@@ -1,0 +1,1 @@
+src/spxhash/testvc/test_output.log filter=lfs diff=lfs merge=lfs -text

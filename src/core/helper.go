@@ -21,7 +21,6 @@
 // SOFTWARE.
 
 // go/src/core/helper.go
-// go/src/core/helper.go
 package core
 
 import (

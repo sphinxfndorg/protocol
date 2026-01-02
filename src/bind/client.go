@@ -24,11 +24,11 @@
 package bind
 
 import (
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 
 	"github.com/sphinx-core/go/src/rpc"
+	"golang.org/x/crypto/sha3"
 )
 
 // CallNodeRPC sends an RPC request to a node identified by its name in the resources.
@@ -52,9 +52,12 @@ func CallNodeRPC(resources []NodeResources, nodeName, method string, params inte
 	}
 
 	// Generate NodeID from the node's PublicKey (consistent with network.GenerateKademliaID)
-	hash := sha256.Sum256(node.PublicKey)
+	// Generate NodeID from the node's PublicKey (SHAKE256-based)
 	var nodeID rpc.NodeID
-	copy(nodeID[:], hash[:]) // Copy the 32-byte hash directly into nodeID
+
+	sh := sha3.NewShake256()
+	sh.Write(node.PublicKey)
+	sh.Read(nodeID[:]) // fills 32 bytes
 
 	// Call RPC
 	resp, err := rpc.CallRPC(udpAddr, method, params, nodeID, ttl)

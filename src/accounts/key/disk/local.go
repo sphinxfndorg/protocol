@@ -25,7 +25,7 @@ package disk
 
 import (
 	"crypto/rand"
-	"crypto/sha256"
+
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -36,7 +36,7 @@ import (
 
 	"github.com/sphinx-core/go/src/accounts/key"
 	"github.com/sphinx-core/go/src/core/wallet/crypter"
-	"golang.org/x/crypto/pbkdf2"
+	"golang.org/x/crypto/sha3"
 )
 
 // NewDiskKeyStore creates a new disk keystore instance  // Changed from NewHotKeyStore
@@ -321,8 +321,15 @@ func (ks *DiskKeyStore) generateKeyID() string { // Changed receiver type
 	return fmt.Sprintf("disk_key_%d_%x", timestamp, randomBytes) // Changed from "hot_key_"
 }
 
-func (ks *DiskKeyStore) generateSalt(passphrase string) []byte { // Changed receiver type
-	return pbkdf2.Key([]byte(passphrase), []byte("sphinx-disk-keystore-salt"), 1, crypter.WALLET_CRYPTO_IV_SIZE, sha256.New) // Changed salt
+func (ks *DiskKeyStore) generateSalt(passphrase string) []byte {
+	out := make([]byte, crypter.WALLET_CRYPTO_IV_SIZE)
+
+	sh := sha3.NewShake256()
+	sh.Write([]byte(passphrase))
+	sh.Write([]byte("sphinx-disk-keystore-salt"))
+	sh.Read(out)
+
+	return out
 }
 
 func (ks *DiskKeyStore) validateKeyPair(keyPair *key.KeyPair) error { // Changed receiver type

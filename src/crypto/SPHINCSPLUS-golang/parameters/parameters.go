@@ -107,6 +107,48 @@ func MakeSphincsPlusSHAKE256128sSimple(RANDOMIZE bool) *Parameters {
 	return MakeSphincsPlus(16, 16, 63, 7, 14, 12, "SHAKE256-simple", RANDOMIZE)
 }
 
+// SPHINXHASH-robust and N = 32
+func MakeSphincsPlusSPHINXHASH256fRobust(RANDOMIZE bool) *Parameters {
+	return MakeSphincsPlus(32, 16, 68, 17, 35, 9, "SPHINXHASH-robust", RANDOMIZE)
+}
+func MakeSphincsPlusSPHINXHASH256sRobust(RANDOMIZE bool) *Parameters {
+	return MakeSphincsPlus(32, 16, 64, 8, 22, 14, "SPHINXHASH-robust", RANDOMIZE)
+}
+func MakeSphincsPlusSPHINXHASH256fSimple(RANDOMIZE bool) *Parameters {
+	return MakeSphincsPlus(32, 16, 68, 17, 35, 9, "SPHINXHASH-simple", RANDOMIZE)
+}
+func MakeSphincsPlusSPHINXHASH256sSimple(RANDOMIZE bool) *Parameters {
+	return MakeSphincsPlus(32, 16, 64, 8, 22, 14, "SPHINXHASH-simple", RANDOMIZE)
+}
+
+// SPHINXHASH-robust and N = 24
+func MakeSphincsPlusSPHINXHASH192fRobust(RANDOMIZE bool) *Parameters {
+	return MakeSphincsPlus(24, 16, 66, 22, 33, 8, "SPHINXHASH-robust", RANDOMIZE)
+}
+func MakeSphincsPlusSPHINXHASH192sRobust(RANDOMIZE bool) *Parameters {
+	return MakeSphincsPlus(24, 16, 63, 7, 17, 14, "SPHINXHASH-robust", RANDOMIZE)
+}
+func MakeSphincsPlusSPHINXHASH192fSimple(RANDOMIZE bool) *Parameters {
+	return MakeSphincsPlus(24, 16, 66, 22, 33, 8, "SPHINXHASH-simple", RANDOMIZE)
+}
+func MakeSphincsPlusSPHINXHASH192sSimple(RANDOMIZE bool) *Parameters {
+	return MakeSphincsPlus(24, 16, 63, 7, 17, 14, "SPHINXHASH-simple", RANDOMIZE)
+}
+
+// SPHINXHASH-robust and N = 16
+func MakeSphincsPlusSPHINXHASH128fRobust(RANDOMIZE bool) *Parameters {
+	return MakeSphincsPlus(16, 16, 66, 22, 33, 6, "SPHINXHASH-robust", RANDOMIZE)
+}
+func MakeSphincsPlusSPHINXHASH128sRobust(RANDOMIZE bool) *Parameters {
+	return MakeSphincsPlus(16, 16, 63, 7, 14, 12, "SPHINXHASH-robust", RANDOMIZE)
+}
+func MakeSphincsPlusSPHINXHASH128fSimple(RANDOMIZE bool) *Parameters {
+	return MakeSphincsPlus(16, 16, 66, 22, 33, 6, "SPHINXHASH-simple", RANDOMIZE)
+}
+func MakeSphincsPlusSPHINXHASH128sSimple(RANDOMIZE bool) *Parameters {
+	return MakeSphincsPlus(16, 16, 63, 7, 14, 12, "SPHINXHASH-simple", RANDOMIZE)
+}
+
 func MakeSphincsPlus(n int, w int, h int, d int, k int, logt int, hashFunc string, RANDOMIZE bool) *Parameters {
 	params := new(Parameters)
 	params.N = n
@@ -135,6 +177,10 @@ func MakeSphincsPlus(n int, w int, h int, d int, k int, logt int, hashFunc strin
 		params.Tweak = &tweakable.Shake256Tweak{tweakable.Robust, m, n}
 	case "SHAKE256-simple":
 		params.Tweak = &tweakable.Shake256Tweak{tweakable.Simple, m, n}
+	case "SPHINXHASH-robust":
+		params.Tweak = &tweakable.SphinxHashTweak{tweakable.Robust, m, n}
+	case "SPHINXHASH-simple":
+		params.Tweak = &tweakable.SphinxHashTweak{tweakable.Simple, m, n}
 	default:
 		params.Tweak = &tweakable.Sha256Tweak{tweakable.Robust, m, n}
 	}

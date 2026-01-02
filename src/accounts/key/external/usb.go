@@ -25,7 +25,7 @@ package usb
 
 import (
 	"crypto/rand"
-	"crypto/sha256"
+
 	"encoding/json"
 	"fmt"
 	"io"
@@ -35,7 +35,7 @@ import (
 
 	"github.com/sphinx-core/go/src/accounts/key"
 	"github.com/sphinx-core/go/src/core/wallet/crypter"
-	"golang.org/x/crypto/pbkdf2"
+	"golang.org/x/crypto/argon2"
 )
 
 // NewUSBKeyStore creates a new USB keystore instance
@@ -417,7 +417,14 @@ func (ks *USBKeyStore) generateKeyID() string {
 }
 
 func (ks *USBKeyStore) generateSalt(passphrase string) []byte {
-	return pbkdf2.Key([]byte(passphrase), []byte("sphinx-usb-keystore-salt"), 1, crypter.WALLET_CRYPTO_IV_SIZE, sha256.New)
+	return argon2.IDKey(
+		[]byte(passphrase),
+		[]byte("sphinx-usb-keystore-salt"),
+		3,
+		64*1024, // 64MB
+		2,
+		crypter.WALLET_CRYPTO_IV_SIZE,
+	)
 }
 
 func (ks *USBKeyStore) validateKeyPair(keyPair *key.KeyPair) error {

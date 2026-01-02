@@ -24,9 +24,7 @@ package seed
 
 import (
 	"bytes"
-	"crypto/hmac"
 	"crypto/rand"
-	"crypto/sha256"
 
 	"encoding/base32"
 	"errors"
@@ -235,10 +233,13 @@ func GenerateKeys() (passphrase string, base32Passkey string, hashedPasskey []by
 	// Step 4: Use secretKey + passphrase as PRF input
 	prfInput := append([]byte(passphrase), secretKey...)
 
-	// Step 5: Apply HMAC-SHA256 as PRF
-	prf := hmac.New(sha256.New, secretKey)
-	prf.Write(prfInput)
-	prfOutput := prf.Sum(nil) // 32 bytes
+	// Step 5: Keyed SHAKE256 PRF
+	sh := sha3.NewShake256()
+	sh.Write(secretKey)
+	sh.Write(prfInput)
+
+	prfOutput := make([]byte, 32)
+	sh.Read(prfOutput)
 
 	// Step 6: Derive hashedPasskey (optional: SHA3-512 for extra entropy)
 	hashed := sha3.Sum512(prfOutput)

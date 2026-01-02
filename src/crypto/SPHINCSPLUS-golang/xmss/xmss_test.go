@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/kasperdi/SPHINCSPLUS-golang/address"
-	"github.com/kasperdi/SPHINCSPLUS-golang/parameters"
+	"github.com/sphinx-core/go/src/crypto/SPHINCSPLUS-golang/address"
+	"github.com/sphinx-core/go/src/crypto/SPHINCSPLUS-golang/parameters"
 )
 
 // Runs XMSS subtests for all 24 variants.

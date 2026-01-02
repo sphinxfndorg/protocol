@@ -27,8 +27,8 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/kasperdi/SPHINCSPLUS-golang/sphincs"
 	key "github.com/sphinx-core/go/src/core/sphincs/key/backend"
+	"github.com/sphinx-core/go/src/crypto/SPHINCSPLUS-golang/sphincs"
 )
 
 func main() {

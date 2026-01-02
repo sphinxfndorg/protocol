@@ -4,18 +4,18 @@
   "peak_tps": 0,
   "total_transactions": 10,
   "blocks_processed": 2,
-  "last_updated": "2026-01-01T18:18:12.410352+07:00",
+  "last_updated": "2026-01-02T23:22:55.973538+07:00",
   "current_window_count": 9,
-  "window_start_time": "2026-01-01T18:15:33.700863+07:00",
+  "window_start_time": "2026-01-02T23:20:44.152408+07:00",
   "window_duration_seconds": 5,
   "tps_history": [
     {
-      "timestamp": "2026-01-01T18:18:04.751999+07:00",
-      "tps": 2.841250444549148e-7,
+      "timestamp": "2026-01-02T23:22:49.305865+07:00",
+      "tps": 2.832822990828792e-7,
       "block_height": 1
     },
     {
-      "timestamp": "2026-01-01T18:18:12.410352+07:00",
+      "timestamp": "2026-01-02T23:22:55.973537+07:00",
       "tps": 2,
       "block_height": 1
     }
@@ -23,16 +23,16 @@
   "transactions_per_block": [
     {
       "block_height": 1,
-      "block_hash": "f7c3f9e6cf1655e067641b0b5833d3a2167c86b23ed7cb2131f4788c9adc1634",
+      "block_hash": "6f5a43faf03b234da04aa0f0afb7bee5c378a793424df8e55793767197ea4a86",
       "tx_count": 10,
-      "block_time": "2026-01-01T18:16:11+07:00",
+      "block_time": "2026-01-02T23:21:16+07:00",
       "block_size_bytes": 1936
     },
     {
       "block_height": 1,
-      "block_hash": "f7c3f9e6cf1655e067641b0b5833d3a2167c86b23ed7cb2131f4788c9adc1634",
+      "block_hash": "6f5a43faf03b234da04aa0f0afb7bee5c378a793424df8e55793767197ea4a86",
       "tx_count": 10,
-      "block_time": "2026-01-01T18:16:11+07:00",
+      "block_time": "2026-01-02T23:21:16+07:00",
       "block_size_bytes": 1936
     }
   ],

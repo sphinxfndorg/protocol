@@ -1,0 +1,134 @@
+{
+  "header": {
+    "hash": "6f5a43faf03b234da04aa0f0afb7bee5c378a793424df8e55793767197ea4a86",
+    "txs_root": "f12c87cbae84d49ca85bf1d4f71e3b1569c40db095e936e94df0412524a0d1a3",
+    "state_root": "c2dc4d1acca7884abbf93ce671366052d5bcf6add6a2b95ddad6147998bbcdee",
+    "parent_hash": "GENESIS_aa6d6761d1ee4e6c25ad55600c2261965c06f6de1d6d20843ac8f57a10871ac1",
+    "uncles_hash": "2c669e9ff4b5b5dd3c20c116397d974c50c3b573c30ed4ec5dd6152de1c9fe76",
+    "extra_data": "Sphinx Network Block",
+    "miner": "0000000000000000000000000000000000000000",
+    "version": 1,
+    "nblock": 1,
+    "height": 1,
+    "timestamp": "2026-01-02T16:21:16Z",
+    "difficulty": "17179869184",
+    "nonce": "0000000000000003",
+    "gas_limit": "10000000",
+    "gas_used": "0"
+  },
+  "body": {
+    "txs_list": [
+      {
+        "amount": "1500",
+        "gas_limit": "21000",
+        "gas_price": "1",
+        "id": "6a8beab1e286c039da2474350847c5cd1003f34289b245104a51228e9a2de996",
+        "nonce": 4,
+        "receiver": "david",
+        "sender": "alice",
+        "signature": "",
+        "timestamp": "2026-01-02T16:20:41Z"
+      },
+      {
+        "amount": "300",
+        "gas_limit": "21000",
+        "gas_price": "1",
+        "id": "96c1fbd2b86f0b17401e2ceeff0672be29689c5d497f1b1870f6de3cc9c2a221",
+        "nonce": 6,
+        "receiver": "frank",
+        "sender": "charlie",
+        "signature": "",
+        "timestamp": "2026-01-02T16:20:42Z"
+      },
+      {
+        "amount": "1200",
+        "gas_limit": "21000",
+        "gas_price": "1",
+        "id": "1707e874fb303af0634ad358eebc66ac419d95d6b04e936b5976ac2f4aeb9e64",
+        "nonce": 7,
+        "receiver": "grace",
+        "sender": "david",
+        "signature": "",
+        "timestamp": "2026-01-02T16:20:42Z"
+      },
+      {
+        "amount": "800",
+        "gas_limit": "21000",
+        "gas_price": "1",
+        "id": "964d56bbd17998cfcce1f960301b58d40886febc83f76276696a5976dfe36a99",
+        "nonce": 8,
+        "receiver": "henry",
+        "sender": "emma",
+        "signature": "",
+        "timestamp": "2026-01-02T16:20:43Z"
+      },
+      {
+        "amount": "400",
+        "gas_limit": "21000",
+        "gas_price": "1",
+        "id": "e29628db26afa5524f98b6f8c307e7e0c3f90c6e37e56b7c0b725636d752904b",
+        "nonce": 9,
+        "receiver": "alice",
+        "sender": "frank",
+        "signature": "",
+        "timestamp": "2026-01-02T16:20:43Z"
+      },
+      {
+        "amount": "500",
+        "gas_limit": "21000",
+        "gas_price": "1",
+        "id": "7ff10ebcc9c7ab6e4fc8bbdeb4aaaa4523498b75332754ad70bbcb2ccd4b5e0e",
+        "nonce": 2,
+        "receiver": "charlie",
+        "sender": "bob",
+        "signature": "",
+        "timestamp": "2026-01-02T16:20:41Z"
+      },
+      {
+        "amount": "750",
+        "gas_limit": "21000",
+        "gas_price": "1",
+        "id": "3a79dcfcfebbb12bcdee086c972696a0ac9b7447946ea9dfdafc67b8c4c78e8c",
+        "nonce": 5,
+        "receiver": "emma",
+        "sender": "bob",
+        "signature": "",
+        "timestamp": "2026-01-02T16:20:42Z"
+      },
+      {
+        "amount": "950",
+        "gas_limit": "21000",
+        "gas_price": "1",
+        "id": "1c98ebe41f0fbe3aa304049a5565563f31a91448ab39ef600431becd9e938c16",
+        "nonce": 10,
+        "receiver": "bob",
+        "sender": "grace",
+        "signature": "",
+        "timestamp": "2026-01-02T16:20:43Z"
+      },
+      {
+        "amount": "1000",
+        "gas_limit": "21000",
+        "gas_price": "1",
+        "id": "a6f0f14e09203422b6579702b3fe1a00ebd20f7b0d6fcdf350234775d1365da0",
+        "nonce": 1,
+        "receiver": "bob",
+        "sender": "alice",
+        "signature": "",
+        "timestamp": "2026-01-02T16:20:40Z"
+      },
+      {
+        "amount": "200",
+        "gas_limit": "21000",
+        "gas_price": "1",
+        "id": "4ff1c964c22403d0dd95701e88259ecb160658f1071a6d349fd6a00616ca6991",
+        "nonce": 3,
+        "receiver": "alice",
+        "sender": "charlie",
+        "signature": "",
+        "timestamp": "2026-01-02T16:20:41Z"
+      }
+    ],
+    "uncles_hash": "3916d45c66e84c612c8a4a403702ec44cc575fc2383dbe4e861dd29ef892bee3"
+  }
+}

@@ -2,7 +2,7 @@
 package tweakable
 
 import (
-	"github.com/kasperdi/SPHINCSPLUS-golang/address"
+	"github.com/sphinx-core/go/src/crypto/SPHINCSPLUS-golang/address"
 )
 
 // SphinxHashTweak must match the same field structure as Sha256Tweak

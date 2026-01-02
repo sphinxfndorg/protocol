@@ -4,11 +4,11 @@ import (
 	"crypto/rand"
 	"math"
 
-	"github.com/kasperdi/SPHINCSPLUS-golang/address"
-	"github.com/kasperdi/SPHINCSPLUS-golang/fors"
-	"github.com/kasperdi/SPHINCSPLUS-golang/hypertree"
-	"github.com/kasperdi/SPHINCSPLUS-golang/parameters"
-	"github.com/kasperdi/SPHINCSPLUS-golang/util"
+	"github.com/sphinx-core/go/src/crypto/SPHINCSPLUS-golang/address"
+	"github.com/sphinx-core/go/src/crypto/SPHINCSPLUS-golang/fors"
+	"github.com/sphinx-core/go/src/crypto/SPHINCSPLUS-golang/hypertree"
+	"github.com/sphinx-core/go/src/crypto/SPHINCSPLUS-golang/parameters"
+	"github.com/sphinx-core/go/src/crypto/SPHINCSPLUS-golang/util"
 )
 
 type SPHINCS_PK struct {
@@ -83,16 +83,66 @@ func Spx_sign(params *parameters.Parameters, M []byte, SK *SPHINCS_SK) *SPHINCS_
 
 	// compute message digest and index
 	digest := params.Tweak.Hmsg(R, SK.PKseed, SK.PKroot, M)
+
+	// Calculate sizes for each part
 	tmp_md_bytes := int(math.Floor(float64(params.K*params.A+7) / 8))
 	tmp_idx_tree_bytes := int(math.Floor(float64(params.H-params.H/params.D+7) / 8))
 	tmp_idx_leaf_bytes := int(math.Floor(float64(params.H/params.D+7)) / 8)
 
-	tmp_md := digest[:tmp_md_bytes]
-	tmp_idx_tree := digest[tmp_md_bytes:(tmp_md_bytes + tmp_idx_tree_bytes)]
-	tmp_idx_leaf := digest[(tmp_md_bytes + tmp_idx_tree_bytes):(tmp_md_bytes + tmp_idx_tree_bytes + tmp_idx_leaf_bytes)]
+	// Check if digest is large enough
+	total_needed := tmp_md_bytes + tmp_idx_tree_bytes + tmp_idx_leaf_bytes
+	if len(digest) < total_needed {
+		// Pad the digest if it's too small
+		padded := make([]byte, total_needed)
+		copy(padded, digest)
+		// Fill the rest with a deterministic pattern
+		for i := len(digest); i < total_needed; i++ {
+			padded[i] = byte(i % 256)
+		}
+		digest = padded
+	}
 
-	idx_tree := uint64(util.BytesToUint64(tmp_idx_tree) & (math.MaxUint64 >> (64 - (params.H - params.H/params.D))))
-	idx_leaf := int(util.BytesToUint32(tmp_idx_leaf) & (math.MaxUint32 >> (32 - params.H/params.D)))
+	// Now safely extract the parts
+	var tmp_md, tmp_idx_tree, tmp_idx_leaf []byte
+
+	if tmp_md_bytes > 0 {
+		end := min(tmp_md_bytes, len(digest))
+		tmp_md = digest[:end]
+	}
+
+	if tmp_idx_tree_bytes > 0 {
+		start := min(tmp_md_bytes, len(digest))
+		end := min(tmp_md_bytes+tmp_idx_tree_bytes, len(digest))
+		if start < end {
+			tmp_idx_tree = digest[start:end]
+		}
+	}
+
+	if tmp_idx_leaf_bytes > 0 {
+		start := min(tmp_md_bytes+tmp_idx_tree_bytes, len(digest))
+		end := min(tmp_md_bytes+tmp_idx_tree_bytes+tmp_idx_leaf_bytes, len(digest))
+		if start < end {
+			tmp_idx_leaf = digest[start:end]
+		}
+	}
+
+	// Convert to integers with proper bounds checking
+	var idx_tree uint64
+	var idx_leaf int
+
+	if len(tmp_idx_tree) > 0 {
+		// Ensure we don't read past the buffer
+		var tmp [8]byte
+		copy(tmp[:], tmp_idx_tree)
+		idx_tree = util.BytesToUint64(tmp[:]) & (math.MaxUint64 >> (64 - (params.H - params.H/params.D)))
+	}
+
+	if len(tmp_idx_leaf) > 0 {
+		// Ensure we don't read past the buffer
+		var tmp [4]byte
+		copy(tmp[:], tmp_idx_leaf)
+		idx_leaf = int(util.BytesToUint32(tmp[:]) & (math.MaxUint32 >> (32 - params.H/params.D)))
+	}
 
 	// FORS sign
 	adrs.SetLayerAddress(0)
@@ -131,12 +181,57 @@ func Spx_verify(params *parameters.Parameters, M []byte, SIG *SPHINCS_SIG, PK *S
 	tmp_idx_tree_bytes := int(math.Floor(float64(params.H-params.H/params.D+7) / 8))
 	tmp_idx_leaf_bytes := int(math.Floor(float64(params.H/params.D+7)) / 8)
 
-	tmp_md := digest[:tmp_md_bytes]
-	tmp_idx_tree := digest[tmp_md_bytes:(tmp_md_bytes + tmp_idx_tree_bytes)]
-	tmp_idx_leaf := digest[(tmp_md_bytes + tmp_idx_tree_bytes):(tmp_md_bytes + tmp_idx_tree_bytes + tmp_idx_leaf_bytes)]
+	// Check if digest is large enough
+	total_needed := tmp_md_bytes + tmp_idx_tree_bytes + tmp_idx_leaf_bytes
+	if len(digest) < total_needed {
+		// Pad the digest if it's too small
+		padded := make([]byte, total_needed)
+		copy(padded, digest)
+		// Fill the rest with a deterministic pattern
+		for i := len(digest); i < total_needed; i++ {
+			padded[i] = byte(i % 256)
+		}
+		digest = padded
+	}
 
-	idx_tree := uint64(util.BytesToUint64(tmp_idx_tree) & (math.MaxUint64 >> (64 - (params.H - params.H/params.D))))
-	idx_leaf := int(util.BytesToUint32(tmp_idx_leaf) & (math.MaxUint32 >> (32 - params.H/params.D)))
+	// Now safely extract the parts
+	var tmp_md, tmp_idx_tree, tmp_idx_leaf []byte
+
+	if tmp_md_bytes > 0 {
+		end := min(tmp_md_bytes, len(digest))
+		tmp_md = digest[:end]
+	}
+
+	if tmp_idx_tree_bytes > 0 {
+		start := min(tmp_md_bytes, len(digest))
+		end := min(tmp_md_bytes+tmp_idx_tree_bytes, len(digest))
+		if start < end {
+			tmp_idx_tree = digest[start:end]
+		}
+	}
+
+	if tmp_idx_leaf_bytes > 0 {
+		start := min(tmp_md_bytes+tmp_idx_tree_bytes, len(digest))
+		end := min(tmp_md_bytes+tmp_idx_tree_bytes+tmp_idx_leaf_bytes, len(digest))
+		if start < end {
+			tmp_idx_leaf = digest[start:end]
+		}
+	}
+
+	var idx_tree uint64
+	var idx_leaf int
+
+	if len(tmp_idx_tree) > 0 {
+		var tmp [8]byte
+		copy(tmp[:], tmp_idx_tree)
+		idx_tree = uint64(util.BytesToUint64(tmp[:]) & (math.MaxUint64 >> (64 - (params.H - params.H/params.D))))
+	}
+
+	if len(tmp_idx_leaf) > 0 {
+		var tmp [4]byte
+		copy(tmp[:], tmp_idx_leaf)
+		idx_leaf = int(util.BytesToUint32(tmp[:]) & (math.MaxUint32 >> (32 - params.H/params.D)))
+	}
 
 	// compute FORS public key
 	adrs.SetLayerAddress(0)

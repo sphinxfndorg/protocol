@@ -1,6 +1,8 @@
 module github.com/sphinx-core/go
 
-go 1.23.0
+go 1.24.0
+
+replace github.com/sphinx-core/go/src/crypto/SPHINCSPLUS-golang => ./src/crypto/SPHINCSPLUS-golang
 
 require (
 	fyne.io/fyne/v2 v2.7.1
@@ -12,14 +14,14 @@ require (
 	github.com/gin-gonic/gin v1.10.1
 	github.com/gorilla/websocket v1.5.3
 	github.com/holiman/uint256 v1.3.2
-	github.com/kasperdi/SPHINCSPLUS-golang v0.0.0-20231223193046-84468b93f7e9
 	github.com/lni/goutils v1.4.0
 	github.com/minio/highwayhash v1.0.3
 	github.com/prometheus/client_golang v1.22.0
+	github.com/sphinx-core/go/src/crypto/SPHINCSPLUS-golang v0.0.0
 	github.com/syndtr/goleveldb v1.0.0
 	go.uber.org/zap v1.27.0
-	golang.org/x/crypto v0.36.0
-	golang.org/x/sys v0.31.0
+	golang.org/x/crypto v0.46.0
+	golang.org/x/sys v0.39.0
 	lukechampine.com/blake3 v1.4.1
 )
 
@@ -79,8 +81,8 @@ require (
 	go.uber.org/multierr v1.10.0 // indirect
 	golang.org/x/arch v0.8.0 // indirect
 	golang.org/x/image v0.24.0 // indirect
-	golang.org/x/net v0.38.0 // indirect
-	golang.org/x/text v0.23.0 // indirect
+	golang.org/x/net v0.47.0 // indirect
+	golang.org/x/text v0.32.0 // indirect
 	google.golang.org/protobuf v1.36.5 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

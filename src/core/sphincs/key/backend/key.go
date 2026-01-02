@@ -28,8 +28,8 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/kasperdi/SPHINCSPLUS-golang/sphincs"
 	params "github.com/sphinx-core/go/src/core/sphincs/config"
+	"github.com/sphinx-core/go/src/crypto/SPHINCSPLUS-golang/sphincs"
 )
 
 // KeyManager is responsible for managing key generation using SPHINCS+ parameters.

@@ -24,8 +24,8 @@
 package utils
 
 import (
-	"github.com/kasperdi/SPHINCSPLUS-golang/sphincs"
 	"github.com/sphinx-core/go/src/consensus"
+	"github.com/sphinx-core/go/src/crypto/SPHINCSPLUS-golang/sphincs"
 	logger "github.com/sphinx-core/go/src/log"
 )
 

@@ -30,9 +30,9 @@ import (
 	"fmt"
 
 	"github.com/holiman/uint256"
-	"github.com/kasperdi/SPHINCSPLUS-golang/sphincs"
 	key "github.com/sphinx-core/go/src/core/sphincs/key/backend"
 	sign "github.com/sphinx-core/go/src/core/sphincs/sign/backend"
+	"github.com/sphinx-core/go/src/crypto/SPHINCSPLUS-golang/sphincs" // Keep this one
 	logger "github.com/sphinx-core/go/src/log"
 )
 

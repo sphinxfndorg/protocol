@@ -5,9 +5,9 @@ import (
 	"encoding/hex"
 	"fmt"
 
-	sphincs "github.com/kasperdi/SPHINCSPLUS-golang/sphincs"
 	params "github.com/sphinx-core/go/src/core/sphincs/config"
 	key "github.com/sphinx-core/go/src/core/sphincs/key/backend"
+	sphincs "github.com/sphinx-core/go/src/crypto/SPHINCSPLUS-golang/sphincs"
 )
 
 // NewSignWrapper initializes a new SignWrapper.

@@ -31,10 +31,10 @@ import (
 	"time" // Add for timestamp validation
 
 	"github.com/holiman/uint256"
-	"github.com/sphinx-core/go/src/core/hashtree"
-	sigproof "github.com/sphinx-core/go/src/core/proof"
-	key "github.com/sphinx-core/go/src/core/sphincs/key/backend"
-	sign "github.com/sphinx-core/go/src/core/sphincs/sign/backend"
+	"github.com/sphinxorg/protocol/src/core/hashtree"
+	sigproof "github.com/sphinxorg/protocol/src/core/proof"
+	key "github.com/sphinxorg/protocol/src/core/sphincs/key/backend"
+	sign "github.com/sphinxorg/protocol/src/core/sphincs/sign/backend"
 
 	"github.com/syndtr/goleveldb/leveldb"
 )

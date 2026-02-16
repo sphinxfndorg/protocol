@@ -37,13 +37,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sphinx-core/go/src/common"
-	"github.com/sphinx-core/go/src/consensus"
+	"github.com/sphinxorg/protocol/src/common"
+	"github.com/sphinxorg/protocol/src/consensus"
 
-	types "github.com/sphinx-core/go/src/core/transaction"
-	logger "github.com/sphinx-core/go/src/log"
-	"github.com/sphinx-core/go/src/pool"
-	storage "github.com/sphinx-core/go/src/state"
+	types "github.com/sphinxorg/protocol/src/core/transaction"
+	logger "github.com/sphinxorg/protocol/src/log"
+	"github.com/sphinxorg/protocol/src/pool"
+	storage "github.com/sphinxorg/protocol/src/state"
 )
 
 // GetMerkleRoot returns the Merkle root of transactions for a specific block

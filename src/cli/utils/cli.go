@@ -27,8 +27,8 @@ import (
 	"flag"
 	"fmt"
 
-	"github.com/sphinx-core/go/src/bind"
-	"github.com/sphinx-core/go/src/network"
+	"github.com/sphinxorg/protocol/src/bind"
+	"github.com/sphinxorg/protocol/src/network"
 )
 
 // ---------------------------------------------------------------------

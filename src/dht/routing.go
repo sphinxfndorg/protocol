@@ -40,8 +40,8 @@ import (
 	"time"
 
 	"github.com/elliotchance/orderedmap/v2"
-	"github.com/sphinx-core/go/src/network"
-	"github.com/sphinx-core/go/src/rpc"
+	"github.com/sphinxorg/protocol/src/network"
+	"github.com/sphinxorg/protocol/src/rpc"
 )
 
 const (

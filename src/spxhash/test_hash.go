@@ -27,7 +27,7 @@ import (
 	"fmt"
 	"log"
 
-	spxhash "github.com/sphinx-core/go/src/spxhash/hash"
+	spxhash "github.com/sphinxorg/protocol/src/spxhash/hash"
 )
 
 func main() {

@@ -28,7 +28,7 @@ import (
 	"encoding/binary"
 	"errors"
 
-	"github.com/sphinx-core/go/src/core/hashtree"
+	"github.com/sphinxorg/protocol/src/core/hashtree"
 )
 
 // Serialize the signed message to bytes

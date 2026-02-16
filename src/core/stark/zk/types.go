@@ -28,8 +28,8 @@ import (
 
 	"github.com/actuallyachraf/algebra/ff"
 	"github.com/actuallyachraf/algebra/poly"
-	params "github.com/sphinx-core/go/src/core/sphincs/config"
-	"github.com/sphinx-core/go/src/crypto/SPHINCSPLUS-golang/sphincs"
+	params "github.com/sphinxorg/protocol/src/core/sphincs/config"
+	"github.com/sphinxorg/protocol/src/crypto/SPHINCSPLUS-golang/sphincs"
 )
 
 // STARKProof represents the STARK proof for multiple SPHINCS+ signatures.

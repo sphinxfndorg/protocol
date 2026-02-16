@@ -26,8 +26,8 @@ import (
 	"fmt"
 	"log"
 
-	multisig "github.com/sphinx-core/go/src/core/multisig/mps"
-	"github.com/sphinx-core/go/src/core/wallet/utils"
+	multisig "github.com/sphinxorg/protocol/src/core/multisig/mps"
+	"github.com/sphinxorg/protocol/src/core/wallet/utils"
 )
 
 func main() {

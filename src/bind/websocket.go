@@ -26,10 +26,10 @@ package bind
 import (
 	"sync"
 
-	security "github.com/sphinx-core/go/src/handshake"
-	logger "github.com/sphinx-core/go/src/log"
-	"github.com/sphinx-core/go/src/rpc"
-	"github.com/sphinx-core/go/src/transport"
+	security "github.com/sphinxorg/protocol/src/handshake"
+	logger "github.com/sphinxorg/protocol/src/log"
+	"github.com/sphinxorg/protocol/src/rpc"
+	"github.com/sphinxorg/protocol/src/transport"
 )
 
 // startWebSocketServer starts a WebSocket server for the given node.

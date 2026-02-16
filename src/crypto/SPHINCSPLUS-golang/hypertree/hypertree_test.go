@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/sphinx-core/go/src/crypto/SPHINCSPLUS-golang/parameters"
+	"github.com/sphinxorg/protocol/src/crypto/SPHINCSPLUS-golang/parameters"
 )
 
 // Runs the testSignAndVerify subtest for all 24 implemented Hypertree variants.

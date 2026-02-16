@@ -28,9 +28,9 @@ import (
 	"sync"
 
 	"github.com/gin-gonic/gin"
-	"github.com/sphinx-core/go/src/core"
-	types "github.com/sphinx-core/go/src/core/transaction"
-	security "github.com/sphinx-core/go/src/handshake"
+	"github.com/sphinxorg/protocol/src/core"
+	types "github.com/sphinxorg/protocol/src/core/transaction"
+	security "github.com/sphinxorg/protocol/src/handshake"
 )
 
 // Server represents an HTTP server.

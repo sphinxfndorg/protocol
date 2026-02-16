@@ -26,8 +26,8 @@ package sign
 import (
 	"sync"
 
-	params "github.com/sphinx-core/go/src/core/sphincs/config"
-	key "github.com/sphinx-core/go/src/core/sphincs/key/backend"
+	params "github.com/sphinxorg/protocol/src/core/sphincs/config"
+	key "github.com/sphinxorg/protocol/src/core/sphincs/key/backend"
 	"github.com/syndtr/goleveldb/leveldb"
 )
 

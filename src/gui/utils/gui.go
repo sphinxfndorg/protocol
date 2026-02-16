@@ -33,8 +33,8 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
-	"github.com/sphinx-core/go/src/accounts/key"
-	util "github.com/sphinx-core/go/src/accounts/key/utils"
+	"github.com/sphinxorg/protocol/src/accounts/key"
+	util "github.com/sphinxorg/protocol/src/accounts/key/utils"
 )
 
 // RunGUI starts the wallet GUI application

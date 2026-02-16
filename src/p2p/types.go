@@ -28,11 +28,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sphinx-core/go/src/consensus"
-	"github.com/sphinx-core/go/src/core"
-	sign "github.com/sphinx-core/go/src/core/sphincs/sign/backend"
-	security "github.com/sphinx-core/go/src/handshake"
-	"github.com/sphinx-core/go/src/network"
+	"github.com/sphinxorg/protocol/src/consensus"
+	"github.com/sphinxorg/protocol/src/core"
+	sign "github.com/sphinxorg/protocol/src/core/sphincs/sign/backend"
+	security "github.com/sphinxorg/protocol/src/handshake"
+	"github.com/sphinxorg/protocol/src/network"
 	"github.com/syndtr/goleveldb/leveldb"
 )
 

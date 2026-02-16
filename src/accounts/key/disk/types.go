@@ -26,8 +26,8 @@ package disk
 import (
 	"sync"
 
-	"github.com/sphinx-core/go/src/accounts/key"
-	"github.com/sphinx-core/go/src/core/wallet/crypter"
+	"github.com/sphinxorg/protocol/src/accounts/key"
+	"github.com/sphinxorg/protocol/src/core/wallet/crypter"
 )
 
 // DiskKeyStore represents local disk storage for key pairs  // Changed from HotKeyStore

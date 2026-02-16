@@ -3,10 +3,10 @@ package xmss
 import (
 	"math"
 
-	"github.com/sphinx-core/go/src/crypto/SPHINCSPLUS-golang/address"
-	"github.com/sphinx-core/go/src/crypto/SPHINCSPLUS-golang/parameters"
-	"github.com/sphinx-core/go/src/crypto/SPHINCSPLUS-golang/util"
-	"github.com/sphinx-core/go/src/crypto/SPHINCSPLUS-golang/wots"
+	"github.com/sphinxorg/protocol/src/crypto/SPHINCSPLUS-golang/address"
+	"github.com/sphinxorg/protocol/src/crypto/SPHINCSPLUS-golang/parameters"
+	"github.com/sphinxorg/protocol/src/crypto/SPHINCSPLUS-golang/util"
+	"github.com/sphinxorg/protocol/src/crypto/SPHINCSPLUS-golang/wots"
 )
 
 type XMSSSignature struct {

@@ -30,7 +30,7 @@ import (
 	"time"
 
 	"github.com/holiman/uint256"
-	database "github.com/sphinx-core/go/src/core/state"
+	database "github.com/sphinxorg/protocol/src/core/state"
 )
 
 // NodeStatus represents the operational state of a node in the network.

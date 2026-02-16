@@ -31,9 +31,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sphinx-core/go/src/consensus"
-	types "github.com/sphinx-core/go/src/core/transaction"
-	logger "github.com/sphinx-core/go/src/log"
+	"github.com/sphinxorg/protocol/src/consensus"
+	types "github.com/sphinxorg/protocol/src/core/transaction"
+	logger "github.com/sphinxorg/protocol/src/log"
 )
 
 const (

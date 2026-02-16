@@ -28,7 +28,7 @@ import (
 	"errors"
 
 	"github.com/btcsuite/btcutil/base58"
-	"github.com/sphinx-core/go/src/common"
+	"github.com/sphinxorg/protocol/src/common"
 )
 
 // Prefix byte for internal processing (used only for checksum validation)

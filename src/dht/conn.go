@@ -39,8 +39,8 @@ import (
 	"os"
 	"time"
 
-	security "github.com/sphinx-core/go/src/handshake"
-	"github.com/sphinx-core/go/src/rpc"
+	security "github.com/sphinxorg/protocol/src/handshake"
+	"github.com/sphinxorg/protocol/src/rpc"
 	"go.uber.org/zap"
 	"lukechampine.com/blake3"
 )

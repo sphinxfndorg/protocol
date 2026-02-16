@@ -28,8 +28,8 @@ import (
 	"errors"
 	"math/big"
 
-	types "github.com/sphinx-core/go/src/core/transaction"
-	"github.com/sphinx-core/go/src/network"
+	types "github.com/sphinxorg/protocol/src/core/transaction"
+	"github.com/sphinxorg/protocol/src/network"
 )
 
 // ValidateMessage ensures the message conforms to expected structure and type rules.

@@ -27,7 +27,7 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	spxhash "github.com/sphinx-core/go/src/spxhash/hash"
+	spxhash "github.com/sphinxorg/protocol/src/spxhash/hash"
 )
 
 // OpCode represents an instruction in the SVM

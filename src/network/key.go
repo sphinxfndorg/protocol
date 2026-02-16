@@ -38,7 +38,7 @@ import (
 	"encoding/hex"
 	"fmt"
 
-	database "github.com/sphinx-core/go/src/core/state"
+	database "github.com/sphinxorg/protocol/src/core/state"
 	"lukechampine.com/blake3"
 )
 

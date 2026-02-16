@@ -106,7 +106,7 @@ BenchmarkSHA512_256/inputLen=4096-8 398010 8675.261782 ns/op
 --- PASS: BenchmarkSHA512_256
 
 PASS
-ok      github.com/sphinx-core/go/src/spxhash/testvc    21.007s
+ok      github.com/sphinxorg/protocol/src/spxhash/testvc    21.007s
 File: testvc.test
 Type: cpu
 Time: 2025-07-30 03:47:15 WIB

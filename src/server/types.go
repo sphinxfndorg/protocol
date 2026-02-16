@@ -24,10 +24,10 @@
 package server
 
 import (
-	"github.com/sphinx-core/go/src/http"
-	"github.com/sphinx-core/go/src/network"
-	"github.com/sphinx-core/go/src/p2p"
-	"github.com/sphinx-core/go/src/transport"
+	"github.com/sphinxorg/protocol/src/http"
+	"github.com/sphinxorg/protocol/src/network"
+	"github.com/sphinxorg/protocol/src/p2p"
+	"github.com/sphinxorg/protocol/src/transport"
 )
 
 // Server encapsulates TCP, WebSocket, HTTP, and P2P servers.

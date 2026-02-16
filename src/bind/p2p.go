@@ -28,8 +28,8 @@ import (
 	"sync"
 	"time"
 
-	logger "github.com/sphinx-core/go/src/log"
-	"github.com/sphinx-core/go/src/p2p"
+	logger "github.com/sphinxorg/protocol/src/log"
+	"github.com/sphinxorg/protocol/src/p2p"
 )
 
 // startP2PServer starts a P2P server for the given node.

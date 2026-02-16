@@ -24,14 +24,14 @@
 package bind
 
 import (
-	"github.com/sphinx-core/go/src/consensus"
-	"github.com/sphinx-core/go/src/core"
-	security "github.com/sphinx-core/go/src/handshake"
-	"github.com/sphinx-core/go/src/http"
-	"github.com/sphinx-core/go/src/network"
-	"github.com/sphinx-core/go/src/p2p"
-	"github.com/sphinx-core/go/src/rpc"
-	"github.com/sphinx-core/go/src/transport"
+	"github.com/sphinxorg/protocol/src/consensus"
+	"github.com/sphinxorg/protocol/src/core"
+	security "github.com/sphinxorg/protocol/src/handshake"
+	"github.com/sphinxorg/protocol/src/http"
+	"github.com/sphinxorg/protocol/src/network"
+	"github.com/sphinxorg/protocol/src/p2p"
+	"github.com/sphinxorg/protocol/src/rpc"
+	"github.com/sphinxorg/protocol/src/transport"
 )
 
 // NodeConfig defines the configuration for a node’s TCP server.

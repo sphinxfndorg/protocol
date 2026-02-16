@@ -32,9 +32,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sphinx-core/go/src/common"
-	types "github.com/sphinx-core/go/src/core/transaction"
-	logger "github.com/sphinx-core/go/src/log"
+	"github.com/sphinxorg/protocol/src/common"
+	types "github.com/sphinxorg/protocol/src/core/transaction"
+	logger "github.com/sphinxorg/protocol/src/log"
 )
 
 // Workflow: Prepare Phase → Commit Phase → Block Commitment → View Change → Repeat

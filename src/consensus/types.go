@@ -29,10 +29,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sphinx-core/go/src/core/hashtree"
-	key "github.com/sphinx-core/go/src/core/sphincs/key/backend"
-	sign "github.com/sphinx-core/go/src/core/sphincs/sign/backend"
-	"github.com/sphinx-core/go/src/crypto/SPHINCSPLUS-golang/sphincs"
+	"github.com/sphinxorg/protocol/src/core/hashtree"
+	key "github.com/sphinxorg/protocol/src/core/sphincs/key/backend"
+	sign "github.com/sphinxorg/protocol/src/core/sphincs/sign/backend"
+	"github.com/sphinxorg/protocol/src/crypto/SPHINCSPLUS-golang/sphincs"
 )
 
 // Block interface that your existing types.Block will satisfy

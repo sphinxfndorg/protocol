@@ -27,7 +27,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/sphinx-core/go/src/crypto/SPHINCSPLUS-golang/parameters"
+	"github.com/sphinxorg/protocol/src/crypto/SPHINCSPLUS-golang/parameters"
 )
 
 // SPHINCSParameters wraps the Parameters struct for additional configuration.

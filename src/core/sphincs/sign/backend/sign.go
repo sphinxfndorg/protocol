@@ -27,10 +27,10 @@ import (
 	"encoding/hex"
 	"errors"
 
-	"github.com/sphinx-core/go/src/core/hashtree"
-	params "github.com/sphinx-core/go/src/core/sphincs/config"
-	key "github.com/sphinx-core/go/src/core/sphincs/key/backend"
-	"github.com/sphinx-core/go/src/crypto/SPHINCSPLUS-golang/sphincs"
+	"github.com/sphinxorg/protocol/src/core/hashtree"
+	params "github.com/sphinxorg/protocol/src/core/sphincs/config"
+	key "github.com/sphinxorg/protocol/src/core/sphincs/key/backend"
+	"github.com/sphinxorg/protocol/src/crypto/SPHINCSPLUS-golang/sphincs"
 	"github.com/syndtr/goleveldb/leveldb"
 )
 

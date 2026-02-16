@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/sphinx-core/go/src/crypto/SPHINCSPLUS-golang/address"
-	"github.com/sphinx-core/go/src/crypto/SPHINCSPLUS-golang/util"
+	"github.com/sphinxorg/protocol/src/crypto/SPHINCSPLUS-golang/address"
+	"github.com/sphinxorg/protocol/src/crypto/SPHINCSPLUS-golang/util"
 )
 
 // Test of MGF1-SHA256

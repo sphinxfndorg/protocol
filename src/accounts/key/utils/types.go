@@ -24,8 +24,8 @@
 package utils
 
 import (
-	disk "github.com/sphinx-core/go/src/accounts/key/disk"
-	usb "github.com/sphinx-core/go/src/accounts/key/external"
+	disk "github.com/sphinxorg/protocol/src/accounts/key/disk"
+	usb "github.com/sphinxorg/protocol/src/accounts/key/external"
 )
 
 // StorageType represents the type of storage

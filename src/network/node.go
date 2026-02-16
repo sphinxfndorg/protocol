@@ -31,9 +31,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sphinx-core/go/src/common"
-	"github.com/sphinx-core/go/src/consensus"
-	database "github.com/sphinx-core/go/src/core/state"
+	"github.com/sphinxorg/protocol/src/common"
+	"github.com/sphinxorg/protocol/src/consensus"
+	database "github.com/sphinxorg/protocol/src/core/state"
 )
 
 // Add chain identification constants

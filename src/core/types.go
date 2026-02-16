@@ -28,10 +28,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sphinx-core/go/src/consensus"
-	types "github.com/sphinx-core/go/src/core/transaction"
-	"github.com/sphinx-core/go/src/pool"
-	storage "github.com/sphinx-core/go/src/state"
+	"github.com/sphinxorg/protocol/src/consensus"
+	types "github.com/sphinxorg/protocol/src/core/transaction"
+	"github.com/sphinxorg/protocol/src/pool"
+	storage "github.com/sphinxorg/protocol/src/state"
 )
 
 // BlockchainStatus represents the current status of the blockchain

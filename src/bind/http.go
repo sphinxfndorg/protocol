@@ -27,10 +27,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sphinx-core/go/src/core"
-	security "github.com/sphinx-core/go/src/handshake"
-	"github.com/sphinx-core/go/src/http"
-	logger "github.com/sphinx-core/go/src/log"
+	"github.com/sphinxorg/protocol/src/core"
+	security "github.com/sphinxorg/protocol/src/handshake"
+	"github.com/sphinxorg/protocol/src/http"
+	logger "github.com/sphinxorg/protocol/src/log"
 )
 
 // startHTTPServer starts an HTTP server for the given node.

@@ -30,9 +30,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sphinx-core/go/src/common"
-	sphincsKey "github.com/sphinx-core/go/src/core/sphincs/key/backend"
-	database "github.com/sphinx-core/go/src/core/state"
+	"github.com/sphinxorg/protocol/src/common"
+	sphincsKey "github.com/sphinxorg/protocol/src/core/sphincs/key/backend"
+	database "github.com/sphinxorg/protocol/src/core/state"
 )
 
 // Add this method to NodeManager for chain recognition

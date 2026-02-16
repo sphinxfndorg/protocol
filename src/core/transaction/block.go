@@ -32,8 +32,8 @@ import (
 	"log"
 	"math/big"
 
-	"github.com/sphinx-core/go/src/common"
-	logger "github.com/sphinx-core/go/src/log"
+	"github.com/sphinxorg/protocol/src/common"
+	logger "github.com/sphinxorg/protocol/src/log"
 )
 
 // NewBlockHeader creates a new BlockHeader with proper parent-uncle relationships

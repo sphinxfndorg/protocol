@@ -30,10 +30,10 @@ import (
 	"fmt"
 
 	"github.com/holiman/uint256"
-	key "github.com/sphinx-core/go/src/core/sphincs/key/backend"
-	sign "github.com/sphinx-core/go/src/core/sphincs/sign/backend"
-	"github.com/sphinx-core/go/src/crypto/SPHINCSPLUS-golang/sphincs" // Keep this one
-	logger "github.com/sphinx-core/go/src/log"
+	key "github.com/sphinxorg/protocol/src/core/sphincs/key/backend"
+	sign "github.com/sphinxorg/protocol/src/core/sphincs/sign/backend"
+	"github.com/sphinxorg/protocol/src/crypto/SPHINCSPLUS-golang/sphincs" // Keep this one
+	logger "github.com/sphinxorg/protocol/src/log"
 )
 
 // Add this method to register public keys

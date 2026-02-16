@@ -28,7 +28,7 @@ import (
 	"sync"
 	"time"
 
-	types "github.com/sphinx-core/go/src/core/transaction"
+	types "github.com/sphinxorg/protocol/src/core/transaction"
 )
 
 // TransactionStatus represents the state of a transaction in the pool

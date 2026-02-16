@@ -13,13 +13,13 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/sphinx-core/go/src/common"
-	svm "github.com/sphinx-core/go/src/core/svm/opcodes"
+	"github.com/sphinxorg/protocol/src/common"
+	svm "github.com/sphinxorg/protocol/src/core/svm/opcodes"
 	"golang.org/x/crypto/hkdf"
 )
 
 const (
-	// prime64 is defined locally to avoid importing github.com/sphinx-core/go/src/spxhash/hash
+	// prime64 is defined locally to avoid importing github.com/sphinxorg/protocol/src/spxhash/hash
 	prime64           = 0x9e3779b97f4a7c15 // Matches value from go/src/spxhash/hash/params.go
 	testVectorKey     = "whats the Elvish word for friend"
 	testVectorContext = "spxHash 2019-12-27 16:29:52 test vectors context"

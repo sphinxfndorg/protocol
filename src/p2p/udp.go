@@ -34,10 +34,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sphinx-core/go/src/core/hashtree"
-	sigproof "github.com/sphinx-core/go/src/core/proof"
-	key "github.com/sphinx-core/go/src/core/sphincs/key/backend"
-	"github.com/sphinx-core/go/src/network"
+	"github.com/sphinxorg/protocol/src/core/hashtree"
+	sigproof "github.com/sphinxorg/protocol/src/core/proof"
+	key "github.com/sphinxorg/protocol/src/core/sphincs/key/backend"
+	"github.com/sphinxorg/protocol/src/network"
 	"golang.org/x/sys/unix"
 )
 

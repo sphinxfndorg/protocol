@@ -29,8 +29,8 @@ import (
 	"sync"
 
 	"github.com/gorilla/websocket"
-	security "github.com/sphinx-core/go/src/handshake"
-	"github.com/sphinx-core/go/src/rpc"
+	security "github.com/sphinxorg/protocol/src/handshake"
+	"github.com/sphinxorg/protocol/src/rpc"
 )
 
 type IPConfig struct {

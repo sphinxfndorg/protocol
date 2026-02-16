@@ -31,8 +31,8 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/sphinx-core/go/src/core"
-	security "github.com/sphinx-core/go/src/handshake"
+	"github.com/sphinxorg/protocol/src/core"
+	security "github.com/sphinxorg/protocol/src/handshake"
 )
 
 // NodeID represents a unique 256-bit node identifier.

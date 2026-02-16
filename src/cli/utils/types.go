@@ -24,8 +24,8 @@
 package utils
 
 import (
-	"github.com/sphinx-core/go/src/params/commit"
-	params "github.com/sphinx-core/go/src/params/denom"
+	"github.com/sphinxorg/protocol/src/params/commit"
+	params "github.com/sphinxorg/protocol/src/params/denom"
 )
 
 // Config holds CLI configuration parameters.

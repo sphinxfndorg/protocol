@@ -27,8 +27,8 @@ import (
 	"fmt"
 	"log"
 
-	key "github.com/sphinx-core/go/src/core/sphincs/key/backend"
-	encode "github.com/sphinx-core/go/src/core/wallet/address/encoding"
+	key "github.com/sphinxorg/protocol/src/core/sphincs/key/backend"
+	encode "github.com/sphinxorg/protocol/src/core/wallet/address/encoding"
 )
 
 func main() {

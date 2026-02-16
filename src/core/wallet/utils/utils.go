@@ -28,10 +28,10 @@ import (
 	"log"
 	"sync"
 
-	"github.com/sphinx-core/go/src/common"
+	"github.com/sphinxorg/protocol/src/common"
 
-	multisig "github.com/sphinx-core/go/src/core/multisig/mps"
-	"github.com/sphinx-core/go/src/core/wallet/auth"
+	multisig "github.com/sphinxorg/protocol/src/core/multisig/mps"
+	"github.com/sphinxorg/protocol/src/core/wallet/auth"
 )
 
 // Mutex to protect access to memoryStore - ensures thread-safe access

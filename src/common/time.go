@@ -29,7 +29,7 @@ import (
 	"sync"
 	"time"
 
-	logger "github.com/sphinx-core/go/src/log"
+	logger "github.com/sphinxorg/protocol/src/log"
 )
 
 // TimeService provides centralized time management for the blockchain

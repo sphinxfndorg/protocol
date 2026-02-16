@@ -28,7 +28,7 @@ import (
 	"fmt"
 	"math/big"
 
-	params "github.com/sphinx-core/go/src/params/denom"
+	params "github.com/sphinxorg/protocol/src/params/denom"
 )
 
 const (

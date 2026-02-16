@@ -28,8 +28,8 @@ import (
 	"math/big"
 	"time"
 
-	"github.com/sphinx-core/go/src/accounts/key"
-	"github.com/sphinx-core/go/src/pool"
+	"github.com/sphinxorg/protocol/src/accounts/key"
+	"github.com/sphinxorg/protocol/src/pool"
 )
 
 func (m *MockChainParamsProvider) GetChainParams() *SphinxChainParameters {

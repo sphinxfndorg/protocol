@@ -27,7 +27,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/sphinx-core/go/src/rpc"
+	"github.com/sphinxorg/protocol/src/rpc"
 	"golang.org/x/crypto/sha3"
 )
 

@@ -24,9 +24,9 @@
 package utils
 
 import (
-	"github.com/sphinx-core/go/src/consensus"
-	"github.com/sphinx-core/go/src/crypto/SPHINCSPLUS-golang/sphincs"
-	logger "github.com/sphinx-core/go/src/log"
+	"github.com/sphinxorg/protocol/src/consensus"
+	"github.com/sphinxorg/protocol/src/crypto/SPHINCSPLUS-golang/sphincs"
+	logger "github.com/sphinxorg/protocol/src/log"
 )
 
 // Add this function to exchange public keys between nodes

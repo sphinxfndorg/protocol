@@ -29,7 +29,7 @@ import (
 	"encoding/hex"
 	"fmt"
 
-	"github.com/sphinx-core/go/src/common"
+	"github.com/sphinxorg/protocol/src/common"
 )
 
 // NewMerkleNode creates a new Merkle node

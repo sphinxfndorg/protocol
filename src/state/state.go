@@ -36,9 +36,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sphinx-core/go/src/common"
-	types "github.com/sphinx-core/go/src/core/transaction"
-	logger "github.com/sphinx-core/go/src/log"
+	"github.com/sphinxorg/protocol/src/common"
+	types "github.com/sphinxorg/protocol/src/core/transaction"
+	logger "github.com/sphinxorg/protocol/src/log"
 )
 
 // GetBlockByHeight returns a block by its height

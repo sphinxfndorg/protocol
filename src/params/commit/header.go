@@ -27,7 +27,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/sphinx-core/go/src/accounts/key"
+	"github.com/sphinxorg/protocol/src/accounts/key"
 )
 
 // SphinxChainParams returns the mainnet parameters for Sphinx blockchain

@@ -33,9 +33,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/sphinx-core/go/src/core"
-	types "github.com/sphinx-core/go/src/core/transaction"
-	security "github.com/sphinx-core/go/src/handshake"
+	"github.com/sphinxorg/protocol/src/core"
+	types "github.com/sphinxorg/protocol/src/core/transaction"
+	security "github.com/sphinxorg/protocol/src/handshake"
 )
 
 func NewServer(address string, messageCh chan *security.Message, blockchain *core.Blockchain, readyCh chan struct{}) *Server {

@@ -37,9 +37,9 @@ import (
 	"net"
 	"time"
 
-	security "github.com/sphinx-core/go/src/handshake"
-	"github.com/sphinx-core/go/src/network"
-	"github.com/sphinx-core/go/src/transport"
+	security "github.com/sphinxorg/protocol/src/handshake"
+	"github.com/sphinxorg/protocol/src/network"
+	"github.com/sphinxorg/protocol/src/transport"
 	"lukechampine.com/blake3"
 )
 

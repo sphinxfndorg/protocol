@@ -31,7 +31,7 @@ import (
 	"testing"
 	"time"
 
-	logger "github.com/sphinx-core/go/src/log"
+	logger "github.com/sphinxorg/protocol/src/log"
 )
 
 // TPSMonitor tracks transactions per second metrics

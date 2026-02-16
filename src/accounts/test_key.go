@@ -26,9 +26,9 @@ import (
 	"fmt"
 	"log"
 
-	seed "github.com/sphinx-core/go/src/accounts/phrase"
-	auth "github.com/sphinx-core/go/src/core/wallet/auth"
-	utils "github.com/sphinx-core/go/src/core/wallet/utils"
+	seed "github.com/sphinxorg/protocol/src/accounts/phrase"
+	auth "github.com/sphinxorg/protocol/src/core/wallet/auth"
+	utils "github.com/sphinxorg/protocol/src/core/wallet/utils"
 )
 
 func main() {

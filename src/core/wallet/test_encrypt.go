@@ -28,10 +28,10 @@ import (
 	"fmt"
 	"log"
 
-	seed "github.com/sphinx-core/go/src/accounts/phrase"
-	key "github.com/sphinx-core/go/src/core/sphincs/key/backend"
-	"github.com/sphinx-core/go/src/core/wallet/crypter"
-	config "github.com/sphinx-core/go/src/core/wallet/utils"
+	seed "github.com/sphinxorg/protocol/src/accounts/phrase"
+	key "github.com/sphinxorg/protocol/src/core/sphincs/key/backend"
+	"github.com/sphinxorg/protocol/src/core/wallet/crypter"
+	config "github.com/sphinxorg/protocol/src/core/wallet/utils"
 )
 
 func main() {

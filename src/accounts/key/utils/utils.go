@@ -29,9 +29,9 @@ import (
 	"path/filepath"
 	"runtime"
 
-	"github.com/sphinx-core/go/src/accounts/key"
-	disk "github.com/sphinx-core/go/src/accounts/key/disk"
-	usb "github.com/sphinx-core/go/src/accounts/key/external"
+	"github.com/sphinxorg/protocol/src/accounts/key"
+	disk "github.com/sphinxorg/protocol/src/accounts/key/disk"
+	usb "github.com/sphinxorg/protocol/src/accounts/key/external"
 )
 
 // NewStorageManager creates a new storage manager

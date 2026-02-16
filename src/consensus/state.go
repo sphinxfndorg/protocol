@@ -26,7 +26,7 @@ package consensus
 import (
 	"time"
 
-	logger "github.com/sphinx-core/go/src/log"
+	logger "github.com/sphinxorg/protocol/src/log"
 )
 
 // NewConsensusState creates a new consensus state instance with initial values

@@ -1,8 +1,8 @@
-module github.com/sphinx-core/go
+module github.com/sphinxorg/protocol
 
 go 1.24.0
 
-replace github.com/sphinx-core/go/src/crypto/SPHINCSPLUS-golang => ./src/crypto/SPHINCSPLUS-golang
+replace github.com/sphinxorg/protocol/src/crypto/SPHINCSPLUS-golang => ./src/crypto/SPHINCSPLUS-golang
 
 require (
 	fyne.io/fyne/v2 v2.7.1
@@ -17,7 +17,7 @@ require (
 	github.com/lni/goutils v1.4.0
 	github.com/minio/highwayhash v1.0.3
 	github.com/prometheus/client_golang v1.22.0
-	github.com/sphinx-core/go/src/crypto/SPHINCSPLUS-golang v0.0.0
+	github.com/sphinxorg/protocol/src/crypto/SPHINCSPLUS-golang v0.0.0
 	github.com/syndtr/goleveldb v1.0.0
 	go.uber.org/zap v1.27.0
 	golang.org/x/crypto v0.46.0

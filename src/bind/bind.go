@@ -27,8 +27,8 @@ import (
 	"fmt"
 	"sync"
 
-	logger "github.com/sphinx-core/go/src/log"
-	"github.com/sphinx-core/go/src/transport"
+	logger "github.com/sphinxorg/protocol/src/log"
+	"github.com/sphinxorg/protocol/src/transport"
 )
 
 // BindTCPServers binds TCP servers for the given node configurations.

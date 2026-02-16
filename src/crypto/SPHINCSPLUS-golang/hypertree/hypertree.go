@@ -3,9 +3,9 @@ package hypertree
 import (
 	"bytes"
 
-	"github.com/sphinx-core/go/src/crypto/SPHINCSPLUS-golang/address"
-	"github.com/sphinx-core/go/src/crypto/SPHINCSPLUS-golang/parameters"
-	"github.com/sphinx-core/go/src/crypto/SPHINCSPLUS-golang/xmss"
+	"github.com/sphinxorg/protocol/src/crypto/SPHINCSPLUS-golang/address"
+	"github.com/sphinxorg/protocol/src/crypto/SPHINCSPLUS-golang/parameters"
+	"github.com/sphinxorg/protocol/src/crypto/SPHINCSPLUS-golang/xmss"
 )
 
 type HTSignature struct {

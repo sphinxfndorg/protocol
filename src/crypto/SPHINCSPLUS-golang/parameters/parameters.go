@@ -3,7 +3,7 @@ package parameters
 import (
 	"math"
 
-	"github.com/sphinx-core/go/src/crypto/SPHINCSPLUS-golang/tweakable"
+	"github.com/sphinxorg/protocol/src/crypto/SPHINCSPLUS-golang/tweakable"
 )
 
 type Parameters struct {

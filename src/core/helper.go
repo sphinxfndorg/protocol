@@ -27,9 +27,9 @@ import (
 	"fmt"
 	"math/big"
 
-	"github.com/sphinx-core/go/src/consensus"
-	types "github.com/sphinx-core/go/src/core/transaction"
-	storage "github.com/sphinx-core/go/src/state"
+	"github.com/sphinxorg/protocol/src/consensus"
+	types "github.com/sphinxorg/protocol/src/core/transaction"
+	storage "github.com/sphinxorg/protocol/src/state"
 )
 
 // NewBlockHelper creates a new adapter for types.Block

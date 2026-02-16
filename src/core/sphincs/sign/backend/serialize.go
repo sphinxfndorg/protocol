@@ -26,7 +26,7 @@ package sign
 import (
 	"errors"
 
-	"github.com/sphinx-core/go/src/crypto/SPHINCSPLUS-golang/sphincs"
+	"github.com/sphinxorg/protocol/src/crypto/SPHINCSPLUS-golang/sphincs"
 )
 
 // SerializeSignature serializes the signature into a byte slice

@@ -31,11 +31,11 @@ import (
 	"fmt"
 	"unicode/utf8"
 
-	sips3 "github.com/sphinx-core/go/src/accounts/mnemonic"
-	"github.com/sphinx-core/go/src/common"
-	key "github.com/sphinx-core/go/src/core/sphincs/key/backend"
-	auth "github.com/sphinx-core/go/src/core/wallet/auth"
-	utils "github.com/sphinx-core/go/src/core/wallet/utils"
+	sips3 "github.com/sphinxorg/protocol/src/accounts/mnemonic"
+	"github.com/sphinxorg/protocol/src/common"
+	key "github.com/sphinxorg/protocol/src/core/sphincs/key/backend"
+	auth "github.com/sphinxorg/protocol/src/core/wallet/auth"
+	utils "github.com/sphinxorg/protocol/src/core/wallet/utils"
 	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/sha3"
 )

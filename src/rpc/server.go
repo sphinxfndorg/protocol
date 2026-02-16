@@ -28,8 +28,8 @@ import (
 	"net"
 	"time"
 
-	"github.com/sphinx-core/go/src/core"
-	security "github.com/sphinx-core/go/src/handshake"
+	"github.com/sphinxorg/protocol/src/core"
+	security "github.com/sphinxorg/protocol/src/handshake"
 )
 
 // NewServer creates a new RPC server instance.

@@ -39,8 +39,8 @@ import (
 
 	"github.com/elliotchance/orderedmap/v2"
 	"github.com/lni/goutils/syncutil"
-	"github.com/sphinx-core/go/src/network"
-	"github.com/sphinx-core/go/src/rpc"
+	"github.com/sphinxorg/protocol/src/network"
+	"github.com/sphinxorg/protocol/src/rpc"
 	"go.uber.org/zap"
 )
 

@@ -30,7 +30,7 @@ import (
 	"sync"
 	"time"
 
-	logger "github.com/sphinx-core/go/src/log"
+	logger "github.com/sphinxorg/protocol/src/log"
 	"github.com/syndtr/goleveldb/leveldb"
 	"github.com/syndtr/goleveldb/leveldb/errors"
 	"github.com/syndtr/goleveldb/leveldb/opt"

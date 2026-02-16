@@ -24,7 +24,7 @@
 package main
 
 import (
-	"github.com/sphinx-core/go/src/gui/utils"
+	"github.com/sphinxorg/protocol/src/gui/utils"
 )
 
 func main() {

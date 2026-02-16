@@ -28,7 +28,7 @@ import (
 	"fmt"
 	"math/big"
 
-	"github.com/sphinx-core/go/src/common"
+	"github.com/sphinxorg/protocol/src/common"
 )
 
 // CreateContract creates a contract between Alice and Bob based on the validated note.

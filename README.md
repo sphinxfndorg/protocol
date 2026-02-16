@@ -42,11 +42,11 @@ go version
 Once Go is set up, clone the repository to your local machine.
 
 ```bash
-git clone https://github.com/sphinx-core/sphinx-core.git
+git clone https://github.com/sphinxorg/protocol.git
 ```
 
 ```bash
-cd sphinx-core
+cd protocol
 ```
 
 ### 3. Fork the Repository
@@ -56,7 +56,7 @@ If you intend to contribute, it is recommended to fork the repository. You can d
 Add your fork as a remote:
 
 ```bash
-git remote add fork https://github.com/<your-username>/sphinx-core.git
+git remote add fork https://github.com/<your-username>/protocol.git
 ```
 
 ## Contribution Guidelines

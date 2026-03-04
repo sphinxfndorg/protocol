@@ -36,16 +36,14 @@ import (
 )
 
 // Block interface that your existing types.Block will satisfy
-// This interface defines the minimum required methods for a block
-// to participate in the consensus protocol
 type Block interface {
-	GetHeight() uint64                // Returns the block height/sequence number
-	GetHash() string                  // Returns the cryptographic hash of the block
-	GetPrevHash() string              // Returns the hash of the previous block
-	GetTimestamp() int64              // Returns the block creation timestamp
-	Validate() error                  // Validates the block structure and contents
-	GetDifficulty() *big.Int          // Returns the block difficulty
-	GetCurrentNonce() (uint64, error) // ADD THIS METHOD - Returns the current nonce value
+	GetHeight() uint64
+	GetHash() string
+	GetPrevHash() string
+	GetTimestamp() int64
+	Validate() error
+	GetDifficulty() *big.Int
+	GetCurrentNonce() (uint64, error)
 }
 
 // MerkleRootExtractor is a separate interface for blocks that can provide merkle roots
@@ -56,133 +54,179 @@ type MerkleRootExtractor interface {
 // BlockWithBody extends the basic Block interface for blocks that have bodies
 type BlockWithBody interface {
 	Block
-	GetBody() interface{} // Returns the block body (for transaction access)
+	GetBody() interface{}
 }
 
 // Proposal represents a block proposal from a leader
-// This is the initial message in the PBFT protocol where the leader
-// proposes a new block for the current consensus round
 type Proposal struct {
-	Block      Block  `json:"block"`       // The proposed block to be committed
-	View       uint64 `json:"view"`        // The consensus view number this proposal belongs to
-	ProposerID string `json:"proposer_id"` // ID of the node making this proposal
-	Signature  []byte `json:"signature"`   // Cryptographic signature of the proposer
+	Block      Block  `json:"block"`
+	View       uint64 `json:"view"`
+	ProposerID string `json:"proposer_id"`
+	Signature  []byte `json:"signature"`
 }
 
 // Vote represents a vote from a validator
-// Validators send votes to indicate agreement with proposed blocks
-// There are two types of votes: prepare votes and commit votes
 type Vote struct {
-	BlockHash string `json:"block_hash"` // Hash of the block being voted on
-	View      uint64 `json:"view"`       // Consensus view number for this vote
-	VoterID   string `json:"voter_id"`   // ID of the validator casting this vote
-	Signature []byte `json:"signature"`  // Cryptographic signature of the voter
+	BlockHash string `json:"block_hash"`
+	View      uint64 `json:"view"`
+	VoterID   string `json:"voter_id"`
+	Signature []byte `json:"signature"`
+}
+
+// Attestation represents a validator's vote with epoch information
+type Attestation struct {
+	Slot        uint64
+	Epoch       uint64
+	BlockHash   string
+	ValidatorID string
+	SourceEpoch uint64
+	TargetEpoch uint64
+	Signature   []byte
 }
 
 // BlockChain interface for block storage and retrieval
-// This interface abstracts the blockchain storage layer from consensus logic
-// allowing different blockchain implementations to work with the consensus engine
 type BlockChain interface {
-	GetLatestBlock() Block            // Returns the most recent block in the chain
-	ValidateBlock(block Block) error  // Validates a block against chain rules
-	CommitBlock(block Block) error    // Permanently adds a block to the chain
-	GetBlockByHash(hash string) Block // Retrieves a block by its hash
-}
+	GetLatestBlock() Block
+	ValidateBlock(block Block) error
+	CommitBlock(block Block) error
+	GetBlockByHash(hash string) Block
 
-// Add to consensus/types.go
-type ConsensusWithForcePopulation interface {
-	GetConsensusSignatures() []*ConsensusSignature
-	ForcePopulateAllSignatures()
+	// New methods for staking
+	GetValidatorStake(validatorID string) *big.Int
+	GetTotalStaked() *big.Int
+	UpdateValidatorStake(validatorID string, delta *big.Int) error
+	GetGenesisTime() time.Time
 }
 
 // NodeManager interface to abstract network functionality
-// This interface provides network communication capabilities for the consensus engine
-// allowing it to interact with other nodes without knowing network implementation details
 type NodeManager interface {
-	GetPeers() map[string]Peer                                   // Returns all connected peers
-	GetNode(nodeID string) Node                                  // Returns node information by ID
-	BroadcastMessage(messageType string, data interface{}) error // Sends message to all peers
+	GetPeers() map[string]Peer
+	GetNode(nodeID string) Node
+	BroadcastMessage(messageType string, data interface{}) error
 }
 
 // Node interface represents a participant in the network
-// This provides basic information about network participants
 type Node interface {
-	GetID() string         // Returns the unique identifier of the node
-	GetRole() NodeRole     // Returns the role of the node (validator, observer, etc.)
-	GetStatus() NodeStatus // Returns the current status of the node
+	GetID() string
+	GetRole() NodeRole
+	GetStatus() NodeStatus
 }
 
 // Peer interface represents a connection to another node
-// Peers are the network connections through which consensus messages flow
 type Peer interface {
-	GetNode() Node // Returns the node information for this peer connection
+	GetNode() Node
 }
 
 // NodeRole represents the role of a node in the network
-// Different roles have different responsibilities in the consensus process
 type NodeRole int
 
 // NodeStatus represents the status of a node
-// Status indicates whether a node is active, syncing, or unavailable
 type NodeStatus int
 
 // ConsensusPhase represents the current phase of the consensus protocol
-// PBFT progresses through several phases: idle, pre-prepared, prepared, committed
 type ConsensusPhase int
 
-// Update the Consensus struct to include the missing fields
+// StakedValidator represents a validator with SPX stake
+type StakedValidator struct {
+	ID              string
+	PublicKey       []byte
+	StakeAmount     *big.Int // In nSPX (base units)
+	ActivationEpoch uint64
+	ExitEpoch       uint64
+	IsSlashed       bool
+	LastAttested    uint64
+	RewardAddress   string
+}
+
+// ValidatorSet manages staked validators
+// ValidatorSet manages staked validators
+type ValidatorSet struct {
+	validators     map[string]*StakedValidator
+	totalStake     *big.Int
+	mu             sync.RWMutex
+	minStakeAmount *big.Int // Add this field - store the minimum stake
+}
+
+// RANDAO provides verifiable randomness for leader selection
+type RANDAO struct {
+	mix     [32]byte
+	reveals map[uint64][][32]byte
+	mu      sync.RWMutex
+}
+
+// StakeWeightedSelector selects proposers and committees based on stake
+type StakeWeightedSelector struct {
+	validatorSet *ValidatorSet
+}
+
+// TimeConverter converts between slots/epochs and time
+type TimeConverter struct {
+	genesisTime time.Time
+}
+
+// UPDATED Consensus struct with ALL fields including PoS
 type Consensus struct {
-	mu sync.RWMutex // Read-write mutex for thread-safe access to consensus state
+	mu sync.RWMutex
 
-	// Node and network references
-	nodeID      string      // Unique identifier for this node
-	nodeManager NodeManager // Network communication interface
-	blockChain  BlockChain  // Blockchain storage interface
-
-	// Consensus state - these variables track the current progress of consensus
-	currentView    uint64         // Current consensus view/round number
-	currentHeight  uint64         // Current blockchain height
-	phase          ConsensusPhase // Current phase in PBFT protocol
-	lockedBlock    Block          // Block that is locked after prepare phase (safety guarantee)
-	preparedBlock  Block          // Block that has been prepared but not yet locked
-	preparedView   uint64         // View in which the block was prepared
+	// Core fields
+	nodeID         string
+	nodeManager    NodeManager
+	blockChain     BlockChain
 	signingService *SigningService
+	currentView    uint64
+	currentHeight  uint64
+	phase          ConsensusPhase
+	lockedBlock    Block
+	preparedBlock  Block
+	preparedView   uint64
+	quorumFraction float64
+	timeout        time.Duration
+	isLeader       bool
 
-	// Vote tracking - these data structures collect and count votes from validators
-	receivedVotes    map[string]map[string]*Vote // blockHash -> voterID -> commit votes
-	prepareVotes     map[string]map[string]*Vote // blockHash -> voterID -> prepare votes
-	sentVotes        map[string]bool             // Tracks which commit votes this node has sent
-	sentPrepareVotes map[string]bool             // Tracks which prepare votes this node has sent
+	// Vote tracking
+	receivedVotes    map[string]map[string]*Vote
+	prepareVotes     map[string]map[string]*Vote
+	sentVotes        map[string]bool
+	sentPrepareVotes map[string]bool
 
-	// Configuration - these parameters control consensus behavior
-	quorumFraction float64       // Fraction of nodes required for quorum (typically 2/3)
-	timeout        time.Duration // Timeout duration for view changes
-	isLeader       bool          // Whether this node is the current leader
+	// Channels
+	proposalCh chan *Proposal
+	voteCh     chan *Vote
+	timeoutCh  chan *TimeoutMsg
+	prepareCh  chan *Vote
 
-	// Channels for consensus messages - these channels receive messages from the network
-	proposalCh chan *Proposal   // Channel for receiving block proposals
-	voteCh     chan *Vote       // Channel for receiving commit votes
-	timeoutCh  chan *TimeoutMsg // Channel for receiving timeout messages
-	prepareCh  chan *Vote       // Channel for receiving prepare votes
+	// Callbacks
+	onCommit func(Block) error
 
-	// Callbacks - functions called at important consensus events
-	onCommit func(Block) error // Callback executed when a block is successfully committed
+	// Context
+	ctx             context.Context
+	cancel          context.CancelFunc
+	lastViewChange  time.Time
+	viewChangeMutex sync.Mutex
+	lastBlockTime   time.Time
 
-	ctx            context.Context    // Context for graceful shutdown and cancellation
-	cancel         context.CancelFunc // Function to cancel the context and stop consensus
-	lastViewChange time.Time          // Track last view change time
-
-	// ADD THESE MISSING FIELDS:
-	viewChangeMutex sync.Mutex // Dedicated mutex for view change synchronization
-
-	// View change and timing control
-	lastBlockTime time.Time // Last time a block was committed
-
-	// ADD THESE CACHE FIELDS:
+	// Cache fields
 	merkleRootCache     map[string]string
 	cacheMutex          sync.RWMutex
 	signatureMutex      sync.RWMutex
 	consensusSignatures []*ConsensusSignature
+
+	// ========== NEW PoS FIELDS ==========
+	validatorSet     *ValidatorSet
+	randao           *RANDAO
+	selector         *StakeWeightedSelector
+	timeConverter    *TimeConverter
+	useStakeWeighted bool
+	currentEpoch     uint64
+	justifiedEpoch   uint64
+	finalizedEpoch   uint64
+
+	// Stake-weighted vote tracking
+	weightedPrepareVotes map[string]*big.Int // blockHash -> total stake for prepare
+	weightedCommitVotes  map[string]*big.Int // blockHash -> total stake for commit
+
+	// Attestations per epoch
+	attestations map[uint64][]*Attestation
 }
 
 // SigningService handles cryptographic signing for consensus messages
@@ -192,21 +236,19 @@ type SigningService struct {
 	nodeID            string
 	privateKey        *sphincs.SPHINCS_SK
 	publicKey         *sphincs.SPHINCS_PK
-	publicKeyRegistry map[string]*sphincs.SPHINCS_PK // Add this
-	registryMutex     sync.RWMutex                   // Add this
+	publicKeyRegistry map[string]*sphincs.SPHINCS_PK
+	registryMutex     sync.RWMutex
 }
 
 // SignedMessage represents a complete signed message with all components
 type SignedMessage struct {
-	Signature  []byte                 // Raw SPHINCS+ signature bytes
-	Timestamp  []byte                 // Timestamp
-	Nonce      []byte                 // Nonce
-	MerkleRoot *hashtree.HashTreeNode // Merkle root
-	Data       []byte                 // Original message data
+	Signature  []byte
+	Timestamp  []byte
+	Nonce      []byte
+	MerkleRoot *hashtree.HashTreeNode
+	Data       []byte
 }
 
-// ConsensusSignature represents a captured signature from consensus messages
-// This type stores cryptographic signatures for audit and verification purposes
 // ConsensusSignature represents a captured signature from consensus messages
 type ConsensusSignature struct {
 	BlockHash    string `json:"block_hash"`
@@ -217,8 +259,8 @@ type ConsensusSignature struct {
 	View         uint64 `json:"view"`
 	Timestamp    string `json:"timestamp"`
 	Valid        bool   `json:"valid"`
-	MerkleRoot   string `json:"merkle_root"` // ADD THIS - MUST BE INCLUDED
-	Status       string `json:"status"`      // ADD THIS - MUST BE INCLUDED
+	MerkleRoot   string `json:"merkle_root"`
+	Status       string `json:"status"`
 }
 
 // SignatureValidation contains statistics about signature validation
@@ -244,33 +286,27 @@ type BlockSizeMetrics struct {
 	TotalSizeMB     float64                  `json:"total_size_mb"`
 }
 
-// Update TimeoutMsg to include timestamp
+// TimeoutMsg represents a view change timeout message
 type TimeoutMsg struct {
-	View      uint64 `json:"view"`      // The new view number being requested
-	VoterID   string `json:"voter_id"`  // ID of the node requesting view change
-	Signature []byte `json:"signature"` // Cryptographic signature of the requester
-	Timestamp int64  `json:"timestamp"` // When this timeout was created
+	View      uint64 `json:"view"`
+	VoterID   string `json:"voter_id"`
+	Signature []byte `json:"signature"`
+	Timestamp int64  `json:"timestamp"`
 }
 
 // QuorumVerifier provides mathematical guarantees for BFT safety
-// This struct contains the parameters needed to verify that the system
-// can tolerate Byzantine faults while maintaining safety and liveness
 type QuorumVerifier struct {
-	totalNodes     int     // Total number of nodes in the network
-	faultyNodes    int     // Number of faulty (Byzantine) nodes to tolerate
-	quorumFraction float64 // Fraction of nodes required for quorum decisions
+	totalNodes     int
+	faultyNodes    int
+	quorumFraction float64
 }
 
 // QuorumCalculator implements the mathematical quorum guarantees
-// This struct performs calculations related to quorum sizes and fault tolerance
-// ensuring the system meets Byzantine Fault Tolerance requirements
 type QuorumCalculator struct {
-	quorumFraction float64 // The quorum fraction used for all calculations
+	quorumFraction float64
 }
 
 // ConsensusState manages the state machine for consensus protocol
-// This struct encapsulates all the state variables needed for PBFT consensus
-// and provides thread-safe access through mutex protection
 type ConsensusState struct {
 	mu             sync.RWMutex
 	currentView    uint64
@@ -280,4 +316,24 @@ type ConsensusState struct {
 	preparedBlock  Block
 	preparedView   uint64
 	lastViewChange time.Time
+}
+
+// EpochInfo contains epoch state
+type EpochInfo struct {
+	Number    uint64
+	StartTime time.Time
+	EndTime   time.Time
+	StartSlot uint64
+	EndSlot   uint64
+	Justified bool
+	Finalized bool
+}
+
+// SlotInfo contains slot state
+type SlotInfo struct {
+	Number    uint64
+	Epoch     uint64
+	Proposer  *StakedValidator
+	Committee []*StakedValidator
+	Timestamp time.Time
 }

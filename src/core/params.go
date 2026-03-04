@@ -74,11 +74,9 @@ func GetSphinxChainParams() *SphinxChainParameters {
 		LedgerName:    "Sphinx",
 
 		Denominations: map[string]*big.Int{
-			"nSPX": big.NewInt(1),    // Base unit
-			"uSPX": big.NewInt(1e3),  // Micro SPX
-			"mSPX": big.NewInt(1e6),  // Milli SPX
-			"SPX":  big.NewInt(1e9),  // Main unit
-			"kSPX": big.NewInt(1e12), // Kilo SPX
+			"nSPX": big.NewInt(1),    // Base unit (nano SPX)
+			"gSPX": big.NewInt(1e9),  // Giga SPX = 1,000,000,000 nSPX
+			"SPX":  big.NewInt(1e18), // Main unit = 1,000,000,000,000,000,000 nSPX
 		},
 
 		// Block Configuration
@@ -123,13 +121,20 @@ func GetDefaultMempoolConfig() *pool.MempoolConfig {
 
 // GetDefaultConsensusConfig returns the default consensus configuration
 func GetDefaultConsensusConfig() *ConsensusConfig {
+	// Calculate 32 SPX in base units (nSPX)
+	// 32 * 1e18 = 32,000,000,000,000,000,000 nSPX
+	minStakeNSPX := new(big.Int).Mul(
+		big.NewInt(32),   // 32 SPX
+		big.NewInt(1e18), // 1e18 nSPX per SPX
+	)
+
 	return &ConsensusConfig{
 		BlockTime:        10 * time.Second,
 		EpochLength:      100,
 		ValidatorSetSize: 21,
 		MaxValidators:    100,
-		MinStakeAmount:   big.NewInt(1000000000000000000), // 1 SPX
-		UnbondingPeriod:  7 * 24 * time.Hour,              // 7 days
+		MinStakeAmount:   minStakeNSPX,       // Now 32 SPX instead of 1 SPX
+		UnbondingPeriod:  7 * 24 * time.Hour, // 7 days
 		SlashingEnabled:  true,
 		DoubleSignSlash:  big.NewInt(500000000000000000), // 0.5 SPX
 	}
@@ -183,7 +188,19 @@ func GetDevnetChainParams() *SphinxChainParameters {
 	// Very fast block times for development
 	params.ConsensusConfig.BlockTime = 2 * time.Second
 	params.ConsensusConfig.EpochLength = 10
-	params.ConsensusConfig.MinStakeAmount = big.NewInt(1000000000000000) // Lower stake for testing
+
+	// For devnet, you can either keep 32 SPX or lower it for testing
+	// If you want to test with lower stakes during development:
+	devnetMinStake := new(big.Int).Mul(
+		big.NewInt(1), // 1 SPX for devnet testing (optional)
+		big.NewInt(1e18),
+	)
+	// OR keep 32 SPX to match mainnet:
+	// devnetMinStake := new(big.Int).Mul(
+	//     big.NewInt(32),
+	//     big.NewInt(1e18),
+	// )
+	params.ConsensusConfig.MinStakeAmount = devnetMinStake
 
 	return params
 }

@@ -26,7 +26,6 @@ package network
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 )
 
 // serializeNodeData converts node data to JSON bytes
@@ -45,14 +44,4 @@ func deserializeNodeData(data []byte) (map[string]interface{}, error) {
 		return nil, fmt.Errorf("failed to unmarshal node data: %w", err)
 	}
 	return nodeData, nil
-}
-
-// cleanupOldKeys removes old key versions, keeping only the most recent ones
-func (nkm *NetworkKeyManager) cleanupOldKeys(nodeID string) error {
-	// Simple implementation - just log the cleanup operation
-	// In production, this would actually iterate through keys and delete old versions
-	log.Printf("Key cleanup would run for node %s (keeping last 5 versions)", nodeID)
-	log.Printf("Key patterns: node:%s:private_key:* and node:%s:public_key:*", nodeID, nodeID)
-
-	return nil
 }

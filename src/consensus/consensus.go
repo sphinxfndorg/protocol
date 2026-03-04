@@ -27,6 +27,7 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"math/big"
 	"reflect"
 	"sort"
 	"sync"
@@ -35,6 +36,7 @@ import (
 	"github.com/sphinxorg/protocol/src/common"
 	types "github.com/sphinxorg/protocol/src/core/transaction"
 	logger "github.com/sphinxorg/protocol/src/log"
+	denom "github.com/sphinxorg/protocol/src/params/denom"
 )
 
 // Workflow: Prepare Phase → Commit Phase → Block Commitment → View Change → Repeat
@@ -46,34 +48,77 @@ func NewConsensus(
 	blockchain BlockChain,
 	signingService *SigningService,
 	onCommit func(Block) error,
+	minStakeAmount *big.Int, // NEW: Add this parameter
 ) *Consensus {
 
 	ctx, cancel := context.WithCancel(context.Background())
+
+	// Initialize PoS components
+	genesisSeed := [32]byte{0x53, 0x50, 0x48, 0x58} // "SPHX"
+	randao := NewRANDAO(genesisSeed)
+
+	// Create validator set with the provided minimum stake
+	validatorSet := NewValidatorSet(minStakeAmount) // Pass it here
+
+	selector := NewStakeWeightedSelector(validatorSet)
+	timeConverter := NewTimeConverter(time.Now()) // Will be set properly
+
+	// Add self as validator with stake from blockchain
+	if blockchain != nil {
+		// Get stake from blockchain state
+		stake := blockchain.GetValidatorStake(nodeID)
+		if stake != nil {
+			// Use the validator set's minimum stake for comparison
+			minStake := validatorSet.GetMinStakeAmount()
+			if stake.Cmp(minStake) >= 0 {
+				// Convert from nSPX to SPX for AddValidator
+				stakeSPX := new(big.Int).Div(stake, big.NewInt(denom.SPX))
+				validatorSet.AddValidator(nodeID, uint64(stakeSPX.Int64()))
+			}
+		}
+
+		// Add self with minimum stake if not already added
+		if validatorSet.validators[nodeID] == nil {
+			minStakeSPX := validatorSet.GetMinStakeSPX()
+			logger.Info("Adding self %s with minimum stake %d SPX", nodeID, minStakeSPX)
+			validatorSet.AddValidator(nodeID, minStakeSPX)
+		}
+	}
 
 	return &Consensus{
 		nodeID:           nodeID,
 		nodeManager:      nodeManager,
 		blockChain:       blockchain,
 		signingService:   signingService,
-		currentView:      0,                                 // Start at view 0
-		currentHeight:    0,                                 // Start at height 0
-		phase:            PhaseIdle,                         // Initial phase is idle
-		quorumFraction:   0.67,                              // 2/3 quorum required for Byzantine fault tolerance
-		timeout:          300 * time.Second,                 // View change timeout
-		receivedVotes:    make(map[string]map[string]*Vote), // Track commit votes by block hash
-		prepareVotes:     make(map[string]map[string]*Vote), // Track prepare votes by block hash
-		sentVotes:        make(map[string]bool),             // Track which votes this node has sent
-		sentPrepareVotes: make(map[string]bool),             // Track which prepare votes this node has sent
-		proposalCh:       make(chan *Proposal, 100),         // Channel for incoming proposals
-		voteCh:           make(chan *Vote, 1000),            // Channel for incoming commit votes
-		timeoutCh:        make(chan *TimeoutMsg, 100),       // Channel for timeout messages
-		prepareCh:        make(chan *Vote, 1000),            // Channel for incoming prepare votes
-		onCommit:         onCommit,                          // Callback for committed blocks
-		ctx:              ctx,                               // Context for cancellation
-		cancel:           cancel,                            // Cancel function for shutdown
-		lastViewChange:   common.GetTimeService().Now(),     // Initialize last view change time using centralized time
-		viewChangeMutex:  sync.Mutex{},                      // Initialize view change mutex
-		lastBlockTime:    common.GetTimeService().Now(),     // Initialize last block time using centralized time
+		currentView:      0,
+		currentHeight:    0,
+		phase:            PhaseIdle,
+		quorumFraction:   0.67,
+		timeout:          300 * time.Second,
+		receivedVotes:    make(map[string]map[string]*Vote),
+		prepareVotes:     make(map[string]map[string]*Vote),
+		sentVotes:        make(map[string]bool),
+		sentPrepareVotes: make(map[string]bool),
+		proposalCh:       make(chan *Proposal, 100),
+		voteCh:           make(chan *Vote, 1000),
+		timeoutCh:        make(chan *TimeoutMsg, 100),
+		prepareCh:        make(chan *Vote, 1000),
+		onCommit:         onCommit,
+		ctx:              ctx,
+		cancel:           cancel,
+		lastViewChange:   common.GetTimeService().Now(),
+		viewChangeMutex:  sync.Mutex{},
+		lastBlockTime:    common.GetTimeService().Now(),
+
+		// New PoS fields
+		validatorSet:         validatorSet,
+		randao:               randao,
+		selector:             selector,
+		timeConverter:        timeConverter,
+		useStakeWeighted:     true,
+		weightedPrepareVotes: make(map[string]*big.Int),
+		weightedCommitVotes:  make(map[string]*big.Int),
+		attestations:         make(map[uint64][]*Attestation),
 	}
 }
 
@@ -229,6 +274,24 @@ func (c *Consensus) GetCurrentHeight() uint64 {
 
 // Private methods
 
+// Add to consensus.go - new method
+func (c *Consensus) shouldPreventViewChange() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	// Don't change view if we're in active consensus phases
+	if c.phase == PhasePrePrepared || c.phase == PhasePrepared {
+		return true
+	}
+
+	// Don't change view if we've received recent votes
+	if len(c.receivedVotes) > 0 || len(c.prepareVotes) > 0 {
+		return true
+	}
+
+	return false
+}
+
 // consensusLoop is the main consensus loop that handles view change timeouts
 // Monitors for view timeouts and initiates view changes when necessary
 func (c *Consensus) consensusLoop() {
@@ -238,11 +301,29 @@ func (c *Consensus) consensusLoop() {
 	for {
 		select {
 		case <-viewTimer.C:
-			// View timeout occurred, initiate view change
+			// Check if we should prevent view change
+			if c.shouldPreventViewChange() {
+				logger.Info("🛑 Preventing view change - active consensus")
+				viewTimer.Reset(10 * time.Second) // Short retry
+				continue
+			}
+
+			// Check if we're already at height > 0 (genesis already committed)
+			c.mu.RLock()
+			currentHeight := c.currentHeight
+			c.mu.RUnlock()
+
+			if currentHeight == 0 {
+				// Special case: at genesis, we should wait longer
+				logger.Info("⏳ At genesis height, extending view change timeout")
+				viewTimer.Reset(30 * time.Second)
+				continue
+			}
+
 			c.startViewChange()
 			viewTimer.Reset(c.timeout)
+
 		case <-c.ctx.Done():
-			// Consensus stopped, exit loop
 			logger.Info("Consensus loop stopped for node %s", c.nodeID)
 			return
 		}
@@ -318,32 +399,73 @@ func (c *Consensus) handleTimeouts() {
 }
 
 // updateLeaderStatus updates the leader status based on current view and validators
+// updateLeaderStatus with stake-weighted selection
 func (c *Consensus) updateLeaderStatus() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	if !c.useStakeWeighted {
+		// Fallback to round-robin for testing
+		c.updateLeaderStatusRoundRobin()
+		return
+	}
+
+	// Get current slot/epoch
+	currentSlot := c.timeConverter.CurrentSlot()
+	currentEpoch := currentSlot / SlotsPerEpoch
+
+	// Check for epoch transition
+	if currentEpoch > c.currentEpoch {
+		c.onEpochTransition(currentEpoch)
+	}
+
+	// Get randomness seed for this slot
+	seed := c.randao.GetSeed(currentSlot)
+
+	// Select proposer by stake weight
+	selected := c.selector.SelectProposer(currentEpoch, seed)
+
+	if selected == nil {
+		c.isLeader = false
+		logger.Warn("No validator selected for slot %d", currentSlot)
+		return
+	}
+
+	c.isLeader = (selected.ID == c.nodeID)
+
+	if c.isLeader {
+		logger.Info("✅ Node %s selected as proposer for slot %d with stake %.2f SPX",
+			c.nodeID, currentSlot, selected.GetStakeInSPX())
+	} else {
+		logger.Info("Node %s NOT selected for slot %d (selected: %s with %.2f SPX)",
+			c.nodeID, currentSlot, selected.ID, selected.GetStakeInSPX())
+	}
+}
+
+// onEpochTransition handles epoch changes
+func (c *Consensus) onEpochTransition(newEpoch uint64) {
+	logger.Info("🔄 Entering epoch %d", newEpoch)
+
+	// Process attestations from previous epoch
+	if newEpoch > 0 {
+		c.processEpochAttestations(newEpoch - 1)
+	}
+
+	c.currentEpoch = newEpoch
+}
+
+// Fallback round-robin (keep for testing)
+func (c *Consensus) updateLeaderStatusRoundRobin() {
 	validators := c.getValidators()
 	if len(validators) == 0 {
 		c.isLeader = false
 		return
 	}
 
-	// Sort validators for deterministic leader selection
 	sort.Strings(validators)
-
-	// Round-robin leader selection based on view number
 	leaderIndex := int(c.currentView) % len(validators)
 	expectedLeader := validators[leaderIndex]
-
 	c.isLeader = (expectedLeader == c.nodeID)
-
-	if c.isLeader {
-		logger.Info("✅ Node %s is leader for view %d (index %d/%d)",
-			c.nodeID, c.currentView, leaderIndex, len(validators))
-	} else {
-		logger.Info("Node %s is NOT leader for view %d (leader is %s)",
-			c.nodeID, c.currentView, expectedLeader)
-	}
 }
 
 // FIXED: processProposal with proper signature creation
@@ -503,47 +625,46 @@ func (c *Consensus) StatusFromMsgType(messageType string) string {
 // Tracks prepare votes and progresses to prepared phase when quorum is reached
 // processPrepareVote handles a received prepare vote
 // Enhanced processPrepareVote method
+// Enhanced processPrepareVote with stake tracking
 func (c *Consensus) processPrepareVote(vote *Vote) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Verify signature if signing service is available
+	// Verify signature
 	if c.signingService != nil && len(vote.Signature) > 0 {
 		valid, err := c.signingService.VerifyVote(vote)
-		if err != nil {
-			logger.Warn("Error verifying prepare vote signature from %s: %v", vote.VoterID, err)
-			return
-		}
-		if !valid {
+		if err != nil || !valid {
 			logger.Warn("Invalid prepare vote signature from %s", vote.VoterID)
 			return
 		}
 	}
 
-	// FIX: If we receive prepare votes for a block we don't have, try to find it
-	if c.preparedBlock == nil || c.preparedBlock.GetHash() != vote.BlockHash {
-		// Look for the block in our recent proposals or ask peers
-		logger.Warn("❌ No prepared block found for hash %s, attempting recovery", vote.BlockHash)
-
-		// FIX: Correct assignment - GetBlockByHash returns only one value
-		block := c.blockChain.GetBlockByHash(vote.BlockHash)
-		if block != nil {
-			c.preparedBlock = block
-			c.preparedView = vote.View
-			logger.Info("✅ Recovered prepared block from storage: %s", vote.BlockHash)
-		} else {
-			logger.Warn("❌ Cannot recover block %s, ignoring prepare votes", vote.BlockHash)
-			return
-		}
-	}
-
-	// Initialize vote tracking for this block hash if needed
+	// Initialize vote tracking - DO THIS ONCE
 	if c.prepareVotes[vote.BlockHash] == nil {
 		c.prepareVotes[vote.BlockHash] = make(map[string]*Vote)
+		c.weightedPrepareVotes[vote.BlockHash] = big.NewInt(0)
+	}
+
+	// Check if already voted
+	if _, exists := c.prepareVotes[vote.BlockHash][vote.VoterID]; exists {
+		return
 	}
 
 	// Store the prepare vote
 	c.prepareVotes[vote.BlockHash][vote.VoterID] = vote
+
+	// Add stake weight
+	stake := c.getValidatorStake(vote.VoterID)
+	c.weightedPrepareVotes[vote.BlockHash].Add(c.weightedPrepareVotes[vote.BlockHash], stake)
+
+	// Log in SPX
+	stakeSPX := new(big.Float).Quo(
+		new(big.Float).SetInt(stake),
+		new(big.Float).SetFloat64(denom.SPX),
+	)
+
+	logger.Info("📊 Prepare vote: %s, block=%s, stake=%.2f SPX",
+		vote.VoterID, vote.BlockHash, stakeSPX)
 
 	totalVotes := len(c.prepareVotes[vote.BlockHash])
 	quorumSize := c.calculateQuorumSize(c.getTotalNodes())
@@ -564,7 +685,8 @@ func (c *Consensus) processPrepareVote(vote *Vote) {
 			}
 			return
 		}
-		// CAPTURE PREPARE VOTE SIGNATURE - FIXED VERSION
+
+		// CAPTURE PREPARE VOTE SIGNATURE
 		signedMsg, err := DeserializeSignedMessage(vote.Signature)
 		var signatureHex string
 		if err != nil {
@@ -583,8 +705,8 @@ func (c *Consensus) processPrepareVote(vote *Vote) {
 			View:         vote.View,
 			Timestamp:    common.GetTimeService().GetCurrentTimeInfo().ISOLocal,
 			Valid:        true,
-			MerkleRoot:   "pending_calculation", // Provide initial value
-			Status:       "prepared",            // Provide initial value
+			MerkleRoot:   "pending_calculation",
+			Status:       "prepared",
 		}
 		c.addConsensusSig(consensusSig)
 
@@ -805,31 +927,59 @@ func (c *Consensus) GetConsensusSignatures() []*ConsensusSignature {
 // Tracks commit votes and commits block when quorum is reached
 // Enhanced processVote method to ensure commit happens
 // Enhanced processVote method
+// Enhanced processVote with stake tracking
 func (c *Consensus) processVote(vote *Vote) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Verify signature if signing service is available
+	// Verify signature
 	if c.signingService != nil && len(vote.Signature) > 0 {
 		valid, err := c.signingService.VerifyVote(vote)
-		if err != nil {
-			logger.Warn("Error verifying commit vote signature from %s: %v", vote.VoterID, err)
+		if err != nil || !valid {
+			logger.Warn("Invalid vote signature from %s", vote.VoterID)
 			return
 		}
-		if !valid {
-			logger.Warn("Invalid commit vote signature from %s", vote.VoterID)
-			return
-		}
-		logger.Debug("✅ Valid commit vote signature from %s", vote.VoterID)
 	}
 
-	// Initialize vote tracking for this block hash if needed
+	// Initialize vote tracking
 	if c.receivedVotes[vote.BlockHash] == nil {
 		c.receivedVotes[vote.BlockHash] = make(map[string]*Vote)
+		c.weightedCommitVotes[vote.BlockHash] = big.NewInt(0)
+	}
+
+	// Check if already voted
+	if _, exists := c.receivedVotes[vote.BlockHash][vote.VoterID]; exists {
+		return
 	}
 
 	// Store the commit vote
 	c.receivedVotes[vote.BlockHash][vote.VoterID] = vote
+
+	// Get stake - FIX: Always get stake from validator set
+	stake := c.getValidatorStake(vote.VoterID)
+
+	// CRITICAL FIX: If stake is zero, check if it's self and assign default
+	if stake.Cmp(big.NewInt(0)) == 0 {
+		if vote.VoterID == c.nodeID {
+			// Self-stake should always be set
+			stake = new(big.Int).Mul(big.NewInt(32), big.NewInt(denom.SPX))
+			logger.Info("⚠️ Self stake was zero, using default: 32 SPX")
+		} else {
+			logger.Warn("⚠️ Vote from %s has zero stake", vote.VoterID)
+		}
+	}
+
+	// Add stake weight
+	c.weightedCommitVotes[vote.BlockHash].Add(c.weightedCommitVotes[vote.BlockHash], stake)
+
+	// Log in SPX
+	stakeSPX := new(big.Float).Quo(
+		new(big.Float).SetInt(stake),
+		new(big.Float).SetFloat64(denom.SPX),
+	)
+
+	logger.Info("📊 Commit vote: %s, block=%s, stake=%.2f SPX",
+		vote.VoterID, vote.BlockHash, stakeSPX)
 
 	totalVotes := len(c.receivedVotes[vote.BlockHash])
 	quorumSize := c.calculateQuorumSize(c.getTotalNodes())
@@ -858,7 +1008,7 @@ func (c *Consensus) processVote(vote *Vote) {
 			logger.Info("🚀 Moving to COMMITTED phase for block %s", vote.BlockHash)
 		}
 
-		// CAPTURE COMMIT VOTE SIGNATURE - FIXED VERSION
+		// CAPTURE COMMIT VOTE SIGNATURE
 		signedMsg, err := DeserializeSignedMessage(vote.Signature)
 		var signatureHex string
 		if err != nil {
@@ -877,8 +1027,8 @@ func (c *Consensus) processVote(vote *Vote) {
 			View:         vote.View,
 			Timestamp:    common.GetTimeService().GetCurrentTimeInfo().ISOLocal,
 			Valid:        true,
-			MerkleRoot:   "pending_calculation", // Provide initial value
-			Status:       "committed",           // Provide initial value
+			MerkleRoot:   "pending_calculation",
+			Status:       "committed",
 		}
 		c.addConsensusSig(consensusSig)
 
@@ -1011,26 +1161,109 @@ func (c *Consensus) voteForBlock(blockHash string, view uint64) {
 		c.nodeID, blockHash, blockToVote.GetHeight(), view)
 }
 
-// hasPrepareQuorum checks if enough prepare votes have been received for a block
-// blockHash: The hash of the block to check
-// Returns true if prepare quorum is achieved
-func (c *Consensus) hasPrepareQuorum(blockHash string) bool {
-	votes := c.prepareVotes[blockHash]
-	if votes == nil {
-		return false
-	}
-	return len(votes) >= c.calculateQuorumSize(c.getTotalNodes())
-}
-
 // hasQuorum checks if enough commit votes have been received for a block
 // blockHash: The hash of the block to check
 // Returns true if commit quorum is achieved
+// hasQuorum checks if enough stake has voted for a block
+// hasQuorum checks if enough stake has voted for a block
 func (c *Consensus) hasQuorum(blockHash string) bool {
 	votes := c.receivedVotes[blockHash]
 	if votes == nil {
 		return false
 	}
-	return len(votes) >= c.calculateQuorumSize(c.getTotalNodes())
+
+	// Calculate total stake that voted
+	totalStakeVoted := big.NewInt(0)
+	for voterID := range votes {
+		stake := c.getValidatorStake(voterID)
+		if stake != nil {
+			totalStakeVoted.Add(totalStakeVoted, stake)
+		}
+	}
+
+	// Store for later use
+	c.weightedCommitVotes[blockHash] = totalStakeVoted
+
+	// Get total active stake
+	totalStake := c.validatorSet.GetTotalStake()
+
+	// SAFETY CHECK: If total stake is zero, can't have quorum
+	if totalStake == nil || totalStake.Cmp(big.NewInt(0)) == 0 {
+		logger.Warn("Total stake is zero, cannot achieve quorum")
+		return false
+	}
+
+	// Check if 2/3 of total stake voted
+	requiredStake := new(big.Int).Mul(totalStake, big.NewInt(2))
+	requiredStake.Div(requiredStake, big.NewInt(3))
+
+	hasQuorum := totalStakeVoted.Cmp(requiredStake) >= 0
+
+	if hasQuorum && totalStakeVoted.Cmp(big.NewInt(0)) > 0 {
+		// Only log if we have positive stake values
+		votedSPX := new(big.Float).Quo(
+			new(big.Float).SetInt(totalStakeVoted),
+			new(big.Float).SetFloat64(denom.SPX),
+		)
+		totalSPX := new(big.Float).Quo(
+			new(big.Float).SetInt(totalStake),
+			new(big.Float).SetFloat64(denom.SPX),
+		)
+
+		// SAFETY CHECK: Ensure totalSPX is not zero
+		if totalSPX.Cmp(big.NewFloat(0)) != 0 {
+			percentage := new(big.Float).Quo(votedSPX, totalSPX)
+			percentage.Mul(percentage, big.NewFloat(100))
+			logger.Info("🎯 Quorum achieved: %.2f / %.2f SPX voted (%.1f%%)",
+				votedSPX, totalSPX, percentage)
+		} else {
+			logger.Info("🎯 Quorum achieved: %.2f SPX voted", votedSPX)
+		}
+	}
+
+	return hasQuorum
+}
+
+// hasPrepareQuorum with stake weighting
+func (c *Consensus) hasPrepareQuorum(blockHash string) bool {
+	votes := c.prepareVotes[blockHash]
+	if votes == nil {
+		return false
+	}
+
+	totalStakeVoted := big.NewInt(0)
+	for voterID := range votes {
+		stake := c.getValidatorStake(voterID)
+		if stake != nil {
+			totalStakeVoted.Add(totalStakeVoted, stake)
+		}
+	}
+
+	c.weightedPrepareVotes[blockHash] = totalStakeVoted
+
+	totalStake := c.validatorSet.GetTotalStake()
+
+	// SAFETY CHECK: If total stake is zero, can't have quorum
+	if totalStake == nil || totalStake.Cmp(big.NewInt(0)) == 0 {
+		logger.Warn("Total stake is zero, cannot achieve prepare quorum")
+		return false
+	}
+
+	requiredStake := new(big.Int).Mul(totalStake, big.NewInt(2))
+	requiredStake.Div(requiredStake, big.NewInt(3))
+
+	return totalStakeVoted.Cmp(requiredStake) >= 0
+}
+
+// getValidatorStake retrieves a validator's stake
+func (c *Consensus) getValidatorStake(validatorID string) *big.Int {
+	c.validatorSet.mu.RLock()
+	defer c.validatorSet.mu.RUnlock()
+
+	if val, exists := c.validatorSet.validators[validatorID]; exists {
+		return val.StakeAmount
+	}
+	return big.NewInt(0)
 }
 
 // calculateQuorumSize calculates the minimum number of votes needed for quorum
@@ -1115,27 +1348,24 @@ func (c *Consensus) startViewChange() {
 	defer c.viewChangeMutex.Unlock()
 
 	c.mu.Lock()
+	defer c.mu.Unlock() // Use defer to ensure unlock
 
-	// Prevent view changes if we're actively processing consensus
-	if c.phase != PhaseIdle && c.phase != PhaseCommitted {
+	// Don't start view change if we're in active consensus
+	if c.phase != PhaseIdle {
 		logger.Debug("Skipping view change - active consensus in phase %v", c.phase)
-		c.mu.Unlock()
 		return
 	}
 
-	// Extended cooldown period: prevent view changes for at least 15 seconds
-	if common.GetTimeService().Now().Sub(c.lastViewChange) < 15*time.Second {
-		logger.Debug("Skipping view change for node %s (cooldown: %v since last view change)",
+	// INCREASE cooldown to 60 seconds
+	if common.GetTimeService().Now().Sub(c.lastViewChange) < 60*time.Second {
+		logger.Debug("Skipping view change for node %s (cooldown: %v)",
 			c.nodeID, common.GetTimeService().Now().Sub(c.lastViewChange))
-		c.mu.Unlock()
 		return
 	}
 
-	// Only proceed with view change if we're significantly behind in block production
+	// Don't start view change if we've committed a block recently (30 seconds)
 	if c.currentHeight > 0 && common.GetTimeService().Now().Sub(c.lastBlockTime) < 30*time.Second {
-		logger.Debug("Skipping view change for node %s (recent block activity: %v since last block)",
-			c.nodeID, common.GetTimeService().Now().Sub(c.lastBlockTime))
-		c.mu.Unlock()
+		logger.Debug("Skipping view change - recent block activity")
 		return
 	}
 

@@ -1,8 +1,33 @@
+> # 📢 Important Notice: Repository Migration
+
+> We want to be transparent with our community about a change in our GitHub organization.
+>
+> * Our original repository was located at: https://github.com/sphinx-core
+> * Our new home is now at: https://github.com/sphinxorg
+
+> **Why the Change?**
+>
+> The original https://github.com/sphinx-core account was unfortunately lost due to Access to that account has been permanently lost and github has no solution for our case. To ensure continuity and maintain an active, accessible home for the Sphinx blockchain project, we've created a new organization: https://github.com/sphinxorg.
+
+> **What This Means for Contributors**
+>
+> * All development continues - We're actively building at the new location
+> * All contribution opportunities remain - Bug fixes, documentation, features, and proposals are still welcome
+> * SIPS (SPHINX Implementation Proposals) - Still available via our GitHub Wiki
+> * MIT License remains - The project continues as open source
+
+
 # Introduction
 
-Sphinx is a blockchain layer 1 technology designed to be a highly secure blockchain that incorporates post-quantum cryptographic algorithms. Our interemediate goals is to ensure blockchain security remains robust in the face of emerging threats posed by quantum computing.
+Sphinx is a blockchain layer 1 protocol built by community for humanity—an infrastructure for personal sovereignty that extends beyond economic participation, where privacy is mathematically enforced rather than merely promised. We implemented post-quantum cryptographic algorithms, we ensure blockchain security remains robust against the emerging and convergent threats posed by quantum computing and artificial intelligence.
 
-We encourage developers, researchers, and blockchain enthusiasts to contribute to our project and participate in discussions to enhance the protocol.
+In an era where AI systems grow increasingly powerful and quantum computers threaten to dismantle classical cryptography, the need for blockchain infrastructure that protects human interests has never been more critical. Sphinx stands as a bulwark for human autonomy, founded on three core beliefs:
+
+- **Privacy** is a fundamental human right, not a luxury—enforced by mathematics, not trust
+- **Sovereignty** means individuals should have complete control over their digital assets, identity, and destiny
+- **Humanity** must be preserved through technology that serves people, elevating human dignity above surveillance and control
+
+We are building this foundation not just for economic participants, but for every human being who deserves digital self-determination. We encourage developers, researchers, and blockchain enthusiasts to contribute to our project and participate in discussions to enhance the protocol.
 
 ## What is SPHINX?
 
@@ -97,11 +122,11 @@ git push fork feature-name
 
 Proposals and Discussions
 
-All major proposals for features, upgrades, and changes are documented in the **[GitHub Wiki](https://github.com/sphinx-core/sips/wiki).** section of the repository. You can find detailed descriptions of proposed features and their technical implementations here:
+All major proposals for features, upgrades, and changes are documented in the **https://github.com/sphinxorg/SIPS** section of the repository. You can find detailed descriptions of proposed features and their technical implementations here:
 
 ## GitHub Wiki Pages
 
-GitHub Wiki Pages is contains of **SIPS (SPHINX IMPLEMENTATION PROPOSALS)** you can join to review, discussions, or suggest improvements to existing proposals ideas. To contribute just visit to the **[GitHub Wiki](https://github.com/sphinx-core/sips/wiki).**
+GitHub Wiki Pages is contains of **SIPS (SPHINX IMPLEMENTATION PROPOSALS)** you can join to review, discussions, or suggest improvements to existing proposals ideas. To contribute just visit to the **https://github.com/sphinxorg/SIPS**
 
 ## Improvement Ideas
 
@@ -111,8 +136,7 @@ Here are some areas where contributions are most welcome:
 2. Testing: Write unit tests, integration tests, or perform manual testing to identify bugs.
 3. Security: Contribute to making Sphinx-Core more secure by reviewing code or proposing post-quantum cryptographic methods.
 4. Performance Optimization: Improve performance and scalability of the Sphinx-Core protocol.
-5. Feature Requests: If you have ideas for new features, open an issue or create a proposal in the **[GitHub Wiki](https://github.com/sphinx-core/sips/wiki).**
-
+5. Feature Requests: If you have ideas for new features, open an issue or create a proposal in the **https://github.com/sphinxorg/SIPS**
 ##  License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
@@ -120,4 +144,3 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 ## By following this guide
 
 you will be able to contribute to the Sphinx-Core project and help us build a quantum-resistant blockchain ecosystem.
-

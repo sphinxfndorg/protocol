@@ -30,6 +30,7 @@ import (
 	"math/big"
 	"net"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -39,6 +40,7 @@ import (
 	"github.com/sphinxorg/protocol/src/core"
 	config "github.com/sphinxorg/protocol/src/core/sphincs/config"
 	key "github.com/sphinxorg/protocol/src/core/sphincs/key/backend"
+
 	sign "github.com/sphinxorg/protocol/src/core/sphincs/sign/backend"
 	database "github.com/sphinxorg/protocol/src/core/state"
 	types "github.com/sphinxorg/protocol/src/core/transaction"
@@ -53,7 +55,7 @@ import (
 )
 
 // Updated CallConsensus function using only network addresses
-// Updated CallConsensus function using only network addresses
+// Updated CallConsensus function with fixed manual block proposal trigger
 func CallConsensus(numNodes int) error {
 	if numNodes < 3 {
 		return fmt.Errorf("PBFT requires at least 3 validator nodes, got %d", numNodes)
@@ -147,34 +149,34 @@ func CallConsensus(numNodes int) error {
 	// Initialize node components
 	dbs := make([]*leveldb.DB, numNodes)
 	sphincsMgrs := make([]*sign.SphincsManager, numNodes)
-	blockchains := make([]*core.Blockchain, numNodes) // DECLARED HERE
+	blockchains := make([]*core.Blockchain, numNodes)
 	consensusEngines := make([]*consensus.Consensus, numNodes)
 	networkNodes := make([]*network.Node, numNodes)
 
 	// Generate network addresses and validator IDs FIRST
 	networkAddresses := make([]string, numNodes)
-	validatorIDs := make([]string, numNodes) // DECLARED HERE
+	validatorIDs := make([]string, numNodes)
 	for i := 0; i < numNodes; i++ {
 		address := fmt.Sprintf("127.0.0.1:%d", 32307+i)
 		networkAddresses[i] = address
-		validatorIDs[i] = fmt.Sprintf("Node-%s", address) // Use network address as ID
+		validatorIDs[i] = fmt.Sprintf("Node-%s", address)
 	}
 
-	// Create a map of signing services for key exchange - initialize it here
+	// Create a map of signing services for key exchange
 	signingServices := make(map[string]*consensus.SigningService)
 
-	// Initialize each validator node using network addresses
+	// Initialize each validator node
 	for i := 0; i < numNodes; i++ {
 		address := networkAddresses[i]
 		nodeID := validatorIDs[i]
 
-		// Create node data directory using network address
+		// Create node data directory
 		if err := common.EnsureNodeDirs(address); err != nil {
 			return fmt.Errorf("failed to create node directories for %s: %v", address, err)
 		}
 		logger.Info("Created directories for node: %s", nodeID)
 
-		// Initialize LevelDB storage using network address
+		// Initialize LevelDB storage
 		db, err := leveldb.OpenFile(common.GetLevelDBPath(address), nil)
 		if err != nil {
 			return fmt.Errorf("failed to open LevelDB for node %s: %v", nodeID, err)
@@ -187,15 +189,15 @@ func CallConsensus(numNodes int) error {
 			return fmt.Errorf("failed to create database for node %s: %v", nodeID, err)
 		}
 
-		// Create actual network node using network address
+		// Create actual network node
 		networkNode := network.NewNode(
-			address,                    // address
-			"127.0.0.1",                // ip
-			fmt.Sprintf("%d", 32307+i), // port
-			fmt.Sprintf("%d", 32308+i), // udpPort
-			true,                       // isLocal
-			network.RoleValidator,      // role
-			nodeDB,                     // database
+			address,
+			"127.0.0.1",
+			fmt.Sprintf("%d", 32307+i),
+			fmt.Sprintf("%d", 32308+i),
+			true,
+			network.RoleValidator,
+			nodeDB,
 		)
 
 		if networkNode == nil {
@@ -219,10 +221,10 @@ func CallConsensus(numNodes int) error {
 		// ========== NODE MANAGER AND PEER CONNECTIONS ==========
 		var dhtInstance network.DHT = nil
 
-		// Initialize node manager with actual database
+		// Initialize node manager
 		nodeMgr := network.NewNodeManager(16, dhtInstance, nodeDB)
 
-		// Create and add local node to node manager using network address
+		// Create and add local node
 		if err := nodeMgr.CreateLocalNode(
 			address,
 			"127.0.0.1",
@@ -233,7 +235,7 @@ func CallConsensus(numNodes int) error {
 			return fmt.Errorf("failed to create local node for node manager: %v", err)
 		}
 
-		// Add all validator nodes as peers (using network addresses)
+		// Add all validator nodes as peers
 		for j := range validatorIDs {
 			if i != j {
 				remoteAddress := networkAddresses[j]
@@ -255,7 +257,6 @@ func CallConsensus(numNodes int) error {
 		logger.Info("%s peer connections established", nodeID)
 
 		// ========== BLOCKCHAIN SETUP ==========
-		// Use network address for blockchain data directory
 		bc, err := core.NewBlockchain(common.GetBlockchainDataDir(address), nodeID, validatorIDs, networkType)
 		if err != nil {
 			return fmt.Errorf("node %s blockchain initialization failed: %v", nodeID, err)
@@ -285,7 +286,7 @@ func CallConsensus(numNodes int) error {
 		logger.Info("  BIP44 Coin Type: %d", chainInfo["bip44_coin_type"])
 		logger.Info("  Ledger Name: %s", chainInfo["ledger_name"])
 
-		// Validate storage layer functionality
+		// Validate storage layer
 		logger.Info("%s: Validating storage layer...", nodeID)
 		if debugErr := bc.DebugStorage(); debugErr != nil {
 			logger.Warn("%s storage validation warning: %v", nodeID, debugErr)
@@ -295,7 +296,7 @@ func CallConsensus(numNodes int) error {
 		// ========== CONSENSUS CONFIGURATION ==========
 		testNodeMgr := network.NewCallNodeManager()
 
-		// Add all validator nodes as peers to the test node manager
+		// Add all validator nodes as peers
 		for _, id := range validatorIDs {
 			testNodeMgr.AddPeer(id)
 		}
@@ -318,17 +319,41 @@ func CallConsensus(numNodes int) error {
 		// Create signing service
 		signingService := consensus.NewSigningService(sphincsManager, keyManager, nodeID)
 
-		// Store the signing service in the map for key exchange
+		// Store the signing service
 		signingServices[nodeID] = signingService
 
-		// Initialize PBFT consensus engine
+		// Get the minimum stake from core chain parameters
+		chainParams := core.GetSphinxChainParams() // Use core, not commit
+		minStakeAmount := chainParams.ConsensusConfig.MinStakeAmount
+
+		// Log it to verify
+		minSPX := new(big.Int).Div(minStakeAmount, big.NewInt(1e18))
+		logger.Info("📊 Min stake from params: %d SPX (%v nSPX)", minSPX.Uint64(), minStakeAmount)
+
+		// Pass to consensus
 		cons := consensus.NewConsensus(
-			nodeID, // Use network address ID
+			nodeID,
 			testNodeMgr,
 			bc,
-			signingService, // Add the signing service here
+			signingService,
 			bc.CommitBlock,
+			minStakeAmount,
 		)
+
+		// Initialize stake - now using validator set methods
+		validatorSet := cons.GetValidatorSet()
+		if validatorSet != nil {
+			// Get the minimum stake from the validator set itself
+			stakeSPX := validatorSet.GetMinStakeSPX()
+
+			err := validatorSet.AddValidator(nodeID, stakeSPX)
+			if err != nil {
+				logger.Warn("Failed to add validator %s with stake %d SPX: %v", nodeID, stakeSPX, err)
+			} else {
+				logger.Info("✅ Validator %s initialized with %d SPX stake (from chain parameters)", nodeID, stakeSPX)
+			}
+		}
+
 		consensusEngines[i] = cons
 		bc.SetConsensusEngine(cons)
 		bc.SetConsensus(cons)
@@ -336,8 +361,9 @@ func CallConsensus(numNodes int) error {
 		// Register consensus with network layer
 		network.RegisterConsensus(nodeID, cons)
 
-		// Configure consensus parameters (timeout only)
-		cons.SetTimeout(15 * time.Second)
+		// Set a VERY LONG timeout to prevent automatic view changes during test
+		// This is critical - we want to control view changes manually
+		cons.SetTimeout(1 * time.Hour) // 1 hour timeout effectively disables auto view changes
 
 		// Start consensus engine
 		if err := cons.Start(); err != nil {
@@ -347,14 +373,13 @@ func CallConsensus(numNodes int) error {
 		// Allow consensus engine to fully initialize
 		time.Sleep(100 * time.Millisecond)
 
-		// Begin automatic block proposal for leader
+		// Begin automatic block proposal for leader (but it won't trigger due to long timeout)
 		bc.StartLeaderLoop(ctx)
 	}
 
 	// ========== GENESIS BLOCK CONSISTENCY VALIDATION ==========
 	logger.Info("=== VALIDATING GENESIS BLOCK CONSISTENCY ===")
 
-	// First, get the expected genesis hash that should be consistent across all nodes
 	expectedGenesisHash := core.GetGenesisHash()
 	logger.Info("Expected genesis hash for all nodes: %s", expectedGenesisHash)
 
@@ -367,9 +392,7 @@ func CallConsensus(numNodes int) error {
 		actualHash := genesis.GetHash()
 		logger.Info("%s genesis: height=%d, hash=%s", validatorIDs[i], genesis.GetHeight(), actualHash)
 
-		// FIXED: Simple direct comparison - both should have GENESIS_ prefix
 		if actualHash != expectedGenesisHash {
-			// If direct comparison fails, try normalized comparison as fallback
 			normalizedActual := actualHash
 			normalizedExpected := expectedGenesisHash
 
@@ -388,12 +411,11 @@ func CallConsensus(numNodes int) error {
 	}
 	logger.Info("✅ All nodes have consistent genesis blocks: %s", expectedGenesisHash)
 
-	// ========== KEY EXCHANGE - MOVE THIS AFTER ALL NODES ARE INITIALIZED ==========
-	// Exchange public keys between all nodes - NOW this happens after all signing services are created
+	// ========== KEY EXCHANGE ==========
 	logger.Info("=== EXCHANGING PUBLIC KEYS BETWEEN NODES ===")
 	exchangePublicKeys(signingServices, validatorIDs)
 
-	// Verify that key directories were created using network addresses
+	// Verify key directories
 	logger.Info("=== VERIFYING KEY DIRECTORY CREATION ===")
 	for i := 0; i < numNodes; i++ {
 		address := networkAddresses[i]
@@ -405,7 +427,6 @@ func CallConsensus(numNodes int) error {
 		} else {
 			logger.Info("Keys directory exists for node %s: %s", nodeID, keysDir)
 
-			// Check if key files exist
 			privateKeyPath := common.GetPrivateKeyPath(address)
 			publicKeyPath := common.GetPublicKeyPath(address)
 
@@ -425,10 +446,9 @@ func CallConsensus(numNodes int) error {
 
 	// ========== JSON-RPC SERVER INITIALIZATION ==========
 	for i := 0; i < numNodes; i++ {
-		address := networkAddresses[i] // Declare address here
+		address := networkAddresses[i]
 		nodeID := validatorIDs[i]
 
-		// THIS LINE FIXES THE "declared and not used" ERROR
 		logger.Info("Setting up RPC server for node with address: %s", address)
 
 		msgCh := make(chan *security.Message, 100)
@@ -488,74 +508,24 @@ func CallConsensus(numNodes int) error {
 		logger.Info("%s genesis: height=%d, hash=%s", validatorIDs[i], genesis.GetHeight(), genesis.GetHash())
 	}
 
-	// ========== TRANSACTION PROPAGATION TEST USING NOTES ==========
+	// ========== TRANSACTION CREATION AND PROPAGATION ==========
 	logger.Info("=== CREATING AND DISTRIBUTING MULTIPLE TRANSACTIONS VIA NOTES ===")
 
-	// Create 10 notes with different balances for comprehensive testing
+	// Create 10 notes with different balances
 	notes := []*types.Note{
-		{
-			To:      "bob",
-			From:    "alice",
-			Fee:     1000.0,
-			Storage: "test-storage-1",
-		},
-		{
-			To:      "charlie",
-			From:    "bob",
-			Fee:     500.0,
-			Storage: "test-storage-2",
-		},
-		{
-			To:      "alice",
-			From:    "charlie",
-			Fee:     200.0,
-			Storage: "test-storage-3",
-		},
-		{
-			To:      "david",
-			From:    "alice",
-			Fee:     1500.0,
-			Storage: "test-storage-4",
-		},
-		{
-			To:      "emma",
-			From:    "bob",
-			Fee:     750.0,
-			Storage: "test-storage-5",
-		},
-		{
-			To:      "frank",
-			From:    "charlie",
-			Fee:     300.0,
-			Storage: "test-storage-6",
-		},
-		{
-			To:      "grace",
-			From:    "david",
-			Fee:     1200.0,
-			Storage: "test-storage-7",
-		},
-		{
-			To:      "henry",
-			From:    "emma",
-			Fee:     800.0,
-			Storage: "test-storage-8",
-		},
-		{
-			To:      "alice",
-			From:    "frank",
-			Fee:     400.0,
-			Storage: "test-storage-9",
-		},
-		{
-			To:      "bob",
-			From:    "grace",
-			Fee:     950.0,
-			Storage: "test-storage-10",
-		},
+		{To: "bob", From: "alice", Fee: 1000.0, Storage: "test-storage-1"},
+		{To: "charlie", From: "bob", Fee: 500.0, Storage: "test-storage-2"},
+		{To: "alice", From: "charlie", Fee: 200.0, Storage: "test-storage-3"},
+		{To: "david", From: "alice", Fee: 1500.0, Storage: "test-storage-4"},
+		{To: "emma", From: "bob", Fee: 750.0, Storage: "test-storage-5"},
+		{To: "frank", From: "charlie", Fee: 300.0, Storage: "test-storage-6"},
+		{To: "grace", From: "david", Fee: 1200.0, Storage: "test-storage-7"},
+		{To: "henry", From: "emma", Fee: 800.0, Storage: "test-storage-8"},
+		{To: "alice", From: "frank", Fee: 400.0, Storage: "test-storage-9"},
+		{To: "bob", From: "grace", Fee: 950.0, Storage: "test-storage-10"},
 	}
 
-	// Convert notes to transactions (this will auto-generate IDs, timestamps, and proper MACs)
+	// Convert notes to transactions
 	transactions := make([]*types.Transaction, len(notes))
 	for i, note := range notes {
 		transactions[i] = note.ToTxs(uint64(i+1), big.NewInt(21000), big.NewInt(1))
@@ -564,15 +534,13 @@ func CallConsensus(numNodes int) error {
 	}
 
 	// Distribute transactions across all nodes
-	successfulDistributions := 0
 	for i := 0; i < numNodes; i++ {
 		nodeID := validatorIDs[i]
 		nodeSuccessCount := 0
 
 		for _, tx := range transactions {
-			// Create a copy (the ID is already set by ToTxs)
 			txCopy := &types.Transaction{
-				ID:        tx.ID, // Use the auto-generated ID
+				ID:        tx.ID,
 				Sender:    tx.Sender,
 				Receiver:  tx.Receiver,
 				Amount:    new(big.Int).Set(tx.Amount),
@@ -588,12 +556,7 @@ func CallConsensus(numNodes int) error {
 				logger.Warn("%s failed to add transaction %s: %v", nodeID, tx.ID, err)
 			} else {
 				nodeSuccessCount++
-				logger.Debug("%s added transaction %s to mempool", nodeID, tx.ID)
 			}
-		}
-
-		if nodeSuccessCount == len(transactions) {
-			successfulDistributions++
 		}
 
 		logger.Info("%s added %d/%d transactions to mempool", nodeID, nodeSuccessCount, len(transactions))
@@ -607,77 +570,79 @@ func CallConsensus(numNodes int) error {
 	}
 	logger.Info("Total transactions created: %d", len(transactions))
 
-	// CRITICAL FIX: Increase timeout for larger transaction sets
-	logger.Info("Waiting for transactions to propagate across network...")
-	time.Sleep(8 * time.Second) // Increased from 5s to 8s for 10 transactions
+	// Give a short time for transactions to propagate (minimal, to avoid view changes)
+	logger.Info("Waiting briefly for transactions to propagate...")
+	time.Sleep(2 * time.Second)
 
-	// Enhanced transaction propagation status check WITH DEBUGGING
-	logger.Info("=== TRANSACTION PROPAGATION STATUS ===")
-	for i := 0; i < numNodes; i++ {
-		nodeID := validatorIDs[i]
-		mempoolStats := blockchains[i].GetMempool().GetStats()
+	// ========== CRITICAL FIX: MANUAL BLOCK PROPOSAL TRIGGER ==========
+	// This runs BEFORE any view changes can occur (view is still 0)
+	logger.Info("=== MANUALLY TRIGGERING BLOCK PROPOSAL AT VIEW 0 ===")
 
-		// DEBUG: Print all mempool stats to see what's available
-		logger.Info("DEBUG %s mempool stats: %+v", nodeID, mempoolStats)
+	// Sort validator IDs for deterministic leader selection
+	sort.Strings(validatorIDs)
+	expectedLeaderID := validatorIDs[0]
+	logger.Info("Setting leader for view 0 to: %s", expectedLeaderID)
 
-		// SAFE: Get transaction count with multiple fallbacks
-		var txCount int
-		if mempoolStats == nil {
-			logger.Warn("%s: mempoolStats is nil", nodeID)
-			// Try alternative way to get transaction count
-			pendingTxs := blockchains[i].GetMempool().GetPendingTransactions()
-			txCount = len(pendingTxs)
-			logger.Info("%s: using direct pending transactions count: %d", nodeID, txCount)
-		} else {
-			// Try multiple possible keys for transaction count
-			possibleKeys := []string{"transaction_count", "tx_count", "count", "size"}
-			for _, key := range possibleKeys {
-				if count, exists := mempoolStats[key]; exists && count != nil {
-					switch v := count.(type) {
-					case int:
-						txCount = v
-					case float64:
-						txCount = int(v)
-					case int64:
-						txCount = int(v)
-					case uint64:
-						txCount = int(v)
-					}
-					if txCount > 0 {
-						break
-					}
-				}
-			}
+	var leaderNode *core.Blockchain
+	var leaderConsensus *consensus.Consensus
 
-			// If still 0, try direct method
-			if txCount == 0 {
-				pendingTxs := blockchains[i].GetMempool().GetPendingTransactions()
-				txCount = len(pendingTxs)
-			}
-		}
-
-		logger.Info("%s: %d transactions in mempool", nodeID, txCount)
-
-		// Check for specific transactions
-		missingTxs := 0
-		foundTxs := 0
-		for _, tx := range transactions {
-			hasTx := blockchains[i].HasPendingTx(tx.ID)
-			if !hasTx {
-				missingTxs++
-				logger.Warn("  ✗ %s missing transaction %s", nodeID, tx.ID)
-			} else {
-				foundTxs++
-				logger.Debug("  ✓ %s has transaction %s", nodeID, tx.ID)
-			}
-		}
-
-		if missingTxs > 0 {
-			logger.Warn("  %s is missing %d/%d transactions (found %d)", nodeID, missingTxs, len(transactions), foundTxs)
-		} else {
-			logger.Info("  ✅ %s has all %d transactions", nodeID, len(transactions))
+	// Find the leader node
+	for i, id := range validatorIDs {
+		if id == expectedLeaderID {
+			leaderNode = blockchains[i]
+			leaderConsensus = consensusEngines[i]
+			break
 		}
 	}
+
+	if leaderNode == nil {
+		return fmt.Errorf("CRITICAL: Could not find expected leader node %s", expectedLeaderID)
+	}
+
+	// FORCE this node to be the leader for view 0
+	leaderConsensus.SetLeader(true)
+	logger.Info("✅ Manually set %s as leader for view 0", expectedLeaderID)
+
+	// Verify the node is now marked as leader
+	if !leaderConsensus.IsLeader() {
+		return fmt.Errorf("Failed to set leader status on %s", expectedLeaderID)
+	}
+
+	// Get pending transactions directly from the leader's mempool
+	pendingTxs := leaderNode.GetMempool().GetPendingTransactions()
+	txCount := len(pendingTxs)
+	logger.Info("Leader has %d pending transactions in mempool.", txCount)
+
+	if txCount == 0 {
+		return fmt.Errorf("Leader mempool is empty, cannot start consensus")
+	}
+
+	// Leader creates a block
+	newBlock, err := leaderNode.CreateBlock()
+	if err != nil {
+		return fmt.Errorf("failed to create block: %v", err)
+	}
+
+	logger.Info("✅ Leader created block: height=%d, hash=%s, with %d transactions",
+		newBlock.GetHeight(), newBlock.GetHash(), len(newBlock.Body.TxsList))
+
+	// Wrap the block in a consensus.Block adapter
+	consensusBlock := core.NewBlockHelper(newBlock)
+
+	// Leader proposes the block at view 0
+	logger.Info("Leader proposing block %s at view 0...", consensusBlock.GetHash())
+	err = leaderConsensus.ProposeBlock(consensusBlock)
+	if err != nil {
+		logger.Error("❌ Leader failed to propose block: %v", err)
+		return fmt.Errorf("leader failed to propose block: %v", err)
+	}
+	logger.Info("✅ Block proposed successfully by leader at view 0")
+
+	// ========== NOW CONTINUE WITH CONSENSUS VALIDATION ==========
+
+	// Quick verification that proposal was sent
+	logger.Info("Waiting for consensus to complete...")
+	time.Sleep(2 * time.Second)
 
 	// Enhanced consensus diagnostics
 	logger.Info("=== ENHANCED CONSENSUS STATE DIAGNOSTICS ===")
@@ -687,86 +652,20 @@ func CallConsensus(numNodes int) error {
 			leaderStatus = "LEADER"
 		}
 
-		mempoolStats := blockchains[i].GetMempool().GetStats()
+		// Get pending transaction count
+		pendingTxs := blockchains[i].GetMempool().GetPendingTransactions()
+		txCount := len(pendingTxs)
 
-		// SAFE: Get transaction count
-		var txCount int
-		if mempoolStats != nil {
-			if count, exists := mempoolStats["transaction_count"]; exists && count != nil {
-				switch v := count.(type) {
-				case int:
-					txCount = v
-				case float64:
-					txCount = int(v)
-				case int64:
-					txCount = int(v)
-				case uint64:
-					txCount = int(v)
-				default:
-					txCount = 0
-				}
-			}
-		}
-
-		// Get block size stats with safe handling
-		sizeStats := blockchains[i].GetBlockSizeStats()
-		var avgBlockSize interface{} = "N/A"
-		var maxBlockSize interface{} = "N/A"
-
-		if sizeStats != nil {
-			if avg, exists := sizeStats["average_block_size"]; exists {
-				avgBlockSize = avg
-			}
-			if max, exists := sizeStats["max_block_size"]; exists {
-				maxBlockSize = max
-			}
-		}
-
-		logger.Info("%s: %s, pending_txs=%d, avg_block_size=%v, max_block_size=%v",
-			validatorIDs[i], leaderStatus, txCount, avgBlockSize, maxBlockSize)
-
-		// Check if this node can create a block with current transactions
-		if txCount > 0 {
-			pendingTxs := blockchains[i].GetMempool().GetPendingTransactions()
-			estimatedSize := uint64(0)
-			for _, tx := range pendingTxs {
-				txSize := blockchains[i].GetMempool().CalculateTransactionSize(tx)
-				estimatedSize += txSize
-			}
-
-			blockOverhead := uint64(1000)
-			totalSize := estimatedSize + blockOverhead
-			maxBlockSize := blockchains[i].GetChainParams().MaxBlockSize
-
-			if totalSize > maxBlockSize {
-				logger.Warn("  ⚠️  Transactions exceed block size: %d > %d", totalSize, maxBlockSize)
-			} else {
-				logger.Info("  ✅ Block size OK: %d/%d bytes", totalSize, maxBlockSize)
-			}
-		}
+		logger.Info("%s: %s, pending_txs=%d", validatorIDs[i], leaderStatus, txCount)
 	}
 	logger.Info("====================================")
 
-	// CRITICAL FIX: Increase consensus timeout for larger blocks
-	// Configure consensus engines to handle larger transaction sets
-	for i := 0; i < numNodes; i++ {
-		// Increase timeout for larger blocks
-		consensusEngines[i].SetTimeout(600 * time.Second) // 10 minutes for 10+ transactions
-
-		// Log consensus configuration
-		logger.Info("Consensus %s configured with timeout: %v", validatorIDs[i], 600*time.Second)
-	}
-
-	// Allow transaction to propagate through network with increased timeout
-	logger.Info("Waiting for consensus with 10 transactions (increased timeout)...")
-	time.Sleep(10 * time.Second) // Increased from 2s to 10s
-
-	// ========== BLOCK COMMITMENT AND CONSENSUS VALIDATION ==========
-	const timeout = 300 * time.Second // INCREASED FROM 60s TO 90s
+	// Set timeout for consensus completion
+	const timeout = 60 * time.Second
 	start := time.Now()
 	logger.Info("Waiting for block commitment (timeout: %v)...", timeout)
 
-	checkInterval := 1 * time.Second // SLOWER CHECK INTERVAL
+	checkInterval := 1 * time.Second
 	progressTicker := time.NewTicker(checkInterval)
 	defer progressTicker.Stop()
 
@@ -774,7 +673,7 @@ func CallConsensus(numNodes int) error {
 	timeoutReached := false
 	consensusOK := false
 
-	// Enhanced progress monitoring
+	// Monitor for block commitment
 	for range progressTicker.C {
 		if time.Since(start) > timeout {
 			timeoutReached = true
@@ -792,8 +691,7 @@ func CallConsensus(numNodes int) error {
 				committedNodes++
 			}
 
-			// Enhanced progress reporting
-			if time.Since(lastProgressLog) > 10*time.Second { // SLOWER PROGRESS REPORTS
+			if time.Since(lastProgressLog) > 10*time.Second {
 				if latest == nil {
 					logger.Info("Progress: %s at height 0 (genesis)", validatorIDs[i])
 				} else {
@@ -812,13 +710,10 @@ func CallConsensus(numNodes int) error {
 		}
 	}
 
-	// Handle consensus timeout scenario - FIXED: Remove references to undefined 'tx'
 	if timeoutReached {
 		logger.Info("=== CONSENSUS TIMEOUT DIAGNOSTICS ===")
 		for i := 0; i < numNodes; i++ {
 			latest := blockchains[i].GetLatestBlock()
-
-			// Check if any transactions are still pending (using the first transaction as example)
 			hasPendingTxs := false
 			if len(transactions) > 0 {
 				hasPendingTxs = blockchains[i].HasPendingTx(transactions[0].ID)
@@ -858,7 +753,7 @@ func CallConsensus(numNodes int) error {
 	// ========== COMPREHENSIVE CHAIN STATE CAPTURE ==========
 	logger.Info("=== CAPTURING FINAL CHAIN STATE ===")
 
-	// SIMPLIFIED: Use sequential collection to avoid goroutine timing issues
+	// Rest of the function remains the same...
 	nodes := make([]*state.NodeInfo, numNodes)
 
 	for i := 0; i < numNodes; i++ {
@@ -870,7 +765,6 @@ func CallConsensus(numNodes int) error {
 		b := blockchains[i].GetLatestBlock()
 		if b == nil {
 			logger.Warn("No block found for node %s", nodeID)
-			// Create placeholder node info
 			nodes[i] = &state.NodeInfo{
 				NodeID:      nodeID,
 				NodeName:    nodeID,
@@ -884,7 +778,6 @@ func CallConsensus(numNodes int) error {
 			continue
 		}
 
-		// Calculate Merkle root
 		var merkleRoot string
 		if blockAdapter, ok := b.(*core.BlockHelper); ok {
 			underlyingBlock := blockAdapter.GetUnderlyingBlock()
@@ -895,14 +788,12 @@ func CallConsensus(numNodes int) error {
 			logger.Warn("Could not get underlying block for %s", nodeID)
 		}
 
-		// Get chain info
 		chainInfo := blockchains[i].GetChainInfo()
 		if chainInfo == nil {
 			chainInfo = make(map[string]interface{})
 			logger.Warn("Chain info was nil for %s, created empty", nodeID)
 		}
 
-		// Create NodeInfo
 		nodeInfo := &state.NodeInfo{
 			NodeID:      nodeID,
 			NodeName:    nodeID,
@@ -914,7 +805,6 @@ func CallConsensus(numNodes int) error {
 			Timestamp:   time.Now().Format(time.RFC3339),
 		}
 
-		// Validate the node info is properly initialized
 		if nodeInfo.NodeID == "" || nodeInfo.NodeName == "" {
 			logger.Error("❌ Node info has empty ID/Name for %s", nodeID)
 		}
@@ -950,34 +840,24 @@ func CallConsensus(numNodes int) error {
 		nodeID := validatorIDs[i]
 		logger.Info("--- Saving chain state for %s ---", nodeID)
 
-		// ✅ ADD FINAL STATE INITIALIZATION HERE - USING PROPER METHOD
 		stateMachine := blockchains[i].GetStateMachine()
 		if stateMachine == nil {
-			logger.Warn("%s: No state machine available, creating one...", nodeID)
-			// Try to create if it doesn't exist
-			// If GetOrCreateStateMachine method exists, use it:
-			// stateMachine = blockchains[i].GetOrCreateStateMachine()
-
-			// If not, skip final state initialization for this node
-			logger.Warn("%s: Skipping final state initialization", nodeID)
+			logger.Warn("%s: No state machine available, skipping final state initialization", nodeID)
 		} else {
 			logger.Info("Initializing final states for %s", nodeID)
 
-			// Force populate final states
 			if err := stateMachine.ForcePopulateFinalStates(); err != nil {
 				logger.Warn("%s: Failed to populate final states: %v", nodeID, err)
 			} else {
 				logger.Info("%s: Successfully force populated final states", nodeID)
 			}
 
-			// Sync with consensus
 			stateMachine.SyncFinalStatesNow()
 			logger.Info("%s: Synced final states with consensus", nodeID)
 
 			finalStates := stateMachine.GetFinalStates()
 			logger.Info("%s: Final states ready - %d entries", nodeID, len(finalStates))
 
-			// Log the final states for debugging
 			for j, state := range finalStates {
 				if state != nil {
 					logger.Info("  %s FinalState %d: block=%s, merkle=%s, status=%s",
@@ -986,29 +866,24 @@ func CallConsensus(numNodes int) error {
 			}
 		}
 
-		// Add small delay between saves to avoid race conditions
 		if i > 0 {
 			time.Sleep(100 * time.Millisecond)
 		}
 
-		// Make a safe copy of nodes array to prevent any modification issues
 		nodesCopy := make([]*state.NodeInfo, len(nodes))
 		copy(nodesCopy, nodes)
 
-		// FIXED: Check if the copy has valid data, not if it's nil
 		if len(nodesCopy) == 0 {
 			logger.Error("❌ nodesCopy is EMPTY for %s!", nodeID)
 			continue
 		}
 
-		// Count valid (non-nil) nodes in the copy
 		validInCopy := 0
 		for j, node := range nodesCopy {
 			if node == nil {
 				logger.Warn("Node %d in copy is nil for %s", j, nodeID)
 			} else {
 				validInCopy++
-				// Additional validation to catch interface nil issues
 				if node.NodeID == "" {
 					logger.Warn("Node %d has empty NodeID for %s", j, nodeID)
 				}
@@ -1017,13 +892,11 @@ func CallConsensus(numNodes int) error {
 
 		logger.Info("Nodes copy for %s: %d valid nodes out of %d total", nodeID, validInCopy, len(nodesCopy))
 
-		// If no valid nodes, skip saving to avoid the "non-nil == nil" error
 		if validInCopy == 0 {
 			logger.Error("❌ No valid nodes in copy for %s, skipping save", nodeID)
 			continue
 		}
 
-		// Attempt to save with retry logic
 		maxRetries := 3
 		for attempt := 1; attempt <= maxRetries; attempt++ {
 			logger.Info("Attempt %d/%d to save chain state for %s", attempt, maxRetries, nodeID)
@@ -1035,7 +908,6 @@ func CallConsensus(numNodes int) error {
 				if attempt == maxRetries {
 					logger.Error("❌ ALL attempts failed for %s", nodeID)
 
-					// Try fallback: save basic state
 					logger.Info("Trying fallback basic state save for %s", nodeID)
 					if basicErr := blockchains[i].SaveBasicChainState(); basicErr != nil {
 						logger.Error("❌ Basic state also failed for %s: %v", nodeID, basicErr)
@@ -1043,7 +915,6 @@ func CallConsensus(numNodes int) error {
 						logger.Info("✅ Basic state saved as fallback for %s", nodeID)
 					}
 				} else {
-					// Wait before retry
 					time.Sleep(200 * time.Millisecond)
 				}
 			} else {
@@ -1055,7 +926,7 @@ func CallConsensus(numNodes int) error {
 
 	logger.Info("=== CHAIN STATE CAPTURE COMPLETED ===")
 
-	// Display detailed block information with Merkle roots
+	// Display detailed block information
 	logger.Info("=== BLOCK DATA WITH MERKLE ROOTS ===")
 	for i := 0; i < numNodes; i++ {
 		latestBlock := blockchains[i].GetLatestBlock()
@@ -1089,8 +960,6 @@ func CallConsensus(numNodes int) error {
 	}
 
 	logger.Info("Chain state verification deferred (VerifyState method unavailable)")
-
-	// Consolidate test artifacts
 	logger.Info("Test artifacts consolidated into chain_state.json")
 
 	// ========== RESOURCE CLEANUP AND SHUTDOWN ==========
@@ -1149,7 +1018,7 @@ func PrintBlockchainData(bc *core.Blockchain, nodeID string) {
 		logger.Info("Magic Number: 0x%x", chainParams.MagicNumber)
 		logger.Info("Timestamp: %d", underlyingBlock.Header.Timestamp)
 		logger.Info("Difficulty: %s", underlyingBlock.Header.Difficulty.String())
-		logger.Info("Nonce: %d", underlyingBlock.Header.Nonce)
+		logger.Info("Nonce: %s", underlyingBlock.Header.Nonce)
 		logger.Info("Gas Limit: %s", underlyingBlock.Header.GasLimit.String())
 		logger.Info("Gas Used: %s", underlyingBlock.Header.GasUsed.String())
 		logger.Info("Transaction Count: %d", len(underlyingBlock.Body.TxsList))

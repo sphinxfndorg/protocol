@@ -26,37 +26,12 @@ package types
 import (
 	"fmt"
 	"math/big"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	logger "github.com/sphinxorg/protocol/src/log"
 )
-
-// TPSMonitor tracks transactions per second metrics
-type TPSMonitor struct {
-	mu sync.RWMutex
-
-	// Transaction counters
-	totalTransactions  uint64
-	currentWindowCount uint64
-	windowStartTime    time.Time
-
-	// TPS metrics
-	currentTPS     float64
-	averageTPS     float64
-	peakTPS        float64
-	windowDuration time.Duration
-
-	// Historical data
-	tpsHistory     []float64
-	maxHistorySize int
-
-	// Block-based metrics
-	blocksProcessed uint64
-	txsPerBlock     []uint64
-}
 
 // NewTPSMonitor creates a new TPS monitor
 func NewTPSMonitor(windowDuration time.Duration) *TPSMonitor {

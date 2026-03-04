@@ -254,52 +254,6 @@ func (nm *NodeManager) restoreNodeFromConfig(nodeID string) (*Node, error) {
 	return node, nil
 }
 
-// Update RotateNodeKeys to use simple key generation
-func (nkm *NetworkKeyManager) RotateNodeKeys(nodeID string) error {
-	// Generate new key pair using simple method
-	privateKey, publicKey, err := nkm.GenerateSimpleKeys()
-	if err != nil {
-		return fmt.Errorf("failed to generate new key pair: %w", err)
-	}
-
-	// Serialize keys
-	privateKey, publicKey, err = nkm.SerializeSimpleKeys(privateKey, publicKey)
-	if err != nil {
-		return fmt.Errorf("failed to serialize new key pair: %w", err)
-	}
-
-	// Store new keys with versioning (existing implementation)
-	timestamp := time.Now().Unix()
-	privateKeyKey := fmt.Sprintf("node:%s:private_key:%d", nodeID, timestamp)
-	publicKeyKey := fmt.Sprintf("node:%s:public_key:%d", nodeID, timestamp)
-	currentPrivateKey := fmt.Sprintf("node:%s:private_key:current", nodeID)
-	currentPublicKey := fmt.Sprintf("node:%s:public_key:current", nodeID)
-
-	// Store versioned keys
-	if err := nkm.db.Put(privateKeyKey, privateKey); err != nil {
-		return fmt.Errorf("failed to store versioned private key: %w", err)
-	}
-	if err := nkm.db.Put(publicKeyKey, publicKey); err != nil {
-		return fmt.Errorf("failed to store versioned public key: %w", err)
-	}
-
-	// Update current key references
-	if err := nkm.db.Put(currentPrivateKey, []byte(privateKeyKey)); err != nil {
-		return fmt.Errorf("failed to update current private key reference: %w", err)
-	}
-	if err := nkm.db.Put(currentPublicKey, []byte(publicKeyKey)); err != nil {
-		return fmt.Errorf("failed to update current public key reference: %w", err)
-	}
-
-	// Archive old keys
-	if err := nkm.cleanupOldKeys(nodeID); err != nil {
-		log.Printf("Warning: failed to cleanup old keys: %v", err)
-	}
-
-	log.Printf("Successfully rotated keys for node %s", nodeID)
-	return nil
-}
-
 func NewNetworkKeyManager(db *database.DB) (*NetworkKeyManager, error) {
 	km, err := sphincsKey.NewKeyManager()
 	if err != nil {

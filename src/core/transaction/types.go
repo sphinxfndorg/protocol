@@ -26,6 +26,7 @@ package types
 import (
 	"math/big"
 	"sync"
+	"time"
 )
 
 // BlockHeader represents the metadata for a block in the blockchain.
@@ -146,4 +147,28 @@ type MerkleNode struct {
 	Right  *MerkleNode
 	Hash   []byte
 	IsLeaf bool // Helper field to identify leaf nodes
+}
+
+// TPSMonitor tracks transactions per second metrics
+type TPSMonitor struct {
+	mu sync.RWMutex
+
+	// Transaction counters
+	totalTransactions  uint64
+	currentWindowCount uint64
+	windowStartTime    time.Time
+
+	// TPS metrics
+	currentTPS     float64
+	averageTPS     float64
+	peakTPS        float64
+	windowDuration time.Duration
+
+	// Historical data
+	tpsHistory     []float64
+	maxHistorySize int
+
+	// Block-based metrics
+	blocksProcessed uint64
+	txsPerBlock     []uint64
 }

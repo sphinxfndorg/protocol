@@ -1365,19 +1365,6 @@ func (bc *Blockchain) DecodeBlockHash(hash string) ([]byte, error) {
 	return hex.DecodeString(hash)
 }
 
-// Helper function to check if string is hex
-func isHexString(s string) bool {
-	if len(s)%2 != 0 {
-		return false
-	}
-	for _, c := range s {
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
-			return false
-		}
-	}
-	return true
-}
-
 // VerifyTransactionInBlock verifies if a transaction is included in a block
 func (bc *Blockchain) VerifyTransactionInBlock(tx *types.Transaction, blockHash string) (bool, error) {
 	block, err := bc.storage.GetBlockByHash(blockHash)

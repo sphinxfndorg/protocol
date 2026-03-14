@@ -49,6 +49,10 @@ type BlockHeader struct {
 	// NEW: PoS signature fields
 	ProposerSignature []byte `json:"proposer_signature"` // Signature by the block proposer
 	ProposerID        string `json:"proposer_id"`        // Which validator proposed this block
+
+	// NEW: explicit status fields
+	CommitStatus string `json:"commit_status"`   // "proposed" | "prepared" | "committed"
+	SigValid     bool   `json:"signature_valid"` // true once verified by a peer
 }
 
 // BlockBody represents the transactions and uncle blocks.

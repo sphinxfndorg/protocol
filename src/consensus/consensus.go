@@ -39,7 +39,7 @@ import (
 	denom "github.com/sphinxorg/protocol/src/params/denom"
 )
 
-// Workflow: Prepare Phase → Commit Phase → Block Commitment → View Change → Repeat
+// Workflow:  ProposeBlock → processProposal → processPrepareVote → processVote → commitBlock → CommitBlock → StoreBlock → storeBlockToDisk.
 
 // NewConsensus creates a new consensus instance with context
 func NewConsensus(
@@ -176,6 +176,17 @@ func (c *Consensus) ProposeBlock(block Block) error {
 		// block must already have its hash finalized via FinalizeHash()
 		if err := c.signingService.SignBlock(block); err != nil {
 			return fmt.Errorf("failed to sign block header: %w", err)
+		}
+	}
+
+	// After SignBlock succeeds
+	if direct, ok := block.(*types.Block); ok {
+		direct.Header.CommitStatus = "proposed"
+		direct.Header.SigValid = false
+	} else if helper, ok := block.(interface{ GetUnderlyingBlock() *types.Block }); ok {
+		if ub := helper.GetUnderlyingBlock(); ub != nil {
+			ub.Header.CommitStatus = "proposed"
+			ub.Header.SigValid = false
 		}
 	}
 
@@ -530,6 +541,17 @@ func (c *Consensus) processProposal(proposal *Proposal) {
 		logger.Info("✅ Block header signature verified for block %s", proposal.Block.GetHash())
 	}
 
+	// Mark it verified on the underlying block
+	if direct, ok := proposal.Block.(*types.Block); ok {
+		direct.Header.SigValid = true
+		direct.Header.CommitStatus = "proposed"
+	} else if helper, ok := proposal.Block.(interface{ GetUnderlyingBlock() *types.Block }); ok {
+		if ub := helper.GetUnderlyingBlock(); ub != nil {
+			ub.Header.SigValid = true
+			ub.Header.CommitStatus = "proposed"
+		}
+	}
+
 	// CRITICAL FIX: CAPTURE PROPOSAL SIGNATURE - THIS WAS MISSING!
 	signedMsg, err := DeserializeSignedMessage(proposal.Signature)
 	var signatureHex string
@@ -729,7 +751,13 @@ func (c *Consensus) processPrepareVote(vote *Vote) {
 		if c.phase == PhasePrePrepared {
 			c.phase = PhasePrepared
 			c.lockedBlock = c.preparedBlock
-			logger.Info("🔒 Moving to PREPARED phase and locking block %s", vote.BlockHash)
+			if direct, ok := c.preparedBlock.(*types.Block); ok {
+				direct.Header.CommitStatus = "prepared"
+			} else if helper, ok := c.preparedBlock.(interface{ GetUnderlyingBlock() *types.Block }); ok {
+				if ub := helper.GetUnderlyingBlock(); ub != nil {
+					ub.Header.CommitStatus = "prepared"
+				}
+			}
 
 			// Send commit vote
 			c.voteForBlock(vote.BlockHash, vote.View)
@@ -1320,33 +1348,80 @@ func (c *Consensus) commitBlock(block Block) {
 	logger.Info("🚀 Node %s attempting to commit block %s at height %d",
 		c.nodeID, block.GetHash(), block.GetHeight())
 
-	// Verify this is the next expected block
 	currentHeight := c.blockChain.GetLatestBlock().GetHeight()
 	if block.GetHeight() != currentHeight+1 {
 		logger.Warn("❌ Block height mismatch: expected %d, got %d", currentHeight+1, block.GetHeight())
 		return
 	}
 
-	// Commit block to blockchain storage
+	// ✅ Extract the underlying *types.Block regardless of wrapper type
+	var tb *types.Block
+
+	// Direct type assertion first
+	if direct, ok := block.(*types.Block); ok {
+		tb = direct
+		logger.Info("✅ commitBlock: direct *types.Block assertion succeeded")
+	} else if helper, ok := block.(interface{ GetUnderlyingBlock() *types.Block }); ok {
+		// Unwrap BlockHelper
+		tb = helper.GetUnderlyingBlock()
+		logger.Info("✅ commitBlock: unwrapped *types.Block from BlockHelper")
+	}
+
+	if tb == nil {
+		logger.Error("❌ commitBlock: cannot extract *types.Block from %T — attestations will be missing", block)
+	} else {
+		tb.Header.CommitStatus = "committed"
+		if len(tb.Header.ProposerSignature) > 0 {
+			tb.Header.SigValid = true
+		}
+
+		// Snapshot votes immediately
+		votesSnapshot := make(map[string]*Vote)
+		if votes, exists := c.receivedVotes[block.GetHash()]; exists {
+			for k, v := range votes {
+				votesSnapshot[k] = v
+			}
+		}
+
+		logger.Info("🔍 PRE-COMMIT vote snapshot for block %s: %d votes",
+			block.GetHash(), len(votesSnapshot))
+
+		if len(votesSnapshot) > 0 {
+			tb.Body.Attestations = make([]*types.Attestation, 0, len(votesSnapshot))
+			for voterID, vote := range votesSnapshot {
+				att := &types.Attestation{
+					ValidatorID: voterID,
+					BlockHash:   block.GetHash(),
+					View:        vote.View,
+					Signature:   vote.Signature,
+				}
+				tb.Body.Attestations = append(tb.Body.Attestations, att)
+			}
+			logger.Info("✅ Attached %d attestations to block %s before commit",
+				len(tb.Body.Attestations), block.GetHash())
+		} else {
+			logger.Warn("⚠️ No votes in snapshot for block %s — attestations will be empty",
+				block.GetHash())
+		}
+
+		logger.Info("🔍 PRE-COMMIT attestation count for block %s: %d",
+			block.GetHash(), len(tb.Body.Attestations))
+	}
+
 	if err := c.blockChain.CommitBlock(block); err != nil {
 		logger.Error("❌ Error committing block: %v", err)
 		return
 	}
 
-	// Execute commit callback if provided
 	if c.onCommit != nil {
 		if err := c.onCommit(block); err != nil {
 			logger.Warn("⚠️ Error in commit callback: %v", err)
-			// Don't return here - we still want to update consensus state
 		}
 	}
 
-	// Update consensus state and set last block time
-	c.mu.Lock()
 	c.currentHeight = block.GetHeight()
-	c.lastBlockTime = common.GetTimeService().Now() // Update the last block time using centralized time
+	c.lastBlockTime = common.GetTimeService().Now()
 	c.resetConsensusState()
-	c.mu.Unlock()
 
 	logger.Info("🎉 Node %s successfully committed block %s at height %d",
 		c.nodeID, block.GetHash(), c.currentHeight)

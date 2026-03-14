@@ -1125,8 +1125,14 @@ func (s *Storage) StoreBlock(block *types.Block) error {
 	// Check if block already exists
 	if existing, exists := s.blockIndex[blockHash]; exists {
 		if existing.GetHeight() == height {
-			logger.Info("Block already exists: height=%d, hash=%s", height, blockHash)
-			return nil // Block already stored
+			// Only skip if the new block has no MORE data than existing
+			if len(block.Body.Attestations) <= len(existing.Body.Attestations) {
+				logger.Info("Block already exists with same/more attestations: height=%d, hash=%s", height, blockHash)
+				return nil
+			}
+			logger.Info("Block exists but new version has %d attestations (existing: %d), updating...",
+				len(block.Body.Attestations), len(existing.Body.Attestations))
+			// Fall through to re-store with attestations
 		}
 	}
 
@@ -1484,28 +1490,30 @@ func (s *Storage) storeBlockToDisk(block *types.Block) error {
 	// Create a custom serialization structure with ISO timestamp
 	type SerializableBlock struct {
 		Header struct {
-			Hash       string `json:"hash"`        // This block's hash
-			TxsRoot    string `json:"txs_root"`    // Merkle root of transactions
-			StateRoot  string `json:"state_root"`  // State Merkle root
-			ParentHash string `json:"parent_hash"` // Hash of the previous block (chain continuity)
-			UnclesHash string `json:"uncles_hash"` // Hash of uncle blocks
-			ExtraData  string `json:"extra_data"`  // Additional block data
-			Miner      string `json:"miner"`       // Miner address
-			Version    uint64 `json:"version"`     // Block version
-			NBlock     uint64 `json:"nblock"`      // Block number/height
-			Height     uint64 `json:"height"`      // Block height
-			Timestamp  string `json:"timestamp"`   // Block timestamp in ISO RFC format
-			Difficulty string `json:"difficulty"`  // Mining difficulty
-			Nonce      string `json:"nonce"`       // Mining nonce
-			GasLimit   string `json:"gas_limit"`   // Gas limit
-			GasUsed    string `json:"gas_used"`    // Gas used
-			// ADD THESE TWO:
-			ProposerSignature string `json:"proposer_signature"`
-			ProposerID        string `json:"proposer_id"`
+			Hash              string `json:"hash"`               // This block's hash
+			TxsRoot           string `json:"txs_root"`           // Merkle root of transactions
+			StateRoot         string `json:"state_root"`         // State Merkle root
+			ParentHash        string `json:"parent_hash"`        // Hash of the previous block (chain continuity)
+			UnclesHash        string `json:"uncles_hash"`        // Hash of uncle blocks
+			ExtraData         string `json:"extra_data"`         // Additional block data
+			Miner             string `json:"miner"`              // Miner address
+			Version           uint64 `json:"version"`            // Block version
+			NBlock            uint64 `json:"nblock"`             // Block number/height
+			Height            uint64 `json:"height"`             // Block height
+			Timestamp         string `json:"timestamp"`          // Block timestamp in ISO RFC format
+			Difficulty        string `json:"difficulty"`         // Mining difficulty
+			Nonce             string `json:"nonce"`              // Mining nonce
+			GasLimit          string `json:"gas_limit"`          // Gas limit
+			GasUsed           string `json:"gas_used"`           // Gas used
+			ProposerSignature string `json:"proposer_signature"` // was missing
+			ProposerID        string `json:"proposer_id"`        // was missing
+			CommitStatus      string `json:"commit_status"`
+			SigValid          bool   `json:"signature_valid"`
 		} `json:"header"`
 		Body struct {
-			TxsList    []map[string]interface{} `json:"txs_list"`    // List of transactions as maps with ISO timestamps
-			UnclesHash string                   `json:"uncles_hash"` // Hash of uncles in body
+			TxsList      []map[string]interface{} `json:"txs_list"`
+			UnclesHash   string                   `json:"uncles_hash"`
+			Attestations []map[string]interface{} `json:"attestations,omitempty"`
 		} `json:"body"`
 	}
 
@@ -1547,6 +1555,32 @@ func (s *Storage) storeBlockToDisk(block *types.Block) error {
 		// ADD THESE TWO:
 		serializableBlock.Header.ProposerSignature = hex.EncodeToString(block.Header.ProposerSignature)
 		serializableBlock.Header.ProposerID = block.Header.ProposerID
+		// Default empty CommitStatus — blocks only reach disk when committed
+		commitStatus := block.Header.CommitStatus
+		if commitStatus == "" {
+			commitStatus = "committed"
+		}
+		serializableBlock.Header.CommitStatus = commitStatus
+
+		// If a signature exists, it was verified before commit
+		sigValid := block.Header.SigValid
+		if !sigValid && len(block.Header.ProposerSignature) > 0 {
+			sigValid = true
+		}
+		serializableBlock.Header.SigValid = sigValid
+	}
+	// Convert attestations
+	serializableBlock.Body.Attestations = make([]map[string]interface{}, 0, len(block.Body.Attestations))
+	for _, att := range block.Body.Attestations {
+		if att == nil {
+			continue
+		}
+		serializableBlock.Body.Attestations = append(serializableBlock.Body.Attestations, map[string]interface{}{
+			"validator_id": att.ValidatorID,
+			"block_hash":   att.BlockHash,
+			"view":         att.View,
+			"signature":    hex.EncodeToString(att.Signature),
+		})
 	}
 
 	// Convert transactions to maps with ISO timestamps
@@ -1591,9 +1625,7 @@ func (s *Storage) storeBlockToDisk(block *types.Block) error {
 }
 
 // loadBlockFromDisk loads a block from disk, handling both string and hex ParentHash formats and ISO timestamp
-// loadBlockFromDisk loads a block from disk, handling both string and hex ParentHash formats and ISO timestamp
 func (s *Storage) loadBlockFromDisk(hash string) (*types.Block, error) {
-	// Try both original hash and sanitized version
 	filenames := []string{
 		filepath.Join(s.blocksDir, hash+".json"),
 		filepath.Join(s.blocksDir, s.sanitizeFilename(hash)+".json"),
@@ -1617,31 +1649,32 @@ func (s *Storage) loadBlockFromDisk(hash string) (*types.Block, error) {
 		return nil, fmt.Errorf("block file does not exist for hash: %s", hash)
 	}
 
-	// First, unmarshal into a temporary structure to handle ParentHash conversion and ISO timestamp
 	type TempBlock struct {
 		Header struct {
-			Hash       string `json:"hash"`
-			TxsRoot    string `json:"txs_root"`
-			StateRoot  string `json:"state_root"`
-			ParentHash string `json:"parent_hash"` // This could be string or hex
-			UnclesHash string `json:"uncles_hash"`
-			ExtraData  string `json:"extra_data"`
-			Miner      string `json:"miner"`
-			Version    uint64 `json:"version"`
-			NBlock     uint64 `json:"nblock"`
-			Height     uint64 `json:"height"`
-			Timestamp  string `json:"timestamp"` // This could be ISO string or int64 (for backward compatibility)
-			Difficulty string `json:"difficulty"`
-			Nonce      uint64 `json:"nonce"` // This is uint64 in the JSON file
-			GasLimit   string `json:"gas_limit"`
-			GasUsed    string `json:"gas_used"`
-			// ADD THESE TWO:
+			Hash              string `json:"hash"`
+			TxsRoot           string `json:"txs_root"`
+			StateRoot         string `json:"state_root"`
+			ParentHash        string `json:"parent_hash"`
+			UnclesHash        string `json:"uncles_hash"`
+			ExtraData         string `json:"extra_data"`
+			Miner             string `json:"miner"`
+			Version           uint64 `json:"version"`
+			NBlock            uint64 `json:"nblock"`
+			Height            uint64 `json:"height"`
+			Timestamp         string `json:"timestamp"`
+			Difficulty        string `json:"difficulty"`
+			Nonce             uint64 `json:"nonce"`
+			GasLimit          string `json:"gas_limit"`
+			GasUsed           string `json:"gas_used"`
 			ProposerSignature string `json:"proposer_signature"`
 			ProposerID        string `json:"proposer_id"`
+			CommitStatus      string `json:"commit_status"`
+			SigValid          bool   `json:"signature_valid"`
 		} `json:"header"`
 		Body struct {
-			TxsList    []map[string]interface{} `json:"txs_list"` // Transactions as maps
-			UnclesHash string                   `json:"uncles_hash"`
+			TxsList      []map[string]interface{} `json:"txs_list"`
+			UnclesHash   string                   `json:"uncles_hash"`
+			Attestations []map[string]interface{} `json:"attestations"`
 		} `json:"body"`
 	}
 
@@ -1652,40 +1685,34 @@ func (s *Storage) loadBlockFromDisk(hash string) (*types.Block, error) {
 		return nil, fmt.Errorf("failed to unmarshal block: %w", err)
 	}
 
-	// Convert timestamp from ISO format to Unix timestamp
+	// ---- DO NOT touch block before this line ----
+
+	// Parse timestamp
 	var timestamp int64
 	if tempBlock.Header.Timestamp != "" {
-		// Try to parse as ISO timestamp first
 		t, err := time.Parse(time.RFC3339, tempBlock.Header.Timestamp)
 		if err == nil {
 			timestamp = t.Unix()
+		} else if ts, err := strconv.ParseInt(tempBlock.Header.Timestamp, 10, 64); err == nil {
+			timestamp = ts
 		} else {
-			// Fallback: try to parse as integer (for backward compatibility)
-			if ts, err := strconv.ParseInt(tempBlock.Header.Timestamp, 10, 64); err == nil {
-				timestamp = ts
-			} else {
-				// Use current time as fallback
-				timestamp = time.Now().Unix()
-				logger.Warn("Could not parse timestamp '%s' for block %s, using current time",
-					tempBlock.Header.Timestamp, hash)
-			}
+			timestamp = time.Now().Unix()
+			logger.Warn("Could not parse timestamp '%s' for block %s, using current time",
+				tempBlock.Header.Timestamp, hash)
 		}
 	} else {
-		// No timestamp provided, use current time
 		timestamp = time.Now().Unix()
 	}
 
-	// Now convert to types.Block
+	// var block is declared here — ALL assignments must come after this line
 	var block types.Block
 	block.Header = &types.BlockHeader{
-		Version:   tempBlock.Header.Version,
-		Block:     tempBlock.Header.NBlock,
-		Height:    tempBlock.Header.Height,
-		Timestamp: timestamp, // Store as Unix timestamp internally
-		Hash:      []byte(tempBlock.Header.Hash),
-		// Handle ParentHash conversion - check if it's hex-encoded genesis
+		Version:    tempBlock.Header.Version,
+		Block:      tempBlock.Header.NBlock,
+		Height:     tempBlock.Header.Height,
+		Timestamp:  timestamp,
+		Hash:       []byte(tempBlock.Header.Hash),
 		ParentHash: s.decodeParentHash(tempBlock.Header.ParentHash),
-		// Convert other fields from hex
 		TxsRoot:    s.decodeHexField(tempBlock.Header.TxsRoot),
 		StateRoot:  s.decodeHexField(tempBlock.Header.StateRoot),
 		UnclesHash: s.decodeHexField(tempBlock.Header.UnclesHash),
@@ -1693,40 +1720,44 @@ func (s *Storage) loadBlockFromDisk(hash string) (*types.Block, error) {
 		Miner:      s.decodeHexField(tempBlock.Header.Miner),
 	}
 
-	// Restore proposer signature and ID
+	// New PoS fields — safe here because block.Header now exists
+	block.Header.CommitStatus = tempBlock.Header.CommitStatus
+	if block.Header.CommitStatus == "" {
+		block.Header.CommitStatus = "committed"
+	}
+	block.Header.SigValid = tempBlock.Header.SigValid
+	if !block.Header.SigValid && len(block.Header.ProposerSignature) > 0 {
+		block.Header.SigValid = true
+	}
+	block.Header.ProposerID = tempBlock.Header.ProposerID
 	if tempBlock.Header.ProposerSignature != "" {
-		sig, err := hex.DecodeString(tempBlock.Header.ProposerSignature)
-		if err == nil {
+		if sig, err := hex.DecodeString(tempBlock.Header.ProposerSignature); err == nil {
 			block.Header.ProposerSignature = sig
 		}
 	}
-	block.Header.ProposerID = tempBlock.Header.ProposerID
 
-	// Convert difficulty
+	// Numeric fields
 	difficulty, ok := new(big.Int).SetString(tempBlock.Header.Difficulty, 10)
 	if !ok {
 		difficulty = big.NewInt(1)
 	}
 	block.Header.Difficulty = difficulty
 
-	// Convert gas limit
 	gasLimit, ok := new(big.Int).SetString(tempBlock.Header.GasLimit, 10)
 	if !ok {
 		gasLimit = big.NewInt(0)
 	}
 	block.Header.GasLimit = gasLimit
 
-	// Convert gas used
 	gasUsed, ok := new(big.Int).SetString(tempBlock.Header.GasUsed, 10)
 	if !ok {
 		gasUsed = big.NewInt(0)
 	}
 	block.Header.GasUsed = gasUsed
 
-	// FIX: Convert uint64 nonce to string format
 	block.Header.Nonce = common.FormatNonce(tempBlock.Header.Nonce)
 
-	// Convert transactions from maps back to Transaction objects
+	// Transactions
 	block.Body.TxsList = make([]*types.Transaction, len(tempBlock.Body.TxsList))
 	for i, txMap := range tempBlock.Body.TxsList {
 		tx := &types.Transaction{
@@ -1735,8 +1766,6 @@ func (s *Storage) loadBlockFromDisk(hash string) (*types.Block, error) {
 			Receiver: getStringFromMap(txMap, "receiver"),
 			Nonce:    getUint64FromMap(txMap, "nonce"),
 		}
-
-		// Convert amount from string to big.Int
 		if amountStr, ok := txMap["amount"].(string); ok {
 			amount := new(big.Int)
 			amount.SetString(amountStr, 10)
@@ -1744,58 +1773,50 @@ func (s *Storage) loadBlockFromDisk(hash string) (*types.Block, error) {
 		} else {
 			tx.Amount = big.NewInt(0)
 		}
-
-		// Convert gas limit from string to big.Int
 		if gasLimitStr, ok := txMap["gas_limit"].(string); ok {
-			gasLimit := new(big.Int)
-			gasLimit.SetString(gasLimitStr, 10)
-			tx.GasLimit = gasLimit
+			gl := new(big.Int)
+			gl.SetString(gasLimitStr, 10)
+			tx.GasLimit = gl
 		} else {
 			tx.GasLimit = big.NewInt(0)
 		}
-
-		// Convert gas price from string to big.Int
 		if gasPriceStr, ok := txMap["gas_price"].(string); ok {
-			gasPrice := new(big.Int)
-			gasPrice.SetString(gasPriceStr, 10)
-			tx.GasPrice = gasPrice
+			gp := new(big.Int)
+			gp.SetString(gasPriceStr, 10)
+			tx.GasPrice = gp
 		} else {
 			tx.GasPrice = big.NewInt(0)
 		}
-
-		// Convert timestamp from ISO to Unix
-		if timestampStr, ok := txMap["timestamp"].(string); ok {
-			t, err := time.Parse(time.RFC3339, timestampStr)
-			if err == nil {
+		if tsStr, ok := txMap["timestamp"].(string); ok {
+			if t, err := time.Parse(time.RFC3339, tsStr); err == nil {
 				tx.Timestamp = t.Unix()
-			} else {
-				tx.Timestamp = 0 // Default to 0 if parsing fails
 			}
-		} else {
-			tx.Timestamp = 0
 		}
-
-		// Convert signature from hex string to bytes
-		if signatureStr, ok := txMap["signature"].(string); ok {
-			signature, err := hex.DecodeString(signatureStr)
-			if err == nil {
-				tx.Signature = signature
-			} else {
-				tx.Signature = nil
+		if sigStr, ok := txMap["signature"].(string); ok {
+			if sig, err := hex.DecodeString(sigStr); err == nil {
+				tx.Signature = sig
 			}
-		} else {
-			tx.Signature = nil
 		}
-
 		block.Body.TxsList[i] = tx
+	}
+
+	// Attestations
+	for _, attMap := range tempBlock.Body.Attestations {
+		att := &types.Attestation{
+			ValidatorID: getStringFromMap(attMap, "validator_id"),
+			BlockHash:   getStringFromMap(attMap, "block_hash"),
+			View:        getUint64FromMap(attMap, "view"),
+		}
+		if sigStr := getStringFromMap(attMap, "signature"); sigStr != "" {
+			att.Signature, _ = hex.DecodeString(sigStr)
+		}
+		block.Body.Attestations = append(block.Body.Attestations, att)
 	}
 
 	block.Body.UnclesHash = s.decodeHexField(tempBlock.Body.UnclesHash)
 
-	// Log timestamp information for debugging
-	timestampISO := common.GetTimeService().GetTimeInfo(timestamp).ISOUTC
-	logger.Debug("Block loaded from disk: height=%d, hash=%s, timestamp=%s, file=%s",
-		block.GetHeight(), block.GetHash(), timestampISO, usedFilename)
+	logger.Debug("Block loaded from disk: height=%d, hash=%s, commit_status=%s, sig_valid=%t, file=%s",
+		block.GetHeight(), block.GetHash(), block.Header.CommitStatus, block.Header.SigValid, usedFilename)
 
 	return &block, nil
 }

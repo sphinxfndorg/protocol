@@ -16,7 +16,9 @@
     "gas_limit": "5000",
     "gas_used": "0",
     "proposer_signature": "",
-    "proposer_id": ""
+    "proposer_id": "",
+    "commit_status": "committed",
+    "signature_valid": false
   },
   "body": {
     "txs_list": [],

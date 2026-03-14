@@ -32,6 +32,7 @@ import (
 	"github.com/holiman/uint256"
 	key "github.com/sphinxorg/protocol/src/core/sphincs/key/backend"
 	sign "github.com/sphinxorg/protocol/src/core/sphincs/sign/backend"
+	types "github.com/sphinxorg/protocol/src/core/transaction"
 	"github.com/sphinxorg/protocol/src/crypto/SPHINCSPLUS-golang/sphincs" // Keep this one
 	logger "github.com/sphinxorg/protocol/src/log"
 )
@@ -305,4 +306,71 @@ func (s *SigningService) GetPublicKey() ([]byte, error) {
 // GetPublicKeyObject returns the public key object for this node
 func (s *SigningService) GetPublicKeyObject() *sphincs.SPHINCS_PK {
 	return s.publicKey
+}
+
+// SignBlock signs the block header hash. block must implement Block interface
+// and wrap a *types.Block underneath.
+func (s *SigningService) SignBlock(block Block) error {
+	// Type-assert to get the underlying *types.Block
+	tb, ok := block.(*types.Block)
+	if !ok {
+		// Try unwrapping via helper interface
+		type underlyingBlockGetter interface {
+			GetUnderlyingBlock() *types.Block
+		}
+		if getter, ok2 := block.(underlyingBlockGetter); ok2 {
+			tb = getter.GetUnderlyingBlock()
+		}
+	}
+	if tb == nil {
+		return fmt.Errorf("SignBlock: cannot unwrap *types.Block from interface")
+	}
+	if tb.Header == nil || len(tb.Header.Hash) == 0 {
+		return fmt.Errorf("block must be hashed before signing")
+	}
+
+	signedData, err := s.SignMessage(tb.Header.Hash)
+	if err != nil {
+		return fmt.Errorf("failed to sign block: %w", err)
+	}
+
+	tb.Header.ProposerSignature = signedData
+	tb.Header.ProposerID = s.nodeID
+	return nil
+}
+
+// VerifyBlockSignature verifies the proposer's signature on a block.
+func (s *SigningService) VerifyBlockSignature(block Block) (bool, error) {
+	tb, ok := block.(*types.Block)
+	if !ok {
+		type underlyingBlockGetter interface {
+			GetUnderlyingBlock() *types.Block
+		}
+		if getter, ok2 := block.(underlyingBlockGetter); ok2 {
+			tb = getter.GetUnderlyingBlock()
+		}
+	}
+	if tb == nil {
+		return false, fmt.Errorf("VerifyBlockSignature: cannot unwrap *types.Block from interface")
+	}
+	if tb.Header == nil {
+		return false, fmt.Errorf("block header is nil")
+	}
+	if len(tb.Header.ProposerSignature) == 0 {
+		return false, fmt.Errorf("block has no proposer signature")
+	}
+	if tb.Header.ProposerID == "" {
+		return false, fmt.Errorf("block has no proposer ID")
+	}
+
+	signedMsg, err := DeserializeSignedMessage(tb.Header.ProposerSignature)
+	if err != nil {
+		return false, fmt.Errorf("failed to deserialize block signature: %w", err)
+	}
+
+	if string(signedMsg.Data) != string(tb.Header.Hash) {
+		return false, fmt.Errorf("signature data does not match block hash")
+	}
+
+	return s.VerifySignature(tb.Header.ProposerSignature, tb.Header.ProposerID)
 }

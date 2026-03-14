@@ -487,29 +487,32 @@ func (b *Block) GetTimeInfo() *common.TimeInfo {
 }
 
 // MarshalJSON custom marshaling for BlockHeader
-// MarshalJSON custom marshaling for BlockHeader
 func (h *BlockHeader) MarshalJSON() ([]byte, error) {
 	type Alias BlockHeader
 	return json.Marshal(&struct {
-		Hash       string `json:"hash"`
-		TxsRoot    string `json:"txs_root"`
-		StateRoot  string `json:"state_root"`
-		ParentHash string `json:"parent_hash"`
-		UnclesHash string `json:"uncles_hash"`
-		ExtraData  string `json:"extra_data"`
-		Miner      string `json:"miner"`
-		Nonce      string `json:"nonce"` // Correctly handles string nonce
+		Hash              string `json:"hash"`
+		TxsRoot           string `json:"txs_root"`
+		StateRoot         string `json:"state_root"`
+		ParentHash        string `json:"parent_hash"`
+		UnclesHash        string `json:"uncles_hash"`
+		ExtraData         string `json:"extra_data"`
+		Miner             string `json:"miner"`
+		Nonce             string `json:"nonce"` // Correctly handles string nonce
+		ProposerSignature string `json:"proposer_signature"`
+		ProposerID        string `json:"proposer_id"`
 		*Alias
 	}{
-		Hash:       string(h.Hash),
-		TxsRoot:    common.Bytes2Hex(h.TxsRoot),
-		StateRoot:  common.Bytes2Hex(h.StateRoot),
-		ParentHash: common.Bytes2Hex(h.ParentHash),
-		UnclesHash: common.Bytes2Hex(h.UnclesHash),
-		ExtraData:  string(h.ExtraData),
-		Miner:      common.Bytes2Hex(h.Miner),
-		Nonce:      h.Nonce, // String nonce
-		Alias:      (*Alias)(h),
+		Hash:              string(h.Hash),
+		TxsRoot:           common.Bytes2Hex(h.TxsRoot),
+		StateRoot:         common.Bytes2Hex(h.StateRoot),
+		ParentHash:        common.Bytes2Hex(h.ParentHash),
+		UnclesHash:        common.Bytes2Hex(h.UnclesHash),
+		ExtraData:         string(h.ExtraData),
+		Miner:             common.Bytes2Hex(h.Miner),
+		Nonce:             h.Nonce, // String nonce
+		ProposerSignature: hex.EncodeToString(h.ProposerSignature),
+		ProposerID:        h.ProposerID,
+		Alias:             (*Alias)(h),
 	})
 }
 
@@ -517,14 +520,16 @@ func (h *BlockHeader) MarshalJSON() ([]byte, error) {
 func (h *BlockHeader) UnmarshalJSON(data []byte) error {
 	type Alias BlockHeader
 	aux := &struct {
-		Hash       string `json:"hash"`
-		TxsRoot    string `json:"txs_root"`
-		StateRoot  string `json:"state_root"`
-		ParentHash string `json:"parent_hash"`
-		UnclesHash string `json:"uncles_hash"`
-		ExtraData  string `json:"extra_data"`
-		Miner      string `json:"miner"`
-		Nonce      string `json:"nonce"` // Add nonce as string
+		Hash              string `json:"hash"`
+		TxsRoot           string `json:"txs_root"`
+		StateRoot         string `json:"state_root"`
+		ParentHash        string `json:"parent_hash"`
+		UnclesHash        string `json:"uncles_hash"`
+		ExtraData         string `json:"extra_data"`
+		Miner             string `json:"miner"`
+		Nonce             string `json:"nonce"`
+		ProposerSignature string `json:"proposer_signature"` // string, not []byte
+		ProposerID        string `json:"proposer_id"`
 		*Alias
 	}{
 		Alias: (*Alias)(h),
@@ -557,9 +562,18 @@ func (h *BlockHeader) UnmarshalJSON(data []byte) error {
 	if err != nil {
 		return fmt.Errorf("failed to decode miner: %w", err)
 	}
-	h.Nonce = aux.Nonce // Direct string assignment
+	h.Nonce = aux.Nonce
 
-	return nil
+	// ProposerSignature may be empty for legacy/genesis blocks
+	if aux.ProposerSignature != "" {
+		h.ProposerSignature, err = hex.DecodeString(aux.ProposerSignature)
+		if err != nil {
+			return fmt.Errorf("failed to decode proposer_signature: %w", err)
+		}
+	}
+	h.ProposerID = aux.ProposerID
+
+	return nil // only one return nil here — the duplicate is removed
 }
 
 // MarshalJSON for Block

@@ -1472,8 +1472,6 @@ func (s *Storage) sanitizeFilename(hash string) string {
 	return sanitized
 }
 
-// go/src/state/storage.go
-
 // storeBlockToDisk stores a block to disk with sanitized filenames
 func (s *Storage) storeBlockToDisk(block *types.Block) error {
 	blockHash := block.GetHash()
@@ -1501,6 +1499,9 @@ func (s *Storage) storeBlockToDisk(block *types.Block) error {
 			Nonce      string `json:"nonce"`       // Mining nonce
 			GasLimit   string `json:"gas_limit"`   // Gas limit
 			GasUsed    string `json:"gas_used"`    // Gas used
+			// ADD THESE TWO:
+			ProposerSignature string `json:"proposer_signature"`
+			ProposerID        string `json:"proposer_id"`
 		} `json:"header"`
 		Body struct {
 			TxsList    []map[string]interface{} `json:"txs_list"`    // List of transactions as maps with ISO timestamps
@@ -1543,6 +1544,9 @@ func (s *Storage) storeBlockToDisk(block *types.Block) error {
 		serializableBlock.Header.Nonce = block.Header.Nonce
 		serializableBlock.Header.GasLimit = block.Header.GasLimit.String()
 		serializableBlock.Header.GasUsed = block.Header.GasUsed.String()
+		// ADD THESE TWO:
+		serializableBlock.Header.ProposerSignature = hex.EncodeToString(block.Header.ProposerSignature)
+		serializableBlock.Header.ProposerID = block.Header.ProposerID
 	}
 
 	// Convert transactions to maps with ISO timestamps
@@ -1631,6 +1635,9 @@ func (s *Storage) loadBlockFromDisk(hash string) (*types.Block, error) {
 			Nonce      uint64 `json:"nonce"` // This is uint64 in the JSON file
 			GasLimit   string `json:"gas_limit"`
 			GasUsed    string `json:"gas_used"`
+			// ADD THESE TWO:
+			ProposerSignature string `json:"proposer_signature"`
+			ProposerID        string `json:"proposer_id"`
 		} `json:"header"`
 		Body struct {
 			TxsList    []map[string]interface{} `json:"txs_list"` // Transactions as maps
@@ -1685,6 +1692,15 @@ func (s *Storage) loadBlockFromDisk(hash string) (*types.Block, error) {
 		ExtraData:  []byte(tempBlock.Header.ExtraData),
 		Miner:      s.decodeHexField(tempBlock.Header.Miner),
 	}
+
+	// Restore proposer signature and ID
+	if tempBlock.Header.ProposerSignature != "" {
+		sig, err := hex.DecodeString(tempBlock.Header.ProposerSignature)
+		if err == nil {
+			block.Header.ProposerSignature = sig
+		}
+	}
+	block.Header.ProposerID = tempBlock.Header.ProposerID
 
 	// Convert difficulty
 	difficulty, ok := new(big.Int).SetString(tempBlock.Header.Difficulty, 10)

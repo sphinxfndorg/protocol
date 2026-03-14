@@ -553,14 +553,7 @@ func (c *Consensus) processProposal(proposal *Proposal) {
 	}
 
 	// CRITICAL FIX: CAPTURE PROPOSAL SIGNATURE - THIS WAS MISSING!
-	signedMsg, err := DeserializeSignedMessage(proposal.Signature)
-	var signatureHex string
-	if err != nil {
-		logger.Warn("Failed to deserialize signed message for storage: %v", err)
-		signatureHex = hex.EncodeToString(proposal.Signature)
-	} else {
-		signatureHex = hex.EncodeToString(signedMsg.Signature)
-	}
+	signatureHex := hex.EncodeToString(proposal.Signature)
 
 	consensusSig := &ConsensusSignature{
 		BlockHash:    proposal.Block.GetHash(),
@@ -724,14 +717,7 @@ func (c *Consensus) processPrepareVote(vote *Vote) {
 		}
 
 		// CAPTURE PREPARE VOTE SIGNATURE
-		signedMsg, err := DeserializeSignedMessage(vote.Signature)
-		var signatureHex string
-		if err != nil {
-			logger.Warn("Failed to deserialize prepare vote for storage: %v", err)
-			signatureHex = hex.EncodeToString(vote.Signature)
-		} else {
-			signatureHex = hex.EncodeToString(signedMsg.Signature)
-		}
+		signatureHex := hex.EncodeToString(vote.Signature)
 
 		consensusSig := &ConsensusSignature{
 			BlockHash:    vote.BlockHash,
@@ -1052,20 +1038,17 @@ func (c *Consensus) processVote(vote *Vote) {
 		}
 
 		// CAPTURE COMMIT VOTE SIGNATURE
-		signedMsg, err := DeserializeSignedMessage(vote.Signature)
-		var signatureHex string
-		if err != nil {
-			logger.Warn("Failed to deserialize commit vote for storage: %v", err)
-			signatureHex = hex.EncodeToString(vote.Signature)
-		} else {
-			signatureHex = hex.EncodeToString(signedMsg.Signature)
-		}
+		signatureHex := hex.EncodeToString(vote.Signature)
+
+		// CAPTURE COMMIT VOTE SIGNATURE
+		// Store the full raw signature — same format as attestations in the block
+		signatureHex = hex.EncodeToString(vote.Signature) // ← always use raw, don't strip envelope
 
 		consensusSig := &ConsensusSignature{
 			BlockHash:    vote.BlockHash,
 			BlockHeight:  c.currentHeight,
 			SignerNodeID: vote.VoterID,
-			Signature:    signatureHex,
+			Signature:    signatureHex, // now matches attestation signature
 			MessageType:  "commit",
 			View:         vote.View,
 			Timestamp:    common.GetTimeService().GetCurrentTimeInfo().ISOLocal,

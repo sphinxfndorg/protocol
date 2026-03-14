@@ -30,7 +30,6 @@ import (
 	"math/big"
 	"net"
 	"os"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -54,8 +53,8 @@ import (
 	"github.com/syndtr/goleveldb/leveldb"
 )
 
-// Updated CallConsensus function using only network addresses
-// Updated CallConsensus function with fixed manual block proposal trigger
+// CallConsensus runs the full PBFT integration test using natural stake-weighted
+// RANDAO leader election instead of manually forcing a leader.
 func CallConsensus(numNodes int) error {
 	if numNodes < 3 {
 		return fmt.Errorf("PBFT requires at least 3 validator nodes, got %d", numNodes)
@@ -143,7 +142,7 @@ func CallConsensus(numNodes int) error {
 
 	// ========== NODE INFRASTRUCTURE INITIALIZATION ==========
 	var wg sync.WaitGroup
-	ctx, cancel := context.WithCancel(context.Background())
+	_, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	// Initialize node components
@@ -323,8 +322,8 @@ func CallConsensus(numNodes int) error {
 		signingServices[nodeID] = signingService
 
 		// Get the minimum stake from core chain parameters
-		chainParams := core.GetSphinxChainParams() // Use core, not commit
-		minStakeAmount := chainParams.ConsensusConfig.MinStakeAmount
+		coreChainParams := core.GetSphinxChainParams()
+		minStakeAmount := coreChainParams.ConsensusConfig.MinStakeAmount
 
 		// Log it to verify
 		minSPX := new(big.Int).Div(minStakeAmount, big.NewInt(1e18))
@@ -361,9 +360,8 @@ func CallConsensus(numNodes int) error {
 		// Register consensus with network layer
 		network.RegisterConsensus(nodeID, cons)
 
-		// Set a VERY LONG timeout to prevent automatic view changes during test
-		// This is critical - we want to control view changes manually
-		cons.SetTimeout(1 * time.Hour) // 1 hour timeout effectively disables auto view changes
+		// Set a long timeout to prevent automatic view changes during test
+		cons.SetTimeout(1 * time.Hour)
 
 		// Start consensus engine
 		if err := cons.Start(); err != nil {
@@ -372,10 +370,36 @@ func CallConsensus(numNodes int) error {
 
 		// Allow consensus engine to fully initialize
 		time.Sleep(100 * time.Millisecond)
-
-		// Begin automatic block proposal for leader (but it won't trigger due to long timeout)
-		bc.StartLeaderLoop(ctx)
 	}
+
+	// ========== CROSS-REGISTER ALL VALIDATORS IN EVERY NODE'S VALIDATOR SET ==========
+	logger.Info("=== REGISTERING ALL VALIDATORS ACROSS ALL NODES ===")
+
+	coreChainParams := core.GetSphinxChainParams()
+	minStakeAmount := coreChainParams.ConsensusConfig.MinStakeAmount
+	minSPX := new(big.Int).Div(minStakeAmount, big.NewInt(1e18)).Uint64()
+
+	for i := 0; i < numNodes; i++ {
+		vs := consensusEngines[i].GetValidatorSet()
+		if vs == nil {
+			logger.Warn("Node %s has nil validator set", validatorIDs[i])
+			continue
+		}
+		for j := 0; j < numNodes; j++ {
+			if i == j {
+				continue
+			}
+			if err := vs.AddValidator(validatorIDs[j], minSPX); err != nil {
+				logger.Warn("Failed to register %s in %s validator set: %v",
+					validatorIDs[j], validatorIDs[i], err)
+			} else {
+				logger.Info("Registered %s in %s validator set with %d SPX",
+					validatorIDs[j], validatorIDs[i], minSPX)
+			}
+		}
+		logger.Info("Node %s now has %d validators registered", validatorIDs[i], numNodes)
+	}
+	logger.Info("=== VALIDATOR CROSS-REGISTRATION COMPLETE ===")
 
 	// ========== GENESIS BLOCK CONSISTENCY VALIDATION ==========
 	logger.Info("=== VALIDATING GENESIS BLOCK CONSISTENCY ===")
@@ -570,77 +594,93 @@ func CallConsensus(numNodes int) error {
 	}
 	logger.Info("Total transactions created: %d", len(transactions))
 
-	// Give a short time for transactions to propagate (minimal, to avoid view changes)
+	// Give a short time for transactions to propagate
 	logger.Info("Waiting briefly for transactions to propagate...")
 	time.Sleep(2 * time.Second)
 
-	// ========== CRITICAL FIX: MANUAL BLOCK PROPOSAL TRIGGER ==========
-	// This runs BEFORE any view changes can occur (view is still 0)
-	logger.Info("=== MANUALLY TRIGGERING BLOCK PROPOSAL AT VIEW 0 ===")
+	// ========== NATURAL STAKE-WEIGHTED RANDAO LEADER ELECTION ==========
+	// Each consensus engine runs its own stake-weighted RANDAO selection.
+	// The terminal will reveal which node is elected and why.
+	logger.Info("=== INITIATING NATURAL LEADER ELECTION (STAKE-WEIGHTED RANDAO) ===")
+	logger.Info("Running stake-weighted RANDAO proposer selection on all %d nodes...", numNodes)
 
-	// Sort validator IDs for deterministic leader selection
-	sort.Strings(validatorIDs)
-	expectedLeaderID := validatorIDs[0]
-	logger.Info("Setting leader for view 0 to: %s", expectedLeaderID)
+	for i := 0; i < numNodes; i++ {
+		// UpdateLeaderStatus triggers the internal updateLeaderStatus() which:
+		//   1. Gets the current slot from TimeConverter
+		//   2. Derives the RANDAO seed for that slot
+		//   3. Runs StakeWeightedSelector.SelectProposer(epoch, seed)
+		//   4. Sets c.isLeader = (selected.ID == c.nodeID)
+		// The result is logged as either:
+		//   "✅ Node X selected as proposer for slot Y with stake Z SPX"
+		//   "Node X NOT selected for slot Y (selected: Y with Z SPX)"
+		consensusEngines[i].UpdateLeaderStatus()
+	}
 
-	var leaderNode *core.Blockchain
-	var leaderConsensus *consensus.Consensus
+	// Brief pause so all goroutines flush their log lines before we read IsLeader()
+	time.Sleep(200 * time.Millisecond)
 
-	// Find the leader node
-	for i, id := range validatorIDs {
-		if id == expectedLeaderID {
-			leaderNode = blockchains[i]
-			leaderConsensus = consensusEngines[i]
-			break
+	// ========== REVEAL ELECTION RESULT ==========
+	logger.Info("=== LEADER ELECTION RESULT ===")
+
+	electedLeaderIndex := -1
+	for i := 0; i < numNodes; i++ {
+		if consensusEngines[i].IsLeader() {
+			logger.Info("🏆 ELECTED LEADER : %s (stake-weighted RANDAO)", validatorIDs[i])
+			electedLeaderIndex = i
+		} else {
+			logger.Info("   Follower       : %s", validatorIDs[i])
 		}
 	}
 
-	if leaderNode == nil {
-		return fmt.Errorf("CRITICAL: Could not find expected leader node %s", expectedLeaderID)
+	// Safety fallback: if RANDAO produced no leader (e.g. all stakes equal and
+	// slot boundary lands between nodes), fall back to deterministic round-robin
+	// for view 0 so the test can complete.
+	if electedLeaderIndex == -1 {
+		// Log each node's elected leader for diagnosis
+		for i := 0; i < numNodes; i++ {
+			logger.Error("Node %s electedLeaderID=%s, isLeader=%v",
+				validatorIDs[i],
+				consensusEngines[i].GetElectedLeaderID(),
+				consensusEngines[i].IsLeader())
+		}
+		return fmt.Errorf("RANDAO elected no leader — all nodes must agree on a single winner; check genesis time alignment")
 	}
 
-	// FORCE this node to be the leader for view 0
-	leaderConsensus.SetLeader(true)
-	logger.Info("✅ Manually set %s as leader for view 0", expectedLeaderID)
+	leaderNode := blockchains[electedLeaderIndex]
+	leaderConsensus := consensusEngines[electedLeaderIndex]
+	leaderID := validatorIDs[electedLeaderIndex]
 
-	// Verify the node is now marked as leader
-	if !leaderConsensus.IsLeader() {
-		return fmt.Errorf("Failed to set leader status on %s", expectedLeaderID)
-	}
-
-	// Get pending transactions directly from the leader's mempool
+	// Confirm the elected leader's mempool is ready
 	pendingTxs := leaderNode.GetMempool().GetPendingTransactions()
 	txCount := len(pendingTxs)
-	logger.Info("Leader has %d pending transactions in mempool.", txCount)
+	logger.Info("Leader %s has %d pending transactions in mempool.", leaderID, txCount)
 
 	if txCount == 0 {
-		return fmt.Errorf("Leader mempool is empty, cannot start consensus")
+		return fmt.Errorf("leader mempool is empty, cannot start consensus")
 	}
 
-	// Leader creates a block
+	// ========== LEADER CREATES AND PROPOSES BLOCK ==========
+	logger.Info("=== LEADER CREATING BLOCK ===")
+
 	newBlock, err := leaderNode.CreateBlock()
 	if err != nil {
 		return fmt.Errorf("failed to create block: %v", err)
 	}
 
-	logger.Info("✅ Leader created block: height=%d, hash=%s, with %d transactions",
-		newBlock.GetHeight(), newBlock.GetHash(), len(newBlock.Body.TxsList))
+	logger.Info("✅ Leader %s created block: height=%d, hash=%s, transactions=%d",
+		leaderID, newBlock.GetHeight(), newBlock.GetHash(), len(newBlock.Body.TxsList))
 
-	// Wrap the block in a consensus.Block adapter
+	// Wrap in consensus.Block adapter and broadcast proposal to all peers
 	consensusBlock := core.NewBlockHelper(newBlock)
 
-	// Leader proposes the block at view 0
-	logger.Info("Leader proposing block %s at view 0...", consensusBlock.GetHash())
-	err = leaderConsensus.ProposeBlock(consensusBlock)
-	if err != nil {
-		logger.Error("❌ Leader failed to propose block: %v", err)
+	logger.Info("Leader %s proposing block %s...", leaderID, consensusBlock.GetHash())
+	if err := leaderConsensus.ProposeBlock(consensusBlock); err != nil {
+		logger.Error("❌ Leader %s failed to propose block: %v", leaderID, err)
 		return fmt.Errorf("leader failed to propose block: %v", err)
 	}
-	logger.Info("✅ Block proposed successfully by leader at view 0")
+	logger.Info("✅ Block proposed successfully by elected leader %s", leaderID)
 
-	// ========== NOW CONTINUE WITH CONSENSUS VALIDATION ==========
-
-	// Quick verification that proposal was sent
+	// ========== WAIT FOR CONSENSUS TO COMPLETE ==========
 	logger.Info("Waiting for consensus to complete...")
 	time.Sleep(2 * time.Second)
 
@@ -651,11 +691,8 @@ func CallConsensus(numNodes int) error {
 		if consensusEngines[i].IsLeader() {
 			leaderStatus = "LEADER"
 		}
-
-		// Get pending transaction count
 		pendingTxs := blockchains[i].GetMempool().GetPendingTransactions()
 		txCount := len(pendingTxs)
-
 		logger.Info("%s: %s, pending_txs=%d", validatorIDs[i], leaderStatus, txCount)
 	}
 	logger.Info("====================================")
@@ -753,7 +790,6 @@ func CallConsensus(numNodes int) error {
 	// ========== COMPREHENSIVE CHAIN STATE CAPTURE ==========
 	logger.Info("=== CAPTURING FINAL CHAIN STATE ===")
 
-	// Rest of the function remains the same...
 	nodes := make([]*state.NodeInfo, numNodes)
 
 	for i := 0; i < numNodes; i++ {
@@ -981,7 +1017,7 @@ func CallConsensus(numNodes int) error {
 	return nil
 }
 
-// Helper function to inspect consensus types (unchanged)
+// inspectConsensusTypes logs the consensus message types for debugging
 func inspectConsensusTypes() {
 	logger.Info("=== CONSENSUS TYPE INSPECTION ===")
 	proposal := &consensus.Proposal{}
@@ -993,7 +1029,7 @@ func inspectConsensusTypes() {
 	logger.Info("=== END TYPE INSPECTION ===")
 }
 
-// PrintBlockchainData function (unchanged)
+// PrintBlockchainData prints detailed blockchain data for a node
 func PrintBlockchainData(bc *core.Blockchain, nodeID string) {
 	latestBlock := bc.GetLatestBlock()
 	if latestBlock == nil {

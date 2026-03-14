@@ -70,11 +70,10 @@ func (tc *TimeConverter) IsNewEpoch(lastEpoch uint64) bool {
 	return currentEpoch > lastEpoch
 }
 
-// ProcessEpochAttestations processes attestations for finality
-// ProcessEpochAttestations processes attestations for finality
+// processEpochAttestations processes attestations for finality.
+// MUST be called with c.mu already held (no internal locking).
 func (c *Consensus) processEpochAttestations(epoch uint64) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	// NOTE: c.mu is already held by the caller — do NOT lock here.
 
 	attestations := c.attestations[epoch]
 	if len(attestations) == 0 {
@@ -82,24 +81,21 @@ func (c *Consensus) processEpochAttestations(epoch uint64) {
 		return
 	}
 
-	// Group by target block
 	blockVotes := make(map[string]*big.Int)
 	for _, att := range attestations {
-		stake := c.getValidatorStake(att.ValidatorID) // This returns nSPX
+		stake := c.getValidatorStake(att.ValidatorID)
 		if blockVotes[att.BlockHash] == nil {
 			blockVotes[att.BlockHash] = big.NewInt(0)
 		}
 		blockVotes[att.BlockHash].Add(blockVotes[att.BlockHash], stake)
 	}
 
-	// Check for 2/3 majority
-	totalStake := c.validatorSet.GetTotalStake() // This returns nSPX
+	totalStake := c.validatorSet.GetTotalStake()
 	required := new(big.Int).Mul(totalStake, big.NewInt(2))
 	required.Div(required, big.NewInt(3))
 
 	for blockHash, votedStake := range blockVotes {
 		if votedStake.Cmp(required) >= 0 {
-			// Convert to SPX for human-readable logging
 			votedSPX := new(big.Float).Quo(
 				new(big.Float).SetInt(votedStake),
 				new(big.Float).SetFloat64(denom.SPX))
@@ -107,7 +103,6 @@ func (c *Consensus) processEpochAttestations(epoch uint64) {
 			logger.Info("🎯 Epoch %d justified for block %s with %v SPX stake",
 				epoch, blockHash, votedSPX)
 
-			// Casper FFG finality rule
 			if c.justifiedEpoch == epoch-1 {
 				c.finalizedEpoch = epoch - 1
 				logger.Info("🔒 Epoch %d FINALIZED!", epoch-1)

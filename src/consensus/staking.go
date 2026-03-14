@@ -108,21 +108,47 @@ func (vs *ValidatorSet) GetMinimumStakeInSPX() float64 {
 	return result
 }
 
-// GetActiveValidators returns validators active at given epoch
+// GetActiveValidators returns a sorted slice of validators that are active
+// in the given epoch.  A validator is active when:
+//   - its ActivationEpoch <= epoch, and
+//   - its ExitEpoch == 0 (not exited) OR its ExitEpoch > epoch, and
+//   - it has not been slashed.
+//
+// IMPORTANT: the returned slice is sorted by validator ID (lexicographic).
+// Callers MUST NOT rely on any other ordering.  Sorting here is defence-in-depth;
+// SelectProposer also sorts its own copy, but having a deterministic source
+// slice makes bugs easier to detect.
 func (vs *ValidatorSet) GetActiveValidators(epoch uint64) []*StakedValidator {
 	vs.mu.RLock()
 	defer vs.mu.RUnlock()
 
-	active := make([]*StakedValidator, 0)
+	// Pre-allocate with the full capacity to avoid repeated re-allocations.
+	active := make([]*StakedValidator, 0, len(vs.validators))
+
 	for _, v := range vs.validators {
-		if v.ActivationEpoch <= epoch &&
-			(v.ExitEpoch == 0 || v.ExitEpoch > epoch) &&
-			!v.IsSlashed {
-			active = append(active, v)
+		// Skip slashed validators — they lose their right to propose or attest.
+		if v.IsSlashed {
+			continue
 		}
+
+		// Skip validators that have not yet reached their activation epoch.
+		if v.ActivationEpoch > epoch {
+			continue
+		}
+
+		// Skip validators that have already exited (ExitEpoch == 0 means "never exits").
+		if v.ExitEpoch != 0 && v.ExitEpoch <= epoch {
+			continue
+		}
+
+		active = append(active, v)
 	}
 
-	// Sort by ID for deterministic ordering when stakes equal
+	// Sort by ID so every node produces the same ordering.
+	// Without this sort, Go map iteration order is randomised per-process and
+	// per-map, meaning each node iterates validators in a different order.
+	// SelectProposer's cumulative-stake walk then finds a different winner on
+	// each node, causing the "Invalid leader" rejection.
 	sort.Slice(active, func(i, j int) bool {
 		return active[i].ID < active[j].ID
 	})
@@ -151,7 +177,7 @@ func (v *StakedValidator) GetStakeInSPX() float64 {
 	return result
 }
 
-// Add to consensus.go - a public method to access validator set
+// GetValidatorSet returns this consensus instance's validator set
 func (c *Consensus) GetValidatorSet() *ValidatorSet {
 	if c == nil {
 		return nil

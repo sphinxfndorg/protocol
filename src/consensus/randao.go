@@ -20,7 +20,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-// consensus/randao.go
+// go/src/consensus/randao.go
 package consensus
 
 import (
@@ -29,53 +29,72 @@ import (
 	"github.com/sphinxorg/protocol/src/common"
 )
 
+// NewRANDAO initialises a RANDAO beacon with the given genesis seed.
+// genesisSeed is typically [32]byte{0x53,0x50,0x48,0x58} ("SPHX\0…").
 func NewRANDAO(genesisSeed [32]byte) *RANDAO {
 	return &RANDAO{
-		mix:     genesisSeed,
-		reveals: make(map[uint64][][32]byte),
+		mix:     genesisSeed,                 // starting mix — same on every node
+		reveals: make(map[uint64][][32]byte), // epoch → list of reveals
 	}
 }
 
-// AddReveal adds a validator's random reveal
+// AddReveal incorporates a validator's random reveal into the running RANDAO mix.
+// Called once per validator per epoch when the validator publishes their secret.
+// The reveal is XOR'd into the mix byte-by-byte, making the mix a cumulative
+// commitment to all revealed values for the epoch.
 func (r *RANDAO) AddReveal(epoch uint64, reveal [32]byte) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	// Append the raw reveal to the per-epoch log for audit purposes.
 	r.reveals[epoch] = append(r.reveals[epoch], reveal)
 
-	// Update mix with XOR
+	// XOR every byte of the reveal into the running mix.
+	// XOR is commutative and associative, so the final mix does not depend on
+	// the order in which reveals arrive.
 	for i := 0; i < 32; i++ {
 		r.mix[i] ^= reveal[i]
 	}
 }
 
-// GetSeed returns randomness seed for a given slot
+// GetSeed derives a deterministic 32-byte seed for the given slot number.
+// The seed is computed as SpxHash(mix || slot), where:
+//   - mix    is the 32-byte RANDAO accumulator (same on all nodes)
+//   - slot   is encoded as a little-endian uint64 (8 bytes)
+//
+// Because the mix and slot number are identical on every node, GetSeed returns
+// the same value everywhere — which is the key property required for consistent
+// leader election across the network.
 func (r *RANDAO) GetSeed(slot uint64) [32]byte {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	// Mix current RANDAO with slot number
+	// Build the 40-byte pre-image: first 32 bytes = mix, last 8 bytes = slot.
 	data := make([]byte, 40)
-	copy(data[:32], r.mix[:])
-	binary.LittleEndian.PutUint64(data[32:], slot)
+	copy(data[:32], r.mix[:])                      // copy current RANDAO mix
+	binary.LittleEndian.PutUint64(data[32:], slot) // append slot number LE
 
-	// Use SpxHash instead of sha256
+	// Hash the pre-image using the Sphinx-native hash function.
 	hashResult := common.SpxHash(data)
 
-	// Convert []byte to [32]byte
+	// Copy the hash output into a fixed-size [32]byte result.
 	var result [32]byte
 	copy(result[:], hashResult)
 	return result
 }
 
-// GenerateVRF generates a VRF proof (simplified)
+// GenerateVRF produces a Verifiable Random Function (VRF) output by hashing
+// a validator's secret key together with the current RANDAO seed.
+// Used by validators to prove that their reveal was derived from their key
+// without revealing the key itself.
 func (r *RANDAO) GenerateVRF(secretKey []byte, seed [32]byte) [32]byte {
+	// Concatenate secretKey and seed as the VRF input.
 	data := append(secretKey, seed[:]...)
 
-	// Use SpxHash instead of sha256
+	// Hash using SpxHash.  In production this would be replaced with a proper
+	// VRF construction (e.g. ECVRF) that provides a zero-knowledge proof.
 	hashResult := common.SpxHash(data)
 
-	// Convert []byte to [32]byte
 	var result [32]byte
 	copy(result[:], hashResult)
 	return result

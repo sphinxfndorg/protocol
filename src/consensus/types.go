@@ -58,11 +58,14 @@ type BlockWithBody interface {
 }
 
 // Proposal represents a block proposal from a leader
+// Proposal represents a block proposal from a leader
 type Proposal struct {
-	Block      Block  `json:"block"`
-	View       uint64 `json:"view"`
-	ProposerID string `json:"proposer_id"`
-	Signature  []byte `json:"signature"`
+	Block           Block  `json:"block"`
+	View            uint64 `json:"view"`
+	ProposerID      string `json:"proposer_id"`
+	Signature       []byte `json:"signature"`
+	ElectedLeaderID string `json:"elected_leader_id"` // ADD THIS
+	SlotNumber      uint64 `json:"slot_number"`       // ADD THIS
 }
 
 // Vote represents a vote from a validator
@@ -90,8 +93,6 @@ type BlockChain interface {
 	ValidateBlock(block Block) error
 	CommitBlock(block Block) error
 	GetBlockByHash(hash string) Block
-
-	// New methods for staking
 	GetValidatorStake(validatorID string) *big.Int
 	GetTotalStaked() *big.Int
 	UpdateValidatorStake(validatorID string, delta *big.Int) error
@@ -139,12 +140,11 @@ type StakedValidator struct {
 }
 
 // ValidatorSet manages staked validators
-// ValidatorSet manages staked validators
 type ValidatorSet struct {
 	validators     map[string]*StakedValidator
 	totalStake     *big.Int
 	mu             sync.RWMutex
-	minStakeAmount *big.Int // Add this field - store the minimum stake
+	minStakeAmount *big.Int
 }
 
 // RANDAO provides verifiable randomness for leader selection
@@ -164,7 +164,7 @@ type TimeConverter struct {
 	genesisTime time.Time
 }
 
-// UPDATED Consensus struct with ALL fields including PoS
+// Consensus is the main PBFT + PoS consensus engine.
 type Consensus struct {
 	mu sync.RWMutex
 
@@ -182,6 +182,13 @@ type Consensus struct {
 	quorumFraction float64
 	timeout        time.Duration
 	isLeader       bool
+
+	// electedLeaderID stores the node ID selected by the most recent
+	// UpdateLeaderStatus (RANDAO) or updateLeaderStatusWithValidators
+	// (round-robin view-change) call.  Every node that runs the same
+	// deterministic selection arrives at the same value, so
+	// isValidLeader can compare the proposer against it directly.
+	electedLeaderID string
 
 	// Vote tracking
 	receivedVotes    map[string]map[string]*Vote
@@ -211,7 +218,7 @@ type Consensus struct {
 	signatureMutex      sync.RWMutex
 	consensusSignatures []*ConsensusSignature
 
-	// ========== NEW PoS FIELDS ==========
+	// PoS fields
 	validatorSet     *ValidatorSet
 	randao           *RANDAO
 	selector         *StakeWeightedSelector
@@ -227,6 +234,8 @@ type Consensus struct {
 
 	// Attestations per epoch
 	attestations map[uint64][]*Attestation
+
+	electedSlot uint64 // slot number used when electedLeaderID was set
 }
 
 // SigningService handles cryptographic signing for consensus messages

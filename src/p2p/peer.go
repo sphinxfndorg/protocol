@@ -44,33 +44,47 @@ import (
 )
 
 // NewPeerManager creates a new peer manager.
+// Initializes the peer manager with empty maps for tracking peers, scores, and bans.
+// Sets default connection limits for inbound and outbound connections.
 func NewPeerManager(server *Server, bucketSize int) *PeerManager {
 	return &PeerManager{
-		server:      server,
-		peers:       make(map[string]*network.Peer),
-		scores:      make(map[string]int),
-		bans:        make(map[string]time.Time),
-		maxPeers:    50,
-		maxInbound:  30,
-		maxOutbound: 20,
+		server:      server,                         // Reference to the P2P server
+		peers:       make(map[string]*network.Peer), // Map of peer ID to peer struct
+		scores:      make(map[string]int),           // Map of peer ID to reputation score
+		bans:        make(map[string]time.Time),     // Map of peer ID to ban expiry time
+		maxPeers:    50,                             // Maximum total peer connections
+		maxInbound:  30,                             // Maximum inbound connections
+		maxOutbound: 20,                             // Maximum outbound connections
 	}
 }
 
 // ConnectPeer establishes a connection to a peer and performs handshake.
-// go/src/p2p/peer.go
-// ConnectPeer establishes a connection to a peer and performs handshake.
+// This function handles the entire peer connection lifecycle including:
+// - Ban check
+// - Connection limit validation
+// - TCP connection establishment
+// - Peer registration
+// - Protocol handshake
+// - Peer information broadcast
 func (pm *PeerManager) ConnectPeer(node *network.Node) error {
-	pm.mu.Lock()
+	pm.mu.Lock() // Lock for thread safety
 	defer pm.mu.Unlock()
+
+	// Check if peer is banned
 	if banExpiry, banned := pm.bans[node.ID]; banned && time.Now().Before(banExpiry) {
 		log.Printf("Peer %s is banned until %v", node.ID, banExpiry)
 		return fmt.Errorf("peer %s is banned until %v", node.ID, banExpiry)
 	}
+
+	// Check if we've reached maximum peer limit
 	if len(pm.peers) >= pm.maxPeers {
 		log.Printf("Maximum peer limit reached: %d", pm.maxPeers)
 		return errors.New("maximum peer limit reached")
 	}
+
 	log.Printf("Connecting to node %s via TCP: %s", node.ID, node.Address)
+
+	// Establish TCP connection to the peer
 	_, err := transport.ConnectTCP(node.Address, pm.server.messageCh)
 	if err != nil {
 		log.Printf("Failed to connect to %s: %v", node.ID, err)
@@ -78,36 +92,47 @@ func (pm *PeerManager) ConnectPeer(node *network.Node) error {
 	}
 	log.Printf("TCP connection established to %s", node.Address)
 
-	// Add peer to nodeManager.peers before handshake
+	// Create peer object before handshake
 	peer := &network.Peer{
 		Node:             node,
 		ConnectionStatus: "connected",
 		ConnectedAt:      time.Now(),
 		LastSeen:         time.Now(),
 	}
+
+	// Add peer to node manager's peer list
 	if err := pm.server.nodeManager.AddPeer(node); err != nil {
 		log.Printf("Failed to add peer %s: %v", node.ID, err)
-		transport.DisconnectNode(node) // This will close the connection
+		transport.DisconnectNode(node) // Clean up connection
 		return fmt.Errorf("failed to add peer %s: %v", node.ID, err)
 	}
+
+	// Add to local peer tracking maps
 	pm.peers[node.ID] = peer
-	pm.scores[node.ID] = 50
+	pm.scores[node.ID] = 50 // Initial default score
 
 	// Perform handshake after adding peer
 	if err := pm.performHandshake(node); err != nil {
 		log.Printf("Handshake failed with %s: %v", node.ID, err)
-		transport.DisconnectNode(node) // This will close the connection
+		transport.DisconnectNode(node) // Clean up connection
+		// Rollback peer addition
 		pm.server.nodeManager.RemovePeer(node.ID)
 		delete(pm.peers, node.ID)
 		delete(pm.scores, node.ID)
 		return fmt.Errorf("handshake failed with %s: %v", node.ID, err)
 	}
 
+	// Store peer information in database for persistence
 	if err := pm.server.StorePeer(peer); err != nil {
 		log.Printf("Failed to store peer %s in DB: %v", node.ID, err)
 	}
+
 	log.Printf("Connected to peer %s (Role=%s)", node.ID, node.Role)
+
+	// Send initial ping to check liveness
 	peer.SendPing()
+
+	// Broadcast our peer information to the network
 	pm.server.Broadcast(&security.Message{Type: "peer_info", Data: network.PeerInfo{
 		NodeID:          pm.server.localNode.ID,
 		KademliaID:      pm.server.localNode.KademliaID,
@@ -121,14 +146,17 @@ func (pm *PeerManager) ConnectPeer(node *network.Node) error {
 		ProtocolVersion: "1.0",
 		PublicKey:       pm.server.localNode.PublicKey,
 	}})
+
 	return nil
 }
 
 // performHandshake negotiates protocol version and capabilities.
+// Implements the version/verack handshake protocol to establish
+// compatibility and exchange basic information with a peer.
 func (pm *PeerManager) performHandshake(node *network.Node) error {
 	log.Printf("Starting handshake with %s (ID=%s)", node.Address, node.ID)
 
-	// Add peer to nodeManager.peers before sending version message
+	// Ensure peer exists in our tracking maps before sending version
 	pm.mu.Lock()
 	if _, exists := pm.peers[node.ID]; !exists {
 		pm.peers[node.ID] = &network.Peer{
@@ -141,43 +169,61 @@ func (pm *PeerManager) performHandshake(node *network.Node) error {
 	}
 	pm.mu.Unlock()
 
+	// Generate random nonce for this handshake to prevent replay attacks
 	nonce := make([]byte, 8)
 	rand.Read(nonce)
+
+	// Create version message with our information
 	versionMsg := &security.Message{
 		Type: "version",
 		Data: map[string]interface{}{
-			"version":      "0.1.0",
-			"node_id":      pm.server.localNode.ID,
-			"chain_id":     "sphinx-mainnet",
-			"block_height": pm.server.blockchain.GetBlockCount(),
-			"nonce":        hex.EncodeToString(nonce),
-			"address":      pm.server.localNode.Address,
+			"version":      "0.1.0",                              // Protocol version
+			"node_id":      pm.server.localNode.ID,               // Our node ID
+			"chain_id":     "sphinx-mainnet",                     // Blockchain identifier
+			"block_height": pm.server.blockchain.GetBlockCount(), // Current block height
+			"nonce":        hex.EncodeToString(nonce),            // Unique nonce
+			"address":      pm.server.localNode.Address,          // Our address
 		},
 	}
+
+	// Get existing TCP connection
 	conn, err := transport.GetConnection(node.Address)
 	if err != nil {
 		log.Printf("No active connection to %s: %v", node.Address, err)
 		return fmt.Errorf("no active connection to %s: %v", node.Address, err)
 	}
+
+	// Flush the connection if it's TCP
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
 		tcpConn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-		tcpConn.Write([]byte{}) // Flush the connection
+		tcpConn.Write([]byte{}) // Flush to ensure clean state
 	}
+
+	// Send version message
 	if err := transport.SendMessage(node.Address, versionMsg); err != nil {
 		log.Printf("Failed to send version message to %s: %v", node.Address, err)
 		return err
 	}
 	log.Printf("Version message sent to %s, waiting for verack response", node.Address)
 
+	// Wait for verack response with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+
 	for {
 		select {
 		case msg := <-pm.server.messageCh:
-			log.Printf("Received message in handshake for %s: Type=%s, Data=%v, ChannelLen=%d", node.Address, msg.Type, msg.Data, len(pm.server.messageCh))
+			// Process incoming messages during handshake
+			log.Printf("Received message in handshake for %s: Type=%s, Data=%v, ChannelLen=%d",
+				node.Address, msg.Type, msg.Data, len(pm.server.messageCh))
+
 			if msg.Type == "verack" {
+				// Check if verack matches expected peer
 				if peerID, ok := msg.Data.(string); ok && peerID == node.ID {
-					log.Printf("Received valid verack from %s for node_id: %s, Address: %s", node.Address, peerID, node.Address)
+					log.Printf("Received valid verack from %s for node_id: %s, Address: %s",
+						node.Address, peerID, node.Address)
+
+					// Update peer status to active
 					pm.mu.Lock()
 					if peer, exists := pm.peers[node.ID]; exists {
 						peer.ConnectionStatus = "active"
@@ -186,14 +232,17 @@ func (pm *PeerManager) performHandshake(node *network.Node) error {
 						log.Printf("Peer %s not found in nodeManager.peers during verack", node.ID)
 					}
 					pm.mu.Unlock()
-					return nil
+					return nil // Handshake successful
 				} else {
-					log.Printf("Invalid verack from %s: peerID=%v, expected=%s, Address: %s", node.Address, msg.Data, node.ID, node.Address)
+					log.Printf("Invalid verack from %s: peerID=%v, expected=%s, Address: %s",
+						node.Address, msg.Data, node.ID, node.Address)
 				}
 			} else {
 				log.Printf("Unexpected message type in handshake for %s: %s", node.Address, msg.Type)
 			}
+
 		case <-ctx.Done():
+			// Timeout waiting for verack
 			log.Printf("Timeout waiting for verack from %s: %v", node.Address, ctx.Err())
 			return fmt.Errorf("timeout waiting for verack from %s", node.Address)
 		}
@@ -201,143 +250,223 @@ func (pm *PeerManager) performHandshake(node *network.Node) error {
 }
 
 // DisconnectPeer terminates a peer connection.
+// Gracefully disconnects from a peer and cleans up all associated resources.
 func (pm *PeerManager) DisconnectPeer(peerID string) error {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
+
+	// Check if peer exists
 	peer, exists := pm.peers[peerID]
 	if !exists {
 		return fmt.Errorf("peer %s not found", peerID)
 	}
+
+	// Close the underlying connection
 	if err := transport.DisconnectNode(peer.Node); err != nil {
 		log.Printf("Failed to disconnect peer %s: %v", peerID, err)
 	}
+
+	// Remove from all tracking maps
 	delete(pm.peers, peerID)
 	delete(pm.scores, peerID)
 	pm.server.nodeManager.RemovePeer(peerID)
+
 	log.Printf("Disconnected peer %s", peerID)
 	return nil
 }
 
 // BanPeer bans a peer for misbehavior.
+// Imposes a temporary ban on a peer, preventing reconnection for the specified duration.
 func (pm *PeerManager) BanPeer(peerID string, duration time.Duration) error {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
+
+	// Check if peer exists
 	if _, exists := pm.peers[peerID]; !exists {
 		return fmt.Errorf("peer %s not found", peerID)
 	}
+
+	// Set ban expiry time
 	pm.bans[peerID] = time.Now().Add(duration)
+
+	// Disconnect the peer
 	return pm.DisconnectPeer(peerID)
 }
 
 // UpdatePeerScore adjusts a peer’s score based on behavior.
+// Implements a reputation system to track peer reliability and trustworthiness.
+// Low scores can lead to automatic bans, high scores improve peer selection.
 func (pm *PeerManager) UpdatePeerScore(peerID string, delta int) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
+
+	// Ignore updates for unknown peers
 	if _, exists := pm.peers[peerID]; !exists {
 		return
 	}
+
+	// Update score
 	pm.scores[peerID] += delta
+
+	// Enforce score boundaries and handle low scores
 	if pm.scores[peerID] < 0 {
 		pm.scores[peerID] = 0
+		// Automatically ban peers with persistent low scores
 		pm.BanPeer(peerID, 1*time.Hour)
 	} else if pm.scores[peerID] > 100 {
-		pm.scores[peerID] = 100
+		pm.scores[peerID] = 100 // Cap maximum score
 	}
+
 	log.Printf("Updated score for peer %s: %d", peerID, pm.scores[peerID])
 }
 
 // PropagateMessage implements gossip protocol for message propagation.
+// Uses a randomized selection algorithm to efficiently broadcast messages
+// while avoiding redundant transmissions and network flooding.
 func (pm *PeerManager) PropagateMessage(msg *security.Message, originID string) {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
+
+	// Generate unique message ID to detect duplicates
 	msgID := generateMessageID(msg)
+
+	// Check if we've already seen this message (anti-flood)
 	if pm.server.nodeManager.HasSeenMessage(msgID) {
 		return
 	}
+
+	// Mark message as seen to prevent repropagation
 	pm.server.nodeManager.MarkMessageSeen(msgID)
+
+	// Structure to hold peer candidates with their scores
 	type peerScore struct {
 		peer  *network.Peer
 		score int
 	}
+
+	// Collect eligible peers for propagation
 	var candidates []peerScore
 	for id, peer := range pm.peers {
+		// Skip origin peer and disconnected peers
 		if id == originID || peer.ConnectionStatus != "connected" {
 			continue
 		}
 		candidates = append(candidates, peerScore{peer, pm.scores[id]})
 	}
-	// Randomly select up to sqrt(n) peers
+
+	// Calculate number of peers to propagate to (sqrt(n) for optimal gossip)
 	n := int(math.Sqrt(float64(len(candidates))))
 	if n < 3 {
-		n = 3
+		n = 3 // Minimum propagation to 3 peers
 	} else if n > 10 {
-		n = 10
+		n = 10 // Maximum propagation to 10 peers
 	}
+
+	// Randomly select peers for propagation using cryptographically secure random
 	if len(candidates) > n {
 		for i := 0; i < n; i++ {
 			j, _ := rand.Int(rand.Reader, big.NewInt(int64(len(candidates)-i)))
 			idx := i + int(j.Int64())
+			// Swap elements for random selection
 			candidates[i], candidates[idx] = candidates[idx], candidates[i]
 		}
-		candidates = candidates[:n]
+		candidates = candidates[:n] // Keep only selected candidates
 	}
+
+	// Send message to selected peers
 	for _, candidate := range candidates {
 		peer := candidate.peer
 		if err := transport.SendMessage(peer.Node.Address, msg); err != nil {
 			log.Printf("Failed to propagate %s to %s: %v", msg.Type, peer.Node.ID, err)
+			// Penalize peer that failed to receive message
 			pm.UpdatePeerScore(peer.Node.ID, -10)
 		} else {
+			// Reward peer for successful message delivery
 			pm.UpdatePeerScore(peer.Node.ID, 5)
 		}
 	}
 }
 
 // SyncBlockchain synchronizes the blockchain with a peer.
+// Requests block headers from a peer to synchronize chain state.
 func (pm *PeerManager) SyncBlockchain(peerID string) error {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
+
+	// Check if peer exists
 	peer, exists := pm.peers[peerID]
 	if !exists {
 		return fmt.Errorf("peer %s not found", peerID)
 	}
+
+	// Create getheaders message
 	headersMsg := &security.Message{
 		Type: "getheaders",
 		Data: map[string]interface{}{
-			"start_height": pm.server.blockchain.GetBlockCount(),
+			"start_height": pm.server.blockchain.GetBlockCount(), // Request headers from current height
 		},
 	}
+
+	// Send request to peer
 	if err := transport.SendMessage(peer.Node.Address, headersMsg); err != nil {
 		return fmt.Errorf("failed to request headers from %s: %v", peerID, err)
 	}
+
 	log.Printf("Requested headers from peer %s", peerID)
 	return nil
 }
 
 // MaintainPeers ensures optimal peer connections.
+// Background maintenance routine that:
+// - Disconnects low-scoring peers when we have enough connections
+// - Actively seeks new peers when connection count is low
+// - Runs periodically to maintain healthy peer set
 func (pm *PeerManager) MaintainPeers() {
 	for {
 		pm.mu.Lock()
+
+		// Disconnect low-scoring peers if we have enough connections
 		for id, score := range pm.scores {
 			if score < 20 && len(pm.peers) > pm.maxPeers/2 {
-				pm.DisconnectPeer(id)
+				pm.DisconnectPeer(id) // Drop underperforming peer
 			}
 		}
+
+		// Seek new peers if connection count is low
 		if len(pm.peers) < pm.maxPeers/2 {
-			peers := pm.server.nodeManager.FindClosestPeers(pm.server.localNode.KademliaID, pm.maxPeers-len(pm.peers))
+			// Find closest nodes to us in the DHT
+			peers := pm.server.nodeManager.FindClosestPeers(
+				pm.server.localNode.KademliaID,
+				pm.maxPeers-len(pm.peers),
+			)
+
+			// Attempt to connect to discovered peers
 			for _, peer := range peers {
+				// Skip if already connected or self
 				if _, exists := pm.peers[peer.Node.ID]; !exists && peer.Node.Address != pm.server.localNode.Address {
+					// Connect in background to avoid blocking maintenance loop
 					go pm.ConnectPeer(peer.Node)
 				}
 			}
 		}
+
 		pm.mu.Unlock()
+
+		// Sleep before next maintenance cycle
 		time.Sleep(30 * time.Second)
 	}
 }
 
 // generateMessageID creates a unique ID for a message.
+// Uses BLAKE3 hash of the marshaled message to create a deterministic
+// but unique identifier for duplicate detection.
 func generateMessageID(msg *security.Message) string {
+	// Marshal message to JSON
 	data, _ := json.Marshal(msg)
+
+	// Calculate BLAKE3 hash (256-bit)
 	hash := blake3.Sum256(data)
+
+	// Return hex-encoded hash as string ID
 	return hex.EncodeToString(hash[:])
 }

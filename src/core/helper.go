@@ -24,11 +24,16 @@
 package core
 
 import (
+	"context"
 	"fmt"
 	"math/big"
+	"strings"
 
+	"github.com/sphinxorg/protocol/src/common"
 	"github.com/sphinxorg/protocol/src/consensus"
 	types "github.com/sphinxorg/protocol/src/core/transaction"
+	logger "github.com/sphinxorg/protocol/src/log"
+	"github.com/sphinxorg/protocol/src/pool"
 	storage "github.com/sphinxorg/protocol/src/state"
 )
 
@@ -104,6 +109,70 @@ func (bc *Blockchain) GetStateMachine() *storage.StateMachine {
 	bc.lock.RLock()
 	defer bc.lock.RUnlock()
 	return bc.stateMachine
+}
+
+// SetConsensus sets the consensus module for the state machine
+func (bc *Blockchain) SetConsensus(consensus *consensus.Consensus) {
+	bc.stateMachine.SetConsensus(consensus)
+}
+
+// IsGenesisHash checks if a hash is a valid genesis hash (starts with GENESIS_)
+func (bc *Blockchain) IsGenesisHash(hash string) bool {
+	return strings.HasPrefix(hash, "GENESIS_")
+}
+
+// calculateEmptyTransactionsRoot returns a standard Merkle root for empty transactions
+func (bc *Blockchain) calculateEmptyTransactionsRoot() []byte {
+	// Standard empty Merkle root (hash of empty string)
+	emptyHash := common.SpxHash([]byte{})
+	return emptyHash
+}
+
+// IsValidChain checks the integrity of the full chain
+func (bc *Blockchain) IsValidChain() error {
+	return bc.storage.ValidateChain()
+}
+
+// Start TPS auto-save in blockchain initialization
+func (bc *Blockchain) StartTPSAutoSave(ctx context.Context) {
+	bc.storage.StartTPSAutoSave(ctx)
+}
+
+// VerifyMessage verifies a signed message (placeholder)
+func (bc *Blockchain) VerifyMessage(address, signature, message string) bool {
+	logger.Info("Message verification requested - address: %s, message: %s", address, message)
+	return true
+}
+
+// HasPendingTx checks if a transaction is in the mempool
+func (bc *Blockchain) HasPendingTx(hash string) bool {
+	return bc.mempool.HasTransaction(hash)
+}
+
+// SetConsensusEngine sets the consensus engine
+func (bc *Blockchain) SetConsensusEngine(engine *consensus.Consensus) {
+	bc.consensusEngine = engine
+}
+
+// GetStorage returns the storage instance for external access
+func (bc *Blockchain) GetStorage() *storage.Storage {
+	return bc.storage
+}
+
+// GetMempool returns the mempool instance
+func (bc *Blockchain) GetMempool() *pool.Mempool {
+	return bc.mempool
+}
+
+// GetChainParams returns the Sphinx blockchain parameters for external recognition
+func (bc *Blockchain) GetChainParams() *SphinxChainParameters {
+	return bc.chainParams
+}
+
+// SaveBasicChainState saves a basic chain state
+// Simplified version of chain state saving without node information
+func (bc *Blockchain) SaveBasicChainState() error {
+	return bc.StoreChainState(nil) // Only one parameter now
 }
 
 // Helper function to check if string is hex

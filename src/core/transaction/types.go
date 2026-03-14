@@ -46,6 +46,9 @@ type BlockHeader struct {
 	UnclesHash []byte   `json:"uncles_hash"` // Hash of the uncles (references side blocks)
 	ExtraData  []byte   `json:"extra_data"`  // Extra data field for additional information
 	Miner      []byte   `json:"miner"`       // Miner address (20 bytes)
+	// NEW: PoS signature fields
+	ProposerSignature []byte `json:"proposer_signature"` // Signature by the block proposer
+	ProposerID        string `json:"proposer_id"`        // Which validator proposed this block
 }
 
 // BlockBody represents the transactions and uncle blocks.
@@ -53,6 +56,16 @@ type BlockBody struct {
 	TxsList    []*Transaction `json:"txs_list"`    // A list of transactions in the block
 	Uncles     []*BlockHeader `json:"uncles"`      // Actual uncle blocks (side chains)
 	UnclesHash []byte         `json:"uncles_hash"` // Hash representing uncles (calculated from uncles)
+	// NEW: Collected validator attestations (optional but recommended)
+	Attestations []*Attestation `json:"attestations,omitempty"`
+}
+
+// NEW: Attestation struct
+type Attestation struct {
+	ValidatorID string `json:"validator_id"`
+	Signature   []byte `json:"signature"`
+	BlockHash   string `json:"block_hash"`
+	View        uint64 `json:"view"`
 }
 
 // Block represents the entire block structure including the header and body.

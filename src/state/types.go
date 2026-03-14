@@ -21,7 +21,6 @@
 // SOFTWARE.
 
 // go/src/state/types.go
-// go/src/state/types.go
 package state
 
 import (

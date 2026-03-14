@@ -171,24 +171,28 @@ func (c *Consensus) ProposeBlock(block Block) error {
 		return fmt.Errorf("node %s is not the leader", c.nodeID)
 	}
 
-	// Create proposal
+	// IMPORTANT: Sign the block itself BEFORE creating the proposal
+	if c.signingService != nil {
+		// block must already have its hash finalized via FinalizeHash()
+		if err := c.signingService.SignBlock(block); err != nil {
+			return fmt.Errorf("failed to sign block header: %w", err)
+		}
+	}
+
 	proposal := &Proposal{
 		Block:      block,
 		View:       c.currentView,
 		ProposerID: c.nodeID,
-		Signature:  []byte{}, // Initialize empty, will be signed
+		Signature:  []byte{},
 	}
 
-	// Sign the proposal
+	// Sign the proposal envelope too (existing behavior)
 	if c.signingService != nil {
 		if err := c.signingService.SignProposal(proposal); err != nil {
-			return fmt.Errorf("failed to sign proposal: %v", err)
+			return fmt.Errorf("failed to sign proposal: %w", err)
 		}
-	} else {
-		logger.Warn("WARNING: No signing service available, sending unsigned proposal")
 	}
 
-	logger.Info("Node %s proposing block %s at view %d", c.nodeID, block.GetHash(), c.currentView)
 	return c.broadcastProposal(proposal)
 }
 
@@ -513,6 +517,17 @@ func (c *Consensus) processProposal(proposal *Proposal) {
 		logger.Info("✅ Valid signature for proposal from %s", proposal.ProposerID)
 	} else {
 		logger.Warn("⚠️ No signing service or empty signature, skipping verification")
+	}
+
+	// After the existing proposal signature check, also verify the block signature:
+	if c.signingService != nil {
+		valid, err := c.signingService.VerifyBlockSignature(proposal.Block)
+		if err != nil || !valid {
+			logger.Warn("❌ Invalid block header signature from proposer %s: %v",
+				proposal.ProposerID, err)
+			return
+		}
+		logger.Info("✅ Block header signature verified for block %s", proposal.Block.GetHash())
 	}
 
 	// CRITICAL FIX: CAPTURE PROPOSAL SIGNATURE - THIS WAS MISSING!

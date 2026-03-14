@@ -14,7 +14,9 @@
     "difficulty": "17179869184",
     "nonce": "0000000000000001",
     "gas_limit": "5000",
-    "gas_used": "0"
+    "gas_used": "0",
+    "proposer_signature": "",
+    "proposer_id": ""
   },
   "body": {
     "txs_list": [],

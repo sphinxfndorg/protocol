@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/sphinxorg/protocol/src/consensus"
+	database "github.com/sphinxorg/protocol/src/core/state"
 	types "github.com/sphinxorg/protocol/src/core/transaction"
 )
 
@@ -102,6 +103,8 @@ type Storage struct {
 	// TPS Monitoring
 	tpsMetrics *TPSMetrics // Add this line
 	tpsConfig  *TPSConfig
+
+	stateDB *database.DB
 }
 
 // ChainParams represents basic chain parameters for storage

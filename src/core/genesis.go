@@ -194,29 +194,19 @@ func (gs *GenesisState) allocationsToTxList() []*types.Transaction {
 // Block construction
 // ----------------------------------------------------------------------------
 
-// BuildBlock materialises a *types.Block from the GenesisState.
-//
-// The genesis block body now contains one transaction per GenesisAllocation
-// so that txs_list in the stored JSON is populated and the TxsRoot in the
-// header is derived from those transactions — making the file self-consistent
-// and human-readable.
-//
-// The resulting block is deterministic: identical GenesisState inputs on any
-// node always produce the same hash.  The block is NOT stored to disk; that
-// is the caller's responsibility (see ApplyGenesis).
-func (gs *GenesisState) BuildBlock() *types.Block {
-	// Convert allocations into genesis funding transactions.
-	// These transactions are stored in the block body (txs_list) so that
-	// the stored JSON shows the genesis allocation data, and the TxsRoot
-	// in the header is computed from them — not from an empty list.
-	genesisTxs := gs.allocationsToTxList()
+// GenesisVaultAddress is the protocol-owned address that receives the entire
+// initial supply as block 0's mining reward. Block 1 then distributes coins
+// from this vault to each allocation address via normal transactions.
+const GenesisVaultAddress = "0000000000000000000000000000000000000001"
 
-	// Calculate the TxsRoot (Merkle root) from the transaction list.
-	// We use a temporary block body to leverage the existing CalculateTxsRoot
-	// implementation so the root is computed identically to how non-genesis
-	// blocks compute it.
-	tempBody := types.NewBlockBody(genesisTxs, []*types.BlockHeader{})
-	tempBlock := types.NewBlock(&types.BlockHeader{}, tempBody)
+// BuildBlock builds a genesis block with NO allocation transactions in the body.
+// Coins are minted to GenesisVaultAddress via mintBlockReward when block 0 is
+// executed. Distribution happens in block 1.
+func (gs *GenesisState) BuildBlock() *types.Block {
+	// Genesis block body is empty — no funding transactions here.
+	// The vault receives coins through mintBlockReward in executor.go.
+	body := types.NewBlockBody([]*types.Transaction{}, []*types.BlockHeader{})
+	tempBlock := types.NewBlock(&types.BlockHeader{}, body)
 	txsRoot := tempBlock.CalculateTxsRoot()
 
 	header := &types.BlockHeader{
@@ -226,25 +216,24 @@ func (gs *GenesisState) BuildBlock() *types.Block {
 		Timestamp:  gs.Timestamp,
 		Difficulty: new(big.Int).Set(gs.InitialDifficulty),
 		Nonce:      gs.Nonce,
-		TxsRoot:    txsRoot, // Derived from the funding transactions in the body
+		TxsRoot:    txsRoot,
 		StateRoot:  common.SpxHash([]byte("sphinx-genesis-state-root")),
 		GasLimit:   new(big.Int).Set(gs.InitialGasLimit),
 		GasUsed:    big.NewInt(0),
 		ExtraData:  append([]byte{}, gs.ExtraData...),
-		Miner:      make([]byte, 20), // zero address at genesis
-		ParentHash: make([]byte, 32), // no parent
+		Miner:      make([]byte, 20),
+		ParentHash: make([]byte, 32),
 		UnclesHash: common.SpxHash([]byte("genesis-no-uncles")),
+		// ProposerID is the vault — receives the genesis mint reward
+		ProposerID: GenesisVaultAddress,
 		Hash:       []byte{},
 	}
 
-	// Build the real block body with the allocation transactions.
-	body := types.NewBlockBody(genesisTxs, []*types.BlockHeader{})
 	block := types.NewBlock(header, body)
 	block.FinalizeHash()
 
-	logger.Info("GenesisState.BuildBlock: hash=%s, height=%d, nonce=%s, txs=%d, txs_root=%s",
-		block.GetHash(), block.GetHeight(), block.Header.Nonce,
-		len(genesisTxs), hex.EncodeToString(txsRoot))
+	logger.Info("GenesisState.BuildBlock: hash=%s, height=0, vault=%s",
+		block.GetHash(), GenesisVaultAddress)
 
 	return block
 }
@@ -403,6 +392,67 @@ func ApplyGenesisWithCachedBlock(bc *Blockchain, gs *GenesisState, cachedBlock *
 	logger.Info("✅ ApplyGenesis (cached): genesis block applied — hash=%s, allocations=%d, txs_in_body=%d",
 		cachedBlock.GetHash(), len(gs.Allocations), len(cachedBlock.Body.TxsList))
 
+	return nil
+}
+
+// ApplyGenesisState credits every genesis allocation into the StateDB and
+// replaces the placeholder StateRoot in the genesis block header with the
+// real Merkle root of all balances.
+//
+// Call this once inside createGenesisBlock(), after ApplyGenesisWithCachedBlock
+// has stored the block.  It is idempotent: if the first allocation address
+// already has a non-zero balance the function returns immediately.
+func ApplyGenesisState(bc *Blockchain, gs *GenesisState) error {
+	if bc == nil || gs == nil {
+		return fmt.Errorf("ApplyGenesisState: nil argument")
+	}
+
+	stateDB, err := bc.newStateDB()
+	if err != nil {
+		return fmt.Errorf("ApplyGenesisState: %w", err)
+	}
+
+	// Idempotency: skip if genesis was already applied.
+	if len(gs.Allocations) > 0 {
+		if stateDB.GetBalance(gs.Allocations[0].Address).Sign() > 0 {
+			logger.Info("ApplyGenesisState: already applied, skipping")
+			return nil
+		}
+	}
+
+	// Credit every allocation.
+	totalMinted := new(big.Int)
+	for _, alloc := range gs.Allocations {
+		if alloc.BalanceNSPX == nil || alloc.BalanceNSPX.Sign() <= 0 {
+			continue
+		}
+		stateDB.SetBalance(alloc.Address, alloc.BalanceNSPX)
+		totalMinted.Add(totalMinted, alloc.BalanceNSPX)
+		logger.Info("ApplyGenesisState: %s nSPX → %s (%s)",
+			alloc.BalanceNSPX.String(), alloc.Address, alloc.Label)
+	}
+
+	stateDB.IncrementTotalSupply(totalMinted)
+
+	stateRoot, err := stateDB.Commit()
+	if err != nil {
+		return fmt.Errorf("ApplyGenesisState: commit: %w", err)
+	}
+
+	// Patch the genesis block header with the real state root.
+	bc.lock.Lock()
+	if len(bc.chain) > 0 && bc.chain[0] != nil {
+		bc.chain[0].Header.StateRoot = stateRoot
+		bc.chain[0].FinalizeHash()
+		if storeErr := bc.storage.StoreBlock(bc.chain[0]); storeErr != nil {
+			logger.Warn("ApplyGenesisState: re-store genesis block: %v", storeErr)
+		}
+	}
+	bc.lock.Unlock()
+
+	totalSPX := new(big.Int).Div(totalMinted, big.NewInt(1e18))
+	logger.Info("✅ ApplyGenesisState: %d accounts, %s SPX, state_root=%x",
+		len(gs.Allocations), totalSPX.String(), stateRoot)
 	return nil
 }
 

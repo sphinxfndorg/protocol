@@ -33,6 +33,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -1509,19 +1510,24 @@ func (bc *Blockchain) selectTransactionsForBlock(pendingTxs []*types.Transaction
 
 	// Log selection statistics
 	if len(selectedTxs) > 0 {
-		utilization := float64(currentSize) / float64(availableSize) * 100 // Block utilization percentage
-		averageTxSize := float64(currentSize) / float64(len(selectedTxs))  // Average transaction size
-
+		utilization := float64(currentSize) / float64(availableSize) * 100
+		averageTxSize := float64(currentSize) / float64(len(selectedTxs))
 		logger.Info("Selected %d transactions, total size: %d bytes (%.2f%% utilization, avg tx: %.2f bytes)",
 			len(selectedTxs), currentSize, utilization, averageTxSize)
-
-		// Log gas usage if applicable
 		if bc.chainParams.BlockGasLimit != nil {
 			gasUtilization := float64(currentGas.Int64()) / float64(bc.chainParams.BlockGasLimit.Int64()) * 100
 			logger.Info("Gas usage: %s / %s (%.2f%%)",
 				currentGas.String(), bc.chainParams.BlockGasLimit.String(), gasUtilization)
 		}
 	}
+
+	// Sort by (sender, nonce) so per-sender nonce ordering is preserved.
+	sort.SliceStable(selectedTxs, func(i, j int) bool {
+		if selectedTxs[i].Sender == selectedTxs[j].Sender {
+			return selectedTxs[i].Nonce < selectedTxs[j].Nonce
+		}
+		return selectedTxs[i].Sender < selectedTxs[j].Sender
+	})
 
 	return selectedTxs, currentSize + blockOverhead, nil
 }
@@ -1757,6 +1763,18 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 	}
 
 	// Store block in storage
+	// Execute block: apply transactions, mint reward, compute real StateRoot.
+	stateRoot, err := bc.ExecuteBlock(typeBlock)
+	if err != nil {
+		return fmt.Errorf("CommitBlock: execution failed: %w", err)
+	}
+
+	// Stamp the real state root into the block header before storage.
+	typeBlock.Header.StateRoot = stateRoot
+	// Re-finalize hash because StateRoot is an input to the block hash.
+	typeBlock.FinalizeHash()
+
+	// Store block in storage (now with the real StateRoot).
 	if err := bc.storage.StoreBlock(typeBlock); err != nil {
 		return fmt.Errorf("failed to store block: %w", err)
 	}
@@ -1921,11 +1939,23 @@ func (bc *Blockchain) createGenesisBlock() error {
 		return fmt.Errorf("genesis state validation failed: %w", err)
 	}
 
+	if err := ApplyGenesisWithCachedBlock(bc, gs, getCachedGenesisBlock()); err != nil {
+		return fmt.Errorf("ApplyGenesis failed: %w", err)
+	}
+
 	// Step 4 — apply genesis using the process-wide cached block.
 	// getCachedGenesisBlock() ensures BuildBlock() (argon2) runs only ONCE
 	// across all nodes in the same process, preventing ~134s × N hang.
 	if err := ApplyGenesisWithCachedBlock(bc, gs, getCachedGenesisBlock()); err != nil {
 		return fmt.Errorf("ApplyGenesis failed: %w", err)
+	}
+
+	// Credit genesis allocations into the account StateDB.
+	// This writes balances to LevelDB and replaces the placeholder StateRoot.
+	gs2 := GenesisStateFromChainParams(bc.chainParams)
+	if err := ApplyGenesisState(bc, gs2); err != nil {
+		// Non-fatal: log and continue. Genesis state may be applied on next run.
+		logger.Warn("ApplyGenesisState failed (will retry on next block): %v", err)
 	}
 
 	// Step 5 — log the genesis allocation summary for operators.

@@ -31,6 +31,7 @@ import (
 
 	"github.com/sphinxorg/protocol/src/common"
 	"github.com/sphinxorg/protocol/src/consensus"
+	database "github.com/sphinxorg/protocol/src/core/state"
 	types "github.com/sphinxorg/protocol/src/core/transaction"
 	logger "github.com/sphinxorg/protocol/src/log"
 	"github.com/sphinxorg/protocol/src/pool"
@@ -173,6 +174,13 @@ func (bc *Blockchain) GetChainParams() *SphinxChainParameters {
 // Simplified version of chain state saving without node information
 func (bc *Blockchain) SaveBasicChainState() error {
 	return bc.StoreChainState(nil) // Only one parameter now
+}
+
+// SetStorageDB injects a shared *database.DB into the blockchain's storage
+// layer, enabling StateDB-backed block execution (ExecuteBlock / CommitBlock).
+// Call this once after NewBlockchain and before any CommitBlock invocation.
+func (bc *Blockchain) SetStorageDB(db *database.DB) {
+	bc.storage.SetDB(db)
 }
 
 // Helper function to check if string is hex

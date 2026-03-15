@@ -112,74 +112,41 @@ func NewValidatorAlloc(address string, spx int64) *GenesisAllocation {
 // multisig or keystore addresses before mainnet launch.
 func DefaultGenesisAllocations() []*GenesisAllocation {
 	return []*GenesisAllocation{
-		// ── Founders & Team (15%) ────────────────────────────────────────────
-		NewFounderAlloc(
-			"1000000000000000000000000000000000000001",
-			50_000_000, // 50 M SPX — Core protocol team
-		),
-		NewFounderAlloc(
-			"1000000000000000000000000000000000000002",
-			50_000_000, // 50 M SPX — Early contributors
-		),
-		NewFounderAlloc(
-			"1000000000000000000000000000000000000003",
-			50_000_000, // 50 M SPX — Advisors & partners
-		),
+		// ── Founders & Team (15%) ─────────────────────────────────────────
+		NewFounderAlloc("1000000000000000000000000000000000000001", 50_000_000),
+		NewFounderAlloc("1000000000000000000000000000000000000002", 50_000_000),
+		NewFounderAlloc("1000000000000000000000000000000000000003", 50_000_000),
 
-		// ── Ecosystem Reserve (30%) ──────────────────────────────────────────
-		NewReserveAlloc(
-			"2000000000000000000000000000000000000001",
-			150_000_000, // 150 M SPX — Long-term ecosystem fund
-		),
-		NewReserveAlloc(
-			"2000000000000000000000000000000000000002",
-			150_000_000, // 150 M SPX — Strategic reserve
-		),
+		// ── Ecosystem Reserve (30%) ───────────────────────────────────────
+		NewReserveAlloc("2000000000000000000000000000000000000001", 150_000_000),
+		NewReserveAlloc("2000000000000000000000000000000000000002", 150_000_000),
 
-		// ── Protocol Treasury (20%) ──────────────────────────────────────────
-		NewTreasuryAlloc(
-			"3000000000000000000000000000000000000001",
-			100_000_000, // 100 M SPX — On-chain governance treasury
-		),
-		NewTreasuryAlloc(
-			"3000000000000000000000000000000000000002",
-			100_000_000, // 100 M SPX — Protocol development fund
-		),
+		// ── Protocol Treasury (20%) ───────────────────────────────────────
+		NewTreasuryAlloc("3000000000000000000000000000000000000001", 100_000_000),
+		NewTreasuryAlloc("3000000000000000000000000000000000000002", 100_000_000),
 
-		// ── Community & Grants (20%) ─────────────────────────────────────────
-		NewCommunityAlloc(
-			"4000000000000000000000000000000000000001",
-			100_000_000, // 100 M SPX — Community incentives & airdrops
-		),
-		NewCommunityAlloc(
-			"4000000000000000000000000000000000000002",
-			100_000_000, // 100 M SPX — Developer grants programme
-		),
+		// ── Community & Grants (20%) ──────────────────────────────────────
+		NewCommunityAlloc("4000000000000000000000000000000000000001", 100_000_000),
+		NewCommunityAlloc("4000000000000000000000000000000000000002", 100_000_000),
 
-		// ── Validator Bonds (15%) ────────────────────────────────────────────
-		// These accounts represent the initial bonded stake for the first
-		// set of genesis validators. Each holds 30 M SPX to cover the
-		// 32-SPX minimum stake and leave room for delegation.
-		NewValidatorAlloc(
-			"5000000000000000000000000000000000000001",
-			30_000_000, // 30 M SPX — Genesis validator pool 1
-		),
-		NewValidatorAlloc(
-			"5000000000000000000000000000000000000002",
-			30_000_000, // 30 M SPX — Genesis validator pool 2
-		),
-		NewValidatorAlloc(
-			"5000000000000000000000000000000000000003",
-			30_000_000, // 30 M SPX — Genesis validator pool 3
-		),
-		NewValidatorAlloc(
-			"5000000000000000000000000000000000000004",
-			30_000_000, // 30 M SPX — Genesis validator pool 4
-		),
-		NewValidatorAlloc(
-			"5000000000000000000000000000000000000005",
-			30_000_000, // 30 M SPX — Genesis validator pool 5
-		),
+		// ── Validator Bonds (15%) ─────────────────────────────────────────
+		NewValidatorAlloc("5000000000000000000000000000000000000001", 30_000_000),
+		NewValidatorAlloc("5000000000000000000000000000000000000002", 30_000_000),
+		NewValidatorAlloc("5000000000000000000000000000000000000003", 30_000_000),
+		NewValidatorAlloc("5000000000000000000000000000000000000004", 30_000_000),
+		NewValidatorAlloc("5000000000000000000000000000000000000005", 30_000_000),
+	}
+}
+
+// newTestAlloc creates a genesis allocation with a human-readable name as the
+// address. These bypass the 40-char hex requirement used for production
+// on-chain addresses — they exist only for devnet / integration testing.
+func newTestAlloc(name string, spx int64) *GenesisAllocation {
+	nspx := new(big.Int).Mul(big.NewInt(spx), big.NewInt(1e18))
+	return &GenesisAllocation{
+		Address:     name,
+		BalanceNSPX: nspx,
+		Label:       "Test",
 	}
 }
 
@@ -241,8 +208,6 @@ func (a *GenesisAllocation) validate() error {
 	if a == nil {
 		return fmt.Errorf("allocation is nil")
 	}
-
-	// Address must be a 40-character hex string (20 bytes).
 	if len(a.Address) != 40 {
 		return fmt.Errorf("address must be 40 hex characters, got %d", len(a.Address))
 	}
@@ -253,15 +218,12 @@ func (a *GenesisAllocation) validate() error {
 	if len(addrBytes) != 20 {
 		return fmt.Errorf("address decodes to %d bytes, want 20", len(addrBytes))
 	}
-
-	// Balance must be present and non-negative.
 	if a.BalanceNSPX == nil {
 		return fmt.Errorf("balance_nspx is nil")
 	}
 	if a.BalanceNSPX.Sign() < 0 {
-		return fmt.Errorf("balance_nspx must be non-negative, got %s", a.BalanceNSPX.String())
+		return fmt.Errorf("balance_nspx must be non-negative")
 	}
-
 	return nil
 }
 

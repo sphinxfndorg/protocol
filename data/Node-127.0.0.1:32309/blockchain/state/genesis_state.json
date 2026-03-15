@@ -1,0 +1,101 @@
+{
+  "chain_id": 7331,
+  "chain_name": "Sphinx Mainnet",
+  "symbol": "SPX",
+  "timestamp": 1732070400,
+  "timestamp_iso": "2024-11-20T02:40:00Z",
+  "extra_data": "Sphinx Network Genesis Block - Decentralized Future",
+  "initial_difficulty": "17179869184",
+  "initial_gas_limit": "5000",
+  "nonce": "0000000000000001",
+  "total_allocations": 14,
+  "total_allocated_nspx": "1000000000000000000000000000",
+  "total_allocated_spx": "1000000000",
+  "total_validators": 0,
+  "allocations": [
+    {
+      "address": "1000000000000000000000000000000000000001",
+      "balance_nspx": "50000000000000000000000000",
+      "balance_spx": "50000000",
+      "label": "Founders"
+    },
+    {
+      "address": "1000000000000000000000000000000000000002",
+      "balance_nspx": "50000000000000000000000000",
+      "balance_spx": "50000000",
+      "label": "Founders"
+    },
+    {
+      "address": "1000000000000000000000000000000000000003",
+      "balance_nspx": "50000000000000000000000000",
+      "balance_spx": "50000000",
+      "label": "Founders"
+    },
+    {
+      "address": "2000000000000000000000000000000000000001",
+      "balance_nspx": "150000000000000000000000000",
+      "balance_spx": "150000000",
+      "label": "Reserve"
+    },
+    {
+      "address": "2000000000000000000000000000000000000002",
+      "balance_nspx": "150000000000000000000000000",
+      "balance_spx": "150000000",
+      "label": "Reserve"
+    },
+    {
+      "address": "3000000000000000000000000000000000000001",
+      "balance_nspx": "100000000000000000000000000",
+      "balance_spx": "100000000",
+      "label": "Treasury"
+    },
+    {
+      "address": "3000000000000000000000000000000000000002",
+      "balance_nspx": "100000000000000000000000000",
+      "balance_spx": "100000000",
+      "label": "Treasury"
+    },
+    {
+      "address": "4000000000000000000000000000000000000001",
+      "balance_nspx": "100000000000000000000000000",
+      "balance_spx": "100000000",
+      "label": "Community"
+    },
+    {
+      "address": "4000000000000000000000000000000000000002",
+      "balance_nspx": "100000000000000000000000000",
+      "balance_spx": "100000000",
+      "label": "Community"
+    },
+    {
+      "address": "5000000000000000000000000000000000000001",
+      "balance_nspx": "30000000000000000000000000",
+      "balance_spx": "30000000",
+      "label": "Validator"
+    },
+    {
+      "address": "5000000000000000000000000000000000000002",
+      "balance_nspx": "30000000000000000000000000",
+      "balance_spx": "30000000",
+      "label": "Validator"
+    },
+    {
+      "address": "5000000000000000000000000000000000000003",
+      "balance_nspx": "30000000000000000000000000",
+      "balance_spx": "30000000",
+      "label": "Validator"
+    },
+    {
+      "address": "5000000000000000000000000000000000000004",
+      "balance_nspx": "30000000000000000000000000",
+      "balance_spx": "30000000",
+      "label": "Validator"
+    },
+    {
+      "address": "5000000000000000000000000000000000000005",
+      "balance_nspx": "30000000000000000000000000",
+      "balance_spx": "30000000",
+      "label": "Validator"
+    }
+  ]
+}

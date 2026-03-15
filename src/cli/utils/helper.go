@@ -105,19 +105,16 @@ func CallConsensus(numNodes int) error {
 	}
 
 	// Determine network configuration based on chain name
-	networkType := "mainnet"               // Default to mainnet
-	networkDisplayName := "Sphinx Mainnet" // Default display name
+	// In helper.go — change the default networkType so every node boots as devnet.
+	// Swap this out for "testnet" or "mainnet" when you promote the chain.
+	networkType := "devnet" // hardcoded — change to "testnet" or "mainnet" to promote
+	networkDisplayName := "Sphinx Devnet"
 
-	switch chainName := chainParams.ChainName; chainName {
-	case "Sphinx Devnet":
-		networkType = "devnet" // Development network
-		networkDisplayName = "Sphinx Devnet"
-	case "Sphinx Testnet":
-		networkType = "testnet" // Test network
+	// The switch is now just for display purposes when NOT overriding:
+	if chainParams.ChainName == "Sphinx Testnet" {
 		networkDisplayName = "Sphinx Testnet"
-	default:
-		networkType = "mainnet" // Production mainnet
-		networkDisplayName = "Sphinx Mainnet"
+	} else if chainParams.ChainName == "Sphinx Devnet" {
+		networkDisplayName = "Sphinx Devnet"
 	}
 
 	logger.Info("Network: %s", networkDisplayName)
@@ -350,12 +347,12 @@ func CallConsensus(numNodes int) error {
 
 		// Pass to consensus - create new consensus engine instance
 		cons := consensus.NewConsensus(
-			nodeID,         // Node identifier
-			testNodeMgr,    // Node manager for peer communication
-			bc,             // Blockchain reference
-			signingService, // Signing service
-			bc.CommitBlock, // Commit callback
-			minStakeAmount, // Minimum stake amount
+			nodeID,
+			testNodeMgr,
+			bc,
+			signingService,
+			nil, // onCommit is nil — blockChain.CommitBlock already commits
+			minStakeAmount,
 		)
 
 		// Initialize stake - now using validator set methods
@@ -766,7 +763,7 @@ func CallConsensus(numNodes int) error {
 	logger.Info("====================================")
 
 	// Set timeout for consensus completion
-	const timeout = 60 * time.Second
+	const timeout = 3 * time.Minute
 	start := time.Now()
 	logger.Info("Waiting for block commitment (timeout: %v)...", timeout)
 

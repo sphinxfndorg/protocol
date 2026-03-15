@@ -1919,77 +1919,66 @@ func (bc *Blockchain) initializeChain() error {
 //
 // Returns: Error if genesis block creation fails
 func (bc *Blockchain) createGenesisBlock() error {
-	// Step 1 — resolve chain params.
-	// bc.chainParams is guaranteed non-nil here because NewBlockchain sets it
-	// before calling initializeChain() → createGenesisBlock().
 	if bc.chainParams == nil {
-		// Defensive fallback: should never happen in normal operation.
 		logger.Warn("chainParams nil during genesis creation, falling back to mainnet params")
 		bc.chainParams = GetSphinxChainParams()
 	}
 
-	// Step 2 — build GenesisState from the current chain parameters.
-	// GenesisStateFromChainParams transfers ChainID, ChainName, Symbol,
-	// GenesisTime, ExtraData, InitialDifficulty, and InitialGasLimit from the
-	// SphinxChainParameters and attaches DefaultGenesisAllocations().
+	// Build GenesisState from the ACTUAL network's chain parameters.
+	// This gs carries the correct ChainName ("Sphinx Devnet"/"Sphinx Testnet"/
+	// "Sphinx Mainnet") and will be written to genesis_state.json.
 	gs := GenesisStateFromChainParams(bc.chainParams)
 
-	// Step 3 — validate before committing anything to disk.
 	if err := ValidateGenesisState(gs); err != nil {
 		return fmt.Errorf("genesis state validation failed: %w", err)
 	}
 
+	// Apply genesis using the process-wide cached block so BuildBlock() (argon2)
+	// only runs once. The gs carries the correct ChainName for the JSON file —
+	// the cached block's hash is environment-agnostic.
+	// NOTE: called only ONCE — the original code called this twice, which was a bug.
 	if err := ApplyGenesisWithCachedBlock(bc, gs, getCachedGenesisBlock()); err != nil {
 		return fmt.Errorf("ApplyGenesis failed: %w", err)
 	}
 
-	// Step 4 — apply genesis using the process-wide cached block.
-	// getCachedGenesisBlock() ensures BuildBlock() (argon2) runs only ONCE
-	// across all nodes in the same process, preventing ~134s × N hang.
-	if err := ApplyGenesisWithCachedBlock(bc, gs, getCachedGenesisBlock()); err != nil {
-		return fmt.Errorf("ApplyGenesis failed: %w", err)
-	}
-
-	// Credit genesis allocations into the account StateDB.
-	// This writes balances to LevelDB and replaces the placeholder StateRoot.
-	gs2 := GenesisStateFromChainParams(bc.chainParams)
-	if err := ApplyGenesisState(bc, gs2); err != nil {
-		// Non-fatal: log and continue. Genesis state may be applied on next run.
+	// Credit genesis allocations into the account StateDB using the same gs
+	// so ApplyGenesisState also sees the correct ChainName if it ever writes files.
+	if err := ApplyGenesisState(bc, gs); err != nil {
 		logger.Warn("ApplyGenesisState failed (will retry on next block): %v", err)
 	}
 
-	// Step 5 — log the genesis allocation summary for operators.
 	LogAllocationSummary(gs.Allocations)
 
-	// Log the genesis block details the same way the old helper did.
 	genesis := bc.chain[0]
 	localTime, utcTime := common.FormatTimestamp(genesis.Header.Timestamp)
 	relativeTime := common.GetTimeService().GetRelativeTime(genesis.Header.Timestamp)
 
-	// Log all genesis block details
 	logger.Info("=== STANDARDIZED GENESIS BLOCK ===")
+	logger.Info("Environment  : %s (ChainID=%d)", bc.chainParams.ChainName, bc.chainParams.ChainID)
 	logger.Info("Height: %d", genesis.GetHeight())
 	logger.Info("Hash: %s", genesis.GetHash())
 	logger.Info("Timestamp: %d (%s)", genesis.Header.Timestamp, relativeTime)
 	logger.Info("Local Time: %s", localTime)
 	logger.Info("UTC Time: %s", utcTime)
-	logger.Info("Difficulty: %s", genesis.Header.Difficulty.String())
-	logger.Info("Gas Limit: %s", genesis.Header.GasLimit.String())
-	logger.Info("Extra Data: %s", string(genesis.Header.ExtraData))
-	logger.Info("Parent Hash: %x", genesis.Header.ParentHash)
-	logger.Info("Uncles Hash: %x", genesis.Header.UnclesHash)
 	logger.Info("================================")
 
-	// Step 6 — keep bc.chainParams.GenesisHash consistent with the block we
-	// just built.  If the hashes diverge it means the GenesisConfig in
-	// SphinxChainParameters was built from a different genesis; update it so
-	// that ValidateBlock, StoreChainState, IsSphinxChain, etc. all use the
-	// correct value for the lifetime of this node.
 	actualHash := genesis.GetHash()
 	if bc.chainParams.GenesisHash != actualHash {
 		logger.Warn("Updating chainParams.GenesisHash from %s to %s",
 			bc.chainParams.GenesisHash, actualHash)
-		bc.chainParams.GenesisHash = actualHash // Keep in sync
+		bc.chainParams.GenesisHash = actualHash
+	}
+
+	if storedHash, err := bc.GetGenesisHashFromIndex(); err == nil {
+		if storedHash != actualHash {
+			return fmt.Errorf(
+				"chain continuity violation: stored genesis %s does not match "+
+					"%s genesis %s — wipe the data directory to switch environments",
+				storedHash, bc.chainParams.ChainName, actualHash,
+			)
+		}
+		logger.Info("✅ Chain continuity confirmed: genesis %s carries forward to %s",
+			actualHash, bc.chainParams.ChainName)
 	}
 
 	return nil

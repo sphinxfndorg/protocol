@@ -64,20 +64,27 @@ const (
 	CacheTypeState
 )
 
-// Global genesis block definition with comprehensive data
+// genesisBlockDefinition is the single canonical source for fields that feed
+// into the genesis hash. It is environment-agnostic: devnet, testnet, and
+// mainnet all derive their genesis block from these exact values so that a
+// validator who started on devnet can verify ancestry on testnet or mainnet
+// without rebuilding or re-downloading block 0.
 var genesisBlockDefinition = &types.BlockHeader{
-	Version:    1,
-	Height:     0,
-	Timestamp:  1732070400, // Fixed: Nov 20, 2024 00:00:00 UTC
-	Difficulty: big.NewInt(1),
-	Nonce:      common.FormatNonce(1),    // FIXED: Start with "0000000000000001"
-	TxsRoot:    common.SpxHash([]byte{}), // Empty transactions root
-	StateRoot:  common.SpxHash([]byte("sphinx-genesis-state-root")),
-	GasLimit:   big.NewInt(5000), // Initial gas limit
+	Version:   1,
+	Height:    0,
+	Timestamp: 1732070400, // Nov 20 2024 00:00:00 UTC — FROZEN, never change
+
+	// Difficulty and GasLimit must match GenesisStateFromChainParams constants.
+	Difficulty: big.NewInt(17179869184),
+	GasLimit:   big.NewInt(5000),
+
 	GasUsed:    big.NewInt(0),
+	Nonce:      common.FormatNonce(1),
+	TxsRoot:    common.SpxHash([]byte{}),
+	StateRoot:  common.SpxHash([]byte("sphinx-genesis-state-root")),
 	ExtraData:  []byte("Sphinx Network Genesis Block - Decentralized Future"),
-	Miner:      make([]byte, 20), // Zero address for genesis
-	ParentHash: make([]byte, 32), // Genesis has no parent
+	Miner:      make([]byte, 20),
+	ParentHash: make([]byte, 32),
 	UnclesHash: common.SpxHash([]byte("genesis-no-uncles")),
 }
 
@@ -209,9 +216,17 @@ var (
 	genesisCached    *types.Block
 )
 
-// getCachedGenesisBlock builds the genesis block exactly once and caches it.
+// getCachedGenesisBlock builds the genesis block exactly once per process.
+// It uses DefaultGenesisState() only for the cryptographic fields (timestamp,
+// difficulty, gas limit, extra data) — the ChainName/ChainID in that state
+// do NOT affect the block hash, so the same block is valid for all environments.
+// The ChainName written to genesis_state.json is controlled by the gs passed
+// to ApplyGenesisWithCachedBlock, NOT by this function.
 func getCachedGenesisBlock() *types.Block {
 	genesisOnce.Do(func() {
+		// DefaultGenesisState() provides the canonical cryptographic inputs.
+		// ChainName here is irrelevant to the hash — only timestamp, difficulty,
+		// gas limit, and extra data feed into BuildBlock() → FinalizeHash().
 		gs := DefaultGenesisState()
 		genesisCached = gs.BuildBlock()
 		genesisHashValue = genesisCached.GetHash()

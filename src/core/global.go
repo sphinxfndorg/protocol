@@ -25,7 +25,7 @@ package core
 
 import (
 	"math/big"
-	"strings"
+	"sync"
 	"time"
 
 	"github.com/sphinxorg/protocol/src/common"
@@ -96,8 +96,6 @@ func (bc *Blockchain) GetGenesisTime() time.Time {
 	genesis := bc.chain[0]
 	return time.Unix(genesis.GetTimestamp(), 0)
 }
-
-// Add to core/blockchain.go
 
 // GetValidatorStake returns the stake amount for a validator in nSPX
 func (bc *Blockchain) GetValidatorStake(validatorID string) *big.Int {
@@ -203,20 +201,29 @@ func CreateStandardGenesisBlock() *types.Block {
 	return genesis
 }
 
-// GetGenesisHash returns the standardized genesis hash that ALL nodes should use
+// genesisOnce ensures BuildBlock() runs exactly once per process.
+// argon2 takes ~134s — running it 3 times (one per node) would hang for 400s+.
+var (
+	genesisOnce      sync.Once
+	genesisHashValue string
+	genesisCached    *types.Block
+)
+
+// getCachedGenesisBlock builds the genesis block exactly once and caches it.
+func getCachedGenesisBlock() *types.Block {
+	genesisOnce.Do(func() {
+		gs := DefaultGenesisState()
+		genesisCached = gs.BuildBlock()
+		genesisHashValue = genesisCached.GetHash()
+		logger.Info("Genesis block computed once: %s", genesisHashValue)
+	})
+	return genesisCached
+}
+
+// GetGenesisHash returns the computed genesis hash (computed once, cached forever).
 func GetGenesisHash() string {
-	genesis := CreateStandardGenesisBlock()
-	hash := genesis.GetHash()
-
-	// Ensure it has the GENESIS_ prefix
-	if !strings.HasPrefix(hash, "GENESIS_") {
-		// Regenerate with proper prefix
-		genesis.FinalizeHash()
-		hash = genesis.GetHash()
-	}
-
-	logger.Info("Standardized genesis hash: %s", hash)
-	return hash
+	getCachedGenesisBlock()
+	return genesisHashValue
 }
 
 // GenerateGenesisHash is deprecated - use GetGenesisHash instead for consistency

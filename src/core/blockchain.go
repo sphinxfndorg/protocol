@@ -54,6 +54,13 @@ import (
 //   - networkType: Type of network (testnet, devnet, mainnet)
 //
 // Returns: Initialized Blockchain instance or error
+//
+// Integration with genesis.go / allocation.go:
+// Chain parameters are resolved from networkType BEFORE initializeChain() is
+// called so that createGenesisBlock() can call GenesisStateFromChainParams()
+// with the correct network parameters.  The genesis block is now built through
+// GenesisState.BuildBlock() so every node that uses the same networkType
+// produces a byte-for-byte identical genesis hash.
 func NewBlockchain(dataDir string, nodeID string, validators []string, networkType string) (*Blockchain, error) {
 	// Initialize storage layer for persistent block storage
 	// Creates a new storage instance that will handle all disk I/O operations
@@ -85,6 +92,24 @@ func NewBlockchain(dataDir string, nodeID string, validators []string, networkTy
 		tpsMonitor:      types.NewTPSMonitor(5 * time.Second), // Monitor transactions per second with 5-second window
 	}
 
+	// ── Resolve chain parameters BEFORE initializeChain so that
+	// createGenesisBlock() can call GenesisStateFromChainParams() with the
+	// correct network parameters.  This is the only ordering change versus the
+	// original constructor.
+	// Use consistent genesis hash that's the same for all nodes
+	// Select appropriate chain parameters based on network type
+	var chainParams *SphinxChainParameters
+	switch networkType {
+	case "testnet":
+		chainParams = GetTestnetChainParams() // Testnet parameters
+	case "devnet":
+		chainParams = GetDevnetChainParams() // Development network parameters
+	default:
+		chainParams = GetSphinxChainParams() // Mainnet parameters (default)
+	}
+	// Store early so createGenesisBlock can read bc.chainParams immediately
+	blockchain.chainParams = chainParams
+
 	// Load existing chain from storage or create genesis block if new chain
 	// This handles both existing chains and first-time initialization
 	if err := blockchain.initializeChain(); err != nil {
@@ -95,17 +120,7 @@ func NewBlockchain(dataDir string, nodeID string, validators []string, networkTy
 	// Configure chain parameters based on network type (testnet, devnet, mainnet)
 	if len(blockchain.chain) > 0 {
 		// Use consistent genesis hash that's the same for all nodes
-		// Select appropriate chain parameters based on network type
-		var chainParams *SphinxChainParameters
-		switch networkType {
-		case "testnet":
-			chainParams = GetTestnetChainParams() // Testnet parameters
-		case "devnet":
-			chainParams = GetDevnetChainParams() // Development network parameters
-		default:
-			chainParams = GetSphinxChainParams() // Mainnet parameters (default)
-		}
-
+		// chainParams is already set above; just validate against actual genesis.
 		blockchain.chainParams = chainParams
 
 		// Validate that our genesis hash matches the chain params
@@ -1830,7 +1845,13 @@ func (bc *Blockchain) DebugStorage() error {
 	return nil
 }
 
-// initializeChain loads existing chain or creates genesis block
+// initializeChain loads existing chain or creates genesis block.
+//
+// If persistent storage already has a block at height 0 it is loaded directly.
+// Otherwise createGenesisBlock() is called which now builds the genesis block
+// through GenesisState (genesis.go / allocation.go) instead of the old
+// CreateStandardGenesisBlock() standalone helper.
+//
 // Returns: Error if initialization fails
 func (bc *Blockchain) initializeChain() error {
 	// First, try to get the latest block
@@ -1864,29 +1885,54 @@ func (bc *Blockchain) initializeChain() error {
 	return nil
 }
 
-// createGenesisBlock creates and stores the genesis block with comprehensive data
+// createGenesisBlock builds and stores the genesis block through GenesisState
+// so that the allocation Merkle root and all header fields are identical across
+// every node in the network.
+//
+// Integration flow:
+//  1. Read bc.chainParams (already set by NewBlockchain before this is called).
+//  2. Call GenesisStateFromChainParams() to build a GenesisState — this embeds
+//     the canonical DefaultGenesisAllocations() Merkle root in the header.
+//  3. Validate the GenesisState before touching disk.
+//  4. Call ApplyGenesis(bc, gs) which calls gs.BuildBlock(), stores the block,
+//     seeds bc.chain[0], and writes genesis_state.json for auditing.
+//  5. Log the allocation summary so operators can verify the distribution.
+//  6. Sync bc.chainParams.GenesisHash with the actual hash produced.
+//
 // Returns: Error if genesis block creation fails
 func (bc *Blockchain) createGenesisBlock() error {
-	// Use the STANDARDIZED genesis block that all nodes will use
-	genesis := CreateStandardGenesisBlock()
-
-	// Store the standardized genesis block
-	if err := bc.storage.StoreBlock(genesis); err != nil {
-		return fmt.Errorf("failed to store genesis block: %w", err)
+	// Step 1 — resolve chain params.
+	// bc.chainParams is guaranteed non-nil here because NewBlockchain sets it
+	// before calling initializeChain() → createGenesisBlock().
+	if bc.chainParams == nil {
+		// Defensive fallback: should never happen in normal operation.
+		logger.Warn("chainParams nil during genesis creation, falling back to mainnet params")
+		bc.chainParams = GetSphinxChainParams()
 	}
 
-	// Verify storage
-	storedBlock, err := bc.storage.GetBlockByHash(genesis.GetHash())
-	if err != nil || storedBlock == nil {
-		return fmt.Errorf("genesis block storage verification failed: %v", err)
+	// Step 2 — build GenesisState from the current chain parameters.
+	// GenesisStateFromChainParams transfers ChainID, ChainName, Symbol,
+	// GenesisTime, ExtraData, InitialDifficulty, and InitialGasLimit from the
+	// SphinxChainParameters and attaches DefaultGenesisAllocations().
+	gs := GenesisStateFromChainParams(bc.chainParams)
+
+	// Step 3 — validate before committing anything to disk.
+	if err := ValidateGenesisState(gs); err != nil {
+		return fmt.Errorf("genesis state validation failed: %w", err)
 	}
 
-	logger.Info("Standardized genesis block stored: %s", genesis.GetHash())
+	// Step 4 — apply genesis using the process-wide cached block.
+	// getCachedGenesisBlock() ensures BuildBlock() (argon2) runs only ONCE
+	// across all nodes in the same process, preventing ~134s × N hang.
+	if err := ApplyGenesisWithCachedBlock(bc, gs, getCachedGenesisBlock()); err != nil {
+		return fmt.Errorf("ApplyGenesis failed: %w", err)
+	}
 
-	// Initialize in-memory chain
-	bc.chain = []*types.Block{genesis}
+	// Step 5 — log the genesis allocation summary for operators.
+	LogAllocationSummary(gs.Allocations)
 
-	// Log comprehensive genesis information
+	// Log the genesis block details the same way the old helper did.
+	genesis := bc.chain[0]
 	localTime, utcTime := common.FormatTimestamp(genesis.Header.Timestamp)
 	relativeTime := common.GetTimeService().GetRelativeTime(genesis.Header.Timestamp)
 
@@ -1903,6 +1949,18 @@ func (bc *Blockchain) createGenesisBlock() error {
 	logger.Info("Parent Hash: %x", genesis.Header.ParentHash)
 	logger.Info("Uncles Hash: %x", genesis.Header.UnclesHash)
 	logger.Info("================================")
+
+	// Step 6 — keep bc.chainParams.GenesisHash consistent with the block we
+	// just built.  If the hashes diverge it means the GenesisConfig in
+	// SphinxChainParameters was built from a different genesis; update it so
+	// that ValidateBlock, StoreChainState, IsSphinxChain, etc. all use the
+	// correct value for the lifetime of this node.
+	actualHash := genesis.GetHash()
+	if bc.chainParams.GenesisHash != actualHash {
+		logger.Warn("Updating chainParams.GenesisHash from %s to %s",
+			bc.chainParams.GenesisHash, actualHash)
+		bc.chainParams.GenesisHash = actualHash // Keep in sync
+	}
 
 	return nil
 }

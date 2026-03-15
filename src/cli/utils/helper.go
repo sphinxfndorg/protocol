@@ -268,6 +268,16 @@ func CallConsensus(numNodes int) error {
 		if err != nil {
 			return fmt.Errorf("node %s blockchain initialization failed: %v", nodeID, err)
 		}
+		bc.SetStorageDB(nodeDB)
+
+		// Execute genesis block now that the DB handle is live.
+		// This fires mintBlockReward for block 0, crediting the vault with
+		// the full 1,000,000,000 SPX that block 1 will distribute.
+		if err := bc.ExecuteGenesisBlock(); err != nil {
+			logger.Warn("ExecuteGenesisBlock failed for %s: %v", nodeID, err)
+		} else {
+			logger.Info("✅ Genesis vault funded for %s", nodeID)
+		}
 
 		// Capture genesis block from first node for validation against other nodes
 		if i == 0 {
@@ -570,26 +580,40 @@ func CallConsensus(numNodes int) error {
 	// ========== TRANSACTION CREATION AND PROPAGATION ==========
 	logger.Info("=== CREATING AND DISTRIBUTING MULTIPLE TRANSACTIONS VIA NOTES ===")
 
-	// Create 10 notes with different balances and recipients
-	// Notes are simplified transaction representations
-	notes := []*types.Note{
-		{To: "bob", From: "alice", Fee: 1000.0, Storage: "test-storage-1"},
-		{To: "charlie", From: "bob", Fee: 500.0, Storage: "test-storage-2"},
-		{To: "alice", From: "charlie", Fee: 200.0, Storage: "test-storage-3"},
-		{To: "david", From: "alice", Fee: 1500.0, Storage: "test-storage-4"},
-		{To: "emma", From: "bob", Fee: 750.0, Storage: "test-storage-5"},
-		{To: "frank", From: "charlie", Fee: 300.0, Storage: "test-storage-6"},
-		{To: "grace", From: "david", Fee: 1200.0, Storage: "test-storage-7"},
-		{To: "henry", From: "emma", Fee: 800.0, Storage: "test-storage-8"},
-		{To: "alice", From: "frank", Fee: 400.0, Storage: "test-storage-9"},
-		{To: "bob", From: "grace", Fee: 950.0, Storage: "test-storage-10"},
+	// Block 1 distributes coins from the genesis vault to every allocation
+	// address. The vault received the full supply as block 0's mining reward.
+	// Notes are built directly from DefaultGenesisAllocations() — no hardcoding.
+	allocs := core.DefaultGenesisAllocations()
+	if len(allocs) == 0 {
+		return fmt.Errorf("DefaultGenesisAllocations is empty")
 	}
 
+	notes := make([]*types.Note, len(allocs))
+	for i, alloc := range allocs {
+		// Convert nSPX balance to SPX float for the Note Fee field.
+		// Note.ToTxs will convert this back to the transaction Amount.
+		balSPX, _ := new(big.Float).Quo(
+			new(big.Float).SetInt(alloc.BalanceNSPX),
+			new(big.Float).SetInt(big.NewInt(1e18)),
+		).Float64()
+
+		notes[i] = &types.Note{
+			From:    core.GenesisVaultAddress, // vault holds all genesis coins
+			To:      alloc.Address,            // each allocation address
+			Fee:     balSPX,                   // exact allocation amount in SPX
+			Storage: fmt.Sprintf("genesis-dist-%d-%s", i, alloc.Label),
+		}
+
+		logger.Info("Note[%d]: vault → %s (%s) %.2f SPX",
+			i, alloc.Address, alloc.Label, balSPX)
+	}
 	// Convert notes to full transactions with proper fields
 	transactions := make([]*types.Transaction, len(notes))
+	senderNonces := make(map[string]uint64)
 	for i, note := range notes {
-		// Convert note to transaction with nonce, gas limit, and gas price
-		transactions[i] = note.ToTxs(uint64(i+1), big.NewInt(21000), big.NewInt(1))
+		nonce := senderNonces[note.From]
+		transactions[i] = note.ToTxs(nonce, big.NewInt(21000), big.NewInt(1))
+		senderNonces[note.From]++
 		logger.Info("Created transaction from note: %s → %s (Amount: %s, ID: %s)",
 			transactions[i].Sender, transactions[i].Receiver, transactions[i].Amount.String(), transactions[i].ID)
 	}

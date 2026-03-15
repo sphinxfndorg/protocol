@@ -20,36 +20,16 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-// go/src/core/state/types.go
-package database
+// go/src/core/transaction/gas.go
+package types
 
-import (
-	"sync"
+import "math/big"
 
-	"github.com/syndtr/goleveldb/leveldb"
-	"github.com/syndtr/goleveldb/leveldb/opt" // Add this import
-)
-
-// DB wraps a LevelDB instance with thread safety
-type DB struct {
-	db    LevelDBInterface // Change to use interface instead of concrete type
-	mutex sync.RWMutex
-}
-
-// LevelDBInterface defines the interface for LevelDB operations
-type LevelDBInterface interface {
-	Put(key []byte, value []byte, wo *opt.WriteOptions) error // Change to opt.WriteOptions
-	Get(key []byte, ro *opt.ReadOptions) ([]byte, error)      // Change to opt.ReadOptions
-	Delete(key []byte, wo *opt.WriteOptions) error            // Change to opt.WriteOptions
-	Close() error
-	Has(key []byte, ro *opt.ReadOptions) (bool, error) // Change to opt.ReadOptions
-}
-
-// Ensure leveldb.DB implements LevelDBInterface
-var _ LevelDBInterface = (*leveldb.DB)(nil)
-
-// LevelDBAdapter adapts leveldb.DB to database.DB interface
-type LevelDBAdapter struct {
-	db *leveldb.DB
-	mu sync.RWMutex
+// GetGasFee returns GasLimit × GasPrice in nSPX.
+// Returns zero if either field is nil.
+func (tx *Transaction) GetGasFee() *big.Int {
+	if tx.GasLimit == nil || tx.GasPrice == nil {
+		return big.NewInt(0)
+	}
+	return new(big.Int).Mul(tx.GasLimit, tx.GasPrice)
 }

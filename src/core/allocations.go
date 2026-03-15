@@ -138,18 +138,6 @@ func DefaultGenesisAllocations() []*GenesisAllocation {
 	}
 }
 
-// newTestAlloc creates a genesis allocation with a human-readable name as the
-// address. These bypass the 40-char hex requirement used for production
-// on-chain addresses — they exist only for devnet / integration testing.
-func newTestAlloc(name string, spx int64) *GenesisAllocation {
-	nspx := new(big.Int).Mul(big.NewInt(spx), big.NewInt(1e18))
-	return &GenesisAllocation{
-		Address:     name,
-		BalanceNSPX: nspx,
-		Label:       "Test",
-	}
-}
-
 // SummariseAllocations iterates over allocs and returns an AllocationSummary.
 // It does not modify the input slice.
 func SummariseAllocations(allocs []*GenesisAllocation) *AllocationSummary {

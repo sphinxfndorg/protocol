@@ -103,12 +103,17 @@ func (tx *Transaction) GetFormattedTimestamps() (localTime, utcTime string) {
 }
 
 // ToTxs converts the current Note instance into a Transaction instance.
-// ToTxs converts the current Note instance into a Transaction instance.
 func (n *Note) ToTxs(nonce uint64, gasLimit, gasPrice *big.Int) *Transaction {
-	// Step 1: Convert the Fee (a float64) to a big integer to be used as the transaction amount.
-	amount := big.NewInt(int64(n.Fee))
+	// Use AmountNSPX if provided (exact big.Int), otherwise fall back to Fee (float64).
+	// AmountNSPX must be used for genesis distribution where amounts are ~10^25 nSPX
+	// and cannot be represented precisely as float64.
+	var amount *big.Int
+	if n.AmountNSPX != nil && n.AmountNSPX.Sign() > 0 {
+		amount = new(big.Int).Set(n.AmountNSPX)
+	} else {
+		amount = big.NewInt(int64(n.Fee))
+	}
 
-	// CRITICAL FIX: Ensure timestamp is valid
 	timestamp := n.Timestamp
 	if timestamp == 0 {
 		timestamp = common.GetCurrentTimestamp()
@@ -117,21 +122,17 @@ func (n *Note) ToTxs(nonce uint64, gasLimit, gasPrice *big.Int) *Transaction {
 		}
 	}
 
-	// Step 2: Create a new Transaction instance based on the current Note, including the gas details.
 	tx := &Transaction{
-		Sender:    n.From,    // Set the sender of the transaction
-		Receiver:  n.To,      // Set the receiver of the transaction
-		Amount:    amount,    // Set the transaction amount (converted from the Fee)
-		GasLimit:  gasLimit,  // Set the gas limit for the transaction
-		GasPrice:  gasPrice,  // Set the gas price for the transaction
-		Timestamp: timestamp, // Set the timestamp of the note (used in the transaction)
-		Nonce:     nonce,     // Set the transaction nonce (used for order in the blockchain)
-		Signature: []byte{},  // Initialize empty signature
+		Sender:    n.From,
+		Receiver:  n.To,
+		Amount:    amount,
+		GasLimit:  gasLimit,
+		GasPrice:  gasPrice,
+		Timestamp: timestamp,
+		Nonce:     nonce,
+		Signature: []byte{},
 	}
-
-	// Generate transaction ID
 	tx.ID = tx.Hash()
-
 	return tx
 }
 

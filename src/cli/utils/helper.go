@@ -580,52 +580,54 @@ func CallConsensus(numNodes int) error {
 	// ========== TRANSACTION CREATION AND PROPAGATION ==========
 	logger.Info("=== CREATING AND DISTRIBUTING MULTIPLE TRANSACTIONS VIA NOTES ===")
 
-	// Block 1 distributes coins from the genesis vault to every allocation
-	// address. The vault received the full supply as block 0's mining reward.
-	// Notes are built directly from DefaultGenesisAllocations() — no hardcoding.
+	// Load the canonical genesis allocation list. Each entry maps an address to
+	// its initial balance (e.g. Founders, Reserve, Treasury, Community, Validators).
+	// Block 1 will execute these transfers, moving funds from the genesis vault to
+	// every recipient defined here.
 	allocs := core.DefaultGenesisAllocations()
 	if len(allocs) == 0 {
 		return fmt.Errorf("DefaultGenesisAllocations is empty")
 	}
 
+	// Build one Note per allocation. Notes are the human-readable precursor to a
+	// signed Transaction — they carry the sender, recipient, and exact amount in
+	// nSPX without any float64 precision loss.
 	notes := make([]*types.Note, len(allocs))
 	for i, alloc := range allocs {
-		// Convert nSPX balance to SPX float for the Note Fee field.
-		// Note.ToTxs will convert this back to the transaction Amount.
-		balSPX, _ := new(big.Float).Quo(
-			new(big.Float).SetInt(alloc.BalanceNSPX),
-			new(big.Float).SetInt(big.NewInt(1e18)),
-		).Float64()
-
 		notes[i] = &types.Note{
-			From:    core.GenesisVaultAddress, // vault holds all genesis coins
-			To:      alloc.Address,            // each allocation address
-			Fee:     balSPX,                   // exact allocation amount in SPX
-			Storage: fmt.Sprintf("genesis-dist-%d-%s", i, alloc.Label),
+			From:       core.GenesisVaultAddress,
+			To:         alloc.Address,
+			Fee:        0,                                   // Fee field is unused; AmountNSPX drives the transfer
+			AmountNSPX: new(big.Int).Set(alloc.BalanceNSPX), // Copy to avoid mutating the allocation table
+			Storage:    fmt.Sprintf("genesis-dist-%d-%s", i, alloc.Label),
 		}
-
-		logger.Info("Note[%d]: vault → %s (%s) %.2f SPX",
-			i, alloc.Address, alloc.Label, balSPX)
+		logger.Info("Note[%d]: vault → %s (%s) %s nSPX",
+			i, alloc.Address, alloc.Label, alloc.BalanceNSPX.String())
 	}
-	// Convert notes to full transactions with proper fields
+
+	// Convert each Note into a signed Transaction. Genesis distribution transfers
+	// are protocol-level operations, so gas is set to zero — charging gas against
+	// the vault being drained would leave it short for the final recipient.
+	// Nonces are tracked per sender so sequential txs from the vault don't collide.
 	transactions := make([]*types.Transaction, len(notes))
 	senderNonces := make(map[string]uint64)
 	for i, note := range notes {
 		nonce := senderNonces[note.From]
-		transactions[i] = note.ToTxs(nonce, big.NewInt(21000), big.NewInt(1))
+		transactions[i] = note.ToTxs(nonce, big.NewInt(0), big.NewInt(0)) // gasLimit=0, gasPrice=0
 		senderNonces[note.From]++
-		logger.Info("Created transaction from note: %s → %s (Amount: %s, ID: %s)",
-			transactions[i].Sender, transactions[i].Receiver, transactions[i].Amount.String(), transactions[i].ID)
 	}
 
-	// Distribute transactions across all nodes' mempools
+	// Replicate the full transaction set into every node's mempool so that
+	// whichever node wins leader election already has all txs ready to include
+	// in the next block. Each tx is deep-copied to prevent shared-pointer races
+	// between nodes running in separate goroutines.
 	for i := 0; i < numNodes; i++ {
 		nodeID := validatorIDs[i]
 		nodeSuccessCount := 0
 
-		// Add each transaction to this node's mempool
 		for _, tx := range transactions {
-			// Create a deep copy of the transaction to avoid reference issues
+			// Deep copy: Amount, GasLimit, GasPrice are *big.Int (pointer types),
+			// and Signature is a byte slice — all must be copied, not shared.
 			txCopy := &types.Transaction{
 				ID:        tx.ID,
 				Sender:    tx.Sender,
@@ -639,17 +641,14 @@ func CallConsensus(numNodes int) error {
 			}
 			copy(txCopy.Signature, tx.Signature)
 
-			// Add to blockchain's mempool
 			if err := blockchains[i].AddTransaction(txCopy); err != nil {
 				logger.Warn("%s failed to add transaction %s: %v", nodeID, tx.ID, err)
 			} else {
 				nodeSuccessCount++
 			}
 		}
-
 		logger.Info("%s added %d/%d transactions to mempool", nodeID, nodeSuccessCount, len(transactions))
 	}
-
 	// Log transaction details for verification
 	logger.Info("=== TRANSACTION DETAILS ===")
 	for i, tx := range transactions {

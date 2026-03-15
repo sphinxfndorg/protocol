@@ -74,33 +74,36 @@ func DefaultGenesisState() *GenesisState {
 // This is the preferred entry-point for testnet / devnet nodes:
 //
 //	state := GenesisStateFromChainParams(GetTestnetChainParams())
+//
+// GenesisStateFromChainParams builds a GenesisState for any network.
+// Identity fields (ChainID, ChainName) are intentionally NOT embedded in
+// the block hash — only the cryptographic fields below affect the hash.
+// This means devnet, testnet, and mainnet all produce the same genesis hash
+// as long as these four fields stay constant.
 func GenesisStateFromChainParams(p *SphinxChainParameters) *GenesisState {
-	extraData := []byte("Sphinx Network Genesis Block - Decentralized Future")
-	initialDiff := big.NewInt(17179869184)
-	initialGas := big.NewInt(5000)
-
-	// Override with values from GenesisConfig if present.
-	if p.GenesisConfig != nil {
-		if p.GenesisConfig.GenesisExtraData != nil {
-			extraData = p.GenesisConfig.GenesisExtraData
-		}
-		if p.GenesisConfig.InitialDifficulty != nil {
-			initialDiff = new(big.Int).Set(p.GenesisConfig.InitialDifficulty)
-		}
-		if p.GenesisConfig.InitialGasLimit != nil {
-			initialGas = new(big.Int).Set(p.GenesisConfig.InitialGasLimit)
-		}
-	}
+	// These four fields are the only ones that feed into BuildBlock() →
+	// FinalizeHash(). They must never change across environments.
+	const (
+		canonicalTimestamp  = int64(1732070400) // Nov 20 2024 00:00:00 UTC, frozen forever
+		canonicalDifficulty = int64(17179869184)
+		canonicalGasLimit   = int64(5000)
+	)
+	canonicalExtraData := []byte("Sphinx Network Genesis Block - Decentralized Future")
 
 	return &GenesisState{
-		ChainID:           p.ChainID,
-		ChainName:         p.ChainName,
-		Symbol:            p.Symbol,
-		Timestamp:         p.GenesisTime,
-		ExtraData:         extraData,
-		InitialDifficulty: initialDiff,
-		InitialGasLimit:   initialGas,
+		// These fields identify the chain but do NOT affect the block hash.
+		ChainID:   p.ChainID,
+		ChainName: p.ChainName,
+		Symbol:    p.Symbol,
+
+		// These fields feed into BuildBlock() and must be identical on every
+		// environment so the genesis hash is the same on devnet, testnet, mainnet.
+		Timestamp:         canonicalTimestamp,
+		ExtraData:         canonicalExtraData,
+		InitialDifficulty: big.NewInt(canonicalDifficulty),
+		InitialGasLimit:   big.NewInt(canonicalGasLimit),
 		Nonce:             common.FormatNonce(1),
+
 		Allocations:       DefaultGenesisAllocations(),
 		InitialValidators: []*GenesisValidator{},
 	}
@@ -345,9 +348,10 @@ func ApplyGenesis(bc *Blockchain, gs *GenesisState) error {
 	return nil
 }
 
-// ApplyGenesisWithCachedBlock is like ApplyGenesis but accepts a pre-built
-// genesis block so BuildBlock() (argon2) is not called again.
-// Use this when multiple nodes start in the same process.
+// ApplyGenesisWithCachedBlock writes genesis_state.json using gs.ChainName,
+// which must come from GenesisStateFromChainParams(bc.chainParams), not from
+// DefaultGenesisState(). The caller (createGenesisBlock) is responsible for
+// passing the environment-correct gs.
 func ApplyGenesisWithCachedBlock(bc *Blockchain, gs *GenesisState, cachedBlock *types.Block) error {
 	if bc == nil {
 		return fmt.Errorf("blockchain is nil")
@@ -355,42 +359,50 @@ func ApplyGenesisWithCachedBlock(bc *Blockchain, gs *GenesisState, cachedBlock *
 	if gs == nil {
 		return fmt.Errorf("genesis state is nil")
 	}
+
+	// If no cached block was provided, build one using the canonical
+	// cryptographic inputs (NOT gs.BuildBlock() which would use gs.ChainName
+	// in log output but more importantly could diverge from the cached hash).
 	if cachedBlock == nil {
-		return ApplyGenesis(bc, gs)
+		cachedBlock = getCachedGenesisBlock()
 	}
 
-	// Check if genesis already applied
 	latest, err := bc.storage.GetLatestBlock()
 	if err == nil && latest != nil && latest.GetHeight() == 0 {
 		existingHash := latest.GetHash()
 		newHash := cachedBlock.GetHash()
 		if existingHash == newHash {
-			logger.Info("ApplyGenesis: genesis block already present (%s), skipping", existingHash)
+			logger.Info("ApplyGenesis (%s): genesis block already present (%s), skipping",
+				gs.ChainName, existingHash)
 			if len(bc.chain) == 0 {
 				bc.chain = []*types.Block{latest}
+			}
+			// Even on skip, rewrite genesis_state.json so ChainName is correct
+			// for the current environment (devnet/testnet/mainnet).
+			if writeErr := gs.writeGenesisStateFile(bc.storage.GetStateDir()); writeErr != nil {
+				logger.Warn("ApplyGenesis (cached, skip): failed to rewrite genesis_state.json: %v", writeErr)
 			}
 			return nil
 		}
 		return fmt.Errorf("genesis conflict: stored=%s new=%s", existingHash, newHash)
 	}
 
-	// Store the cached block
 	if err := bc.storage.StoreBlock(cachedBlock); err != nil {
 		return fmt.Errorf("failed to store cached genesis block: %w", err)
 	}
 
-	// Seed the in-memory chain
 	bc.lock.Lock()
 	bc.chain = []*types.Block{cachedBlock}
 	bc.lock.Unlock()
 
-	// Write genesis_state.json
+	// gs.ChainName is "Sphinx Devnet" / "Sphinx Testnet" / "Sphinx Mainnet"
+	// depending on what the caller passed — this is what ends up in genesis_state.json.
 	if writeErr := gs.writeGenesisStateFile(bc.storage.GetStateDir()); writeErr != nil {
 		logger.Warn("ApplyGenesis (cached): failed to write genesis_state.json: %v", writeErr)
 	}
 
-	logger.Info("✅ ApplyGenesis (cached): genesis block applied — hash=%s, allocations=%d, txs_in_body=%d",
-		cachedBlock.GetHash(), len(gs.Allocations), len(cachedBlock.Body.TxsList))
+	logger.Info("✅ ApplyGenesis (cached): %s genesis applied — hash=%s, allocations=%d",
+		gs.ChainName, cachedBlock.GetHash(), len(gs.Allocations))
 
 	return nil
 }

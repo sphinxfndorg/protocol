@@ -757,14 +757,15 @@ func (s *Storage) SaveCompleteChainState(chainState *ChainState, chainParams *Ch
 			actualGenesisHash = "GENESIS_" + actualGenesisHash
 		}
 
+		// Replace the entire ChainIdentification initialization block:
 		chainState.ChainIdentification = &ChainIdentification{
 			Timestamp: time.Now().Format(time.RFC3339),
 			ChainParams: map[string]interface{}{
 				"chain_id":     chainParams.ChainID,
-				"chain_name":   chainParams.ChainName,
+				"chain_name":   chainParams.ChainName, // was: hardcoded via chainParams ✓ already correct
 				"symbol":       chainParams.Symbol,
 				"genesis_time": chainParams.GenesisTime,
-				"genesis_hash": actualGenesisHash, // Use the actual hash with GENESIS_ prefix
+				"genesis_hash": actualGenesisHash,
 				"version":      chainParams.Version,
 				"magic_number": chainParams.MagicNumber,
 				"default_port": chainParams.DefaultPort,
@@ -774,8 +775,10 @@ func (s *Storage) SaveCompleteChainState(chainState *ChainState, chainParams *Ch
 				"ledger_name": chainParams.LedgerName,
 			},
 			NetworkInfo: map[string]interface{}{
-				"network_name": "Sphinx Mainnet",
-				"protocol":     "SPX/1.0.0",
+				// FIX: was hardcoded "Sphinx Mainnet" — now uses the actual chain name
+				"network_name": chainParams.ChainName,
+				// FIX: was hardcoded "SPX/1.0.0" — now reflects actual protocol version
+				"protocol": fmt.Sprintf("SPX/%s", chainParams.Version),
 			},
 		}
 	}

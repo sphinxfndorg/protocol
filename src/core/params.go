@@ -167,25 +167,40 @@ func GetDefaultPerformanceConfig() *PerformanceConfig {
 
 // GetTestnetChainParams returns testnet parameters
 // Testnet is used for testing before mainnet deployment
+// GetTestnetChainParams returns testnet parameters that inherit the devnet genesis.
+// Chain continuity is preserved by locking GenesisHash to the devnet genesis
+// and incrementing only the ChainID and operational parameters.
 func GetTestnetChainParams() *SphinxChainParameters {
-	// Start with mainnet params as base
 	params := GetSphinxChainParams()
 
-	// Override with testnet-specific values
 	params.ChainName = "Sphinx Testnet"
 	params.ChainID = 17331
 	params.DefaultPort = 32308
-	params.BIP44CoinType = 1 // Same as devnet, different from mainnet
+	params.BIP44CoinType = 1
 	params.LedgerName = "Sphinx Testnet"
 
-	// Testnet-specific adjustments for easier testing
-	params.MaxBlockSize = 4 * 1024 * 1024       // 4MB for testing - larger blocks
-	params.BlockGasLimit = big.NewInt(20000000) // 20 million gas for testing - double mainnet
+	// Inherit the devnet genesis hash — testnet continues from the same genesis
+	// block, so nodes that started on devnet can verify the ancestry.
+	params.GenesisHash = GetGenesisHash() // same hash, same block 0
 
-	// Faster block times for testing to speed up test execution
-	params.ConsensusConfig.BlockTime = 5 * time.Second // Half of mainnet
-	params.ConsensusConfig.EpochLength = 50            // Shorter epochs
+	// Looser block limits for public testnet
+	params.MaxBlockSize = 4 * 1024 * 1024
+	params.BlockGasLimit = big.NewInt(20000000)
 
+	params.ConsensusConfig.BlockTime = 5 * time.Second
+	params.ConsensusConfig.EpochLength = 50
+
+	return params
+}
+
+// GetMainnetChainParams inherits genesis from testnet/devnet lineage.
+// The genesis block is identical across all environments; only operational
+// parameters (ports, gas limits, block times) change per environment.
+func GetMainnetChainParams() *SphinxChainParameters {
+	params := GetSphinxChainParams()
+
+	// GenesisHash is already set by GetSphinxChainParams → GetGenesisHash().
+	// No override needed — mainnet shares the same genesis ancestry.
 	return params
 }
 

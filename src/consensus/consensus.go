@@ -383,28 +383,37 @@ func (c *Consensus) consensusLoop() {
 
 	for {
 		select {
-		case <-viewTimer.C: // View change timeout triggered
-			// Check if we should prevent view change due to active consensus
+		case <-viewTimer.C:
 			if c.shouldPreventViewChange() {
-				logger.Info("🛑 Preventing view change - active consensus")
-				viewTimer.Reset(10 * time.Second) // Short retry
+				viewTimer.Reset(10 * time.Second)
 				continue
 			}
 
-			// Check if we're at genesis height
 			c.mu.RLock()
 			currentHeight := c.currentHeight
 			c.mu.RUnlock()
 
 			if currentHeight == 0 {
-				logger.Info("⏳ At genesis height, extending view change timeout")
-				viewTimer.Reset(30 * time.Second) // Longer timeout for genesis
+				viewTimer.Reset(30 * time.Second)
 				continue
 			}
 
-			// Initiate view change
+			// NEW: also skip view change if the chain has already advanced past height 0
+			// (meaning consensus already succeeded for this round)
+			if c.blockChain != nil {
+				chainHeight := c.blockChain.GetLatestBlock()
+				if chainHeight != nil && chainHeight.GetHeight() > currentHeight {
+					// Chain advanced — suppress view change, just update our height
+					c.mu.Lock()
+					c.currentHeight = chainHeight.GetHeight()
+					c.mu.Unlock()
+					viewTimer.Reset(c.timeout)
+					continue
+				}
+			}
+
 			c.startViewChange()
-			viewTimer.Reset(c.timeout) // Reset timer for next view change
+			viewTimer.Reset(c.timeout)
 
 		case <-c.ctx.Done(): // Consensus stopping
 			logger.Info("Consensus loop stopped for node %s", c.nodeID)

@@ -415,3 +415,23 @@ func (p *SphinxChainParameters) GetRecommendedBlockSize() uint64 {
 	// Default to 90% of maximum to leave room for growth
 	return p.MaxBlockSize * 90 / 100
 }
+
+// NetworkPhase returns the ChainPhase constant matching this parameter set.
+// Used by chain_phase.go to determine operational mode without importing
+// the chain_phase package (avoids a circular dependency).
+func (p *SphinxChainParameters) NetworkPhase() string {
+	switch {
+	case p.IsDevnet():
+		return "devnet"
+	case p.IsTestnet():
+		return "testnet"
+	default:
+		return "mainnet"
+	}
+}
+
+// RequiresDistributionBeforePromotion returns true for devnet — the network
+// must drain the genesis vault before it can be promoted to testnet/mainnet.
+func (p *SphinxChainParameters) RequiresDistributionBeforePromotion() bool {
+	return p.IsDevnet()
+}

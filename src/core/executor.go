@@ -31,15 +31,11 @@ import (
 	logger "github.com/sphinxorg/protocol/src/log"
 )
 
-// maxSupplyNSPX is the hard cap: 5 billion SPX expressed in nSPX.
 var maxSupplyNSPX = new(big.Int).Mul(
 	big.NewInt(5_000_000_000),
 	big.NewInt(1e18),
 )
 
-// newStateDB opens the StateDB for this blockchain node.
-// It calls bc.storage.GetDB() which opens (or returns a cached) *database.DB
-// against the node's LevelDB directory.
 func (bc *Blockchain) newStateDB() (*StateDB, error) {
 	db, err := bc.storage.GetDB()
 	if err != nil {
@@ -48,19 +44,42 @@ func (bc *Blockchain) newStateDB() (*StateDB, error) {
 	return NewStateDB(db), nil
 }
 
-// applyTransactions applies every transaction in block to stateDB,
-// enforcing nonce ordering, balance sufficiency, and gas fee collection.
-// Genesis funding transactions (sender == "genesis") are skipped because
-// ApplyGenesisState has already credited them.
-// applyTransactions — genesis sender check no longer needed,
-// block 0 body is empty. Keep for safety but it will never fire.
+// IsDistributionComplete returns true when the genesis vault has been fully
+// drained — i.e. every allocation has been transferred out of GenesisVaultAddress.
+// This is the signal that devnet's bootstrap phase is finished and the chain
+// is ready to be promoted to testnet or mainnet.
+func (bc *Blockchain) IsDistributionComplete() bool {
+	stateDB, err := bc.newStateDB()
+	if err != nil {
+		logger.Warn("IsDistributionComplete: cannot open stateDB: %v", err)
+		return false
+	}
+	bal := stateDB.GetBalance(GenesisVaultAddress)
+	complete := bal.Sign() == 0
+	if complete {
+		logger.Info("✅ IsDistributionComplete: vault %s balance = 0, distribution done", GenesisVaultAddress)
+	}
+	return complete
+}
+
+// TotalAllocatedNSPX returns the sum of all genesis allocations in nSPX.
+// Used to calculate how many more blocks need to run before distribution is done.
+func TotalAllocatedNSPX() *big.Int {
+	allocs := DefaultGenesisAllocations()
+	total := new(big.Int)
+	for _, a := range allocs {
+		if a.BalanceNSPX != nil {
+			total.Add(total, a.BalanceNSPX)
+		}
+	}
+	return total
+}
+
 func (bc *Blockchain) applyTransactions(block *types.Block, stateDB *StateDB) error {
 	proposerID := block.Header.ProposerID
 
 	for i, tx := range block.Body.TxsList {
 		if tx.Sender == "genesis" {
-			// Should not occur — genesis block body is now empty.
-			// Kept as a safety guard.
 			continue
 		}
 
@@ -95,8 +114,6 @@ func (bc *Blockchain) applyTransactions(block *types.Block, stateDB *StateDB) er
 	return nil
 }
 
-// mintBlockReward issues BaseBlockReward to the block proposer, respecting
-// the hard 5 billion SPX supply cap.  New SPX enters circulation here.
 func (bc *Blockchain) mintBlockReward(block *types.Block, stateDB *StateDB) {
 	if bc.chainParams == nil {
 		return
@@ -111,8 +128,6 @@ func (bc *Blockchain) mintBlockReward(block *types.Block, stateDB *StateDB) {
 	var reward *big.Int
 
 	if block.GetHeight() == 0 {
-		// Block 0 (genesis): mint the ENTIRE allocation supply to the vault.
-		// This is the only source of SPX — no coins exist before this.
 		allocs := DefaultGenesisAllocations()
 		reward = new(big.Int)
 		for _, a := range allocs {
@@ -123,7 +138,6 @@ func (bc *Blockchain) mintBlockReward(block *types.Block, stateDB *StateDB) {
 		logger.Info("mintBlockReward: genesis mint %s nSPX → vault %s",
 			reward.String(), proposerID)
 	} else {
-		// Normal blocks: standard per-block reward
 		reward = new(big.Int).Set(bc.chainParams.BaseBlockReward)
 		if reward.Sign() <= 0 {
 			return
@@ -151,8 +165,6 @@ func (bc *Blockchain) mintBlockReward(block *types.Block, stateDB *StateDB) {
 		rewardSPX, proposerID, block.GetHeight())
 }
 
-// ExecuteBlock is called from CommitBlock.  It applies transactions, mints the
-// block reward, and returns the new StateRoot to stamp into the block header.
 func (bc *Blockchain) ExecuteBlock(block *types.Block) ([]byte, error) {
 	stateDB, err := bc.newStateDB()
 	if err != nil {
@@ -172,10 +184,6 @@ func (bc *Blockchain) ExecuteBlock(block *types.Block) ([]byte, error) {
 	return stateRoot, nil
 }
 
-// ExecuteGenesisBlock runs ExecuteBlock on block 0 so mintBlockReward fires
-// and credits GenesisVaultAddress with the full allocation supply.
-// Must be called AFTER SetStorageDB — it needs a live DB handle.
-// It is idempotent: if the vault already has a non-zero balance it returns nil.
 func (bc *Blockchain) ExecuteGenesisBlock() error {
 	bc.lock.RLock()
 	if len(bc.chain) == 0 || bc.chain[0] == nil {
@@ -185,7 +193,6 @@ func (bc *Blockchain) ExecuteGenesisBlock() error {
 	genesisBlock := bc.chain[0]
 	bc.lock.RUnlock()
 
-	// Idempotency: skip if vault was already funded.
 	stateDB, err := bc.newStateDB()
 	if err != nil {
 		return fmt.Errorf("ExecuteGenesisBlock: %w", err)

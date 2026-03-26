@@ -37,7 +37,7 @@ import (
 	"github.com/syndtr/goleveldb/leveldb"
 )
 
-// SIPS-0002 https://github.com/sphinx-core/sips/wiki/SIPS-0002
+// SIPS-0011 https://github.com/sphinxorg/SIPS/wiki/sips0011
 
 // =============================================================================
 // COMMITMENT SCHEME — SigCommitment vs Pedersen

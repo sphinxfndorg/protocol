@@ -29,6 +29,8 @@ import (
 	"github.com/sphinxorg/protocol/src/crypto/SPHINCSPLUS-golang/sphincs"
 )
 
+// SIPS-0011 https://github.com/sphinxorg/SIPS/wiki/sips0011
+
 // SerializeSignature serializes the SPHINCS+ signature into a byte slice.
 func (sm *SphincsManager) SerializeSignature(sig *sphincs.SPHINCS_SIG) ([]byte, error) {
 	return sig.SerializeSignature()

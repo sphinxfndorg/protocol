@@ -33,7 +33,7 @@ import (
 	"time"
 )
 
-// SIPS-0002 https://github.com/sphinx-core/sips/wiki/SIPS-0002
+// SIPS-0011 https://github.com/sphinxorg/SIPS/wiki/sips0011
 
 // generateNonce creates a cryptographically secure 16-byte random nonce.
 func generateNonce() ([]byte, error) {

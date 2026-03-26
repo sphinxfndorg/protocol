@@ -31,6 +31,8 @@ import (
 	"github.com/sphinxorg/protocol/src/common"
 )
 
+// SIPS-0011 https://github.com/sphinxorg/SIPS/wiki/sips0011
+
 var (
 	mu          sync.Mutex
 	storedProof []byte // Global variable for storing the proof

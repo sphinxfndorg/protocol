@@ -20,7 +20,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-// go/src/core/sphincs/sign/test_sign.go
+// go/src/core/sphincs/sign/test_sign.goss
 package main
 
 import (
@@ -38,6 +38,8 @@ import (
 
 	"github.com/syndtr/goleveldb/leveldb"
 )
+
+// SIPS-0011 https://github.com/sphinxorg/SIPS/wiki/sips0011
 
 // =============================================================================
 // SPHINCS+ Transaction Protocol — Alice sends to Charlie

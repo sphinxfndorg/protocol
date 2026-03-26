@@ -153,12 +153,12 @@ type NodePortConfig struct {
 type DiscoveryMessage struct {
 	Type       string       `json:"type"`
 	Data       []byte       `json:"data"`
-	Signature  []byte       `json:"signature"`
 	PublicKey  []byte       `json:"public_key"`
 	MerkleRoot *uint256.Int `json:"merkle_root"`
 	Proof      []byte       `json:"proof"`
 	Nonce      []byte       `json:"nonce"`
 	Timestamp  []byte       `json:"timestamp"`
+	Commitment []byte       `json:"commitment"` // NEW: H(sigBytes||pk||timestamp||nonce||msg), 32 bytes
 }
 
 // PingData for PING messages.

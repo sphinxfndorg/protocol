@@ -331,3 +331,20 @@ type AllocationSet struct {
 	index map[string]*GenesisAllocation
 	total *big.Int // cached total supply in nSPX
 }
+
+// ChainPhase identifies which operational phase a network is in.
+type ChainPhase string
+
+// ChainCheckpoint captures the state at the moment devnet finishes distribution.
+// It is written to disk so testnet/mainnet nodes can bootstrap from it without
+// re-running devnet.
+type ChainCheckpoint struct {
+	Phase           ChainPhase `json:"phase"`             // "devnet"
+	GenesisHash     string     `json:"genesis_hash"`      // canonical genesis hash
+	TipHeight       uint64     `json:"tip_height"`        // last devnet block height
+	TipHash         string     `json:"tip_hash"`          // last devnet block hash
+	VaultBalance    string     `json:"vault_balance"`     // should be "0"
+	TotalSupply     string     `json:"total_supply"`      // circulating supply in nSPX
+	Timestamp       string     `json:"timestamp"`         // RFC3339 when checkpoint was taken
+	DistributedNSPX string     `json:"distributed_n_spx"` // total nSPX distributed
+}

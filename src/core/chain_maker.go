@@ -34,9 +34,6 @@ import (
 	logger "github.com/sphinxorg/protocol/src/log"
 )
 
-// ChainPhase identifies which operational phase a network is in.
-type ChainPhase string
-
 const (
 	// PhaseDevnet is the bootstrap phase: the vault is being drained via
 	// distribution blocks.  The chain must NOT be promoted until
@@ -51,20 +48,6 @@ const (
 	// PhaseMainnet is production.  Same ancestry as devnet and testnet.
 	PhaseMainnet ChainPhase = "mainnet"
 )
-
-// ChainCheckpoint captures the state at the moment devnet finishes distribution.
-// It is written to disk so testnet/mainnet nodes can bootstrap from it without
-// re-running devnet.
-type ChainCheckpoint struct {
-	Phase           ChainPhase `json:"phase"`             // "devnet"
-	GenesisHash     string     `json:"genesis_hash"`      // canonical genesis hash
-	TipHeight       uint64     `json:"tip_height"`        // last devnet block height
-	TipHash         string     `json:"tip_hash"`          // last devnet block hash
-	VaultBalance    string     `json:"vault_balance"`     // should be "0"
-	TotalSupply     string     `json:"total_supply"`      // circulating supply in nSPX
-	Timestamp       string     `json:"timestamp"`         // RFC3339 when checkpoint was taken
-	DistributedNSPX string     `json:"distributed_n_spx"` // total nSPX distributed
-}
 
 // checkpointPath returns the path to the checkpoint file for a node data dir.
 func checkpointPath(dataDir string) string {

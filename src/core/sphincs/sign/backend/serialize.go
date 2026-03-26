@@ -29,21 +29,15 @@ import (
 	"github.com/sphinxorg/protocol/src/crypto/SPHINCSPLUS-golang/sphincs"
 )
 
-// SerializeSignature serializes the signature into a byte slice
+// SerializeSignature serializes the SPHINCS+ signature into a byte slice.
 func (sm *SphincsManager) SerializeSignature(sig *sphincs.SPHINCS_SIG) ([]byte, error) {
-	return sig.SerializeSignature() // Calls the signature's built-in SerializeSignature method
+	return sig.SerializeSignature()
 }
 
-// DeserializeSignature deserializes a byte slice into a signature
+// DeserializeSignature deserializes a byte slice back into a SPHINCS_SIG struct.
 func (sm *SphincsManager) DeserializeSignature(sigBytes []byte) (*sphincs.SPHINCS_SIG, error) {
-	// Ensure the SPHINCSParameters are initialized
 	if sm.parameters == nil || sm.parameters.Params == nil {
 		return nil, errors.New("SPHINCSParameters are not initialized")
 	}
-
-	// Extract the internal *parameters.Parameters from SPHINCSParameters
-	sphincsParams := sm.parameters.Params
-
-	// Call the SPHINCS method to deserialize the signature using the extracted params
-	return sphincs.DeserializeSignature(sphincsParams, sigBytes)
+	return sphincs.DeserializeSignature(sm.parameters.Params, sigBytes)
 }

@@ -251,11 +251,12 @@ type SigningService struct {
 
 // SignedMessage represents a complete signed message with all components
 type SignedMessage struct {
-	Signature  []byte
-	Timestamp  []byte
-	Nonce      []byte
-	MerkleRoot *hashtree.HashTreeNode
-	Data       []byte
+	Signature  []byte                 // Serialized SPHINCS+ signature bytes
+	Timestamp  []byte                 // 8-byte big-endian Unix timestamp (from SignMessage)
+	Nonce      []byte                 // 16-byte random nonce (from SignMessage)
+	MerkleRoot *hashtree.HashTreeNode // Merkle root node built from sig chunks
+	Commitment []byte                 // NEW: H(sigBytes||pk||timestamp||nonce||data), 32 bytes
+	Data       []byte                 // Original message data that was signed
 }
 
 // ConsensusSignature represents a captured signature from consensus messages

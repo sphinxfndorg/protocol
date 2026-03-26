@@ -33,10 +33,11 @@ import (
 
 // SIPS-0002 https://github.com/sphinx-core/sips/wiki/SIPS-0002
 
-// SphincsManager holds a reference to KeyManager
+// SphincsManager holds a reference to KeyManager, the SPHINCS+ parameters,
+// and the LevelDB instance used for timestamp-nonce replay prevention.
 type SphincsManager struct {
 	db         *leveldb.DB
 	keyManager *key.KeyManager
-	parameters *params.SPHINCSParameters // Add SPHINCSParameters
-	mu         sync.RWMutex              // Mutex for thread-safe database access
+	parameters *params.SPHINCSParameters
+	mu         sync.RWMutex // Mutex for thread-safe database access
 }

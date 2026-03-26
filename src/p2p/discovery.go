@@ -372,8 +372,9 @@ func (s *Server) iterativeFindNode(targetID network.NodeID) {
 						return
 					}
 
-					// Deserialize local node's key pair
-					privateKey, _, err := km.DeserializeKeyPair(s.localNode.PrivateKey, s.localNode.PublicKey)
+					// Deserialize local node's key pair.
+					// We need both sk (for signing) and pk (for the commitment).
+					privateKey, publicKey, err := km.DeserializeKeyPair(s.localNode.PrivateKey, s.localNode.PublicKey)
 					if err != nil {
 						log.Printf("iterativeFindNode: Failed to deserialize key pair: %v", err)
 						errorCh <- fmt.Errorf("failed to deserialize key pair: %v", err)
@@ -398,8 +399,10 @@ func (s *Server) iterativeFindNode(targetID network.NodeID) {
 					timestamp := make([]byte, 8)
 					binary.BigEndian.PutUint64(timestamp, uint64(data.Timestamp.Unix()))
 
-					// Sign the message using SPHINCS+ post-quantum signature
-					signature, merkleRoot, _, _, err := s.sphincsMgr.SignMessage(dataBytes, privateKey)
+					// Sign the message using SPHINCS+ post-quantum signature.
+					// FIX: pass publicKey as third argument; capture all 6 return values
+					// including the new commitment.
+					signature, merkleRoot, sigTimestamp, sigNonce, commitment, err := s.sphincsMgr.SignMessage(dataBytes, privateKey, publicKey)
 					if err != nil {
 						errorCh <- err
 						return
@@ -420,11 +423,15 @@ func (s *Server) iterativeFindNode(targetID network.NodeID) {
 						return
 					}
 
-					// Generate signature proof for verification
-					proofData := append(timestamp, append(nonce, dataBytes...)...)
+					// Generate signature proof.
+					// FIX: fold commitment into leaves so GenerateSigProof stays at 3 args.
+					// Both sender and receiver must use leaves = [merkleRootHash, commitment].
+					// sigTimestamp and sigNonce come from SignMessage (bound inside commitment).
+					proofData := append(sigTimestamp, append(sigNonce, dataBytes...)...)
+					proofLeaves := [][]byte{merkleRoot.Hash.Bytes(), commitment}
 					proof, err := sigproof.GenerateSigProof(
 						[][]byte{proofData},
-						[][]byte{merkleRoot.Hash.Bytes()},
+						proofLeaves,
 						s.localNode.PublicKey,
 					)
 					if err != nil {
@@ -432,16 +439,22 @@ func (s *Server) iterativeFindNode(targetID network.NodeID) {
 						return
 					}
 
-					// Create discovery message
+					// Create discovery message.
+					// Timestamp and Nonce fields carry the values SignMessage generated
+					// (which are bound inside commitment) so the receiver can verify them.
 					msg := network.DiscoveryMessage{
 						Type:       "FINDNODE",
 						Data:       dataBytes,
 						PublicKey:  s.localNode.PublicKey,
-						MerkleRoot: merkleRoot.Hash, // Use *uint256.Int directly
+						MerkleRoot: merkleRoot.Hash,
 						Proof:      proof,
-						Nonce:      nonce,
-						Timestamp:  timestamp,
+						Nonce:      sigNonce,
+						Timestamp:  sigTimestamp,
+						Commitment: commitment, // 32-byte commitment transmitted to receiver
 					}
+
+					// Suppress unused variable warning for outer timestamp var
+					_ = timestamp
 
 					// Send UDP message to peer
 					s.sendUDPMessage(addr, msg)

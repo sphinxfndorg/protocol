@@ -40,6 +40,36 @@ import (
 	"github.com/sphinxorg/protocol/src/rpc"
 )
 
+// maxMessageSize is the maximum allowed TCP message size in bytes.
+//
+// Breakdown of the largest legitimate wire payload:
+//
+//	sigBytes (SHAKE-256-256s)    7,856 B   SPHINCS+ signature
+//	pkBytes                         32 B   public key
+//	merkleRootHash                  32 B   receipt hash
+//	commitment                      32 B   tx fingerprint
+//	timestamp                        8 B   Unix timestamp
+//	nonce                           16 B   random nonce
+//	proof                           32 B   light-client proof
+//	message                     ~1,024 B   transaction payload (typical)
+//	encryption overhead          ~1,024 B   SecureMessage wrapping
+//	─────────────────────────────────────
+//	Total realistic maximum      ~10,056 B   (~10 KB)
+//
+// We set the limit to 64 KB to give ample headroom for:
+//   - Larger transaction messages
+//   - Encryption/framing overhead from SecureMessage
+//   - Future protocol extensions
+//   - SHAKE-256-256f sigBytes (35,664 B) if the faster parameter set is used
+//
+// 64 KB is still strict enough to reject malformed or malicious oversized
+// frames before allocating memory for them.
+//
+// PRODUCTION NOTE: If you switch back to SHAKE-256-256f parameters
+// (sigBytes = 35,664 B), raise this constant to at least 128*1024 (128 KB).
+// The current value of 64 KB is sized for SHAKE-256-256s (sigBytes = 7,856 B).
+const maxMessageSize = 64 * 1024 // 64 KB
+
 // Global server instance for connection management.
 var globalServer = &TCPServer{
 	connections: make(map[string]net.Conn),
@@ -133,8 +163,15 @@ func (s *TCPServer) handleConnection(conn net.Conn, nodeAddr string) {
 			return
 		}
 		length := binary.BigEndian.Uint32(lengthBuf)
-		if length > 1024*1024 {
-			log.Printf("TCP message too large on %s: %d bytes", nodeAddr, length)
+
+		// Reject frames that exceed the maximum allowed size.
+		// This prevents memory exhaustion from malformed or malicious frames
+		// while still accommodating the full SPHINCS+ wire payload (~8 KB with
+		// SHAKE-256-256s params, ~36 KB with SHAKE-256-256f params).
+		// See maxMessageSize for the size breakdown.
+		if length > maxMessageSize {
+			log.Printf("TCP message too large on %s: %d bytes (limit: %d bytes = %d KB)",
+				nodeAddr, length, maxMessageSize, maxMessageSize/1024)
 			return
 		}
 
@@ -284,7 +321,7 @@ func ConnectTCP(address string, messageCh chan *security.Message) (net.Conn, err
 			globalServer.mu.Unlock()
 
 			// Start background goroutine to read responses
-			go func(conn net.Conn, address string) { // Remove cancel from goroutine
+			go func(conn net.Conn, address string) {
 				defer func() {
 					globalServer.mu.Lock()
 					delete(globalServer.connections, address)
@@ -305,10 +342,15 @@ func ConnectTCP(address string, messageCh chan *security.Message) (net.Conn, err
 						return
 					}
 					length := binary.BigEndian.Uint32(lengthBuf)
-					if length > 1024*1024 {
-						log.Printf("TCP response too large on %s: %d bytes", address, length)
+
+					// Same size limit as the server side — reject oversized frames.
+					// See maxMessageSize for the full breakdown.
+					if length > maxMessageSize {
+						log.Printf("TCP response too large on %s: %d bytes (limit: %d bytes = %d KB)",
+							address, length, maxMessageSize, maxMessageSize/1024)
 						return
 					}
+
 					respData := make([]byte, length)
 					if _, err := io.ReadFull(reader, respData); err != nil {
 						if err != io.EOF && !strings.Contains(err.Error(), "closed") {
@@ -444,12 +486,4 @@ func DisconnectNode(node *network.Node) error {
 	delete(globalServer.encKeys, addr)
 	log.Printf("Disconnected from node %s at %s", node.ID, addr)
 	return nil
-}
-
-// min returns the minimum of two integers.
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

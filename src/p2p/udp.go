@@ -279,12 +279,26 @@ func (s *Server) handleDiscoveryMessage(msg *network.DiscoveryMessage, addr *net
 		return
 	}
 
-	// Verify the cryptographic proof
+	// Validate commitment presence (32 bytes required).
+	// The commitment = H(sigBytes||pk||timestamp||nonce||message) proves that the
+	// Merkle root was derived from a genuine SPHINCS+ signing operation.
+	if len(msg.Commitment) != 32 {
+		log.Printf("handleDiscoveryMessage: Missing or malformed commitment in %s message from %s for %s",
+			msg.Type, addr.String(), s.localNode.Address)
+		return
+	}
+
+	// Verify the cryptographic proof.
+	// Regenerate the proof using the same leaves the sender used:
+	//   leaves = [merkleRootHash, commitment]
+	// This keeps GenerateSigProof at 3 arguments while binding the commitment
+	// to the proof so it cannot be swapped out without proof verification failing.
 	dataBytes := msg.Data
 	proofData := append(msg.Timestamp, append(msg.Nonce, dataBytes...)...)
+	proofLeaves := [][]byte{msg.MerkleRoot.Bytes(), msg.Commitment}
 	regeneratedProof, err := sigproof.GenerateSigProof(
 		[][]byte{proofData},
-		[][]byte{msg.MerkleRoot.Bytes()},
+		proofLeaves,
 		msg.PublicKey,
 	)
 	if err != nil {
@@ -545,8 +559,9 @@ func (s *Server) sendUDPPing(addr *net.UDPAddr, toID network.NodeID, nonce []byt
 	log.Printf("sendUDPPing: Deserializing keys for node %s: PrivateKey length=%d, PublicKey length=%d",
 		s.localNode.Address, len(s.localNode.PrivateKey), len(s.localNode.PublicKey))
 
-	// Deserialize key pair
-	privateKey, _, err := km.DeserializeKeyPair(s.localNode.PrivateKey, s.localNode.PublicKey)
+	// Deserialize key pair.
+	// FIX: capture publicKey so it can be passed to SignMessage.
+	privateKey, publicKey, err := km.DeserializeKeyPair(s.localNode.PrivateKey, s.localNode.PublicKey)
 	if err != nil {
 		log.Printf("sendUDPPing: Failed to deserialize key pair for %s: %v", s.localNode.Address, err)
 		return
@@ -570,12 +585,9 @@ func (s *Server) sendUDPPing(addr *net.UDPAddr, toID network.NodeID, nonce []byt
 
 	log.Printf("sendUDPPing: PING data for %s to %s: %s", s.localNode.Address, addr.String(), string(dataBytes))
 
-	// Create timestamp bytes
-	timestamp := make([]byte, 8)
-	binary.BigEndian.PutUint64(timestamp, uint64(data.Timestamp.Unix()))
-
-	// Sign the message
-	signature, merkleRootNode, _, _, err := s.sphincsMgr.SignMessage(dataBytes, privateKey)
+	// Sign the message.
+	// FIX: pass publicKey as third arg; capture all 6 return values including commitment.
+	signature, merkleRootNode, sigTimestamp, sigNonce, commitment, err := s.sphincsMgr.SignMessage(dataBytes, privateKey, publicKey)
 	if err != nil {
 		log.Printf("sendUDPPing: Failed to sign PING message for %s to %s: %v",
 			s.localNode.Address, addr.String(), err)
@@ -598,11 +610,14 @@ func (s *Server) sendUDPPing(addr *net.UDPAddr, toID network.NodeID, nonce []byt
 		return
 	}
 
-	// Generate cryptographic proof
-	proofData := append(timestamp, append(nonce, dataBytes...)...)
+	// Generate cryptographic proof.
+	// FIX: fold commitment into proof leaves so GenerateSigProof stays at 3 args.
+	// Receiver regenerates with the same leaves = [merkleRootHash, commitment].
+	proofData := append(sigTimestamp, append(sigNonce, dataBytes...)...)
+	proofLeaves := [][]byte{merkleRootNode.Hash.Bytes(), commitment}
 	proof, err := sigproof.GenerateSigProof(
 		[][]byte{proofData},
-		[][]byte{merkleRootNode.Hash.Bytes()},
+		proofLeaves,
 		s.localNode.PublicKey,
 	)
 	if err != nil {
@@ -611,15 +626,18 @@ func (s *Server) sendUDPPing(addr *net.UDPAddr, toID network.NodeID, nonce []byt
 		return
 	}
 
-	// Create and send discovery message
+	// Create and send discovery message.
+	// Nonce and Timestamp use the values from SignMessage (bound inside commitment)
+	// so the receiver can verify them consistently.
 	msg := network.DiscoveryMessage{
 		Type:       "PING",
 		Data:       dataBytes,
 		PublicKey:  s.localNode.PublicKey,
 		MerkleRoot: merkleRootNode.Hash, // Use *uint256.Int directly
 		Proof:      proof,
-		Nonce:      nonce,
-		Timestamp:  timestamp,
+		Nonce:      sigNonce,     // use nonce from SignMessage (bound inside commitment)
+		Timestamp:  sigTimestamp, // use timestamp from SignMessage (bound inside commitment)
+		Commitment: commitment,   // 32-byte commitment transmitted to receiver
 	}
 
 	log.Printf("sendUDPPing: Sending PING message from %s to %s: Type=%s, Nonce=%x, Timestamp=%x",
@@ -643,8 +661,9 @@ func (s *Server) sendUDPPong(addr *net.UDPAddr, toID network.NodeID, nonce []byt
 	log.Printf("sendUDPPong: Deserializing keys for node %s: PrivateKey length=%d, PublicKey length=%d",
 		s.localNode.Address, len(s.localNode.PrivateKey), len(s.localNode.PublicKey))
 
-	// Deserialize key pair
-	privateKey, _, err := km.DeserializeKeyPair(s.localNode.PrivateKey, s.localNode.PublicKey)
+	// Deserialize key pair.
+	// FIX: capture publicKey so it can be passed to SignMessage.
+	privateKey, publicKey, err := km.DeserializeKeyPair(s.localNode.PrivateKey, s.localNode.PublicKey)
 	if err != nil {
 		log.Printf("sendUDPPong: Failed to deserialize key pair for %s: %v", s.localNode.Address, err)
 		return
@@ -668,12 +687,9 @@ func (s *Server) sendUDPPong(addr *net.UDPAddr, toID network.NodeID, nonce []byt
 
 	log.Printf("sendUDPPong: PONG data for %s to %s: %s", s.localNode.Address, addr.String(), string(dataBytes))
 
-	// Create timestamp bytes
-	timestamp := make([]byte, 8)
-	binary.BigEndian.PutUint64(timestamp, uint64(data.Timestamp.Unix()))
-
-	// Sign the message
-	signature, merkleRootNode, _, _, err := s.sphincsMgr.SignMessage(dataBytes, privateKey)
+	// Sign the message.
+	// FIX: pass publicKey as third arg; capture all 6 return values including commitment.
+	signature, merkleRootNode, sigTimestamp, sigNonce, commitment, err := s.sphincsMgr.SignMessage(dataBytes, privateKey, publicKey)
 	if err != nil {
 		log.Printf("sendUDPPong: Failed to sign PONG message for %s to %s: %v",
 			s.localNode.Address, addr.String(), err)
@@ -696,11 +712,13 @@ func (s *Server) sendUDPPong(addr *net.UDPAddr, toID network.NodeID, nonce []byt
 		return
 	}
 
-	// Generate cryptographic proof
-	proofData := append(timestamp, append(nonce, dataBytes...)...)
+	// Generate cryptographic proof.
+	// FIX: fold commitment into proof leaves.
+	proofData := append(sigTimestamp, append(sigNonce, dataBytes...)...)
+	proofLeaves := [][]byte{merkleRootNode.Hash.Bytes(), commitment}
 	proof, err := sigproof.GenerateSigProof(
 		[][]byte{proofData},
-		[][]byte{merkleRootNode.Hash.Bytes()},
+		proofLeaves,
 		s.localNode.PublicKey,
 	)
 	if err != nil {
@@ -716,8 +734,9 @@ func (s *Server) sendUDPPong(addr *net.UDPAddr, toID network.NodeID, nonce []byt
 		PublicKey:  s.localNode.PublicKey,
 		MerkleRoot: merkleRootNode.Hash,
 		Proof:      proof,
-		Nonce:      nonce,
-		Timestamp:  timestamp,
+		Nonce:      sigNonce,
+		Timestamp:  sigTimestamp,
+		Commitment: commitment,
 	}
 
 	s.sendUDPMessage(addr, msg)
@@ -773,13 +792,15 @@ func (s *Server) sendUDPNeighbors(addr *net.UDPAddr, targetID network.NodeID, no
 	log.Printf("sendUDPNeighbors: Deserializing keys for node %s: PrivateKey length=%d, PublicKey length=%d",
 		s.localNode.Address, len(s.localNode.PrivateKey), len(s.localNode.PublicKey))
 
-	// Deserialize key pair
-	privateKey, _, err := km.DeserializeKeyPair(s.localNode.PrivateKey, s.localNode.PublicKey)
+	// Deserialize key pair.
+	// FIX: capture publicKey so it can be passed to SignMessage.
+	privateKey, publicKey, err := km.DeserializeKeyPair(s.localNode.PrivateKey, s.localNode.PublicKey)
 	if err != nil {
 		log.Printf("sendUDPNeighbors: Failed to deserialize key pair: %v", err)
 		return
 	}
 
+	// Refresh neighbor list (cache may have been stale).
 	// Find closest peers (again, in case cache wasn't used)
 	peers := s.nodeManager.FindClosestPeers(targetID, s.nodeManager.K)
 	neighbors = make([]network.PeerInfo, 0, len(peers))
@@ -801,12 +822,9 @@ func (s *Server) sendUDPNeighbors(addr *net.UDPAddr, targetID network.NodeID, no
 		return
 	}
 
-	// Create timestamp bytes
-	timestamp := make([]byte, 8)
-	binary.BigEndian.PutUint64(timestamp, uint64(data.Timestamp.Unix()))
-
-	// Sign the message
-	signature, merkleRootNode, _, _, err := s.sphincsMgr.SignMessage(dataBytes, privateKey)
+	// Sign the message.
+	// FIX: pass publicKey as third arg; capture all 6 return values including commitment.
+	signature, merkleRootNode, sigTimestamp, sigNonce, commitment, err := s.sphincsMgr.SignMessage(dataBytes, privateKey, publicKey)
 	if err != nil {
 		log.Printf("sendUDPNeighbors: Failed to sign NEIGHBORS message: %v", err)
 		return
@@ -826,11 +844,13 @@ func (s *Server) sendUDPNeighbors(addr *net.UDPAddr, targetID network.NodeID, no
 		return
 	}
 
-	// Generate cryptographic proof
-	proofData := append(timestamp, append(nonce, dataBytes...)...)
+	// Generate cryptographic proof.
+	// FIX: fold commitment into proof leaves.
+	proofData := append(sigTimestamp, append(sigNonce, dataBytes...)...)
+	proofLeaves := [][]byte{merkleRootNode.Hash.Bytes(), commitment}
 	proof, err := sigproof.GenerateSigProof(
 		[][]byte{proofData},
-		[][]byte{merkleRootNode.Hash.Bytes()},
+		proofLeaves,
 		s.localNode.PublicKey,
 	)
 	if err != nil {
@@ -845,8 +865,9 @@ func (s *Server) sendUDPNeighbors(addr *net.UDPAddr, targetID network.NodeID, no
 		PublicKey:  s.localNode.PublicKey,
 		MerkleRoot: merkleRootNode.Hash, // Use *uint256.Int directly
 		Proof:      proof,
-		Nonce:      nonce,
-		Timestamp:  timestamp,
+		Nonce:      sigNonce,
+		Timestamp:  sigTimestamp,
+		Commitment: commitment,
 	}
 
 	s.sendUDPMessage(addr, msg)

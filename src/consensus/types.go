@@ -58,14 +58,13 @@ type BlockWithBody interface {
 }
 
 // Proposal represents a block proposal from a leader
-// Proposal represents a block proposal from a leader
 type Proposal struct {
 	Block           Block  `json:"block"`
 	View            uint64 `json:"view"`
 	ProposerID      string `json:"proposer_id"`
 	Signature       []byte `json:"signature"`
-	ElectedLeaderID string `json:"elected_leader_id"` // ADD THIS
-	SlotNumber      uint64 `json:"slot_number"`       // ADD THIS
+	ElectedLeaderID string `json:"elected_leader_id"`
+	SlotNumber      uint64 `json:"slot_number"`
 }
 
 // Vote represents a vote from a validator
@@ -104,6 +103,8 @@ type NodeManager interface {
 	GetPeers() map[string]Peer
 	GetNode(nodeID string) Node
 	BroadcastMessage(messageType string, data interface{}) error
+	// BroadcastRANDAOState broadcasts RANDAO state to all peers
+	BroadcastRANDAOState(mix [32]byte, submissions map[uint64]map[string]*VDFSubmission) error
 }
 
 // Node interface represents a participant in the network
@@ -147,11 +148,53 @@ type ValidatorSet struct {
 	minStakeAmount *big.Int
 }
 
-// RANDAO provides verifiable randomness for leader selection
+// VDFParams holds the public parameters for the VDF evaluation and verification.
+type VDFParams struct {
+	Discriminant *big.Int // Class group discriminant (post-quantum)
+	T            uint64   // sequential squarings = delay target
+	Lambda       uint     // security parameter
+}
+
+// VDFSubmission is what a validator (or any node) broadcasts after computing
+// the VDF output for an epoch.  Because the VDF input is public (the current
+// RANDAO seed) any node can compute it; no secret key or commit-reveal is
+// required.
+type VDFSubmission struct {
+	Epoch       uint64   `json:"epoch"`
+	SlotInEpoch uint64   `json:"slot_in_epoch"`
+	ValidatorID string   `json:"validator_id"` // submitter identity for slashing
+	Input       [32]byte `json:"input"`        // seed fed into VDF (from GetSeed)
+	Output      *big.Int `json:"output"`       // y = x^(2^T) mod N
+	Proof       *big.Int `json:"proof"`        // Wesolowski π = x^(floor(2^T / l)) mod N
+}
+
+// RANDAO holds the running mix and all per-epoch VDF submission state.
+//
+// Design notes vs. the former VRF-based design:
+//   - No commit/reveal phases.  The VDF input is public at slot 0; any node
+//     may start computing immediately.  The sequential delay T ensures the
+//     output is not known until roughly T squarings have elapsed, preventing
+//     last-submitter grinding.
+//   - submissions maps epoch → (validatorID → *VDFSubmission).  The first
+//     valid submission per epoch is accepted and mixed in; duplicate submitters
+//     are ignored (not slashed).
+//   - missed maps epoch → set of validator IDs that were in the active set
+//     for that epoch but did not submit before the window closed.  These are
+//     returned by FinaliseEpoch for slashing by the caller.
+//   - epochFinalized maps epoch → bool to prevent submissions after epoch finalization.
+//   - impl can be swapped for a deterministic stub in unit tests.
 type RANDAO struct {
-	mix     [32]byte
-	reveals map[uint64][][32]byte
-	mu      sync.RWMutex
+	mu                  sync.RWMutex
+	mix                 [32]byte
+	reveals             map[uint64][][32]byte                // audit log of mixed-in outputs
+	submissions         map[uint64]map[string]*VDFSubmission // submissions per epoch
+	missed              map[uint64]map[string]bool           // validators that missed submission
+	epochFinalized      map[uint64]bool                      // prevents submissions after finalization
+	params              VDFParams
+	impl                vdfProvider
+	cache               *VDFCache
+	consecutiveFailures map[string]int // Track consecutive failures per validator
+	validatorID         string         // Store this node's validator ID
 }
 
 // StakeWeightedSelector selects proposers and committees based on stake
@@ -185,9 +228,7 @@ type Consensus struct {
 
 	// electedLeaderID stores the node ID selected by the most recent
 	// UpdateLeaderStatus (RANDAO) or updateLeaderStatusWithValidators
-	// (round-robin view-change) call.  Every node that runs the same
-	// deterministic selection arrives at the same value, so
-	// isValidLeader can compare the proposer against it directly.
+	// (round-robin view-change) call.
 	electedLeaderID string
 
 	// Vote tracking
@@ -255,7 +296,7 @@ type SignedMessage struct {
 	Timestamp  []byte                 // 8-byte big-endian Unix timestamp (from SignMessage)
 	Nonce      []byte                 // 16-byte random nonce (from SignMessage)
 	MerkleRoot *hashtree.HashTreeNode // Merkle root node built from sig chunks
-	Commitment []byte                 // NEW: H(sigBytes||pk||timestamp||nonce||data), 32 bytes
+	Commitment []byte                 // H(sigBytes||pk||timestamp||nonce||data), 32 bytes
 	Data       []byte                 // Original message data that was signed
 }
 

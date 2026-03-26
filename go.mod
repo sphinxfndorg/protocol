@@ -9,7 +9,7 @@ require (
 	github.com/actuallyachraf/algebra v0.1.0
 	github.com/actuallyachraf/go-merkle v0.0.0-20200130102531-0ff8ce0d081e
 	github.com/btcsuite/btcutil v1.0.2
-	github.com/cloudflare/circl v1.6.1
+	github.com/cloudflare/circl v1.6.3
 	github.com/elliotchance/orderedmap/v2 v2.7.0
 	github.com/gin-gonic/gin v1.10.1
 	github.com/gorilla/websocket v1.5.3

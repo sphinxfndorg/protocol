@@ -37,6 +37,7 @@ import (
 	types "github.com/sphinxorg/protocol/src/core/transaction"
 	logger "github.com/sphinxorg/protocol/src/log"
 	denom "github.com/sphinxorg/protocol/src/params/denom"
+	"golang.org/x/crypto/sha3"
 )
 
 // Workflow:  ProposeBlock → processProposal → processPrepareVote → processVote → commitBlock → CommitBlock → StoreBlock → storeBlockToDisk.
@@ -54,9 +55,41 @@ func NewConsensus(
 	// Create a cancellable context for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Initialize RANDAO with genesis seed for deterministic randomness
+	// Initialize VDF parameters for class group VDF (post-quantum)
+	// For development, generate test parameters
+	// In production, these should come from genesis/trusted setup
+	var vdfParams VDFParams
+
+	// Check if we have genesis parameters, otherwise generate for testing
+	// For now, generate test parameters
+	testParams, err := GenerateClassGroupParameters(1024, 1024) // 1024-bit discriminant, T=1024
+	if err != nil {
+		// Fallback to a simple placeholder for testing
+		logger.Warn("Failed to generate class group parameters, using placeholder: %v", err)
+
+		// FIX: SetString returns two values, need to handle both
+		placeholder := new(big.Int)
+		_, ok := placeholder.SetString("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF", 16)
+		if !ok {
+			logger.Error("Failed to set placeholder discriminant, using default")
+			placeholder = big.NewInt(0)
+		}
+
+		vdfParams = VDFParams{
+			Discriminant: placeholder,
+			T:            1024,
+			Lambda:       256,
+		}
+	} else {
+		vdfParams = *testParams
+		logger.Info("✅ Generated class group VDF parameters: D=%d bits, T=%d",
+			vdfParams.Discriminant.BitLen(), vdfParams.T)
+	}
+
+	// Initialize RANDAO with genesis seed and VDF parameters
 	genesisSeed := [32]byte{0x53, 0x50, 0x48, 0x58} // "SPHX"
-	randao := NewRANDAO(genesisSeed)
+	// In NewConsensus, when creating RANDAO:
+	randao := NewRANDAO(genesisSeed, vdfParams, nodeID)
 
 	// Create validator set with minimum stake requirement
 	validatorSet := NewValidatorSet(minStakeAmount)
@@ -98,8 +131,19 @@ func NewConsensus(
 		}
 	}
 
-	// Return initialized consensus instance with all components
-	return &Consensus{
+	// NEW: Register self public key with signing service
+	if signingService != nil {
+		// Register self public key so the node can verify its own signatures
+		if selfPK := signingService.GetPublicKeyObject(); selfPK != nil {
+			signingService.RegisterPublicKey(nodeID, selfPK)
+			logger.Info("✅ Registered self public key for %s", nodeID)
+		} else {
+			logger.Warn("⚠️ Could not get self public key for %s", nodeID)
+		}
+	}
+
+	// Create consensus instance
+	cons := &Consensus{
 		nodeID:               nodeID,                            // Unique identifier for this node
 		nodeManager:          nodeManager,                       // Manages peer connections
 		blockChain:           blockchain,                        // Reference to blockchain storage
@@ -124,7 +168,7 @@ func NewConsensus(
 		viewChangeMutex:      sync.Mutex{},                      // Mutex for view change
 		lastBlockTime:        common.GetTimeService().Now(),     // Last block commit timestamp
 		validatorSet:         validatorSet,                      // Set of active validators
-		randao:               randao,                            // RANDAO instance for randomness
+		randao:               randao,                            // VDF-based RANDAO instance
 		selector:             selector,                          // Leader selector
 		timeConverter:        timeConverter,                     // Slot time converter
 		useStakeWeighted:     true,                              // Use stake-weighted leader election
@@ -133,17 +177,33 @@ func NewConsensus(
 		attestations:         make(map[uint64][]*Attestation),   // Attestations by epoch
 		electedLeaderID:      "",                                // Set by UpdateLeaderStatus
 	}
+
+	// Initialize and validate VDF parameters (run once at startup)
+	if err := cons.initializeVDF(); err != nil {
+		logger.Error("VDF initialization failed: %v", err)
+		// Don't fail consensus startup, but log the error
+	}
+
+	return cons
 }
 
 // Start begins the consensus operation by launching all goroutines
 func (c *Consensus) Start() error {
 	logger.Info("Consensus started for node %s", c.nodeID)
+
 	// Start goroutines for handling different message types
-	go c.handleProposals()    // Handle incoming block proposals
-	go c.handleVotes()        // Handle incoming commit votes
-	go c.handlePrepareVotes() // Handle incoming prepare votes
-	go c.handleTimeouts()     // Handle incoming timeout messages
-	go c.consensusLoop()      // Main consensus loop for view changes
+	go c.handleProposals()
+	go c.handleVotes()
+	go c.handlePrepareVotes()
+	go c.handleTimeouts()
+	go c.consensusLoop()
+
+	// Start periodic VDF state validation
+	go c.periodicVDFValidation()
+
+	// Start periodic RANDAO state sync
+	go c.periodicStateSync()
+
 	return nil
 }
 
@@ -166,6 +226,106 @@ func (c *Consensus) Stop() error {
 	logger.Info("Consensus stopped for node %s", c.nodeID)
 	c.cancel() // Cancel context to stop all goroutines
 	return nil
+}
+
+// initializeVDF validates and optionally recovers VDF state
+func (c *Consensus) initializeVDF() error {
+	if c.randao == nil {
+		logger.Warn("RANDAO not initialized, cannot validate VDF parameters")
+		return nil
+	}
+
+	// Get VDF parameters from genesis
+	expectedParams := c.getExpectedVDFParams()
+
+	// Check if current params match expected
+	if err := c.randao.ValidateVDFParams(expectedParams); err != nil {
+		logger.Error("VDF parameter mismatch: %v", err)
+		logger.Error("This node may be out of sync or corrupted")
+
+		// Force sync from trusted source
+		if err := c.randao.ForceSyncParams(expectedParams); err != nil {
+			return fmt.Errorf("failed to sync VDF params: %w", err)
+		}
+		logger.Info("VDF parameters force synced successfully")
+		c.randao.Recovery()
+		return nil
+	}
+
+	logger.Info("VDF parameters validated successfully")
+
+	// Also validate state consistency
+	if err := c.randao.ValidateState(); err != nil {
+		logger.Warn("VDF state inconsistency detected: %v - running recovery", err)
+		c.randao.Recovery()
+	}
+
+	return nil
+}
+
+// getExpectedVDFParams returns the expected VDF parameters derived from genesis
+// This ensures all nodes use the same parameters derived from the actual genesis block
+func (c *Consensus) getExpectedVDFParams() VDFParams {
+	var genesisHash string
+
+	if c.blockChain != nil {
+		// Try to get genesis block by traversing from latest block
+		latestBlock := c.blockChain.GetLatestBlock()
+		if latestBlock != nil {
+			// Walk backwards to find genesis by checking parent chain
+			currentHash := latestBlock.GetHash()
+			for {
+				block := c.blockChain.GetBlockByHash(currentHash)
+				if block == nil {
+					break
+				}
+				if block.GetHeight() == 0 {
+					genesisHash = block.GetHash()
+					logger.Info("Found genesis hash by traversing chain: %s", genesisHash)
+					break
+				}
+				currentHash = block.GetPrevHash()
+			}
+		}
+	}
+
+	// If still no genesis hash, derive from node ID (fallback)
+	if genesisHash == "" {
+		genesisHash = fmt.Sprintf("GENESIS_%s", c.nodeID)
+		logger.Error("No genesis hash available, using fallback: %s", genesisHash)
+	}
+
+	logger.Info("Deriving VDF parameters from genesis hash: %s", genesisHash)
+
+	// Create a deterministic discriminant from genesis hash
+	shake := sha3.NewShake256()
+	shake.Write([]byte(genesisHash))
+	hashBytes := make([]byte, 32)
+	shake.Read(hashBytes)
+
+	// Create a prime from the hash (ensuring it's suitable for class group)
+	prime := new(big.Int).SetBytes(hashBytes)
+	prime.SetBit(prime, 0, 1) // Ensure odd
+	prime.SetBit(prime, 1, 1) // Ensure ≡ 3 mod 4
+
+	// Ensure it's a prime
+	for !prime.ProbablyPrime(20) {
+		prime.Add(prime, big.NewInt(4))
+	}
+
+	// Make it negative for discriminant
+	D := new(big.Int).Neg(prime)
+	T := uint64(1024)
+
+	logger.Info("Expected VDF parameters:")
+	logger.Info("  Discriminant D: %d bits, D mod 4 = %d", D.BitLen(), new(big.Int).Mod(D, big.NewInt(4)))
+	logger.Info("  T: %d", T)
+
+	return VDFParams{
+		Discriminant: D,
+		T:            T,
+		Lambda:       256,
+	}
 }
 
 // UpdateLeaderStatus runs the stake-weighted RANDAO proposer selection for the
@@ -266,9 +426,11 @@ func (c *Consensus) ProposeBlock(block Block) error {
 	// Use the slot from election time, NOT current slot.
 	// By the time ProposeBlock is called, the slot may have advanced,
 	// causing followers to re-derive a different winner from the new slot.
+	// Use the slot from election time, NOT current slot.
 	proposalSlot := c.electedSlot
 	if proposalSlot == 0 {
-		proposalSlot = c.timeConverter.CurrentSlot() // Fallback if election slot not set
+		proposalSlot = c.timeConverter.CurrentSlot()
+		logger.Warn("⚠️ electedSlot was 0, using current slot %d", proposalSlot)
 	}
 
 	// Create the proposal message
@@ -278,17 +440,21 @@ func (c *Consensus) ProposeBlock(block Block) error {
 		ProposerID:      c.nodeID,
 		Signature:       []byte{},
 		ElectedLeaderID: c.electedLeaderID,
-		SlotNumber:      proposalSlot, // Use the election slot, not current slot
+		SlotNumber:      proposalSlot, // CRITICAL: Must be set for signature verification
 	}
 
-	// Sign the proposal if signing service is available
+	// Log the proposal details before signing
+	logger.Info("📝 Creating proposal: slot=%d, view=%d, leader=%s, block=%s",
+		proposalSlot, c.currentView, c.nodeID, block.GetHash())
+
+	// Sign the proposal
 	if c.signingService != nil {
 		if err := c.signingService.SignProposal(proposal); err != nil {
 			return fmt.Errorf("failed to sign proposal: %w", err)
 		}
 	}
 
-	// Broadcast the proposal to all peers
+	// Broadcast the proposal
 	return c.broadcastProposal(proposal)
 }
 

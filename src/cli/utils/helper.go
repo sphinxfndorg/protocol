@@ -72,6 +72,8 @@ func inspectConsensusTypes() {
 // and keeps proposing blocks until IsDistributionComplete() == true on all nodes.
 //
 // Returns the final block height once distribution is complete.
+// runDevnetDistributionLoop runs consensus blocks until all genesis allocations
+// have been distributed from the vault.
 func runDevnetDistributionLoop(
 	blockchains []*core.Blockchain,
 	consensusEngines []*consensus.Consensus,
@@ -84,7 +86,45 @@ func runDevnetDistributionLoop(
 	logger.Info("=== DEVNET DISTRIBUTION LOOP STARTED ===")
 	logger.Info("Target: drain vault %s of all genesis allocations", core.GenesisVaultAddress)
 
+	// Get the time converter from the first consensus engine to calculate epoch
+	// Note: All nodes should have the same time converter (same genesis time)
+	var timeConverter *consensus.TimeConverter
+	if len(consensusEngines) > 0 && consensusEngines[0] != nil {
+		// You'll need to add a GetTimeConverter() method to Consensus
+		// For now, we'll create a new one from genesis time
+		genesisTime := blockchains[0].GetGenesisTime()
+		timeConverter = consensus.NewTimeConverter(genesisTime)
+	}
+
 	for round := 0; round < maxRounds; round++ {
+		// ========== SUBMIT VDF OUTPUTS FIRST ==========
+		// Get current epoch from time converter
+		currentEpoch := uint64(0)
+		if timeConverter != nil {
+			currentEpoch = timeConverter.CurrentEpoch()
+		}
+
+		// Have all nodes submit VDF outputs for this epoch
+		for i := 0; i < numNodes; i++ {
+			submission, err := consensusEngines[i].GetRANDAO().EvalVDF(validatorIDs[i], currentEpoch, 0)
+			if err != nil {
+				logger.Warn("%s VDF eval failed: %v", validatorIDs[i], err)
+				continue
+			}
+
+			// Submit to all nodes to ensure everyone gets the VDF output
+			for j := 0; j < numNodes; j++ {
+				if err := consensusEngines[j].GetRANDAO().Submit(0, submission); err != nil {
+					logger.Warn("%s failed to submit VDF to %s: %v", validatorIDs[i], validatorIDs[j], err)
+				}
+			}
+			logger.Debug("%s submitted VDF output for epoch %d", validatorIDs[i], currentEpoch)
+		}
+
+		// Give time for VDF outputs to propagate and mix to update
+		time.Sleep(100 * time.Millisecond)
+		// ============================================
+
 		// Check if all nodes have completed distribution.
 		if round%checkEvery == 0 {
 			allDone := true
@@ -222,11 +262,17 @@ func CallConsensus(numNodes int) error {
 	networkType := "devnet" // hardcoded — change to "testnet" or "mainnet" to promote
 	networkDisplayName := "Sphinx Devnet"
 
-	// The switch is now just for display purposes when NOT overriding:
-	if chainParams.ChainName == "Sphinx Testnet" {
+	// Using a switch statement for cleaner network identification
+	switch chainParams.ChainName {
+	case "Sphinx Testnet":
 		networkDisplayName = "Sphinx Testnet"
-	} else if chainParams.ChainName == "Sphinx Devnet" {
+	case "Sphinx Devnet":
 		networkDisplayName = "Sphinx Devnet"
+	case "Sphinx Mainnet":
+		networkDisplayName = "Sphinx Mainnet"
+	default:
+		networkDisplayName = "Unknown Network"
+		logger.Warn("⚠️ Unrecognized ChainName: %s", chainParams.ChainName)
 	}
 
 	logger.Info("Network: %s", networkDisplayName)
@@ -446,6 +492,14 @@ func CallConsensus(numNodes int) error {
 		// Create signing service that wraps SPHINCS+ functionality
 		signingService := consensus.NewSigningService(sphincsManager, keyManager, nodeID)
 
+		// ========== REGISTER SELF PUBLIC KEY IMMEDIATELY ==========
+		// Register self public key so the node can verify its own signatures
+		if selfPK := signingService.GetPublicKeyObject(); selfPK != nil {
+			signingService.RegisterPublicKey(nodeID, selfPK)
+			logger.Info("✅ Registered self public key for %s", nodeID)
+		}
+		// =========================================================
+
 		// Store the signing service for key exchange later
 		signingServices[nodeID] = signingService
 
@@ -492,13 +546,8 @@ func CallConsensus(numNodes int) error {
 		// Set a long timeout to prevent automatic view changes during test
 		cons.SetTimeout(1 * time.Hour)
 
-		// Start consensus engine (launches goroutines for message handling)
-		if err := cons.Start(); err != nil {
-			return fmt.Errorf("failed to start consensus for node %s: %v", nodeID, err)
-		}
-
-		// Allow consensus engine to fully initialize before proceeding
-		time.Sleep(100 * time.Millisecond)
+		// DO NOT START CONSENSUS YET - wait for key exchange first
+		// cons.Start() will be called after all keys are exchanged
 	}
 
 	// ========== CROSS-REGISTER ALL VALIDATORS IN EVERY NODE'S VALIDATOR SET ==========
@@ -574,10 +623,24 @@ func CallConsensus(numNodes int) error {
 	}
 	logger.Info("✅ All nodes have consistent genesis blocks: %s", expectedGenesisHash)
 
-	// ========== KEY EXCHANGE ==========
+	// ========== KEY EXCHANGE (BEFORE STARTING CONSENSUS) ==========
 	// Exchange public keys between nodes for signature verification
-	logger.Info("=== EXCHANGING PUBLIC KEYS BETWEEN NODES ===")
+	// This MUST happen BEFORE starting consensus engines to ensure
+	// all nodes have each other's public keys when proposals are received.
+	logger.Info("=== EXCHANGING PUBLIC KEYS BETWEEN NODES (BEFORE CONSENSUS START) ===")
 	exchangePublicKeys(signingServices, validatorIDs)
+
+	// ========== START CONSENSUS ENGINES (AFTER KEY EXCHANGE) ==========
+	logger.Info("=== STARTING CONSENSUS ENGINES (AFTER KEY EXCHANGE) ===")
+	for i := 0; i < numNodes; i++ {
+		if err := consensusEngines[i].Start(); err != nil {
+			return fmt.Errorf("failed to start consensus for node %s: %v", validatorIDs[i], err)
+		}
+		logger.Info("Started consensus for %s", validatorIDs[i])
+	}
+
+	// Allow consensus engines to fully initialize
+	time.Sleep(100 * time.Millisecond)
 
 	// Verify key directories were created properly
 	logger.Info("=== VERIFYING KEY DIRECTORY CREATION ===")

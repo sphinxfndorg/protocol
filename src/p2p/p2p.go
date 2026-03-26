@@ -26,6 +26,7 @@ package p2p
 import (
 	"crypto/rand"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -481,6 +482,21 @@ func (s *Server) handleMessages() {
 					continue
 				}
 
+				// ========== Extract public key ==========
+				var publicKeyBytes []byte
+				if pkStr, ok := versionData["public_key"].(string); ok {
+					var decodeErr error
+					publicKeyBytes, decodeErr = hex.DecodeString(pkStr)
+					if decodeErr != nil {
+						log.Printf("Failed to decode public key for %s: %v", peerID, decodeErr)
+					} else {
+						log.Printf("Received public key for %s (len=%d)", peerID, len(publicKeyBytes))
+					}
+				} else {
+					log.Printf("No public_key in version message from %s", peerID)
+				}
+				// ============================================
+
 				// Get or create node
 				node := s.nodeManager.GetNode(peerID)
 				if node == nil {
@@ -491,10 +507,33 @@ func (s *Server) handleMessages() {
 						Status:     network.NodeStatusActive,
 						LastSeen:   time.Now(),
 						KademliaID: network.GenerateKademliaID(peerID),
+						PublicKey:  publicKeyBytes,
 					}
 					s.nodeManager.AddNode(node)
 					log.Printf("Created temporary node for version message: ID=%s", peerID)
+				} else if len(publicKeyBytes) > 0 {
+					// Update public key if provided
+					node.PublicKey = publicKeyBytes
+					log.Printf("Updated public key for node %s", peerID)
 				}
+
+				// ========== Register public key with consensus ==========
+				if s.consensus != nil && len(publicKeyBytes) > 0 {
+					signingService := s.consensus.GetSigningService()
+					if signingService != nil {
+						// Use the new deserialize and register method
+						if err := signingService.DeserializeAndRegisterPublicKey(peerID, publicKeyBytes); err != nil {
+							log.Printf("Failed to deserialize and register public key for %s: %v", peerID, err)
+						} else {
+							log.Printf("✅ Registered public key for %s with consensus", peerID)
+						}
+					} else {
+						log.Printf("Signing service not available for consensus, cannot register public key for %s", peerID)
+					}
+				} else if s.consensus == nil {
+					log.Printf("Consensus not initialized yet, cannot register public key for %s", peerID)
+				}
+				// ============================================================
 
 				// Prepare verack response
 				verackMsg := &security.Message{
@@ -514,8 +553,8 @@ func (s *Server) handleMessages() {
 				}
 
 				// Send verack response
-				if err := transport.SendMessage(sourceAddr, verackMsg); err != nil {
-					log.Printf("Failed to send verack to %s at %s: %v", peerID, sourceAddr, err)
+				if sendErr := transport.SendMessage(sourceAddr, verackMsg); sendErr != nil {
+					log.Printf("Failed to send verack to %s at %s: %v", peerID, sourceAddr, sendErr)
 					s.peerManager.UpdatePeerScore(peerID, -10)
 					continue
 				}
@@ -527,8 +566,8 @@ func (s *Server) handleMessages() {
 				// Update node address if provided
 				if addr, ok := versionData["address"].(string); ok && addr != "" && node.Address == "" {
 					node.Address = addr
-					if err := s.nodeManager.UpdateNode(node); err != nil {
-						log.Printf("Failed to update node %s address to %s: %v", peerID, addr, err)
+					if updateErr := s.nodeManager.UpdateNode(node); updateErr != nil {
+						log.Printf("Failed to update node %s address to %s: %v", peerID, addr, updateErr)
 					} else {
 						log.Printf("Updated node %s address to %s", peerID, addr)
 					}

@@ -61,6 +61,12 @@ func (sm *SignedMessage) Serialize() ([]byte, error) {
 		buf.Write(make([]byte, 32))
 	}
 
+	// ========== FIX: Write commitment length and data ==========
+	// Commitment is 32 bytes from SPHINCS+ signing
+	binary.Write(&buf, binary.BigEndian, uint32(len(sm.Commitment)))
+	buf.Write(sm.Commitment)
+	// =========================================================
+
 	// Write original data
 	binary.Write(&buf, binary.BigEndian, uint32(len(sm.Data)))
 	buf.Write(sm.Data)
@@ -115,6 +121,17 @@ func DeserializeSignedMessage(data []byte) (*SignedMessage, error) {
 	msg.MerkleRoot = &hashtree.HashTreeNode{
 		Hash: BytesToUint256(merkleBytes),
 	}
+
+	// ========== FIX: Read commitment length and data ==========
+	var commitLen uint32
+	if err := binary.Read(buf, binary.BigEndian, &commitLen); err != nil {
+		return nil, err
+	}
+	msg.Commitment = make([]byte, commitLen)
+	if _, err := buf.Read(msg.Commitment); err != nil {
+		return nil, err
+	}
+	// =========================================================
 
 	// Read original data
 	var dataLen uint32

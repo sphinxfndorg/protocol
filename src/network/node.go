@@ -520,3 +520,37 @@ func (p *Peer) GetPeerInfo() PeerInfo {
 		PublicKey:       p.Node.PublicKey,  // Public key for verification
 	}
 }
+
+// BroadcastRANDAOState broadcasts RANDAO state to all registered consensus instances
+// This is required to implement the consensus.NodeManager interface
+func (m *CallNodeManager) BroadcastRANDAOState(mix [32]byte, submissions map[uint64]map[string]*consensus.VDFSubmission) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	log.Printf("[CALL] Broadcasting RANDAO state to %d peers", len(consensusRegistry))
+
+	var wg sync.WaitGroup
+	deliveredCount := 0
+
+	// Deliver RANDAO state to all consensus instances
+	for nodeID, cons := range consensusRegistry {
+		wg.Add(1)
+		go func(c *consensus.Consensus, nid string, m [32]byte, subs map[uint64]map[string]*consensus.VDFSubmission) {
+			defer wg.Done()
+
+			// Call the HandleRANDAOSync method to sync state
+			if err := c.HandleRANDAOSync(m, subs); err != nil {
+				log.Printf("[CALL] Failed to sync RANDAO state to %s: %v", nid, err)
+			} else {
+				deliveredCount++
+				log.Printf("[CALL] Successfully synced RANDAO state to %s", nid)
+			}
+		}(cons, nodeID, mix, submissions)
+	}
+
+	wg.Wait()
+	log.Printf("[CALL] RANDAO state broadcast completed: %d/%d successful deliveries",
+		deliveredCount, len(consensusRegistry))
+
+	return nil
+}

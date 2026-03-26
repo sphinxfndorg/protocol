@@ -40,6 +40,7 @@ import (
 
 	"github.com/sphinxorg/protocol/src/common"
 	"github.com/sphinxorg/protocol/src/consensus"
+
 	types "github.com/sphinxorg/protocol/src/core/transaction"
 	logger "github.com/sphinxorg/protocol/src/log"
 	"github.com/sphinxorg/protocol/src/pool"

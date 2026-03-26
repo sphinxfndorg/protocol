@@ -218,6 +218,29 @@ func (s *SigningService) SignProposal(proposal *Proposal) error {
 
 // VerifyProposal verifies a proposal signature.
 func (s *SigningService) VerifyProposal(proposal *Proposal) (bool, error) {
+	// First, try to deserialize the signed message to see what was actually signed
+	if len(proposal.Signature) == 0 {
+		return false, fmt.Errorf("empty signature")
+	}
+
+	signedMsg, err := DeserializeSignedMessage(proposal.Signature)
+	if err != nil {
+		return false, fmt.Errorf("failed to deserialize signature: %w", err)
+	}
+
+	// Debug: log what was signed
+	logger.Info("🔍 Verifying proposal: signed data = %s", string(signedMsg.Data))
+
+	// Check if the signed data matches what we expect
+	expectedData := s.serializeProposalForSigning(proposal)
+	logger.Info("🔍 Expected data = %s", string(expectedData))
+
+	if string(signedMsg.Data) != string(expectedData) {
+		logger.Warn("❌ Signed data mismatch: got=%s, want=%s",
+			string(signedMsg.Data), string(expectedData))
+		return false, fmt.Errorf("signed data does not match proposal content")
+	}
+
 	return s.VerifySignature(proposal.Signature, proposal.ProposerID)
 }
 
@@ -264,7 +287,21 @@ func (s *SigningService) VerifyTimeout(timeout *TimeoutMsg) (bool, error) {
 }
 
 // serializeProposalForSigning creates a deterministic byte string from a proposal.
+// serializeProposalForSigning creates a deterministic byte string from a proposal.
+// IMPORTANT: Must match exactly what VerifyProposal uses for verification.
 func (s *SigningService) serializeProposalForSigning(proposal *Proposal) []byte {
+	// Include SlotNumber for uniqueness across different slots
+	// If SlotNumber is 0 (old proposal), fallback to timestamp
+	if proposal.SlotNumber > 0 {
+		data := fmt.Sprintf("PROPOSAL:%d:%s:%s:%d",
+			proposal.View,
+			proposal.Block.GetHash(),
+			proposal.ProposerID,
+			proposal.SlotNumber)
+		return []byte(data)
+	}
+
+	// Fallback for backward compatibility
 	data := fmt.Sprintf("PROPOSAL:%d:%s:%s:%d",
 		proposal.View,
 		proposal.Block.GetHash(),
@@ -366,4 +403,28 @@ func (s *SigningService) VerifyBlockSignature(block Block) (bool, error) {
 	}
 
 	return s.VerifySignature(tb.Header.ProposerSignature, tb.Header.ProposerID)
+}
+
+// GetSigningService returns the signing service instance
+func (c *Consensus) GetSigningService() *SigningService {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.signingService
+}
+
+// DeserializeAndRegisterPublicKey deserializes a public key from bytes and registers it
+func (s *SigningService) DeserializeAndRegisterPublicKey(nodeID string, publicKeyBytes []byte) error {
+	if s.keyManager == nil {
+		return fmt.Errorf("key manager not available")
+	}
+
+	// Deserialize the public key using the key manager
+	pk, err := s.keyManager.DeserializePublicKey(publicKeyBytes)
+	if err != nil {
+		return fmt.Errorf("failed to deserialize public key: %w", err)
+	}
+
+	// Register the deserialized public key
+	s.RegisterPublicKey(nodeID, pk)
+	return nil
 }

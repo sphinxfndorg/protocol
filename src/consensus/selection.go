@@ -29,7 +29,7 @@ import (
 	"sort"
 )
 
-// sips0013 https://github.com/sphinxorg/SIPS/blob/main/.github/workflows/sips0013/sips0013.md
+// sips0014 https://github.com/sphinxorg/SIPS/blob/main/.github/workflows/sips0014/sips0014.md
 
 // NewStakeWeightedSelector constructs a selector that uses the provided
 // ValidatorSet for all proposer and committee selection calls.

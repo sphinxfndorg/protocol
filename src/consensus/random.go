@@ -36,6 +36,8 @@ import (
 	"golang.org/x/crypto/sha3"
 )
 
+// sips0013 https://github.com/sphinxorg/SIPS/blob/main/.github/workflows/sips0013/sips0013.md
+
 // Constants for VDF submission windows and slashing
 const (
 	CommitWindowEnd = uint64(20)  // slots 0-20: submit commitHash+nonce (first phase of commit-reveal)

@@ -29,6 +29,8 @@ import (
 	"golang.org/x/crypto/sha3"
 )
 
+// sips0013 https://github.com/sphinxorg/SIPS/blob/main/.github/workflows/sips0013/sips0013.md
+
 // ClassGroupElement represents an element in a class group
 // Quadratic form: f(x,y) = ax² + bxy + cy² with discriminant D = b² - 4ac
 type ClassGroupElement struct {

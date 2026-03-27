@@ -91,6 +91,10 @@ type Storage struct {
 	indexDir  string
 	stateDir  string
 
+	// Database handles
+	db      *database.DB // Main database for blocks and transactions
+	stateDB *database.DB // State database for consensus state
+
 	// In-memory indices for fast access
 	blockIndex  map[string]*types.Block       // hash -> block
 	heightIndex map[uint64]*types.Block       // height -> block
@@ -101,10 +105,8 @@ type Storage struct {
 	totalBlocks   uint64
 
 	// TPS Monitoring
-	tpsMetrics *TPSMetrics // Add this line
+	tpsMetrics *TPSMetrics
 	tpsConfig  *TPSConfig
-
-	stateDB *database.DB
 }
 
 // ChainParams represents basic chain parameters for storage

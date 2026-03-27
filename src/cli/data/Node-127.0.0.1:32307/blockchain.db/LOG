@@ -1,0 +1,16 @@
+=============== Mar 27, 2026 (WIB) ===============
+20:32:26.351423 log@legend F·NumFile S·FileSize N·Entry C·BadEntry B·BadBlock Ke·KeyError D·DroppedEntry L·Level Q·SeqNum T·TimeElapsed
+20:32:26.381330 db@open opening
+20:32:26.382015 version@stat F·[] S·0B[] Sc·[]
+20:32:26.397826 db@janitor F·2 G·0
+20:32:26.398021 db@open done T·16.56582ms
+20:37:28.350783 db@close closing
+20:37:28.350967 db@close done T·173.805µs
+ F·NumFile S·FileSize N·Entry C·BadEntry B·BadBlock Ke·KeyError D·DroppedEntry L·Level Q·SeqNum T·TimeElapsed
+20:32:26.398756 version@stat F·[] S·0B[] Sc·[]
+20:32:26.398790 db@open opening
+20:32:26.398896 journal@recovery F·1
+20:32:26.399251 journal@recovery recovering @1
+20:32:26.399896 version@stat F·[] S·0B[] Sc·[]
+20:32:26.437928 db@janitor F·2 G·0
+20:32:26.437979 db@open done T·39.171202ms

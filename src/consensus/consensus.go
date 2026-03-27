@@ -43,6 +43,7 @@ import (
 // Workflow:  ProposeBlock → processProposal → processPrepareVote → processVote → commitBlock → CommitBlock → StoreBlock → storeBlockToDisk.
 
 // NewConsensus creates a new consensus instance with context
+// NewConsensus creates a new consensus instance with context
 func NewConsensus(
 	nodeID string,
 	nodeManager NodeManager,
@@ -56,35 +57,21 @@ func NewConsensus(
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Initialize VDF parameters for class group VDF (post-quantum)
-	// For development, generate test parameters
+	// Parameters are loaded from the canonical genesis constants — fixed at
+	// trusted setup time and identical on every node in the network.
 	// In production, these should come from genesis/trusted setup
-	var vdfParams VDFParams
-
-	// Check if we have genesis parameters, otherwise generate for testing
-	// For now, generate test parameters
-	testParams, err := GenerateClassGroupParameters(1024, 1024) // 1024-bit discriminant, T=1024
+	vdfParams, err := LoadCanonicalVDFParams()
 	if err != nil {
-		// Fallback to a simple placeholder for testing
-		logger.Warn("Failed to generate class group parameters, using placeholder: %v", err)
-
-		// FIX: SetString returns two values, need to handle both
-		placeholder := new(big.Int)
-		_, ok := placeholder.SetString("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF", 16)
-		if !ok {
-			logger.Error("Failed to set placeholder discriminant, using default")
-			placeholder = big.NewInt(0)
-		}
-
-		vdfParams = VDFParams{
-			Discriminant: placeholder,
-			T:            1024,
-			Lambda:       256,
-		}
-	} else {
-		vdfParams = *testParams
-		logger.Info("✅ Generated class group VDF parameters: D=%d bits, T=%d",
-			vdfParams.Discriminant.BitLen(), vdfParams.T)
+		// A mismatched or missing discriminant means this node will elect
+		// different leaders than its peers and can never reach consensus.
+		// This is a fatal startup error — do not continue with a placeholder.
+		logger.Error("❌ FATAL: Could not load canonical VDF parameters: %v", err)
+		logger.Error("   Ensure the genesis VDF parameters are correctly embedded.")
+		cancel()
+		return nil
 	}
+	logger.Info("✅ Loaded canonical VDF parameters: D=%d bits, T=%d",
+		vdfParams.Discriminant.BitLen(), vdfParams.T)
 
 	// Initialize RANDAO with genesis seed and VDF parameters
 	genesisSeed := [32]byte{0x53, 0x50, 0x48, 0x58} // "SPHX"

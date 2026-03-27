@@ -305,6 +305,7 @@ func CallConsensus(numNodes int) error {
 
 	// Initialize slices to hold node components for all nodes
 	dbs := make([]*leveldb.DB, numNodes)                       // LevelDB instances for each node
+	stateDBs := make([]*leveldb.DB, numNodes)                  // State LevelDB instances for each node
 	sphincsMgrs := make([]*sign.SphincsManager, numNodes)      // SPHINCS+ crypto managers
 	blockchains := make([]*core.Blockchain, numNodes)          // Blockchain instances
 	consensusEngines := make([]*consensus.Consensus, numNodes) // Consensus engines
@@ -335,17 +336,38 @@ func CallConsensus(numNodes int) error {
 		}
 		logger.Info("Created directories for node: %s", nodeID)
 
-		// Initialize LevelDB storage for blockchain data
-		db, err := leveldb.OpenFile(common.GetLevelDBPath(address), nil)
+		// ========== CREATE MAIN BLOCKCHAIN DATABASE ==========
+		// Initialize LevelDB storage for blockchain data (blocks, transactions, indices)
+		mainDBPath := common.GetLevelDBPath(address)
+		logger.Info("Creating main blockchain DB for %s at: %s", nodeID, mainDBPath)
+
+		db, err := leveldb.OpenFile(mainDBPath, nil)
 		if err != nil {
-			return fmt.Errorf("failed to open LevelDB for node %s: %v", nodeID, err)
+			return fmt.Errorf("failed to open main LevelDB for node %s: %v", nodeID, err)
 		}
-		dbs[i] = db // Store database reference
+		dbs[i] = db // Store database reference for cleanup
 
 		// Convert LevelDB to database.DB interface for compatibility
-		nodeDB, err := database.NewLevelDB(common.GetLevelDBPath(address))
+		mainDatabase, err := database.NewLevelDB(mainDBPath)
 		if err != nil {
-			return fmt.Errorf("failed to create database for node %s: %v", nodeID, err)
+			return fmt.Errorf("failed to create main database for node %s: %v", nodeID, err)
+		}
+
+		// ========== CREATE STATE DATABASE ==========
+		// Create separate state database for consensus state (validators, view numbers, final states)
+		stateDBPath := common.GetStateDBPath(address)
+		logger.Info("Creating state DB for %s at: %s", nodeID, stateDBPath)
+
+		stateLevelDB, err := leveldb.OpenFile(stateDBPath, nil)
+		if err != nil {
+			return fmt.Errorf("failed to open state DB for node %s: %v", nodeID, err)
+		}
+		stateDBs[i] = stateLevelDB // Store state DB reference for cleanup
+
+		// Convert to database.DB interface for state machine
+		stateDatabase, err := database.NewLevelDB(stateDBPath)
+		if err != nil {
+			return fmt.Errorf("failed to create state database for node %s: %v", nodeID, err)
 		}
 
 		// Create actual network node with P2P capabilities
@@ -356,7 +378,7 @@ func CallConsensus(numNodes int) error {
 			fmt.Sprintf("%d", 32308+i), // RPC port (offset by 1)
 			true,                       // Is validator node
 			network.RoleValidator,      // Node role
-			nodeDB,                     // Database instance
+			mainDatabase,               // Database instance (use mainDatabase, not nodeDB)
 		)
 
 		if networkNode == nil {
@@ -382,7 +404,7 @@ func CallConsensus(numNodes int) error {
 		var dhtInstance network.DHT = nil // Distributed Hash Table (disabled for test)
 
 		// Initialize node manager for peer management
-		nodeMgr := network.NewNodeManager(16, dhtInstance, nodeDB) // Max 16 peers
+		nodeMgr := network.NewNodeManager(16, dhtInstance, mainDatabase) // Max 16 peers
 
 		// Create and add local node to the manager
 		if err := nodeMgr.CreateLocalNode(
@@ -417,15 +439,20 @@ func CallConsensus(numNodes int) error {
 
 		logger.Info("%s peer connections established", nodeID)
 
-		// ========== BLOCKCHAIN SETUP ==========
-		// Create new blockchain instance for this node
-		bc, err := core.NewBlockchain(common.GetBlockchainDataDir(address), nodeID, validatorIDs, networkType)
+		// Create blockchain instance
+		bc, err := core.NewBlockchain(address, networkType, validatorIDs, nodeID)
 		if err != nil {
-			return fmt.Errorf("node %s blockchain initialization failed: %v", nodeID, err)
+			return fmt.Errorf("failed to create blockchain for node %s: %v", nodeID, err)
 		}
-		bc.SetStorageDB(nodeDB)
 
-		// Execute genesis block now that the DB handle is live.
+		// Share both DB handles with the blockchain's storage layer
+		// SetStorageDB shares the main database (blocks, transactions, indices)
+		bc.SetStorageDB(mainDatabase)
+
+		// SetStateDB shares the state database (consensus state, validators, final states)
+		bc.SetStateDB(stateDatabase)
+
+		// Execute genesis block now that the DB handles are live.
 		// This fires mintBlockReward for block 0, crediting the vault with
 		// the full 1,000,000,000 SPX that block 1 will distribute.
 		if err := bc.ExecuteGenesisBlock(); err != nil {
@@ -433,6 +460,47 @@ func CallConsensus(numNodes int) error {
 		} else {
 			logger.Info("✅ Genesis vault funded for %s", nodeID)
 		}
+
+		// ========== REGISTER VDF GENESIS HASH PROVIDER (FIRST NODE ONLY) ==========
+		// InitVDFFromGenesis must be called exactly once, before any NewConsensus call.
+		// It is placed here because:
+		//   1. bc is fully initialized and the genesis block is stored on disk
+		//   2. ExecuteGenesisBlock() has already run so block 0 exists
+		//   3. All nodes share the same genesis hash, so registering from node 0 is sufficient
+		//   4. NewConsensus() is called below this block — the provider must be ready first
+		//
+		// The provider walks back to height 0 the same way getExpectedVDFParams does,
+		// handling both fresh chains (latest block IS genesis) and chains that have
+		// already advanced past height 0 (traverses parent hashes to reach height 0).
+		if i == 0 {
+			bcRef := bc // capture bc in closure — bc will be overwritten by the loop
+			consensus.InitVDFFromGenesis(func() (string, error) {
+				// Get the latest block — on first boot this is the genesis block itself
+				latest := bcRef.GetLatestBlock()
+				if latest == nil {
+					return "", fmt.Errorf("no blocks in storage — genesis not yet applied")
+				}
+				// If we are already at height 0, return immediately
+				if latest.GetHeight() == 0 {
+					return latest.GetHash(), nil
+				}
+				// Otherwise walk backwards through parent hashes until height 0
+				// This handles nodes that restart after having produced blocks
+				current := latest.GetHash()
+				for {
+					block := bcRef.GetBlockByHash(current)
+					if block == nil {
+						return "", fmt.Errorf("chain traversal broken at hash %s", current)
+					}
+					if block.GetHeight() == 0 {
+						return block.GetHash(), nil // Found genesis
+					}
+					current = block.GetPrevHash() // Move to parent
+				}
+			})
+			logger.Info("✅ VDF genesis hash provider registered from node 0")
+		}
+		// =========================================================================f
 
 		// Capture genesis block from first node for validation against other nodes
 		if i == 0 {
@@ -1275,12 +1343,17 @@ func CallConsensus(numNodes int) error {
 	wg.Wait()
 	for i := 0; i < numNodes; i++ {
 		_ = dbs[i].Close()
+		if stateDBs[i] != nil {
+			_ = stateDBs[i].Close()
+		}
 		_ = blockchains[i].Close()
 	}
 
 	logger.Info("=== PBFT INTEGRATION TEST COMPLETED ===")
 	logger.Info("Test artifacts:")
 	logger.Info("  - data/Node-127.0.0.1:32307/blockchain/state/chain_state.json")
+	logger.Info("  - data/Node-127.0.0.1:32307/blockchain.db")
+	logger.Info("  - data/Node-127.0.0.1:32307/state.db")
 
 	if !consensusOK {
 		return fmt.Errorf("consensus validation failed - nodes did not reach agreement")

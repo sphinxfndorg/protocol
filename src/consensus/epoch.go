@@ -31,6 +31,8 @@ import (
 	denom "github.com/sphinxorg/protocol/src/params/denom"
 )
 
+// sips0013 https://github.com/sphinxorg/SIPS/blob/main/.github/workflows/sips0013/sips0013.md
+
 const (
 	// SlotDuration is the time for one block (12 seconds like Ethereum)
 	// This defines the block production interval - each slot can produce one block

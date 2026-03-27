@@ -32,6 +32,8 @@ import (
 	denom "github.com/sphinxorg/protocol/src/params/denom"
 )
 
+// sips0013 https://github.com/sphinxorg/SIPS/blob/main/.github/workflows/sips0013/sips0013.md
+
 // NewValidatorSet creates a validator set with minimum stake configuration.
 func NewValidatorSet(minStakeAmount *big.Int) *ValidatorSet {
 	if minStakeAmount == nil {

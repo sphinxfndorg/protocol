@@ -169,46 +169,55 @@ func (s *Storage) GetTotalBlocks() uint64 {
 	return s.totalBlocks
 }
 
-// NewStorage creates a new storage instances
+// NewStorage creates a new storage instance with LevelDB support
+// dataDir is the node's base directory (e.g., "127.0.0.1:32307")
 func NewStorage(dataDir string) (*Storage, error) {
+	// Use common package to get correct paths with blockchain subdirectory
+	blocksDir := common.GetBlocksDir(dataDir) // .../blockchain/blocks
+	indexDir := common.GetIndexDir(dataDir)   // .../blockchain/index
+	stateDir := common.GetStateDir(dataDir)   // .../blockchain/state
+	// dbPath is not used yet - we'll open DB via SetDB later
+	// dbPath := common.GetLevelDBPath(dataDir)  // .../blockchain.db
+
+	// Ensure all directories exist
+	if err := os.MkdirAll(blocksDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create blocks directory: %w", err)
+	}
+	if err := os.MkdirAll(indexDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create index directory: %w", err)
+	}
+	if err := os.MkdirAll(stateDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create state directory: %w", err)
+	}
+
+	// Create storage instance WITHOUT opening DB yet
+	// DB will be set later via SetDB() to allow sharing
 	storage := &Storage{
 		dataDir:       dataDir,
-		blocksDir:     filepath.Join(dataDir, "blocks"),
-		indexDir:      filepath.Join(dataDir, "index"),
-		stateDir:      filepath.Join(dataDir, "state"),
+		stateDB:       nil, // ✅ Will be set later via SetDB()
+		blocksDir:     blocksDir,
+		indexDir:      indexDir,
+		stateDir:      stateDir,
 		blockIndex:    make(map[string]*types.Block),
 		heightIndex:   make(map[uint64]*types.Block),
 		txIndex:       make(map[string]*types.Transaction),
 		totalBlocks:   0,
 		bestBlockHash: "",
 		tpsConfig: &TPSConfig{
-			WindowDuration: 5 * time.Second, // Keep as time.Duration
+			WindowDuration: 5 * time.Second,
 			MaxHistorySize: 1000,
 			SaveInterval:   30 * time.Second,
 			ReportInterval: 60 * time.Second,
 		},
 	}
 
-	// Create directories if they don't exist
-	if err := os.MkdirAll(storage.blocksDir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create blocks directory: %w", err)
-	}
-	if err := os.MkdirAll(storage.indexDir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create index directory: %w", err)
-	}
-	if err := os.MkdirAll(storage.stateDir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create state directory: %w", err)
-	}
-
-	// Load existing data with better error handling
+	// Load existing data from JSON files (these don't require DB)
 	if err := storage.loadChainState(); err != nil {
 		logger.Warn("Could not load chain state: %v", err)
-		// Continue with fresh state
 	}
 
 	if err := storage.loadBlockIndex(); err != nil {
 		logger.Warn("Could not load block index: %v", err)
-		// Continue with fresh index
 	}
 
 	// Load TPS metrics
@@ -217,8 +226,7 @@ func NewStorage(dataDir string) (*Storage, error) {
 		storage.initializeTPSMetrics()
 	}
 
-	// Log final state
-	logger.Info("Storage initialized: total_blocks=%d, best_block=%s",
+	logger.Info("Storage initialized (DB will be attached later): total_blocks=%d, best_block=%s",
 		storage.totalBlocks, storage.bestBlockHash)
 
 	return storage, nil
@@ -457,6 +465,7 @@ func (s *Storage) GetTPSMetrics() *TPSMetrics {
 
 // SaveTPSMetrics saves TPS metrics to disk
 // Fix SaveTPSMetrics to ensure WindowDurationSeconds is set before saving
+// SaveTPSMetrics saves TPS metrics to disk
 func (s *Storage) SaveTPSMetrics() error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -469,7 +478,17 @@ func (s *Storage) SaveTPSMetrics() error {
 	// Ensure WindowDurationSeconds is set before serialization
 	s.tpsMetrics.WindowDurationSeconds = s.tpsMetrics.WindowDuration.Seconds()
 
-	tpsFile := filepath.Join(s.stateDir, "tps_metrics.json")
+	// Get metrics directory path from common package
+	// Note: We need to get the node address from s.dataDir
+	// s.dataDir is the node address (e.g., "127.0.0.1:32307")
+	metricsDir := common.GetMetricsDir(s.dataDir)
+
+	// Ensure metrics directory exists
+	if err := os.MkdirAll(metricsDir, 0755); err != nil {
+		return fmt.Errorf("failed to create metrics directory: %w", err)
+	}
+
+	tpsFile := filepath.Join(metricsDir, "tps_metrics.json")
 
 	// Create a copy for serialization
 	tpsMetricsCopy := &TPSMetrics{
@@ -482,7 +501,7 @@ func (s *Storage) SaveTPSMetrics() error {
 		CurrentWindowCount:      s.tpsMetrics.CurrentWindowCount,
 		WindowStartTime:         s.tpsMetrics.WindowStartTime,
 		WindowDuration:          s.tpsMetrics.WindowDuration,
-		WindowDurationSeconds:   s.tpsMetrics.WindowDurationSeconds, // This will be serialized
+		WindowDurationSeconds:   s.tpsMetrics.WindowDurationSeconds,
 		TPSHistory:              append([]TPSDataPoint{}, s.tpsMetrics.TPSHistory...),
 		TransactionsPerBlock:    append([]BlockTXCount{}, s.tpsMetrics.TransactionsPerBlock...),
 		AvgTransactionsPerBlock: s.tpsMetrics.AvgTransactionsPerBlock,
@@ -505,18 +524,20 @@ func (s *Storage) SaveTPSMetrics() error {
 		return fmt.Errorf("failed to rename TPS metrics file: %w", err)
 	}
 
-	logger.Debug("✅ TPS metrics saved: current_tps=%.2f, total_txs=%d, history_size=%d",
-		s.tpsMetrics.CurrentTPS, s.tpsMetrics.TotalTransactions, len(s.tpsMetrics.TPSHistory))
+	logger.Debug("✅ TPS metrics saved to %s: current_tps=%.2f, total_txs=%d",
+		tpsFile, s.tpsMetrics.CurrentTPS, s.tpsMetrics.TotalTransactions)
 	return nil
 }
 
 // loadTPSMetrics loads TPS metrics from disk
 func (s *Storage) loadTPSMetrics() error {
-	tpsFile := filepath.Join(s.stateDir, "tps_metrics.json")
+	// Get metrics directory path from common package
+	metricsDir := common.GetMetricsDir(s.dataDir)
+	tpsFile := filepath.Join(metricsDir, "tps_metrics.json")
 
 	// Check if file exists
 	if _, err := os.Stat(tpsFile); os.IsNotExist(err) {
-		logger.Info("No TPS metrics file found, starting fresh")
+		logger.Info("No TPS metrics file found at %s, starting fresh", tpsFile)
 		return fmt.Errorf("TPS metrics file does not exist")
 	}
 
@@ -540,8 +561,8 @@ func (s *Storage) loadTPSMetrics() error {
 	s.tpsMetrics = &tpsMetrics
 	s.mu.Unlock()
 
-	logger.Info("TPS metrics loaded: current_tps=%.2f, total_txs=%d",
-		tpsMetrics.CurrentTPS, tpsMetrics.TotalTransactions)
+	logger.Info("TPS metrics loaded from %s: current_tps=%.2f, total_txs=%d",
+		tpsFile, tpsMetrics.CurrentTPS, tpsMetrics.TotalTransactions)
 	return nil
 }
 

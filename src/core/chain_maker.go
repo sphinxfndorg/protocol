@@ -49,11 +49,6 @@ const (
 	PhaseMainnet ChainPhase = "mainnet"
 )
 
-// checkpointPath returns the path to the checkpoint file for a node data dir.
-func checkpointPath(dataDir string) string {
-	return filepath.Join(dataDir, "state", "chain_checkpoint.json")
-}
-
 // WriteChainCheckpoint serialises the current chain tip and vault state to disk.
 // Call this from the devnet node manager once IsDistributionComplete() == true.
 func (bc *Blockchain) WriteChainCheckpoint() error {
@@ -90,26 +85,36 @@ func (bc *Blockchain) WriteChainCheckpoint() error {
 		return fmt.Errorf("WriteChainCheckpoint: marshal: %w", err)
 	}
 
-	// Create the directory if it doesn't exist
-	path := checkpointPath(bc.storage.GetStateDir())
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("WriteChainCheckpoint: create directory: %w", err)
+	// Get the node address from storage
+	// Assuming storage has a GetAddress() method, or we can get it from dataDir
+	// Since we don't have direct access to address, we'll use the state directory path
+	// and extract or use common functions appropriately
+	stateDir := bc.storage.GetStateDir()
+
+	// Ensure the state directory exists
+	if err := os.MkdirAll(stateDir, 0755); err != nil {
+		return fmt.Errorf("WriteChainCheckpoint: create state directory: %w", err)
 	}
 
+	// Write to chain_checkpoint.json directly inside the state directory
+	path := filepath.Join(stateDir, "chain_checkpoint.json")
 	if err := os.WriteFile(path, data, 0644); err != nil {
 		return fmt.Errorf("WriteChainCheckpoint: write: %w", err)
 	}
 
 	logger.Info("✅ WriteChainCheckpoint: devnet done at height=%d hash=%s vault=%s",
 		cp.TipHeight, cp.TipHash, cp.VaultBalance)
+	logger.Info("   Checkpoint saved to: %s", path)
 	return nil
 }
 
 // LoadChainCheckpoint reads the checkpoint written by devnet.
 // Returns nil if no checkpoint exists (clean start).
+// dataDir is the blockchain data directory (e.g., .../blockchain)
 func LoadChainCheckpoint(dataDir string) (*ChainCheckpoint, error) {
-	path := checkpointPath(filepath.Join(dataDir, "state"))
+	// Use centralized path function
+	path := common.GetBlockchainCheckpointPath(dataDir)
+
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return nil, nil // not an error — just no checkpoint yet
@@ -121,6 +126,26 @@ func LoadChainCheckpoint(dataDir string) (*ChainCheckpoint, error) {
 	var cp ChainCheckpoint
 	if err := json.Unmarshal(data, &cp); err != nil {
 		return nil, fmt.Errorf("LoadChainCheckpoint: unmarshal: %w", err)
+	}
+	return &cp, nil
+}
+
+// LoadChainCheckpointFromAddress loads checkpoint using node address
+// Convenience function that uses common package paths
+func LoadChainCheckpointFromAddress(address string) (*ChainCheckpoint, error) {
+	path := common.GetCheckpointPath(address)
+
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("LoadChainCheckpointFromAddress: %w", err)
+	}
+
+	var cp ChainCheckpoint
+	if err := json.Unmarshal(data, &cp); err != nil {
+		return nil, fmt.Errorf("LoadChainCheckpointFromAddress: unmarshal: %w", err)
 	}
 	return &cp, nil
 }
@@ -208,4 +233,21 @@ func (bc *Blockchain) GetCurrentPhase() ChainPhase {
 	default:
 		return PhaseMainnet
 	}
+}
+
+// HasCheckpoint checks if a checkpoint exists for the given address
+func HasCheckpoint(address string) bool {
+	path := common.GetCheckpointPath(address)
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// DeleteCheckpoint removes the checkpoint file for the given address
+// Use with caution - this should only be used when resetting state
+func DeleteCheckpoint(address string) error {
+	path := common.GetCheckpointPath(address)
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to delete checkpoint: %w", err)
+	}
+	return nil
 }

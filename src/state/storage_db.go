@@ -34,29 +34,47 @@
 // and for writes from a single goroutine.  For production you would share a
 // single handle; for the current test harness this is fine.
 
-// go/src/state/storage_db.go
 package state
 
 import (
 	"fmt"
 
 	database "github.com/sphinxorg/protocol/src/core/state"
+	logger "github.com/sphinxorg/protocol/src/log"
 )
 
-// GetDB returns the *database.DB handle shared with this Storage instance.
-func (s *Storage) GetDB() (*database.DB, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if s.stateDB == nil {
-		return nil, fmt.Errorf("Storage.GetDB: no shared database handle (was NewStorage given a DB?)")
-	}
-	return s.stateDB, nil
-}
-
-// SetDB injects an open *database.DB into this Storage instance.
-// Must be called once after NewStorage, before the first CommitBlock.
+// SetDB sets the main database handle (for blocks and transactions)
 func (s *Storage) SetDB(db *database.DB) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.db = db
+	logger.Info("Main DB handle attached to storage: %p", db)
+}
+
+// GetDB returns the main database handle
+func (s *Storage) GetDB() (*database.DB, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.db == nil {
+		return nil, fmt.Errorf("Storage.GetDB: no shared database handle")
+	}
+	return s.db, nil
+}
+
+// SetStateDB sets the state database handle (for consensus state)
+func (s *Storage) SetStateDB(db *database.DB) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.stateDB = db
+	logger.Info("State DB handle attached to storage: %p", db)
+}
+
+// GetStateDB returns the state database handle
+func (s *Storage) GetStateDB() (*database.DB, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.stateDB == nil {
+		return nil, fmt.Errorf("Storage.GetStateDB: no shared state database handle")
+	}
+	return s.stateDB, nil
 }

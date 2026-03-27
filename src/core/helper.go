@@ -183,6 +183,12 @@ func (bc *Blockchain) SetStorageDB(db *database.DB) {
 	bc.storage.SetDB(db)
 }
 
+// SetStateDB injects a shared *database.DB into the blockchain's storage
+// for consensus state management.
+func (bc *Blockchain) SetStateDB(db *database.DB) {
+	bc.storage.SetStateDB(db)
+}
+
 // Helper function to check if string is hex
 func isHexString(s string) bool {
 	if len(s)%2 != 0 {

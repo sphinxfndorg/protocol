@@ -69,8 +69,12 @@ func (bc *Blockchain) WriteChainCheckpoint() error {
 	vaultBal := stateDB.GetBalance(GenesisVaultAddress)
 	totalSupply := stateDB.GetTotalSupply()
 
+	// ── FIX: derive phase from actual chain params, not a hardcoded constant ──
+	currentPhase := bc.GetCurrentPhase()
+	// ─────────────────────────────────────────────────────────────────────────
+
 	cp := &ChainCheckpoint{
-		Phase:           PhaseDevnet,
+		Phase:           currentPhase, // was: PhaseDevnet (hardcoded)
 		GenesisHash:     GetGenesisHash(),
 		TipHeight:       tip.GetHeight(),
 		TipHash:         tip.GetHash(),
@@ -85,25 +89,18 @@ func (bc *Blockchain) WriteChainCheckpoint() error {
 		return fmt.Errorf("WriteChainCheckpoint: marshal: %w", err)
 	}
 
-	// Get the node address from storage
-	// Assuming storage has a GetAddress() method, or we can get it from dataDir
-	// Since we don't have direct access to address, we'll use the state directory path
-	// and extract or use common functions appropriately
 	stateDir := bc.storage.GetStateDir()
-
-	// Ensure the state directory exists
 	if err := os.MkdirAll(stateDir, 0755); err != nil {
 		return fmt.Errorf("WriteChainCheckpoint: create state directory: %w", err)
 	}
 
-	// Write to chain_checkpoint.json directly inside the state directory
 	path := filepath.Join(stateDir, "chain_checkpoint.json")
 	if err := os.WriteFile(path, data, 0644); err != nil {
 		return fmt.Errorf("WriteChainCheckpoint: write: %w", err)
 	}
 
-	logger.Info("✅ WriteChainCheckpoint: devnet done at height=%d hash=%s vault=%s",
-		cp.TipHeight, cp.TipHash, cp.VaultBalance)
+	logger.Info("✅ WriteChainCheckpoint: %s done at height=%d hash=%s vault=%s",
+		currentPhase, cp.TipHeight, cp.TipHash, cp.VaultBalance)
 	logger.Info("   Checkpoint saved to: %s", path)
 	return nil
 }

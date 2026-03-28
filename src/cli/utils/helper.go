@@ -440,7 +440,7 @@ func CallConsensus(numNodes int) error {
 		logger.Info("%s peer connections established", nodeID)
 
 		// Create blockchain instance
-		bc, err := core.NewBlockchain(address, networkType, validatorIDs, nodeID)
+		bc, err := core.NewBlockchain(address, nodeID, validatorIDs, networkType)
 		if err != nil {
 			return fmt.Errorf("failed to create blockchain for node %s: %v", nodeID, err)
 		}

@@ -336,9 +336,13 @@ func ApplyGenesis(bc *Blockchain, gs *GenesisState) error {
 	bc.chain = []*types.Block{block}
 	bc.lock.Unlock()
 
-	// Persist a human-readable genesis_state.json for auditing.
-	if writeErr := gs.writeGenesisStateFile(bc.storage.GetStateDir()); writeErr != nil {
-		// Non-fatal: log and continue.
+	// ── FIX: same pattern ──
+	envGs := *gs
+	if bc.chainParams != nil {
+		envGs.ChainName = bc.chainParams.ChainName
+		envGs.ChainID = bc.chainParams.ChainID
+	}
+	if writeErr := envGs.writeGenesisStateFile(bc.storage.GetStateDir()); writeErr != nil {
 		logger.Warn("ApplyGenesis: failed to write genesis_state.json: %v", writeErr)
 	}
 
@@ -379,7 +383,13 @@ func ApplyGenesisWithCachedBlock(bc *Blockchain, gs *GenesisState, cachedBlock *
 			}
 			// Even on skip, rewrite genesis_state.json so ChainName is correct
 			// for the current environment (devnet/testnet/mainnet).
-			if writeErr := gs.writeGenesisStateFile(bc.storage.GetStateDir()); writeErr != nil {
+			// With:
+			envGs := *gs // shallow copy
+			if bc.chainParams != nil {
+				envGs.ChainName = bc.chainParams.ChainName // stamp the actual running env
+				envGs.ChainID = bc.chainParams.ChainID
+			}
+			if writeErr := envGs.writeGenesisStateFile(bc.storage.GetStateDir()); writeErr != nil {
 				logger.Warn("ApplyGenesis (cached, skip): failed to rewrite genesis_state.json: %v", writeErr)
 			}
 			return nil
@@ -395,14 +405,18 @@ func ApplyGenesisWithCachedBlock(bc *Blockchain, gs *GenesisState, cachedBlock *
 	bc.chain = []*types.Block{cachedBlock}
 	bc.lock.Unlock()
 
-	// gs.ChainName is "Sphinx Devnet" / "Sphinx Testnet" / "Sphinx Mainnet"
-	// depending on what the caller passed — this is what ends up in genesis_state.json.
-	if writeErr := gs.writeGenesisStateFile(bc.storage.GetStateDir()); writeErr != nil {
+	// ── FIX: stamp ChainName/ChainID on the first-write path too ──
+	envGs := *gs
+	if bc.chainParams != nil {
+		envGs.ChainName = bc.chainParams.ChainName
+		envGs.ChainID = bc.chainParams.ChainID
+	}
+	if writeErr := envGs.writeGenesisStateFile(bc.storage.GetStateDir()); writeErr != nil {
 		logger.Warn("ApplyGenesis (cached): failed to write genesis_state.json: %v", writeErr)
 	}
 
 	logger.Info("✅ ApplyGenesis (cached): %s genesis applied — hash=%s, allocations=%d",
-		gs.ChainName, cachedBlock.GetHash(), len(gs.Allocations))
+		envGs.ChainName, cachedBlock.GetHash(), len(gs.Allocations))
 
 	return nil
 }
@@ -443,8 +457,6 @@ func ApplyGenesisState(bc *Blockchain, gs *GenesisState) error {
 		logger.Info("ApplyGenesisState: %s nSPX → %s (%s)",
 			alloc.BalanceNSPX.String(), alloc.Address, alloc.Label)
 	}
-
-	stateDB.IncrementTotalSupply(totalMinted)
 
 	stateRoot, err := stateDB.Commit()
 	if err != nil {

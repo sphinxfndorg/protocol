@@ -91,7 +91,7 @@ func (bc *Blockchain) applyTransactions(block *types.Block, stateDB *StateDB) er
 	for i, tx := range block.Body.TxsList {
 		if tx.Sender == "genesis" {
 			// Should not occur — genesis block body is now empty.
-			// Kept as a safety guard.
+			// Kept as a safety guard.f
 			continue
 		}
 
@@ -127,7 +127,7 @@ func (bc *Blockchain) applyTransactions(block *types.Block, stateDB *StateDB) er
 }
 
 // mintBlockReward issues BaseBlockReward to the block proposer, respecting
-// the hard 5 billion SPX supply cap.  New SPX enters circulation here.
+// the hard 5 billion SPX supply cap.
 func (bc *Blockchain) mintBlockReward(block *types.Block, stateDB *StateDB) {
 	if bc.chainParams == nil {
 		return
@@ -139,36 +139,44 @@ func (bc *Blockchain) mintBlockReward(block *types.Block, stateDB *StateDB) {
 		return
 	}
 
-	var reward *big.Int
-
 	if block.GetHeight() == 0 {
-		// Block 0 (genesis): mint the ENTIRE allocation supply to the vault.
-		// This is the only source of SPX — no coins exist before this.
+		// Block 0: mint entire genesis supply to the vault.
 		allocs := DefaultGenesisAllocations()
-		reward = new(big.Int)
+		reward := new(big.Int)
 		for _, a := range allocs {
 			if a.BalanceNSPX != nil {
 				reward.Add(reward, a.BalanceNSPX)
 			}
 		}
+		stateDB.AddBalance(proposerID, reward)
+		stateDB.IncrementTotalSupply(reward)
 		logger.Info("mintBlockReward: genesis mint %s nSPX → vault %s",
 			reward.String(), proposerID)
-	} else {
-		// Normal blocks: standard per-block reward
-		reward = new(big.Int).Set(bc.chainParams.BaseBlockReward)
-		if reward.Sign() <= 0 {
+		return
+	}
+
+	// Block 1 is always the genesis distribution block on every environment.
+	// Transactions move coins from the vault to allocation addresses.
+	// No new coins should be minted here.
+	if block.GetHeight() == 1 {
+		logger.Info("mintBlockReward: skipping reward for distribution block 1")
+		return
+	}
+
+	// Normal block reward.
+	reward := new(big.Int).Set(bc.chainParams.BaseBlockReward)
+	if reward.Sign() <= 0 {
+		return
+	}
+
+	current := stateDB.GetTotalSupply()
+	if new(big.Int).Add(current, reward).Cmp(maxSupplyNSPX) > 0 {
+		remaining := new(big.Int).Sub(maxSupplyNSPX, current)
+		if remaining.Sign() <= 0 {
+			logger.Info("mintBlockReward: supply cap reached, block %d", block.GetHeight())
 			return
 		}
-
-		current := stateDB.GetTotalSupply()
-		if new(big.Int).Add(current, reward).Cmp(maxSupplyNSPX) > 0 {
-			remaining := new(big.Int).Sub(maxSupplyNSPX, current)
-			if remaining.Sign() <= 0 {
-				logger.Info("mintBlockReward: supply cap reached, block %d", block.GetHeight())
-				return
-			}
-			reward = remaining
-		}
+		reward = remaining
 	}
 
 	stateDB.AddBalance(proposerID, reward)

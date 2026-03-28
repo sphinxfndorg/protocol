@@ -34,6 +34,7 @@ import (
 	database "github.com/sphinxorg/protocol/src/core/state"
 	types "github.com/sphinxorg/protocol/src/core/transaction"
 	logger "github.com/sphinxorg/protocol/src/log"
+	"github.com/sphinxorg/protocol/src/policy"
 	"github.com/sphinxorg/protocol/src/pool"
 	storage "github.com/sphinxorg/protocol/src/state"
 )
@@ -200,4 +201,58 @@ func isHexString(s string) bool {
 		}
 	}
 	return true
+}
+
+// RequiresDistributionBeforePromotion returns true for devnet — the network
+// must drain the genesis vault before it can be promoted to testnet/mainnet.
+func (p *SphinxChainParameters) RequiresDistributionBeforePromotion() bool {
+	return p.IsDevnet()
+}
+
+// GetGovernancePolicy returns the governance policy parameters
+func (p *SphinxChainParameters) GetGovernancePolicy() *policy.PolicyParameters {
+	return policy.GetDefaultPolicyParams()
+}
+
+// CalculateTransactionFee calculates fee for a transaction based on governance policy
+func (p *SphinxChainParameters) CalculateTransactionFee(bytes uint64, ops uint64, hashes uint64) *policy.FeeComponents {
+	govPolicy := p.GetGovernancePolicy()
+	return govPolicy.CalculateFees(bytes, ops, hashes)
+}
+
+// GetInflationRate returns the current inflation rate based on stake ratio
+func (p *SphinxChainParameters) GetInflationRate(currentStakeRatio float64) float64 {
+	govPolicy := p.GetGovernancePolicy()
+	return govPolicy.CalculateAnnualInflation(uint64(currentStakeRatio * 10000))
+}
+
+// GetStorageCost calculates storage cost based on governance policy
+func (p *SphinxChainParameters) GetStorageCost(bytes uint64, months float64) *policy.StoragePricing {
+	govPolicy := p.GetGovernancePolicy()
+	return govPolicy.CalculateStorageCost(bytes, months)
+}
+
+// GetMaxBlockSize returns the maximum block size in bytes
+// Getter for maximum block size
+func (p *SphinxChainParameters) GetMaxBlockSize() uint64 {
+	return p.MaxBlockSize
+}
+
+// GetTargetBlockSize returns the target block size in bytes
+// Getter for target block size (optimization target)
+func (p *SphinxChainParameters) GetTargetBlockSize() uint64 {
+	return p.TargetBlockSize
+}
+
+// GetMaxTransactionSize returns the maximum transaction size in bytes
+// Getter for maximum transaction size
+func (p *SphinxChainParameters) GetMaxTransactionSize() uint64 {
+	return p.MaxTransactionSize
+}
+
+// IsBlockSizeValid checks if a block size is within acceptable limits
+// Validates block size against chain parameters
+func (p *SphinxChainParameters) IsBlockSizeValid(blockSize uint64) bool {
+	// Block must not exceed maximum and must be positive
+	return blockSize <= p.MaxBlockSize && blockSize > 0
 }

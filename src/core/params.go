@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/sphinxorg/protocol/src/accounts/key"
+	"github.com/sphinxorg/protocol/src/policy"
 	"github.com/sphinxorg/protocol/src/pool"
 )
 
@@ -363,31 +364,6 @@ func (p *SphinxChainParameters) GenerateLedgerHeaders(operation string, amount f
 	return keystoreConfig.GenerateLedgerHeaders(operation, amount, address, memo)
 }
 
-// GetMaxBlockSize returns the maximum block size in bytes
-// Getter for maximum block size
-func (p *SphinxChainParameters) GetMaxBlockSize() uint64 {
-	return p.MaxBlockSize
-}
-
-// GetTargetBlockSize returns the target block size in bytes
-// Getter for target block size (optimization target)
-func (p *SphinxChainParameters) GetTargetBlockSize() uint64 {
-	return p.TargetBlockSize
-}
-
-// GetMaxTransactionSize returns the maximum transaction size in bytes
-// Getter for maximum transaction size
-func (p *SphinxChainParameters) GetMaxTransactionSize() uint64 {
-	return p.MaxTransactionSize
-}
-
-// IsBlockSizeValid checks if a block size is within acceptable limits
-// Validates block size against chain parameters
-func (p *SphinxChainParameters) IsBlockSizeValid(blockSize uint64) bool {
-	// Block must not exceed maximum and must be positive
-	return blockSize <= p.MaxBlockSize && blockSize > 0
-}
-
 // GetRecommendedBlockSize returns a recommended block size (could be target or a percentage of max)
 // Provides an optimal block size for miners/validators
 func (p *SphinxChainParameters) GetRecommendedBlockSize() uint64 {
@@ -413,8 +389,22 @@ func (p *SphinxChainParameters) NetworkPhase() string {
 	}
 }
 
-// RequiresDistributionBeforePromotion returns true for devnet — the network
-// must drain the genesis vault before it can be promoted to testnet/mainnet.
-func (p *SphinxChainParameters) RequiresDistributionBeforePromotion() bool {
-	return p.IsDevnet()
+// GetEpochInflation calculates inflation for a specific epoch
+func (p *SphinxChainParameters) GetEpochInflation(
+	totalSupply *big.Int,
+	year uint64,
+	currentStakeRatio float64,
+) *policy.InflationDistribution {
+	govPolicy := p.GetGovernancePolicy()
+	return govPolicy.CalculateEpochInflation(totalSupply, year, currentStakeRatio)
+}
+
+// GetAnnualMinting calculates total tokens minted in a specific year
+func (p *SphinxChainParameters) GetAnnualMinting(
+	totalSupply *big.Int,
+	year uint64,
+	currentStakeRatio float64,
+) *big.Int {
+	govPolicy := p.GetGovernancePolicy()
+	return govPolicy.GetAnnualMinting(totalSupply, year, currentStakeRatio)
 }

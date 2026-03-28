@@ -24,7 +24,6 @@
 package policy
 
 import (
-	"math"
 	"math/big"
 )
 
@@ -35,14 +34,19 @@ import (
 //	Infl₀ = initial inflation rate (0.05 = 5%)
 //	γ = decay factor (0.8)
 //	y = year number (1-indexed)
+//
+// CalculateAnnualInflation calculates the annual inflation rate for a given year
 func (p *PolicyParameters) CalculateAnnualInflation(year uint64) float64 {
 	if year == 0 {
 		year = 1
 	}
 
-	// Inflation(y) = Infl₀ * γ^(y-1)
-	decayFactor := math.Pow(p.InflationDecayFactor, float64(year-1))
-	return p.InitialInflationRate * decayFactor
+	// Use direct calculation without math.Pow for better precision
+	rate := p.InitialInflationRate
+	for i := uint64(1); i < year; i++ {
+		rate *= p.InflationDecayFactor
+	}
+	return rate
 }
 
 // CalculateAnnualInflationWithStakeAdjustment calculates inflation with stake ratio adjustment

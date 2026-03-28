@@ -90,11 +90,12 @@ func GetSphinxChainParams() *SphinxChainParameters {
 		},
 
 		// Block Configuration - size and gas limits
-		MaxBlockSize:       2 * 1024 * 1024,        // 2MB - maximum block size
-		MaxTransactionSize: 100 * 1024,             // 100KB - maximum transaction size
-		TargetBlockSize:    1 * 1024 * 1024,        // 1MB - target block size for optimization
-		BlockGasLimit:      big.NewInt(10000000),   // 10 million gas - maximum gas per block
-		BaseBlockReward:    big.NewInt(5000000000), // 5 SPX in base units - block mining reward
+		MaxBlockSize:       2 * 1024 * 1024,      // 2MB - maximum block size
+		MaxTransactionSize: 100 * 1024,           // 100KB - maximum transaction size
+		TargetBlockSize:    1 * 1024 * 1024,      // 1MB - target block size for optimization
+		BlockGasLimit:      big.NewInt(10000000), // 10 million gas - maximum gas per block
+		// GetSphinxChainParams()
+		BaseBlockReward: new(big.Int).Mul(big.NewInt(5), big.NewInt(1e18)), // 5 SPX = 5×10^18 nSPX
 
 		// Genesis-specific configuration - MUST MATCH genesisBlockDefinition
 		GenesisConfig: &GenesisConfig{
@@ -207,35 +208,21 @@ func GetMainnetChainParams() *SphinxChainParameters {
 // GetDevnetChainParams returns development network parameters
 // Devnet is used for local development and debugging
 func GetDevnetChainParams() *SphinxChainParameters {
-	// Start with mainnet params as base
 	params := GetSphinxChainParams()
 
-	// Override with devnet-specific values
 	params.ChainName = "Sphinx Devnet"
-	params.ChainID = 7331 // Same as mainnet but different name
+	params.ChainID = 73310 // ← distinct from mainnet (7331)
 	params.DefaultPort = 32309
-	params.BIP44CoinType = 1 // Different from mainnet (7331)
+	params.BIP44CoinType = 1
 	params.LedgerName = "Sphinx Devnet"
 
-	// Development-specific adjustments for maximum flexibility
-	params.MaxBlockSize = 8 * 1024 * 1024       // 8MB for development - largest blocks
-	params.BlockGasLimit = big.NewInt(50000000) // 50 million gas for development - 5x mainnet
+	params.MaxBlockSize = 8 * 1024 * 1024
+	params.BlockGasLimit = big.NewInt(50000000)
 
-	// Very fast block times for rapid development and testing
-	params.ConsensusConfig.BlockTime = 2 * time.Second // 5x faster than mainnet
-	params.ConsensusConfig.EpochLength = 10            // Very short epochs
+	params.ConsensusConfig.BlockTime = 2 * time.Second
+	params.ConsensusConfig.EpochLength = 10
 
-	// For devnet, you can either keep 32 SPX or lower it for testing
-	// If you want to test with lower stakes during development:
-	devnetMinStake := new(big.Int).Mul(
-		big.NewInt(1), // 1 SPX for devnet testing (optional)
-		big.NewInt(1e18),
-	)
-	// OR keep 32 SPX to match mainnet (uncomment to use):
-	// devnetMinStake := new(big.Int).Mul(
-	//     big.NewInt(32),
-	//     big.NewInt(1e18),
-	// )
+	devnetMinStake := new(big.Int).Mul(big.NewInt(1), big.NewInt(1e18))
 	params.ConsensusConfig.MinStakeAmount = devnetMinStake
 
 	return params
@@ -291,38 +278,34 @@ func ValidateChainParams(params *SphinxChainParameters) error {
 
 // GetNetworkName returns human-readable network name
 // Provides a user-friendly network identifier
+// params.go — GetNetworkName() still has the old logic
 func (p *SphinxChainParameters) GetNetworkName() string {
 	switch p.ChainID {
+	case 73310: // ← add devnet's new ChainID
+		return "Sphinx Devnet"
 	case 7331:
-		// ChainID 7331 could be either Mainnet or Devnet - check name
-		if p.ChainName == "Sphinx Devnet" {
-			return "Sphinx Devnet"
-		}
 		return "Sphinx Mainnet"
 	case 17331:
 		return "Sphinx Testnet"
 	default:
-		// Unknown chain ID, default to devnet
 		return "Sphinx Devnet"
 	}
 }
 
-// IsMainnet returns true if this is mainnet configuration
-// Identifies production mainnet
+// IsDevnet no longer needs ChainName as tiebreaker
+func (p *SphinxChainParameters) IsDevnet() bool {
+	return p.ChainID == 73310
+}
+
+// IsMainnet is now unambiguous
 func (p *SphinxChainParameters) IsMainnet() bool {
-	return p.ChainID == 7331 && p.ChainName == "Sphinx Mainnet"
+	return p.ChainID == 7331
 }
 
 // IsTestnet returns true if this is testnet configuration
 // Identifies test network
 func (p *SphinxChainParameters) IsTestnet() bool {
 	return p.ChainID == 17331
-}
-
-// IsDevnet returns true if this is devnet configuration
-// Identifies development network
-func (p *SphinxChainParameters) IsDevnet() bool {
-	return p.ChainID == 7331 && p.ChainName == "Sphinx Devnet"
 }
 
 // GetStakeDenomination returns the stake denomination

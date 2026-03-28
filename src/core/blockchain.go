@@ -1925,28 +1925,25 @@ func (bc *Blockchain) createGenesisBlock() error {
 		bc.chainParams = GetSphinxChainParams()
 	}
 
-	// Build GenesisState from the ACTUAL network's chain parameters.
-	// This gs carries the correct ChainName ("Sphinx Devnet"/"Sphinx Testnet"/
-	// "Sphinx Mainnet") and will be written to genesis_state.json.
+	// Log which environment we're actually creating genesis for
+	logger.Info("createGenesisBlock: environment=%s chainID=%d isDevnet=%v",
+		bc.chainParams.ChainName, bc.chainParams.ChainID, bc.chainParams.IsDevnet())
+
 	gs := GenesisStateFromChainParams(bc.chainParams)
 
 	if err := ValidateGenesisState(gs); err != nil {
 		return fmt.Errorf("genesis state validation failed: %w", err)
 	}
 
-	// Apply genesis using the process-wide cached block so BuildBlock() (argon2)
-	// only runs once. The gs carries the correct ChainName for the JSON file —
-	// the cached block's hash is environment-agnostic.
-	// NOTE: called only ONCE — the original code called this twice, which was a bug.
 	if err := ApplyGenesisWithCachedBlock(bc, gs, getCachedGenesisBlock()); err != nil {
 		return fmt.Errorf("ApplyGenesis failed: %w", err)
 	}
 
-	// Credit genesis allocations into the account StateDB using the same gs
-	// so ApplyGenesisState also sees the correct ChainName if it ever writes files.
-	if err := ApplyGenesisState(bc, gs); err != nil {
-		logger.Warn("ApplyGenesisState failed (will retry on next block): %v", err)
-	}
+	// DO NOT call ApplyGenesisState here.
+	// The vault-and-distribute model (ExecuteGenesisBlock + block 1 txs)
+	// is the single authoritative path for crediting balances.
+	// ApplyGenesisState credits balances directly AND increments total_supply,
+	// which would cause double-counting when block 1 distribution txs run.
 
 	LogAllocationSummary(gs.Allocations)
 

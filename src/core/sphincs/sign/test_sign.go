@@ -440,13 +440,26 @@ func main() {
 	receivedCommitment := wirePayload.Commitment
 	fmt.Println()
 
+	// Print what Charlie is about to verify
+	fmt.Println("  CHARLIE VERIFYING:")
+	fmt.Printf("    senderID:       %q\n", receivedSenderID)
+	fmt.Printf("    commitment:     0x%x\n", receivedCommitment)
+	fmt.Printf("    merkleRootHash: 0x%x\n", receivedMerkleRootHash)
+	fmt.Printf("    message:        %q\n", receivedMessage)
+	fmt.Printf("    timestamp:      0x%x (%d)\n", receivedTimestamp, binary.BigEndian.Uint64(receivedTimestamp))
+	fmt.Printf("    nonce:          0x%x\n", receivedNonce)
+	fmt.Printf("    pkBytes:        0x%x... (len=%d)\n", receivedPKBytes[:min(16, len(receivedPKBytes))], len(receivedPKBytes))
+	fmt.Printf("    sigBytes:       0x%x... (len=%d) ← will be verified then discarded\n", receivedSigBytes[:min(16, len(receivedSigBytes))], len(receivedSigBytes))
+	fmt.Println()
+
 	// STEP 1 — IDENTITY CHECK
 	//
 	// Charlie checks receivedPKBytes against his trusted registry BEFORE
 	// doing any cryptographic work. This stops identity spoofing:
-	//   Eve can generate a valid SPHINCS+ keypair and produce a genuine sig.
-	//   All crypto checks (Spx_verify, commitment, Merkle) would pass for Eve's key.
-	//   But Eve's pkBytes != Alice's registered pkBytes → rejected here immediately.
+	//
+	//	Eve can generate a valid SPHINCS+ keypair and produce a genuine sig.
+	//	All crypto checks (Spx_verify, commitment, Merkle) would pass for Eve's key.
+	//	But Eve's pkBytes != Alice's registered pkBytes → rejected here immediately.
 	//
 	// ORDER MATTERS: identity check must come before Spx_verify.
 	// If Spx_verify ran first, Eve's tx would waste Charlie's compute before
@@ -571,6 +584,15 @@ func main() {
 		Hash: uint256.NewInt(0).SetBytes(receivedMerkleRootHash),
 	}
 
+	// Print what Charlie is about to cryptographically verify
+	fmt.Println("  CHARLIE CRYPTOGRAPHIC VERIFICATION (SPHINCS+):")
+	fmt.Printf("    Verifying that sigBytes was produced by the owner of pkBytes\n")
+	fmt.Printf("    sigBytes length: %d bytes\n", len(receivedSigBytes))
+	fmt.Printf("    pkBytes fingerprint: 0x%x...\n", receivedPKBytes[:min(16, len(receivedPKBytes))])
+	fmt.Printf("    Message: %q\n", receivedMessage)
+	fmt.Printf("    Timestamp + Nonce ensure freshness and uniqueness\n")
+	fmt.Println()
+
 	// Run full verification on Charlie's own deserialized objects.
 	tStep4 := time.Now()
 	isValidFromWire := manager.VerifySignature(
@@ -591,6 +613,14 @@ func main() {
 	printTiming("       VerifySignature() — Spx_verify + commitment + merkle", dStep4)
 	fmt.Printf("         result: PASS (full SPHINCS+ hypertree verified)\n\n")
 
+	// After verification, show what was cryptographically proven
+	fmt.Println("  WHAT CHARLIE CRYPTOGRAPHICALLY PROVED:")
+	fmt.Println("    ✓ Alice's SK produced sigBytes (Spx_verify passed)")
+	fmt.Println("    ✓ Commitment = SpxHash(sigBytes || pkBytes || timestamp || nonce || message)")
+	fmt.Println("    ✓ Merkle root derived from sigBytes matches received root")
+	fmt.Println("    ✓ This transaction is uniquely identified by commitment")
+	fmt.Println()
+
 	// Zero Charlie's copy of receivedSigBytes immediately after verification.
 	// The 7–35 KB signature is no longer needed — the permanent record is the
 	// 32-byte merkleRootHash and 32-byte commitment stored below.
@@ -603,11 +633,9 @@ func main() {
 	// PRODUCTION NOTE — what Charlie stores permanently (88 bytes total):
 	//   (1) timestamp+nonce → "seen"          for replay prevention
 	//   (2) commitment → merkleRootHash        for dispute resolution
+	//   (3) proof → commitment → proof         for Dave's light client verification
 
 	// Store timestamp+nonce pair — blocks replay of this exact tx.
-	// PRODUCTION NOTE: Store AFTER verification succeeds, not before.
-	// Storing before verification would let an attacker permanently block
-	// a valid tx by submitting a fake tx with the same timestamp+nonce first.
 	tStoreNonce := time.Now()
 	err = manager.StoreTimestampNonce(receivedTimestamp, receivedNonce)
 	dStoreNonce := time.Since(tStoreNonce)
@@ -623,19 +651,88 @@ func main() {
 		log.Fatal("Failed to store receipt:", err)
 	}
 
+	// Store proof for Dave's light client verification
+	tStoreProof := time.Now()
+	proofKey := append([]byte("proof:"), receivedCommitment...)
+	err = db.Put(proofKey, wirePayload.Proof, nil)
+	if err != nil {
+		log.Fatal("Failed to store proof:", err)
+	}
+	dStoreProof := time.Since(tStoreProof)
+
 	printTiming("StoreTimestampNonce() — LevelDB PUT nonce guard", dStoreNonce)
 	printTiming("StoreReceipt() — LevelDB PUT commitment→root", dStoreReceipt)
+	printTiming("StoreProof() — LevelDB PUT proof", dStoreProof)
 	fmt.Println()
 	charlieStored := len(receivedCommitment) + len(receivedMerkleRootHash) +
-		len(receivedTimestamp) + len(receivedNonce)
+		len(receivedTimestamp) + len(receivedNonce) + len(wirePayload.Proof)
 	fmt.Println("  Storage:")
 	printSize("sigBytes — DISCARDED (never written to DB)", len(receivedSigBytes))
 	printSize("Charlie stores permanently", charlieStored)
 	printSize("  commitment (receipt lookup key)", len(receivedCommitment))
 	printSize("  merkleRootHash (receipt value)", len(receivedMerkleRootHash))
 	printSize("  timestamp+nonce (replay guard)", len(receivedTimestamp)+len(receivedNonce))
+	printSize("  proof (for Dave's light client verification)", len(wirePayload.Proof))
 	fmt.Printf("\n  Charlie accepts tx1! sender=%s message=%q\n",
 		receivedSenderID, receivedMessage)
+
+	// =========================================================================
+	// DAVE — re-verify tx1 after sigBytes discarded
+	// =========================================================================
+
+	fmt.Println()
+	fmt.Println("=================================================================")
+	fmt.Println(" DAVE — re-verify tx1 after sigBytes discarded")
+	fmt.Println("=================================================================")
+	fmt.Println()
+
+	// Retrieve proof from Charlie's DB by commitment key.
+	storedProofKey := append([]byte("proof:"), receivedCommitment...)
+	storedProof, err := db.Get(storedProofKey, nil)
+	if err != nil {
+		log.Fatal("Dave: proof not found in DB:", err)
+	}
+
+	// Print what Dave is verifying
+	fmt.Println("  DAVE VERIFYING:")
+	fmt.Printf("    commitment:     0x%x\n", receivedCommitment)
+	fmt.Printf("    merkleRootHash: 0x%x\n", receivedMerkleRootHash)
+	fmt.Printf("    message:        %q\n", receivedMessage)
+	fmt.Printf("    timestamp:      0x%x (%d)\n", receivedTimestamp, binary.BigEndian.Uint64(receivedTimestamp))
+	fmt.Printf("    nonce:          0x%x\n", receivedNonce)
+	fmt.Printf("    pkBytes:        0x%x... (len=%d)\n", pkBytes[:min(16, len(pkBytes))], len(pkBytes))
+	fmt.Printf("    storedProof:    0x%x... (len=%d)\n", storedProof[:min(16, len(storedProof))], len(storedProof))
+	fmt.Println()
+
+	// Dave regenerates proof from public inputs only — no sigBytes.
+	tDave := time.Now()
+	daveOK := sigproof.VerifyStoredProof(
+		storedProof,
+		receivedMessage,        // public — always known
+		receivedTimestamp,      // from Charlie's DB
+		receivedNonce,          // from Charlie's DB
+		receivedMerkleRootHash, // from Charlie's DB
+		receivedCommitment,     // from Charlie's DB
+		pkBytes,                // public — Alice's registered key
+	)
+	dDave := time.Since(tDave)
+
+	printTiming("Dave VerifyStoredProof() — no sigBytes, no Spx_verify", dDave)
+	if daveOK {
+		fmt.Printf("         result: PASS\n")
+		fmt.Printf("  Receipt is consistent. These exact inputs were what\n")
+		fmt.Printf("  Charlie ran Spx_verify against at tx time.\n")
+		fmt.Printf("  sigBytes: gone. Spx_verify: not called. Trust: Charlie's receipt.\n")
+
+		// Optional: Show that proof matches regeneration
+		fmt.Println("\n  WHAT DAVE VERIFIED:")
+		fmt.Printf("    ✓ Proof structure is valid\n")
+		fmt.Printf("    ✓ Proof regenerates to same value using public inputs\n")
+		fmt.Printf("    ✓ Commitment matches the receipt fingerprint\n")
+		fmt.Printf("    ✓ Merkle root is consistent with the proof\n")
+	} else {
+		fmt.Printf("         result: FAIL — receipt tampered or wrong inputs\n")
+	}
 
 	// =========================================================================
 	// EVE — tx2: own SK, substitutes Alice's pkBytes

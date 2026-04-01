@@ -87,3 +87,51 @@ func GetStoredProof() []byte {
 	defer mu.Unlock()
 	return storedProof
 }
+
+// VerifyStoredProof re-derives the proof from public inputs and compares
+// against the stored proof. Call this after sigBytes has been discarded.
+//
+// Inputs available permanently after sigBytes is gone:
+//
+//	storedProof    — the 32-byte proof Charlie stored at verification time
+//	message        — the transaction content (always public)
+//	timestamp      — 8 bytes, from Charlie's DB
+//	nonce          — 16 bytes, from Charlie's DB
+//	merkleRootHash — 32 bytes, from Charlie's DB
+//	commitment     — 32 bytes, from Charlie's DB
+//	pkBytes        — Alice's public key (always public, in registry)
+//
+// What a PASS means:
+//
+//	The values you provided are byte-for-byte identical to what Charlie
+//	passed to Spx_verify. Charlie's Spx_verify ran on these exact inputs.
+//
+// What a PASS does NOT mean:
+//
+//	It does not re-run Spx_verify. sigBytes is gone — that is by design.
+//	It proves consistency of the receipt, not validity of the signature.
+//	The caller must trust that Charlie ran Spx_verify honestly at tx time.
+func VerifyStoredProof(
+	storedProof []byte,
+	message, timestamp, nonce []byte,
+	merkleRootHash, commitment []byte,
+	pkBytes []byte,
+) bool {
+	// Rebuild the proof message exactly as GenerateSigProof received it.
+	proofMsg := make([]byte, 0, len(timestamp)+len(nonce)+len(message))
+	proofMsg = append(proofMsg, timestamp...)
+	proofMsg = append(proofMsg, nonce...)
+	proofMsg = append(proofMsg, message...)
+
+	commitmentLeaf := common.SpxHash(commitment) // CommitmentLeaf inline
+
+	regenerated, err := GenerateSigProof(
+		[][]byte{proofMsg},
+		[][]byte{merkleRootHash, commitmentLeaf},
+		pkBytes,
+	)
+	if err != nil {
+		return false
+	}
+	return VerifySigProof(storedProof, regenerated)
+}

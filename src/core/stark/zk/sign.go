@@ -20,7 +20,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-// go/ src/ core/
+// go/src/core/stark/zk/sign.go
 package zk
 
 import (

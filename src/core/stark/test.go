@@ -85,23 +85,24 @@ func main() {
 		return
 	}
 
-	// Parallel signature generation
+	// Parallel signature generation AND verification
 	var wg sync.WaitGroup
-	sigErrChan := make(chan error, numTxs) // Error channel for signature generation
+	sigErrChan := make(chan error, numTxs)
+
 	for i := 0; i < numTxs; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
 			msg := []byte(fmt.Sprintf("message %d", i))
+
 			// Generate key pair
-			keyStart := time.Now()
 			sk, pk, err := km.GenerateKey()
 			if err != nil {
 				sigErrChan <- fmt.Errorf("failed to generate key pair for signature %d: %v", i+1, err)
 				return
 			}
-			keyGenDuration := time.Since(keyStart).Seconds()
-			// Log for first signature
+
+			// Log for first signature only
 			if i == 0 {
 				skBytes, err := sk.SerializeSK()
 				if err != nil {
@@ -117,8 +118,8 @@ func main() {
 				fmt.Printf("    Secret Key size: %d bytes\n", len(skBytes))
 				fmt.Printf("    Public Key (hex, first signature): %s\n", hex.EncodeToString(pkBytes))
 				fmt.Printf("    Public Key size: %d bytes\n", len(pkBytes))
-				fmt.Printf("    Key generation time (first signature): %.3f sec\n", keyGenDuration)
 			}
+
 			// Sign message
 			signStart := time.Now()
 			sig, err := signer.SignMessage(sphincsParams, msg, sk)
@@ -127,7 +128,8 @@ func main() {
 				return
 			}
 			signDuration := time.Since(signStart).Seconds()
-			// Log and verify for first signature
+
+			// Log for first signature
 			if i == 0 {
 				sigHex, _, err := signer.SerializeSignature(sig)
 				if err != nil {
@@ -141,20 +143,33 @@ func main() {
 					return
 				}
 				fmt.Printf("    Signature size: %d bytes\n", len(sigBytes))
-
 				fmt.Printf("    Signature generation time (first signature): %.3f sec\n", signDuration)
-				// Verify first signature
-				fmt.Println("    Verifying first signature...")
-				verifyStart := time.Now()
-				valid, err := signer.VerifySignature(sphincsParams, msg, sig, pk)
-				verifyDuration := time.Since(verifyStart).Seconds()
-				fmt.Printf("    Signature verification result: %v\n", valid)
-				fmt.Printf("    Signature verification time (first signature): %.3f sec\n", verifyDuration)
-				if err != nil || !valid {
-					sigErrChan <- fmt.Errorf("signature verification failed for signature %d: %v", i+1, err)
-					return
-				}
 			}
+
+			// =============================================
+			// FIX: VERIFY ALL SIGNATURES (not just the first)
+			// =============================================
+			verifyStart := time.Now()
+			valid, err := signer.VerifySignature(sphincsParams, msg, sig, pk)
+			verifyDuration := time.Since(verifyStart).Seconds()
+
+			if err != nil || !valid {
+				sigErrChan <- fmt.Errorf("signature verification FAILED for signature %d: %v", i+1, err)
+				return
+			}
+
+			// Log verification result for first and last signatures
+			if i == 0 {
+				fmt.Printf("    Signature verification result (first): true\n")
+				fmt.Printf("    Signature verification time (first): %.3f sec\n", verifyDuration)
+			} else if i == numTxs-1 {
+				fmt.Printf("    Signature verification result (last): true\n")
+				fmt.Printf("    Signature verification time (last): %.3f sec\n", verifyDuration)
+			} else if i < 5 {
+				// Log first few verifications to show they're all being checked
+				fmt.Printf("    Signature %d verified: true (%.3f sec)\n", i+1, verifyDuration)
+			}
+
 			signatures[i] = sign.Signature{
 				Message:   msg,
 				Signature: sig,
@@ -162,8 +177,11 @@ func main() {
 			}
 		}(i)
 	}
+
 	wg.Wait()
-	close(sigErrChan) // Close signature error channel
+	close(sigErrChan)
+
+	// Check if any signature generation or verification failed
 	for err := range sigErrChan {
 		if err != nil {
 			fmt.Printf("Test Case 1 failed: %v\n", err)
@@ -171,12 +189,15 @@ func main() {
 		}
 	}
 
+	fmt.Printf("All %d signatures generated and VERIFIED successfully.\n", numTxs)
+
 	// Generate STARK proofs in batches
-	fmt.Printf("Generating STARK proofs for %d signatures in batches of %d...\n", numTxs, batchSize)
+	fmt.Printf("\nGenerating STARK proofs for %d VERIFIED signatures in batches of %d...\n", numTxs, batchSize)
 	proofStart := time.Now()
 	proofs := make([]*sign.STARKProof, 0, (numTxs+batchSize-1)/batchSize)
 	proofChan := make(chan *sign.STARKProof, (numTxs+batchSize-1)/batchSize)
-	proofErrChan := make(chan error, (numTxs+batchSize-1)/batchSize) // Error channel for proof generation
+	proofErrChan := make(chan error, (numTxs+batchSize-1)/batchSize)
+
 	for i := 0; i < numTxs; i += batchSize {
 		wg.Add(1)
 		go func(startIdx int) {
@@ -190,9 +211,11 @@ func main() {
 			proofChan <- proof
 		}(i)
 	}
+
 	wg.Wait()
 	close(proofChan)
-	close(proofErrChan) // Close proof error channel
+	close(proofErrChan)
+
 	for proof := range proofChan {
 		proofs = append(proofs, proof)
 	}
@@ -207,7 +230,7 @@ func main() {
 	// Log proof details for the first proof
 	for i, proof := range proofs {
 		if i == 0 {
-			fmt.Printf("  Commitment (hex, first proof): %s\n", hex.EncodeToString(proof.Commitment))
+			fmt.Printf("\n  Commitment (hex, first proof): %s\n", hex.EncodeToString(proof.Commitment))
 			fmt.Printf("  Evaluation Root (hex, first proof): %s\n", hex.EncodeToString(proof.DomainParams.EvaluationRoot))
 			fmt.Printf("  Computation Trace (first 5 elements, hex):")
 			for j, elem := range proof.DomainParams.Trace[:min(5, len(proof.DomainParams.Trace))] {
@@ -233,13 +256,14 @@ func main() {
 			fmt.Printf("  STARK proof size (first proof): %d bytes\n", len(proofBytes))
 		}
 	}
-	fmt.Printf("  STARK proof generation time: %.3f sec\n", proofGenDuration)
+	fmt.Printf("\n  STARK proof generation time: %.3f sec\n", proofGenDuration)
 	fmt.Println("STARK proofs generated successfully.")
 
 	// Verify STARK proofs
-	fmt.Println("Verifying STARK proofs...")
+	fmt.Println("\nVerifying STARK proofs...")
 	verifyStart := time.Now()
-	verifyErrChan := make(chan error, len(proofs)) // Error channel for proof verification
+	verifyErrChan := make(chan error, len(proofs))
+
 	for _, proof := range proofs {
 		wg.Add(1)
 		go func(p *sign.STARKProof) {
@@ -250,8 +274,10 @@ func main() {
 			}
 		}(proof)
 	}
+
 	wg.Wait()
-	close(verifyErrChan) // Close verification error channel
+	close(verifyErrChan)
+
 	for err := range verifyErrChan {
 		if err != nil {
 			fmt.Printf("Test Case 1 failed: %v\n", err)
@@ -260,5 +286,6 @@ func main() {
 	}
 	verifyDuration := time.Since(verifyStart).Seconds()
 	fmt.Printf("  STARK proof verification time: %.3f sec\n", verifyDuration)
-	fmt.Printf("Test Case 1 passed: All STARK proofs are valid (total time: %.3f sec)\n", time.Since(start).Seconds())
+	fmt.Printf("\n✅ Test Case 1 passed: All %d signatures verified, STARK proof valid (total time: %.3f sec)\n",
+		numTxs, time.Since(start).Seconds())
 }

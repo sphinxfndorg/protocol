@@ -80,15 +80,16 @@ type Block struct {
 
 // Transaction represents a blockchain transaction
 type Transaction struct {
-	ID        string   `json:"id"`
-	Sender    string   `json:"sender"`
-	Receiver  string   `json:"receiver"`
-	Amount    *big.Int `json:"amount"`
-	GasLimit  *big.Int `json:"gas_limit"`
-	GasPrice  *big.Int `json:"gas_price"`
-	Nonce     uint64   `json:"nonce"`
-	Timestamp int64    `json:"timestamp"`
-	Signature []byte   `json:"signature"`
+	ID         string   `json:"id"`
+	Sender     string   `json:"sender"`
+	Receiver   string   `json:"receiver"`
+	Amount     *big.Int `json:"amount"`
+	GasLimit   *big.Int `json:"gas_limit"`
+	GasPrice   *big.Int `json:"gas_price"`
+	Nonce      uint64   `json:"nonce"`
+	Timestamp  int64    `json:"timestamp"`
+	Signature  []byte   `json:"signature"`
+	ReturnData []byte   `json:"return_data,omitempty"` // OP_RETURN data (memos, proofs, metadata)
 }
 
 // Outpoint represents a specific transaction output.
@@ -132,6 +133,7 @@ type Note struct {
 	// AmountNSPX holds the exact nSPX amount when precision beyond float64 is needed.
 	// If set, ToTxs uses this instead of converting Fee.
 	AmountNSPX *big.Int `json:"amount_nspx,omitempty"`
+	ReturnData []byte   `json:"return_data,omitempty"` // Add OP_RETURN data field
 }
 
 // Contract represents a transaction contract.

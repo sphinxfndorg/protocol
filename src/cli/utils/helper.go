@@ -876,6 +876,7 @@ func CallConsensus(numNodes int) error {
 
 	// Build one Note per allocation
 	notes := make([]*types.Note, len(allocs))
+	// In CallConsensus, when building notes:
 	for i, alloc := range allocs {
 		notes[i] = &types.Note{
 			From:       core.GenesisVaultAddress,
@@ -883,9 +884,8 @@ func CallConsensus(numNodes int) error {
 			Fee:        0,
 			AmountNSPX: new(big.Int).Set(alloc.BalanceNSPX),
 			Storage:    fmt.Sprintf("genesis-dist-%d-%s", i, alloc.Label),
+			ReturnData: []byte(fmt.Sprintf("Genesis distribution to %s", alloc.Address)), // ADD THIS
 		}
-		logger.Info("Note[%d]: vault → %s (%s) %s nSPX",
-			i, alloc.Address, alloc.Label, alloc.BalanceNSPX.String())
 	}
 
 	// Convert each Note into a Transaction (unsigned - genesis vault transactions are trusted)

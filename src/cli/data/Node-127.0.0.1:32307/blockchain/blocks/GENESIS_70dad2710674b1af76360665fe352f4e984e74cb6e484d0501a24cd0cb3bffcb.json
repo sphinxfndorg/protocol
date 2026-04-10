@@ -1,0 +1,105 @@
+{
+  "header": {
+    "hash": "GENESIS_70dad2710674b1af76360665fe352f4e984e74cb6e484d0501a24cd0cb3bffcb",
+    "txs_root": "059fef9dfae5d7565f2753703c8e6cc4228fbe75a928eedb555fc5444e0a0dd8",
+    "state_root": "6bd593c675ee90f411c64f9f56ff743cae4219b1581efac28458b63ae550cf77",
+    "parent_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "uncles_hash": "3916d45c66e84c612c8a4a403702ec44cc575fc2383dbe4e861dd29ef892bee3",
+    "extra_data": "Sphinx Network Genesis Block - Decentralized Future",
+    "miner": "0000000000000000000000000000000000000000",
+    "version": 1,
+    "nblock": 0,
+    "height": 0,
+    "timestamp": "2024-11-20T02:40:00Z",
+    "difficulty": "17179869184",
+    "nonce": "0000000000000001",
+    "gas_limit": "5000",
+    "gas_used": "0",
+    "proposer_signature": "",
+    "proposer_id": "0000000000000000000000000000000000000001",
+    "commit_status": "committed",
+    "signature_valid": false
+  },
+  "body": {
+    "txs_list": [
+      {
+        "amount": "10000000000000000000000000",
+        "gas_limit": "0",
+        "gas_price": "0",
+        "id": "8eb2ae2bedf7d00d54ae9db70a52b224e692bd74f65c3af8ac0473bd8592bdfa",
+        "nonce": 0,
+        "receiver": "1000000000000000000000000000000000000001",
+        "sender": "genesis",
+        "signature": "",
+        "timestamp": "2024-11-20T02:40:00Z"
+      },
+      {
+        "amount": "7000000000000000000000000",
+        "gas_limit": "0",
+        "gas_price": "0",
+        "id": "d113b54d37fb8b98d0365e566836ac86d2caed7bd872d93e603b5fad5d4ff467",
+        "nonce": 1,
+        "receiver": "2000000000000000000000000000000000000001",
+        "sender": "genesis",
+        "signature": "",
+        "timestamp": "2024-11-20T02:40:00Z"
+      },
+      {
+        "amount": "30000000000000000000000000",
+        "gas_limit": "0",
+        "gas_price": "0",
+        "id": "e11fb523ae2402ec14dcd9388f4ac64ceed41762688c11ddef5899679c6c22c6",
+        "nonce": 2,
+        "receiver": "3000000000000000000000000000000000000001",
+        "sender": "genesis",
+        "signature": "",
+        "timestamp": "2024-11-20T02:40:00Z"
+      },
+      {
+        "amount": "20000000000000000000000000",
+        "gas_limit": "0",
+        "gas_price": "0",
+        "id": "1b46ce84d4b8f3422e5e5a79db328f11b7ea9f826e1cd452f4c1f8cdb9dbfa85",
+        "nonce": 3,
+        "receiver": "4000000000000000000000000000000000000001",
+        "sender": "genesis",
+        "signature": "",
+        "timestamp": "2024-11-20T02:40:00Z"
+      },
+      {
+        "amount": "20000000000000000000000000",
+        "gas_limit": "0",
+        "gas_price": "0",
+        "id": "1983b2d37e550e8e9c82f741d7f60cabb86a2ce4fc3c41a3ec638755a4c334ad",
+        "nonce": 4,
+        "receiver": "5000000000000000000000000000000000000001",
+        "sender": "genesis",
+        "signature": "",
+        "timestamp": "2024-11-20T02:40:00Z"
+      },
+      {
+        "amount": "8000000000000000000000000",
+        "gas_limit": "0",
+        "gas_price": "0",
+        "id": "ec62199e053056607b0e86f94a3a8b6ff23754a5047ea02610c6138b9f0e65be",
+        "nonce": 5,
+        "receiver": "6000000000000000000000000000000000000001",
+        "sender": "genesis",
+        "signature": "",
+        "timestamp": "2024-11-20T02:40:00Z"
+      },
+      {
+        "amount": "5000000000000000000000000",
+        "gas_limit": "0",
+        "gas_price": "0",
+        "id": "f9b7d5a03c39774de9aa5b5ca4821017f9e6830f98df7fd3818d1820abb9ce96",
+        "nonce": 6,
+        "receiver": "7000000000000000000000000000000000000001",
+        "sender": "genesis",
+        "signature": "",
+        "timestamp": "2024-11-20T02:40:00Z"
+      }
+    ],
+    "uncles_hash": "3916d45c66e84c612c8a4a403702ec44cc575fc2383dbe4e861dd29ef892bee3"
+  }
+}

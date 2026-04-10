@@ -7,95 +7,53 @@
   "extra_data": "Sphinx Network Genesis Block - Decentralized Future",
   "initial_difficulty": "17179869184",
   "initial_gas_limit": "5000",
-  "nonce": "0000000000000001",
-  "total_allocations": 14,
-  "total_allocated_nspx": "1000000000000000000000000000",
-  "total_allocated_spx": "1000000000",
+  "nonce": "0000000000000042",
+  "total_allocations": 7,
+  "total_allocated_nspx": "100000000000000000000000000",
+  "total_allocated_spx": "100000000",
   "total_validators": 0,
   "allocations": [
     {
       "address": "1000000000000000000000000000000000000001",
-      "balance_nspx": "50000000000000000000000000",
-      "balance_spx": "50000000",
-      "label": "Founders"
-    },
-    {
-      "address": "1000000000000000000000000000000000000002",
-      "balance_nspx": "50000000000000000000000000",
-      "balance_spx": "50000000",
-      "label": "Founders"
-    },
-    {
-      "address": "1000000000000000000000000000000000000003",
-      "balance_nspx": "50000000000000000000000000",
-      "balance_spx": "50000000",
-      "label": "Founders"
+      "balance_nspx": "10000000000000000000000000",
+      "balance_spx": "10000000",
+      "label": "Founder"
     },
     {
       "address": "2000000000000000000000000000000000000001",
-      "balance_nspx": "150000000000000000000000000",
-      "balance_spx": "150000000",
-      "label": "Reserve"
-    },
-    {
-      "address": "2000000000000000000000000000000000000002",
-      "balance_nspx": "150000000000000000000000000",
-      "balance_spx": "150000000",
-      "label": "Reserve"
+      "balance_nspx": "7000000000000000000000000",
+      "balance_spx": "7000000",
+      "label": "CoFounder"
     },
     {
       "address": "3000000000000000000000000000000000000001",
-      "balance_nspx": "100000000000000000000000000",
-      "balance_spx": "100000000",
-      "label": "Treasury"
-    },
-    {
-      "address": "3000000000000000000000000000000000000002",
-      "balance_nspx": "100000000000000000000000000",
-      "balance_spx": "100000000",
-      "label": "Treasury"
+      "balance_nspx": "30000000000000000000000000",
+      "balance_spx": "30000000",
+      "label": "Development"
     },
     {
       "address": "4000000000000000000000000000000000000001",
-      "balance_nspx": "100000000000000000000000000",
-      "balance_spx": "100000000",
-      "label": "Community"
-    },
-    {
-      "address": "4000000000000000000000000000000000000002",
-      "balance_nspx": "100000000000000000000000000",
-      "balance_spx": "100000000",
-      "label": "Community"
+      "balance_nspx": "20000000000000000000000000",
+      "balance_spx": "20000000",
+      "label": "Contributors"
     },
     {
       "address": "5000000000000000000000000000000000000001",
-      "balance_nspx": "30000000000000000000000000",
-      "balance_spx": "30000000",
-      "label": "Validator"
+      "balance_nspx": "20000000000000000000000000",
+      "balance_spx": "20000000",
+      "label": "Foundation"
     },
     {
-      "address": "5000000000000000000000000000000000000002",
-      "balance_nspx": "30000000000000000000000000",
-      "balance_spx": "30000000",
-      "label": "Validator"
+      "address": "6000000000000000000000000000000000000001",
+      "balance_nspx": "8000000000000000000000000",
+      "balance_spx": "8000000",
+      "label": "Campaigns"
     },
     {
-      "address": "5000000000000000000000000000000000000003",
-      "balance_nspx": "30000000000000000000000000",
-      "balance_spx": "30000000",
-      "label": "Validator"
-    },
-    {
-      "address": "5000000000000000000000000000000000000004",
-      "balance_nspx": "30000000000000000000000000",
-      "balance_spx": "30000000",
-      "label": "Validator"
-    },
-    {
-      "address": "5000000000000000000000000000000000000005",
-      "balance_nspx": "30000000000000000000000000",
-      "balance_spx": "30000000",
-      "label": "Validator"
+      "address": "7000000000000000000000000000000000000001",
+      "balance_nspx": "5000000000000000000000000",
+      "balance_spx": "5000000",
+      "label": "Airdrops"
     }
   ]
 }

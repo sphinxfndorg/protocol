@@ -41,6 +41,8 @@ import (
 	"github.com/sphinxorg/protocol/src/common"
 	"github.com/sphinxorg/protocol/src/consensus"
 
+	svm "github.com/sphinxorg/protocol/src/core/svm/opcodes"
+	"github.com/sphinxorg/protocol/src/core/svm/vm"
 	types "github.com/sphinxorg/protocol/src/core/transaction"
 	logger "github.com/sphinxorg/protocol/src/log"
 	"github.com/sphinxorg/protocol/src/pool"
@@ -295,8 +297,10 @@ func (bc *Blockchain) CalculateBlockSize(block *types.Block) uint64 {
 	// Transactions size - sum of all transaction sizes
 	// Calculate size for each transaction in the block
 	for _, tx := range block.Body.TxsList {
-		// Use mempool's transaction size calculator for consistency
-		size += bc.mempool.CalculateTransactionSize(tx)
+		if tx.HasReturnData() {
+			// Use mempool's transaction size calculator for consistency
+			size += bc.mempool.CalculateTransactionSize(tx)
+		}
 	}
 
 	return size
@@ -1311,21 +1315,54 @@ func (bc *Blockchain) CreateBlock() (*types.Block, error) {
 		currentTimestamp = time.Now().Unix() // Fallback to current time
 	}
 
-	// Prepare block components
-	extraData := []byte("Sphinx Network Block") // Block metadata
-	miner := make([]byte, 20)                   // Miner address (placeholder)
-	emptyUncles := []*types.BlockHeader{}       // No uncle blocks
+	// ========== FIX 1: Define miner address ==========
+	// Create a default miner address (20 bytes zero address)
+	// In production, this would be the proposer's address
+	miner := make([]byte, 20) // 20-byte zero address (Ethereum-style)
 
-	// Create block with initial nonce
+	// If consensus engine is available, use the proposer's address
+	if bc.consensusEngine != nil && bc.consensusEngine.GetNodeID() != "" {
+		// Convert node ID to address bytes (simple hash for now)
+		nodeIDHash := common.SpxHash([]byte(bc.consensusEngine.GetNodeID()))
+		if len(nodeIDHash) >= 20 {
+			miner = nodeIDHash[:20] // Use first 20 bytes
+		}
+	}
+	// ================================================
+
+	// ========== FIX 2: Define emptyUncles ==========
+	// Empty slice of uncle block headers
+	emptyUncles := []*types.BlockHeader{}
+	// ================================================
+
+	// ========== FIX 3: Prepare extraData with OP_RETURN hash ==========
+	// Start with base extra data
+	extraData := []byte("Sphinx Network Block")
+
+	// If there are transactions with OP_RETURN data, include a hash of them in ExtraData
+	var returnDataHash []byte
+	for _, tx := range selectedTxs {
+		if tx.HasReturnData() && len(tx.ReturnData) > 0 {
+			// Hash all OP_RETURN data together
+			returnDataHash = common.SpxHash(append(returnDataHash, tx.ReturnData...))
+		}
+	}
+	if len(returnDataHash) > 0 {
+		// Include the hash of all OP_RETURN data in ExtraData
+		extraData = append(extraData, returnDataHash...)
+		logger.Info("Including OP_RETURN data hash in ExtraData: %x", returnDataHash)
+	}
+	// ================================================================
+
 	newHeader := types.NewBlockHeader(
-		prevBlock.GetHeight()+1,      // Next height
+		prevBlock.GetHeight()+1,      // Height
 		parentHashBytes,              // Parent hash
-		bc.GetDifficulty(),           // Current difficulty
+		bc.GetDifficulty(),           // Difficulty
 		txsRoot,                      // Transaction Merkle root
 		stateRoot,                    // State root
 		bc.chainParams.BlockGasLimit, // Gas limit
 		big.NewInt(0),                // Gas used (initially 0)
-		extraData,                    // Extra data
+		extraData,                    // ExtraData includes OP_RETURN hash
 		miner,                        // Miner address
 		currentTimestamp,             // Block timestamp
 		emptyUncles,                  // Uncles (empty)
@@ -1768,6 +1805,38 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 	stateRoot, err := bc.ExecuteBlock(typeBlock)
 	if err != nil {
 		return fmt.Errorf("CommitBlock: execution failed: %w", err)
+	}
+
+	// Process OP_RETURN data in transactions
+	for _, tx := range typeBlock.Body.TxsList {
+		if tx.HasReturnData() {
+			// Validate OP_RETURN with VM
+			dataLen := len(tx.ReturnData)
+			vmBytecode := []byte{
+				byte(svm.PUSH4), byte(dataLen >> 24), byte(dataLen >> 16), byte(dataLen >> 8), byte(dataLen),
+				byte(svm.PUSH4), 0x00, 0x00, 0x00, 0x00,
+				byte(svm.OP_RETURN),
+			}
+
+			memoryLayout := make([]byte, dataLen)
+			copy(memoryLayout, tx.ReturnData)
+
+			// Fix vmachine import - change to vm.NewVM
+			vm := vm.NewVM(vmBytecode) // Was vmachine.NewVM
+			if err := vm.SetMemoryBytes(0, memoryLayout); err != nil {
+				return fmt.Errorf("OP_RETURN VM memory setup failed: %w", err) // Remove nil return
+			}
+			if err := vm.Run(); err != nil {
+				return fmt.Errorf("OP_RETURN execution failed: %w", err) // Remove nil return
+			}
+
+			// Store return data for light clients
+			if err := bc.storeReturnData(tx.ID, tx.ReturnData); err != nil {
+				logger.Warn("Failed to store OP_RETURN data for tx %s: %v", tx.ID, err)
+			}
+
+			logger.Info("📝 OP_RETURN: Transaction %s embedded %d bytes", tx.ID, dataLen)
+		}
 	}
 
 	// Stamp the real state root into the block header before storage.

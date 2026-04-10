@@ -289,8 +289,29 @@ func (mp *Mempool) validateTransaction(pooledTx *PooledTransaction) {
 	startTime := time.Now()
 	tx := pooledTx.Transaction
 
-	// ========== CALL performValidation FOR ACTUAL VALIDATION ==========
-	// performValidation is the main entry point that calls all SVM validations
+	// ========== OP_RETURN VALIDATION ==========
+	const maxReturnSize = 80
+	if len(tx.ReturnData) > maxReturnSize {
+		// Reject transaction with too much OP_RETURN data
+		pooledTx.Status = StatusInvalid
+		pooledTx.Error = fmt.Sprintf("OP_RETURN data exceeds maximum size of %d bytes", maxReturnSize)
+
+		mp.lock.Lock()
+		defer mp.lock.Unlock()
+
+		pooledTx.Status = StatusInvalid
+		pooledTx.Error = fmt.Sprintf("OP_RETURN data exceeds maximum size of %d bytes", maxReturnSize)
+		pooledTx.LastUpdated = time.Now()
+
+		delete(mp.validationPool, tx.ID)
+		mp.invalidPool[tx.ID] = pooledTx
+
+		mp.stats.totalInvalid++
+		logger.Warn("Transaction validation failed: ID=%s, OP_RETURN size exceeded", tx.ID)
+		return // Just return, don't return an error
+	}
+	// ==========================================
+
 	err := mp.performValidation(tx)
 
 	mp.lock.Lock()
@@ -300,7 +321,6 @@ func (mp *Mempool) validateTransaction(pooledTx *PooledTransaction) {
 	mp.stats.validationTime += validationTime
 
 	if err != nil {
-		// Validation failed
 		pooledTx.Status = StatusInvalid
 		pooledTx.Error = err.Error()
 		pooledTx.LastUpdated = time.Now()
@@ -311,7 +331,6 @@ func (mp *Mempool) validateTransaction(pooledTx *PooledTransaction) {
 		mp.stats.totalInvalid++
 		logger.Warn("Transaction validation failed: ID=%s, error=%v", tx.ID, err)
 	} else {
-		// Validation successful
 		pooledTx.Status = StatusPending
 		pooledTx.LastUpdated = time.Now()
 

@@ -256,3 +256,46 @@ func (p *SphinxChainParameters) IsBlockSizeValid(blockSize uint64) bool {
 	// Block must not exceed maximum and must be positive
 	return blockSize <= p.MaxBlockSize && blockSize > 0
 }
+
+// storeReturnData stores OP_RETURN data for light clients
+func (bc *Blockchain) storeReturnData(txID string, data []byte) error {
+	if bc.storage == nil {
+		return fmt.Errorf("storage not initialized")
+	}
+
+	// Get the underlying database from storage - note it returns (db, error)
+	db, err := bc.storage.GetDB()
+	if err != nil {
+		return fmt.Errorf("failed to get database: %w", err)
+	}
+	if db == nil {
+		return fmt.Errorf("database is nil")
+	}
+
+	// Store in a separate "return_data" bucket/prefix
+	key := fmt.Sprintf("return:%s", txID)
+
+	// Use the database's Put method
+	return db.Put(key, data)
+}
+
+// GetReturnData retrieves OP_RETURN data by transaction ID
+func (bc *Blockchain) GetReturnData(txID string) ([]byte, error) {
+	if bc.storage == nil {
+		return nil, fmt.Errorf("storage not initialized")
+	}
+
+	// Get the underlying database from storage - note it returns (db, error)
+	db, err := bc.storage.GetDB()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get database: %w", err)
+	}
+	if db == nil {
+		return nil, fmt.Errorf("database is nil")
+	}
+
+	key := fmt.Sprintf("return:%s", txID)
+
+	// Use the database's Get method
+	return db.Get(key)
+}

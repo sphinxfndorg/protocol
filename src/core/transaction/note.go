@@ -123,14 +123,15 @@ func (n *Note) ToTxs(nonce uint64, gasLimit, gasPrice *big.Int) *Transaction {
 	}
 
 	tx := &Transaction{
-		Sender:    n.From,
-		Receiver:  n.To,
-		Amount:    amount,
-		GasLimit:  gasLimit,
-		GasPrice:  gasPrice,
-		Timestamp: timestamp,
-		Nonce:     nonce,
-		Signature: []byte{},
+		Sender:     n.From,
+		Receiver:   n.To,
+		Amount:     amount,
+		GasLimit:   gasLimit,
+		GasPrice:   gasPrice,
+		Timestamp:  timestamp,
+		Nonce:      nonce,
+		Signature:  []byte{},
+		ReturnData: n.ReturnData, // Include OP_RETURN data
 	}
 	tx.ID = tx.Hash()
 	return tx
@@ -141,4 +142,23 @@ func (tx *Transaction) Hash() string {
 	data, _ := json.Marshal(tx)
 	hash := common.SpxHash(data)
 	return hex.EncodeToString(hash)
+}
+
+// HasReturnData checks if transaction contains OP_RETURN data
+func (tx *Transaction) HasReturnData() bool {
+	return len(tx.ReturnData) > 0
+}
+
+// GetReturnDataAsString returns OP_RETURN data as string if printable
+func (tx *Transaction) GetReturnDataAsString() string {
+	if !tx.HasReturnData() {
+		return ""
+	}
+	// Check if data contains only printable ASCII characters
+	for _, b := range tx.ReturnData {
+		if b < 32 || b > 126 {
+			return hex.EncodeToString(tx.ReturnData)
+		}
+	}
+	return string(tx.ReturnData)
 }

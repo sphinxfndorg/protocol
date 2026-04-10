@@ -20,7 +20,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-// go/src/core/svm/test/opcode.go
+// go/src/core/svm/opcodes/opcode.go
 package svm
 
 import (
@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/sphinxorg/protocol/src/common"
+	logger "github.com/sphinxorg/protocol/src/log"
 	"golang.org/x/crypto/sha3"
 )
 
@@ -190,6 +191,8 @@ func ExecuteOp(op OpCode, stack *Stack, memory []byte, code []byte, pc *uint64) 
 	// Used to load constants, lengths, pointers, and addresses
 	// Example: PUSH4 0x00 0x00 0x1E 0xB0 pushes 7856 onto stack (signature length)
 	// The values are read from the code (bytecode) not from memory
+	// NOTE: PUSH4 remapped to 0xB0, PUSH8 remapped to 0xB1 to avoid collision
+	//       with OP_IF (0x63) and OP_ELSE (0x67)
 	case PUSH1, PUSH2, PUSH4, PUSH8:
 		n := op.GetPushBytes() // Get number of bytes to push (1,2,4,8)
 		// Check bounds: current PC + n must not exceed code length
@@ -243,12 +246,58 @@ func ExecuteOp(op OpCode, stack *Stack, memory []byte, code []byte, pc *uint64) 
 	case SHA3_Shake256:
 		return executeShakeOp(stack)
 
-	// ========== BITWISE ARITHMETIC OPERATIONS (0x20-0x26) ==========
+	// ========== BITWISE ARITHMETIC OPERATIONS (0x20-0x2E) ==========
 	// Xor (0x20) - Bitwise XOR (exclusive OR)
 	// Used for combining values, cryptographic operations, and masking
 	// Pops two values, XORs them, pushes result
 	case Xor, Or, And, Rot, Not, Shr, Add:
 		return executeArithmeticOp(op, stack)
+	// ========== NEW ARITHMETIC OPERATIONS ==========
+	case SUB, MUL, DIV, SDIV, MOD, SMOD, EXP, SIGNEXTEND:
+		return executeArithmeticOp(op, stack)
+
+	// ========== COMPARISON OPERATIONS (0x31-0x36) ==========
+	// LT, GT, SLT, SGT, EQ, ISZERO - Comparison operations
+	case LT, GT, SLT, SGT, EQ, ISZERO:
+		return executeComparisonOp(op, stack)
+
+	// ========== BITWISE OPERATIONS (0x3A-0x3C) ==========
+	case BYTE, SHL, SAR:
+		return executeBitwiseOp(op, stack)
+
+	// ========== ETHEREUM CONTEXT OPERATIONS ==========
+	// NOTE: ORIGIN, CALLER, CALLVALUE, CALLDATALOAD, CALLDATASIZE remapped to 0xA0-0xA4
+	//       to avoid collision with GT(0x32), SLT(0x33), SGT(0x34), EQ(0x35), ISZERO(0x36)
+	// NOTE: EXTCODESIZE, EXTCODECOPY remapped to 0xA5-0xA6
+	//       to avoid collision with SHL(0x3B), SAR(0x3C)
+	// ADDRESS (0x30) - no conflict, kept as-is
+	// CALLDATACOPY (0x37), CODESIZE (0x38), CODECOPY (0x39) - no conflict, kept as-is
+	// RETURNDATASIZE (0x3D), RETURNDATACOPY (0x3E), GASPRICE (0x3F) - no conflict, kept as-is
+	case ADDRESS, ORIGIN, CALLER, CALLVALUE, CALLDATALOAD, CALLDATASIZE, CALLDATACOPY,
+		CODESIZE, CODECOPY, EXTCODESIZE, EXTCODECOPY, RETURNDATASIZE, RETURNDATACOPY, GASPRICE:
+		return executeEthereumContextOp(op, stack, memory)
+
+	// ========== ETHEREUM BLOCK CONTEXT (0x40-0x47) ==========
+	case BLOCKHASH, COINBASE, TIMESTAMP, NUMBER, DIFFICULTY, GASLIMIT, CHAINID, SELFBALANCE:
+		return executeBlockContextOp(op, stack)
+
+	// ========== CONTROL FLOW OPERATIONS (0x56-0x5B) ==========
+	case JUMP, JUMPI, PC, JUMPDEST:
+		return executeControlFlowOp(op, stack, code, pc)
+
+	// ========== BITCOIN SCRIPT STACK OPS ==========
+	// OP_IF (0x63), OP_ELSE (0x67), OP_ENDIF (0x68), OP_VERIFY (0x69)
+	// OP_DEPTH (0x74), OP_NIP (0x77), OP_OVER (0x78), OP_PICK (0x79), OP_ROLL (0x7A), OP_ROT (0x7B), OP_TUCK (0x7D)
+	// OP_EQUAL (0x87), OP_EQUALVERIFY (0x88)
+	// NOTE: OP_IF (0x63) and OP_ELSE (0x67) no longer conflict because PUSH4 was remapped
+	//       to 0xB0 and PUSH8 was remapped to 0xB1
+	case OP_IF, OP_ELSE, OP_ENDIF, OP_VERIFY, OP_EQUAL, OP_EQUALVERIFY, OP_DEPTH, OP_NIP,
+		OP_OVER, OP_PICK, OP_ROLL, OP_ROT, OP_TUCK:
+		return executeBitcoinScriptStackOp(op, stack)
+
+	// ========== BITCOIN SCRIPT OPERATIONS (0x7E-0x7F,0x8A-0x8D) ==========
+	case OP_CAT, OP_SUBSTR, OP_LEFT, OP_RIGHT, OP_SIZE, OP_SPLIT:
+		return executeBitcoinScriptOp(op, stack, memory)
 
 	// ========== SPHINCS+ PROTOCOL OPERATIONS (0xD0-0xDA) ==========
 	// OP_CHECK_SPHINCS (0xD0) - Verify SPHINCS+ signature, push 1/0 on stack
@@ -343,6 +392,16 @@ func ExecuteOp(op OpCode, stack *Stack, memory []byte, code []byte, pc *uint64) 
 	// Used to copy values for multiple operations without consuming the original
 	case DUP, SWAP, POP:
 		return executeStackOp(op, stack)
+
+	// ========== DATA EMBEDDING OPERATION (0xFD) ==========
+	// OP_RETURN (0xFD) - Embed arbitrary data (memos, proofs, metadata)
+	// Similar to Bitcoin's OP_RETURN - stores data without affecting state
+	// Used for: attaching memos to transactions, embedding SPHINCS+ proofs,
+	//           storing metadata, anchoring commitments, light client proofs
+	// Stack layout: data_len, data_ptr
+	// Pushes 1 on success, 0 on failure
+	case OP_RETURN:
+		return executeReturn(stack, memory)
 
 	default:
 		return fmt.Errorf("unknown opcode: 0x%x", op) // Invalid opcode
@@ -1046,6 +1105,87 @@ func executeVerifyProof(stack *Stack, memory []byte) error {
 	return nil
 }
 
+// ========== OP_RETURN OPERATION ==========
+// executeReturn - Embeds arbitrary data (memos, proofs, metadata) on-chain
+// This is similar to Bitcoin's OP_RETURN - stores data without affecting state
+// The data is prunable - full nodes can discard it to save space
+// Light clients can still access the data if needed
+//
+// Stack layout:
+//
+//	Before: ... [data_len] [data_ptr]
+//	After:  ... [1] (success) or [0] (failure)
+//
+// Use cases:
+//   - Attaching memos to transactions
+//   - Embedding SPHINCS+ proofs for light clients
+//   - Storing metadata or JSON data
+//   - Anchoring commitments
+//   - Recording transaction notes
+func executeReturn(stack *Stack, memory []byte) error {
+	// Pop data length from stack (number of bytes to embed)
+	dataLen, err := stack.Pop()
+	if err != nil {
+		return fmt.Errorf("missing data length: %v", err)
+	}
+
+	// Pop data pointer from stack (offset in memory where data starts)
+	dataPtr, err := stack.Pop()
+	if err != nil {
+		return fmt.Errorf("missing data pointer: %v", err)
+	}
+
+	// Validate bounds: pointer + length must not exceed memory size
+	if dataPtr+dataLen > uint64(len(memory)) {
+		return fmt.Errorf("data out of bounds: ptr=%d, len=%d, mem=%d", dataPtr, dataLen, len(memory))
+	}
+
+	// Extract the data (memo, proof, or metadata) from memory
+	data := memory[dataPtr : dataPtr+dataLen]
+
+	// Maximum size limit for OP_RETURN data (like Bitcoin's 80 bytes)
+	// This prevents abuse and keeps the data prunable
+	// Can be adjusted based on network needs
+	const maxReturnSize = 80
+	if dataLen > maxReturnSize {
+		return fmt.Errorf("OP_RETURN data exceeds maximum size of %d bytes (got %d)", maxReturnSize, dataLen)
+	}
+
+	// Generate a hash of the data as a key for retrieval
+	// This allows light clients to reference the data by hash
+	dataHash := sha3_256(data)
+	key := fmt.Sprintf("%x", dataHash[:8]) // Use first 8 bytes as short key
+
+	// Store the data in receiptStore (already defined in your code)
+	// This data is prunable - full nodes can discard it to save space
+	receiptStore[key] = data
+
+	// Also store in a dedicated "memos" or "proofs" store for easy retrieval
+	// This is where SPHINCS+ proofs, commitments, and memos are anchored
+	memoKey := fmt.Sprintf("memo:%x", dataHash[:8])
+	receiptStore[memoKey] = data
+
+	// Log the embedded memo if it's readable text
+	// Check if data contains only printable ASCII characters
+	isText := true
+	for _, b := range data {
+		if b < 32 || b > 126 {
+			isText = false
+			break
+		}
+	}
+
+	if isText && len(data) > 0 {
+		logger.Info("📝 OP_RETURN: Embedded %d bytes of text: %s", len(data), string(data))
+	} else {
+		logger.Debug("OP_RETURN: Embedded %d bytes of binary data (hash: %s)", len(data), key)
+	}
+
+	// Push success onto stack
+	stack.Push(1)
+	return nil
+}
+
 // ========== HELPER FUNCTION IMPLEMENTATIONS ==========
 
 // executeHashOp - Generic hash operation
@@ -1099,6 +1239,7 @@ func executeShakeOp(stack *Stack) error {
 
 // executeArithmeticOp - Handles all arithmetic and bitwise operations
 // Supported ops: Xor (0x20), Or (0x21), And (0x22), Rot (0x23), Not (0x24), Shr (0x25), Add (0x26)
+// Also supports: SUB, MUL, DIV, SDIV, MOD, SMOD, EXP, SIGNEXTEND
 func executeArithmeticOp(op OpCode, stack *Stack) error {
 	switch op {
 	case Not:
@@ -1123,6 +1264,132 @@ func executeArithmeticOp(op OpCode, stack *Stack) error {
 		result := (a << n) | (a >> (64 - n)) // Rotate left
 		stack.Push(result)
 
+	case Shr:
+		b, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		a, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		stack.Push(ShrOp(a, uint(b)))
+
+	case Add:
+		b, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		a, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		stack.Push(AddOp(a, b))
+
+	case SUB:
+		b, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		a, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		stack.Push(SubOp(a, b))
+
+	case MUL:
+		b, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		a, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		stack.Push(MulOp(a, b))
+
+	case DIV:
+		b, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		a, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		result, err := DivOp(a, b)
+		if err != nil {
+			return err
+		}
+		stack.Push(result)
+
+	case SDIV:
+		b, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		a, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		result, err := SDivOp(int64(a), int64(b))
+		if err != nil {
+			return err
+		}
+		stack.Push(uint64(result))
+
+	case MOD:
+		b, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		a, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		result, err := ModOp(a, b)
+		if err != nil {
+			return err
+		}
+		stack.Push(result)
+
+	case SMOD:
+		b, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		a, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		result, err := SModOp(int64(a), int64(b))
+		if err != nil {
+			return err
+		}
+		stack.Push(uint64(result))
+
+	case EXP:
+		b, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		a, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		stack.Push(ExpOp(a, b))
+
+	case SIGNEXTEND:
+		b, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		a, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		stack.Push(SignExtendOp(a, b))
+
 	default:
 		// Binary operations: pop two values, apply operation, push result
 		b, err := stack.Pop() // Second operand (right)
@@ -1141,10 +1408,6 @@ func executeArithmeticOp(op OpCode, stack *Stack) error {
 			result = a | b // Bitwise OR (inclusive OR)
 		case And:
 			result = a & b // Bitwise AND
-		case Shr:
-			result = a >> uint(b) // Shift right by b bits
-		case Add:
-			result = a + b // Addition (mod 2^64, wraps on overflow)
 		}
 		stack.Push(result)
 	}
@@ -1200,16 +1463,419 @@ func executeMultisigOp(op OpCode, stack *Stack) error {
 	return nil
 }
 
+// ========== NEW HELPER FUNCTIONS ==========
+
+// executeComparisonOp - Handles comparison operations
+func executeComparisonOp(op OpCode, stack *Stack) error {
+	b, err := stack.Pop()
+	if err != nil {
+		return err
+	}
+	a, err := stack.Pop()
+	if err != nil {
+		return err
+	}
+	var result uint64
+	switch op {
+	case LT:
+		result = LtOp(a, b)
+	case GT:
+		result = GtOp(a, b)
+	case SLT:
+		result = SlTOp(int64(a), int64(b))
+	case SGT:
+		result = SgTOp(int64(a), int64(b))
+	case EQ:
+		result = EqOp(a, b)
+	case ISZERO:
+		stack.Push(IsZeroOp(a))
+		return nil
+	}
+	stack.Push(result)
+	return nil
+}
+
+// executeBitwiseOp - Handles bitwise operations
+func executeBitwiseOp(op OpCode, stack *Stack) error {
+	switch op {
+	case BYTE:
+		b, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		a, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		stack.Push(ByteOp(a, uint(b)))
+	case SHL:
+		b, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		a, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		stack.Push(ShlOp(a, uint(b)))
+	case SAR:
+		b, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		a, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		stack.Push(SarOp(a, uint(b)))
+	}
+	return nil
+}
+
+// executeBitcoinScriptOp - Handles Bitcoin script operations
+func executeBitcoinScriptOp(op OpCode, stack *Stack, memory []byte) error {
+	switch op {
+	case OP_CAT:
+		// Get second data (length and pointer)
+		len2, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		ptr2, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		// Get first data (length and pointer)
+		len1, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		ptr1, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		// Validate bounds
+		if ptr1+len1 > uint64(len(memory)) || ptr2+len2 > uint64(len(memory)) {
+			return fmt.Errorf("data out of bounds")
+		}
+		data1 := memory[ptr1 : ptr1+len1]
+		data2 := memory[ptr2 : ptr2+len2]
+		result, err := CatOp(data1, data2)
+		if err != nil {
+			return err
+		}
+		// Push result (simplified - would need memory allocation)
+		stack.Push(uint64(len(result)))
+		stack.Push(0) // Placeholder pointer
+	case OP_SIZE:
+		len1, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		ptr1, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		if ptr1+len1 > uint64(len(memory)) {
+			return fmt.Errorf("data out of bounds")
+		}
+		data := memory[ptr1 : ptr1+len1]
+		stack.Push(SizeOp(data))
+	case OP_SUBSTR:
+		length, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		start, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		len1, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		ptr1, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		if ptr1+len1 > uint64(len(memory)) {
+			return fmt.Errorf("data out of bounds")
+		}
+		data := memory[ptr1 : ptr1+len1]
+		result, err := SubStrOp(data, start, length)
+		if err != nil {
+			return err
+		}
+		stack.Push(uint64(len(result)))
+		stack.Push(0)
+	case OP_LEFT:
+		length, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		len1, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		ptr1, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		if ptr1+len1 > uint64(len(memory)) {
+			return fmt.Errorf("data out of bounds")
+		}
+		data := memory[ptr1 : ptr1+len1]
+		result, err := LeftOp(data, length)
+		if err != nil {
+			return err
+		}
+		stack.Push(uint64(len(result)))
+		stack.Push(0)
+	case OP_RIGHT:
+		length, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		len1, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		ptr1, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		if ptr1+len1 > uint64(len(memory)) {
+			return fmt.Errorf("data out of bounds")
+		}
+		data := memory[ptr1 : ptr1+len1]
+		result, err := RightOp(data, length)
+		if err != nil {
+			return err
+		}
+		stack.Push(uint64(len(result)))
+		stack.Push(0)
+	case OP_SPLIT:
+		position, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		len1, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		ptr1, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		if ptr1+len1 > uint64(len(memory)) {
+			return fmt.Errorf("data out of bounds")
+		}
+		data := memory[ptr1 : ptr1+len1]
+		left, right, err := SplitOp(data, position)
+		if err != nil {
+			return err
+		}
+		// Push right then left (stack order)
+		stack.Push(uint64(len(right)))
+		stack.Push(0)
+		stack.Push(uint64(len(left)))
+		stack.Push(0)
+	}
+	return nil
+}
+
+// executeControlFlowOp - Handles control flow operations
+func executeControlFlowOp(op OpCode, stack *Stack, code []byte, pc *uint64) error {
+	switch op {
+	case PC:
+		stack.Push(*pc)
+	case JUMPDEST:
+		// No operation, just a marker
+		return nil
+	case JUMP:
+		dest, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		if dest >= uint64(len(code)) {
+			return fmt.Errorf("invalid jump destination")
+		}
+		*pc = dest
+		return nil // Skip the automatic pc increment
+	case JUMPI:
+		cond, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		dest, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		if cond != 0 {
+			if dest >= uint64(len(code)) {
+				return fmt.Errorf("invalid jump destination")
+			}
+			*pc = dest
+			return nil // Skip the automatic pc increment
+		}
+	}
+	return nil
+}
+
+// executeEthereumContextOp - Handles Ethereum context operations
+func executeEthereumContextOp(op OpCode, stack *Stack, memory []byte) error {
+	// These are placeholder implementations
+	switch op {
+	case ADDRESS, ORIGIN, CALLER, COINBASE:
+		// Push a placeholder address (20 bytes as uint64 is too small)
+		// In production, these would push 160-bit addresses
+		stack.Push(0)
+	case CALLVALUE, GASPRICE, SELFBALANCE:
+		stack.Push(0)
+	case CALLDATALOAD:
+		stack.Push(0)
+	case CALLDATASIZE, CODESIZE, EXTCODESIZE, RETURNDATASIZE:
+		stack.Push(0)
+	case CALLDATACOPY, CODECOPY, EXTCODECOPY, RETURNDATACOPY:
+		// Pop parameters and do nothing (placeholder)
+		for i := 0; i < 3; i++ {
+			stack.Pop()
+		}
+	}
+	return nil
+}
+
+// executeBlockContextOp - Handles block context operations
+func executeBlockContextOp(op OpCode, stack *Stack) error {
+	switch op {
+	case BLOCKHASH:
+		stack.Push(0)
+	case TIMESTAMP:
+		stack.Push(uint64(time.Now().Unix()))
+	case NUMBER:
+		stack.Push(0)
+	case DIFFICULTY:
+		stack.Push(0)
+	case GASLIMIT:
+		stack.Push(0)
+	case CHAINID:
+		stack.Push(1)
+	}
+	return nil
+}
+
+// executeBitcoinScriptStackOp - Handles Bitcoin script stack operations
+func executeBitcoinScriptStackOp(op OpCode, stack *Stack) error {
+	switch op {
+	case OP_VERIFY:
+		val, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		if val == 0 {
+			return fmt.Errorf("VERIFY failed")
+		}
+	case OP_EQUAL:
+		b, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		a, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		if a == b {
+			stack.Push(1)
+		} else {
+			stack.Push(0)
+		}
+	case OP_EQUALVERIFY:
+		b, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		a, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		if a != b {
+			return fmt.Errorf("EQUALVERIFY failed")
+		}
+	case OP_DEPTH:
+		stack.Push(uint64(stack.Size()))
+	case OP_NIP:
+		if stack.Size() < 2 {
+			return fmt.Errorf("stack underflow")
+		}
+		top, _ := stack.Pop()
+		stack.Pop() // Remove second
+		stack.Push(top)
+	case OP_OVER:
+		if stack.Size() < 2 {
+			return fmt.Errorf("stack underflow")
+		}
+		// Get second item without popping
+		second := stack.data[stack.Size()-2]
+		stack.Push(second)
+	case OP_PICK:
+		n, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		if uint64(stack.Size()) <= n {
+			return fmt.Errorf("stack underflow")
+		}
+		val := stack.data[stack.Size()-1-int(n)]
+		stack.Push(val)
+	case OP_ROLL:
+		n, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		if uint64(stack.Size()) <= n {
+			return fmt.Errorf("stack underflow")
+		}
+		idx := stack.Size() - 1 - int(n)
+		val := stack.data[idx]
+		// Remove and shift
+		stack.data = append(stack.data[:idx], stack.data[idx+1:]...)
+		stack.Push(val)
+	case OP_ROT:
+		if stack.Size() < 3 {
+			return fmt.Errorf("stack underflow")
+		}
+		a, _ := stack.Pop()
+		b, _ := stack.Pop()
+		c, _ := stack.Pop()
+		stack.Push(b)
+		stack.Push(a)
+		stack.Push(c)
+	case OP_TUCK:
+		if stack.Size() < 2 {
+			return fmt.Errorf("stack underflow")
+		}
+		top, _ := stack.Pop()
+		second, _ := stack.Pop()
+		stack.Push(top)
+		stack.Push(second)
+		stack.Push(top)
+	}
+	return nil
+}
+
 // ========== OPCODE CONSTANTS ==========
 // All opcodes are single-byte values that the VM interprets
 // Opcodes are grouped by functionality with gaps for future expansion
 
 const (
-	// Push operations (0x60-0x67) - Load immediate values from bytecode onto stack
+	// Push operations - Load immediate values from bytecode onto stack
+	// PUSH1 (0x60) and PUSH2 (0x61) are unchanged - no conflicts
+	// PUSH4 remapped from 0x63 → 0xB0 to avoid collision with OP_IF (0x63)
+	// PUSH8 remapped from 0x67 → 0xB1 to avoid collision with OP_ELSE (0x67)
 	PUSH1 OpCode = 0x60 // Push next 1 byte as uint64 value
 	PUSH2 OpCode = 0x61 // Push next 2 bytes as uint64 value
-	PUSH4 OpCode = 0x63 // Push next 4 bytes as uint64 value
-	PUSH8 OpCode = 0x67 // Push next 8 bytes as uint64 value
+	PUSH4 OpCode = 0xB0 // Push next 4 bytes as uint64 value (remapped from 0x63)
+	PUSH8 OpCode = 0xB1 // Push next 8 bytes as uint64 value (remapped from 0x67)
 
 	// Stack operations (0x50,0x80,0x90) - Manipulate stack without changing values
 	DUP  OpCode = 0x80 // Duplicate top stack item
@@ -1232,6 +1898,96 @@ const (
 	Shr OpCode = 0x25 // Shift right (logical shift)
 	Add OpCode = 0x26 // Addition (mod 2^64, wraps on overflow)
 
+	// ========== NEW ARITHMETIC OPERATIONS (0x27-0x2E) ==========
+	SUB        OpCode = 0x27 // Subtraction (a - b)
+	MUL        OpCode = 0x28 // Multiplication (a * b)
+	DIV        OpCode = 0x29 // Unsigned integer division (a / b)
+	SDIV       OpCode = 0x2A // Signed integer division
+	MOD        OpCode = 0x2B // Unsigned modulo (a % b)
+	SMOD       OpCode = 0x2C // Signed modulo
+	EXP        OpCode = 0x2D // Exponentiation (a ^ b)
+	SIGNEXTEND OpCode = 0x2E // Sign extend from b bits
+
+	// ========== COMPARISON OPERATIONS (0x31-0x36) ==========
+	LT     OpCode = 0x31 // Less than
+	GT     OpCode = 0x32 // Greater than
+	SLT    OpCode = 0x33 // Signed less than
+	SGT    OpCode = 0x34 // Signed greater than
+	EQ     OpCode = 0x35 // Equality
+	ISZERO OpCode = 0x36 // Check if zero
+
+	// ========== BITWISE OPERATIONS (0x3A-0x3C) ==========
+	BYTE OpCode = 0x3A // Get Nth byte from word
+	SHL  OpCode = 0x3B // Shift left
+	SAR  OpCode = 0x3C // Arithmetic shift right
+
+	// ========== ETHEREUM CONTEXT OPERATIONS ==========
+	// ADDRESS (0x30) - unchanged, no conflict
+	// ORIGIN remapped from 0x32 → 0xA0 to avoid collision with GT (0x32)
+	// CALLER remapped from 0x33 → 0xA1 to avoid collision with SLT (0x33)
+	// CALLVALUE remapped from 0x34 → 0xA2 to avoid collision with SGT (0x34)
+	// CALLDATALOAD remapped from 0x35 → 0xA3 to avoid collision with EQ (0x35)
+	// CALLDATASIZE remapped from 0x36 → 0xA4 to avoid collision with ISZERO (0x36)
+	// CALLDATACOPY (0x37), CODESIZE (0x38), CODECOPY (0x39) - unchanged, no conflict
+	// EXTCODESIZE remapped from 0x3B → 0xA5 to avoid collision with SHL (0x3B)
+	// EXTCODECOPY remapped from 0x3C → 0xA6 to avoid collision with SAR (0x3C)
+	// RETURNDATASIZE (0x3D), RETURNDATACOPY (0x3E), GASPRICE (0x3F) - unchanged, no conflict
+	ADDRESS        OpCode = 0x30 // Get address of executing account
+	ORIGIN         OpCode = 0xA0 // Get transaction origin (remapped from 0x32)
+	CALLER         OpCode = 0xA1 // Get caller address (remapped from 0x33)
+	CALLVALUE      OpCode = 0xA2 // Get value sent with call (remapped from 0x34)
+	CALLDATALOAD   OpCode = 0xA3 // Load input data (remapped from 0x35)
+	CALLDATASIZE   OpCode = 0xA4 // Get input data size (remapped from 0x36)
+	CALLDATACOPY   OpCode = 0x37 // Copy input data
+	CODESIZE       OpCode = 0x38 // Get code size
+	CODECOPY       OpCode = 0x39 // Copy code
+	EXTCODESIZE    OpCode = 0xA5 // Get external code size (remapped from 0x3B)
+	EXTCODECOPY    OpCode = 0xA6 // Copy external code (remapped from 0x3C)
+	RETURNDATASIZE OpCode = 0x3D // Get return data size
+	RETURNDATACOPY OpCode = 0x3E // Copy return data
+	GASPRICE       OpCode = 0x3F // Get gas price
+
+	// ========== ETHEREUM BLOCK CONTEXT (0x40-0x47) ==========
+	BLOCKHASH   OpCode = 0x40 // Get block hash
+	COINBASE    OpCode = 0x41 // Get block miner address
+	TIMESTAMP   OpCode = 0x42 // Get block timestamp
+	NUMBER      OpCode = 0x43 // Get block number
+	DIFFICULTY  OpCode = 0x44 // Get block difficulty
+	GASLIMIT    OpCode = 0x45 // Get block gas limit
+	CHAINID     OpCode = 0x46 // Get chain ID
+	SELFBALANCE OpCode = 0x47 // Get balance of current account
+
+	// ========== CONTROL FLOW OPERATIONS (0x56-0x5B) ==========
+	JUMP     OpCode = 0x56 // Unconditional jump
+	JUMPI    OpCode = 0x57 // Conditional jump
+	PC       OpCode = 0x58 // Program counter
+	JUMPDEST OpCode = 0x5B // Jump destination marker
+
+	// ========== BITCOIN SCRIPT OPS (0x63-0x68,0x69,0x74,0x77-0x7B,0x7D,0x87-0x88) ==========
+	// OP_IF (0x63) and OP_ELSE (0x67) are now conflict-free because PUSH4 and PUSH8
+	// have been remapped to 0xB0 and 0xB1 respectively
+	OP_IF          OpCode = 0x63 // Conditional if
+	OP_ELSE        OpCode = 0x67 // Conditional else
+	OP_ENDIF       OpCode = 0x68 // End conditional
+	OP_VERIFY      OpCode = 0x69 // Verify condition
+	OP_DEPTH       OpCode = 0x74 // Stack depth
+	OP_NIP         OpCode = 0x77 // Remove second item
+	OP_OVER        OpCode = 0x78 // Copy second item to top
+	OP_PICK        OpCode = 0x79 // Pick item from depth
+	OP_ROLL        OpCode = 0x7A // Move item to top
+	OP_ROT         OpCode = 0x7B // Rotate top three items
+	OP_TUCK        OpCode = 0x7D // Copy top to third position
+	OP_EQUAL       OpCode = 0x87 // Check equality
+	OP_EQUALVERIFY OpCode = 0x88 // Equal then verify
+
+	// ========== BITCOIN SCRIPT OPERATIONS (0x7E-0x7F,0x8A-0x8D) ==========
+	OP_CAT    OpCode = 0x7E // Concatenate two strings
+	OP_SUBSTR OpCode = 0x7F // Extract substring
+	OP_LEFT   OpCode = 0x8A // Take leftmost bytes
+	OP_RIGHT  OpCode = 0x8B // Take rightmost bytes
+	OP_SIZE   OpCode = 0x8C // Get size of data
+	OP_SPLIT  OpCode = 0x8D // Split at position
+
 	// SPHINCS+ protocol opcodes (0xD0-0xDA) - Post-quantum signature operations
 	OP_CHECK_SPHINCS      OpCode = 0xD0 // Verify signature, push 1/0 on stack
 	OP_VERIFY_SPHINCS     OpCode = 0xD1 // Verify signature, fail if invalid
@@ -1250,8 +2006,14 @@ const (
 	OP_SPHINCS_MULTISIG_SIGN   OpCode = 0xE1 // Add signature to multisignature
 	OP_SPHINCS_MULTISIG_VERIFY OpCode = 0xE2 // Verify multisignature
 	OP_SPHINCS_MULTISIG_PROOF  OpCode = 0xE3 // Generate multisignature proof
+
+	// OP_RETURN (0xFD) - Embed arbitrary data (memos, proofs, metadata)
+	// Similar to Bitcoin's OP_RETURN - stores data without affecting state
+	// Maximum size is configurable (default 80 bytes like Bitcoin)
+	OP_RETURN OpCode = 0xFD
 )
 
+// ========== STRING TO OPCODE MAPPING ==========
 // stringToOp maps string representations to OpCode values
 // Used for parsing human-readable opcode names from configuration or scripts
 var stringToOp = map[string]OpCode{
@@ -1267,10 +2029,72 @@ var stringToOp = map[string]OpCode{
 	"Not":                     Not,
 	"Shr":                     Shr,
 	"Add":                     Add,
+	"SUB":                     SUB,
+	"MUL":                     MUL,
+	"DIV":                     DIV,
+	"SDIV":                    SDIV,
+	"MOD":                     MOD,
+	"SMOD":                    SMOD,
+	"EXP":                     EXP,
+	"SIGNEXTEND":              SIGNEXTEND,
+	"LT":                      LT,
+	"GT":                      GT,
+	"SLT":                     SLT,
+	"SGT":                     SGT,
+	"EQ":                      EQ,
+	"ISZERO":                  ISZERO,
+	"BYTE":                    BYTE,
+	"SHL":                     SHL,
+	"SAR":                     SAR,
+	"ADDRESS":                 ADDRESS,
+	"ORIGIN":                  ORIGIN,       // now 0xA0
+	"CALLER":                  CALLER,       // now 0xA1
+	"CALLVALUE":               CALLVALUE,    // now 0xA2
+	"CALLDATALOAD":            CALLDATALOAD, // now 0xA3
+	"CALLDATASIZE":            CALLDATASIZE, // now 0xA4
+	"CALLDATACOPY":            CALLDATACOPY,
+	"CODESIZE":                CODESIZE,
+	"CODECOPY":                CODECOPY,
+	"EXTCODESIZE":             EXTCODESIZE, // now 0xA5
+	"EXTCODECOPY":             EXTCODECOPY, // now 0xA6
+	"RETURNDATASIZE":          RETURNDATASIZE,
+	"RETURNDATACOPY":          RETURNDATACOPY,
+	"GASPRICE":                GASPRICE,
+	"BLOCKHASH":               BLOCKHASH,
+	"COINBASE":                COINBASE,
+	"TIMESTAMP":               TIMESTAMP,
+	"NUMBER":                  NUMBER,
+	"DIFFICULTY":              DIFFICULTY,
+	"GASLIMIT":                GASLIMIT,
+	"CHAINID":                 CHAINID,
+	"SELFBALANCE":             SELFBALANCE,
+	"JUMP":                    JUMP,
+	"JUMPI":                   JUMPI,
+	"PC":                      PC,
+	"JUMPDEST":                JUMPDEST,
+	"OP_IF":                   OP_IF,
+	"OP_ELSE":                 OP_ELSE,
+	"OP_ENDIF":                OP_ENDIF,
+	"OP_VERIFY":               OP_VERIFY,
+	"OP_DEPTH":                OP_DEPTH,
+	"OP_NIP":                  OP_NIP,
+	"OP_OVER":                 OP_OVER,
+	"OP_PICK":                 OP_PICK,
+	"OP_ROLL":                 OP_ROLL,
+	"OP_ROT":                  OP_ROT,
+	"OP_TUCK":                 OP_TUCK,
+	"OP_EQUAL":                OP_EQUAL,
+	"OP_EQUALVERIFY":          OP_EQUALVERIFY,
+	"OP_CAT":                  OP_CAT,
+	"OP_SUBSTR":               OP_SUBSTR,
+	"OP_LEFT":                 OP_LEFT,
+	"OP_RIGHT":                OP_RIGHT,
+	"OP_SIZE":                 OP_SIZE,
+	"OP_SPLIT":                OP_SPLIT,
 	"PUSH1":                   PUSH1,
 	"PUSH2":                   PUSH2,
-	"PUSH4":                   PUSH4,
-	"PUSH8":                   PUSH8,
+	"PUSH4":                   PUSH4, // now 0xB0
+	"PUSH8":                   PUSH8, // now 0xB1
 	"DUP":                     DUP,
 	"SWAP":                    SWAP,
 	"POP":                     POP,
@@ -1289,6 +2113,8 @@ var stringToOp = map[string]OpCode{
 	"SPHINCS_MULTISIG_SIGN":   OP_SPHINCS_MULTISIG_SIGN,
 	"SPHINCS_MULTISIG_VERIFY": OP_SPHINCS_MULTISIG_VERIFY,
 	"SPHINCS_MULTISIG_PROOF":  OP_SPHINCS_MULTISIG_PROOF,
+	"RETURN":                  OP_RETURN, // Alias for OP_RETURN
+	"OP_RETURN":               OP_RETURN,
 }
 
 // OpCodeFromString returns the OpCode corresponding to a given string

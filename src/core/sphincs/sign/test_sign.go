@@ -21,7 +21,6 @@
 // SOFTWARE.
 
 // go/src/core/sphincs/sign/test_sign.go
-// go/src/core/sphincs/sign/test_sign.go
 package main
 
 import (

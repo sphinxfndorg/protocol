@@ -57,7 +57,7 @@ func NewMempool(config *MempoolConfig) *Mempool {
 		invalidPool:     make(map[string]*PooledTransaction),
 		allTransactions: make(map[string]*PooledTransaction),
 		config:          config,
-		currentBytes:    0, // INITIALIZE currentBytes
+		currentBytes:    0,
 		broadcastChan:   make(chan *types.Transaction, 1000),
 		validationChan:  make(chan *PooledTransaction, 1000),
 		cleanupChan:     make(chan struct{}, 1),
@@ -97,6 +97,7 @@ func (mp *Mempool) Stop() {
 }
 
 // BroadcastTransaction adds a new transaction to the broadcast pool
+// Now with SVM signature verification
 func (mp *Mempool) BroadcastTransaction(tx *types.Transaction) error {
 	mp.lock.Lock()
 	defer mp.lock.Unlock()
@@ -115,6 +116,17 @@ func (mp *Mempool) BroadcastTransaction(tx *types.Transaction) error {
 	if existing := mp.allTransactions[tx.ID]; existing != nil {
 		return fmt.Errorf("transaction %s already exists with status %d", tx.ID, existing.Status)
 	}
+
+	// ========== SVM SIGNATURE VERIFICATION ==========
+	// Verify transaction signature using SVM before adding to mempool
+	// Skip genesis vault transactions (they are trusted)
+	if tx.Sender != "0000000000000000000000000000000000000001" { // Genesis vault address
+		if err := mp.verifyTransactionSignature(tx); err != nil {
+			return fmt.Errorf("SVM signature verification failed: %w", err)
+		}
+		logger.Debug("SVM: Transaction signature verified for %s", tx.ID)
+	}
+	// =================================================
 
 	// Check broadcast pool limits
 	if len(mp.broadcastPool) >= mp.config.MaxBroadcastSize {
@@ -140,7 +152,7 @@ func (mp *Mempool) BroadcastTransaction(tx *types.Transaction) error {
 	// Add to pools and update byte count
 	mp.broadcastPool[tx.ID] = pooledTx
 	mp.allTransactions[tx.ID] = pooledTx
-	mp.currentBytes += txSize // UPDATE currentBytes
+	mp.currentBytes += txSize
 	mp.stats.totalAdded++
 
 	// Send to broadcast channel for processing
@@ -197,106 +209,6 @@ func (mp *Mempool) processBroadcastTransaction(tx *types.Transaction) {
 		mp.pendingPool[tx.ID] = pooledTx
 		logger.Warn("Validation channel full, transaction %s moved to pending", tx.ID)
 	}
-}
-
-// validationProcessor handles transaction validation
-func (mp *Mempool) validationProcessor() {
-	for {
-		select {
-		case pooledTx := <-mp.validationChan:
-			mp.validateTransaction(pooledTx)
-		case <-mp.stopChan:
-			return
-		}
-	}
-}
-
-// validateTransaction performs comprehensive validation
-func (mp *Mempool) validateTransaction(pooledTx *PooledTransaction) {
-	startTime := time.Now()
-	tx := pooledTx.Transaction
-
-	// Perform validation
-	err := mp.performValidation(tx)
-
-	mp.lock.Lock()
-	defer mp.lock.Unlock()
-
-	validationTime := time.Since(startTime)
-	mp.stats.validationTime += validationTime
-
-	if err != nil {
-		// Validation failed
-		pooledTx.Status = StatusInvalid
-		pooledTx.Error = err.Error()
-		pooledTx.LastUpdated = time.Now()
-
-		delete(mp.validationPool, tx.ID)
-		mp.invalidPool[tx.ID] = pooledTx
-
-		mp.stats.totalInvalid++
-		logger.Warn("Transaction validation failed: ID=%s, error=%v", tx.ID, err)
-	} else {
-		// Validation successful
-		pooledTx.Status = StatusPending
-		pooledTx.LastUpdated = time.Now()
-
-		delete(mp.validationPool, tx.ID)
-		mp.pendingPool[tx.ID] = pooledTx
-
-		mp.stats.totalValidated++
-		logger.Debug("Transaction validated: ID=%s, time=%v", tx.ID, validationTime)
-	}
-}
-
-// performValidation executes the actual validation logic
-func (mp *Mempool) performValidation(tx *types.Transaction) error {
-	// Validate transaction size
-	txSize := mp.CalculateTransactionSize(tx)
-	if txSize > mp.config.MaxTxSize {
-		return fmt.Errorf("transaction size %d exceeds maximum %d bytes", txSize, mp.config.MaxTxSize)
-	}
-
-	// Perform transaction sanity checks
-	if err := tx.SanityCheck(); err != nil {
-		return fmt.Errorf("sanity check failed: %w", err)
-	}
-
-	// Validate transaction fields
-	if tx.Sender == "" || tx.Receiver == "" {
-		return errors.New("empty sender or receiver")
-	}
-
-	if tx.Amount == nil || tx.Amount.Cmp(big.NewInt(0)) <= 0 {
-		return errors.New("invalid amount")
-	}
-
-	// Validate gas parameters
-	if tx.GasLimit == nil || tx.GasPrice == nil {
-		return errors.New("missing gas parameters")
-	}
-
-	// Additional business logic validation can be added here
-	// For example: signature verification, nonce validation, balance checks, etc.
-
-	return nil
-}
-
-// validateTransactionBasic performs quick basic validation
-func (mp *Mempool) validateTransactionBasic(tx *types.Transaction) error {
-	if tx == nil {
-		return errors.New("nil transaction")
-	}
-
-	if tx.Sender == "" || tx.Receiver == "" {
-		return errors.New("empty sender or receiver")
-	}
-
-	if tx.Amount == nil || tx.Amount.Cmp(big.NewInt(0)) <= 0 {
-		return errors.New("invalid amount")
-	}
-
-	return nil
 }
 
 // generateTransactionID creates a unique ID for the transaction

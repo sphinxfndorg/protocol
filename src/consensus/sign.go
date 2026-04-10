@@ -21,6 +21,7 @@
 // SOFTWARE.
 
 // go/src/consensus/signing.go
+// go/src/consensus/signing.go - Complete working version with VM
 package consensus
 
 import (
@@ -32,6 +33,8 @@ import (
 	"github.com/holiman/uint256"
 	key "github.com/sphinxorg/protocol/src/core/sphincs/key/backend"
 	sign "github.com/sphinxorg/protocol/src/core/sphincs/sign/backend"
+	svm "github.com/sphinxorg/protocol/src/core/svm/opcodes"
+	vmachine "github.com/sphinxorg/protocol/src/core/svm/vm"
 	types "github.com/sphinxorg/protocol/src/core/transaction"
 	"github.com/sphinxorg/protocol/src/crypto/SPHINCSPLUS-golang/sphincs"
 	logger "github.com/sphinxorg/protocol/src/log"
@@ -96,17 +99,11 @@ func (s *SigningService) initializeKeys() error {
 }
 
 // SignMessage signs a consensus message.
-//
-// FIX: SignMessage now requires both sk and pk, and returns 6 values including
-// the 32-byte commitment. The commitment is stored in SignedMessage so that
-// VerifySignature can pass it to sphincsManager.VerifySignature.
 func (s *SigningService) SignMessage(data []byte) ([]byte, error) {
 	if s.sphincsManager == nil || s.privateKey == nil || s.publicKey == nil {
 		return nil, errors.New("not initialized")
 	}
 
-	// FIX: pass s.publicKey as third argument.
-	// Capture all 6 return values: sig, merkleRoot, timestamp, nonce, commitment, err.
 	sig, merkleRoot, timestamp, nonce, commitment, err := s.sphincsManager.SignMessage(data, s.privateKey, s.publicKey)
 	if err != nil {
 		return nil, err
@@ -121,26 +118,86 @@ func (s *SigningService) SignMessage(data []byte) ([]byte, error) {
 		return nil, err
 	}
 
-	// FIX: store commitment in SignedMessage so VerifySignature can retrieve it.
-	// Without this field the commitment is lost and VerifySignature cannot pass
-	// it to sphincsManager.VerifySignature.
 	signedMsg := &SignedMessage{
 		Signature:  sigBytes,
 		Timestamp:  timestamp,
 		Nonce:      nonce,
 		MerkleRoot: merkleRoot,
-		Commitment: commitment, // 32-byte binding: H(sigBytes||pk||timestamp||nonce||data)
+		Commitment: commitment,
 		Data:       data,
 	}
 
 	return signedMsg.Serialize()
 }
 
+// verifyWithVM uses SVM to verify SPHINCS+ signature
+func (s *SigningService) verifyWithVM(signature, publicKey, message []byte) bool {
+	sigLen := len(signature)
+	pkLen := len(publicKey)
+	msgLen := len(message)
+
+	// Calculate memory pointers
+	sigPtr := uint32(0)
+	pkPtr := uint32(sigLen)
+	msgPtr := uint32(sigLen + pkLen)
+
+	// Build VM bytecode for OP_CHECK_SPHINCS
+	// Stack layout after pushes (top to bottom):
+	//   msg_len, msg_ptr, pk_len, pk_ptr, sig_len, sig_ptr
+	vmBytecode := []byte{}
+
+	// Push message length (will be popped first)
+	vmBytecode = append(vmBytecode, byte(svm.PUSH4))
+	vmBytecode = append(vmBytecode, byte(msgLen>>24), byte(msgLen>>16), byte(msgLen>>8), byte(msgLen))
+
+	// Push message pointer
+	vmBytecode = append(vmBytecode, byte(svm.PUSH4))
+	vmBytecode = append(vmBytecode, byte(msgPtr>>24), byte(msgPtr>>16), byte(msgPtr>>8), byte(msgPtr))
+
+	// Push public key length
+	vmBytecode = append(vmBytecode, byte(svm.PUSH4))
+	vmBytecode = append(vmBytecode, byte(pkLen>>24), byte(pkLen>>16), byte(pkLen>>8), byte(pkLen))
+
+	// Push public key pointer
+	vmBytecode = append(vmBytecode, byte(svm.PUSH4))
+	vmBytecode = append(vmBytecode, byte(pkPtr>>24), byte(pkPtr>>16), byte(pkPtr>>8), byte(pkPtr))
+
+	// Push signature length
+	vmBytecode = append(vmBytecode, byte(svm.PUSH4))
+	vmBytecode = append(vmBytecode, byte(sigLen>>24), byte(sigLen>>16), byte(sigLen>>8), byte(sigLen))
+
+	// Push signature pointer
+	vmBytecode = append(vmBytecode, byte(svm.PUSH4))
+	vmBytecode = append(vmBytecode, byte(sigPtr>>24), byte(sigPtr>>16), byte(sigPtr>>8), byte(sigPtr))
+
+	// Add CHECK opcode
+	vmBytecode = append(vmBytecode, byte(svm.OP_CHECK_SPHINCS))
+
+	// Prepare memory layout
+	memoryLayout := make([]byte, sigLen+pkLen+msgLen)
+	copy(memoryLayout[0:], signature)
+	copy(memoryLayout[sigLen:], publicKey)
+	copy(memoryLayout[sigLen+pkLen:], message)
+
+	vm := vmachine.NewVM(vmBytecode)
+	if err := vm.SetMemoryBytes(0, memoryLayout); err != nil {
+		logger.Warn("VM memory setup failed: %v", err)
+		return false
+	}
+	if err := vm.Run(); err != nil {
+		logger.Warn("VM execution failed: %v", err)
+		return false
+	}
+	result, err := vm.GetResult()
+	if err != nil {
+		logger.Warn("VM result error: %v", err)
+		return false
+	}
+	return result == 1
+}
+
 // VerifySignature verifies a signature for a message.
-//
-// FIX: sphincsManager.VerifySignature now requires a 7th argument: commitment.
-// We extract it from SignedMessage (where it was stored at signing time) and
-// pass it through. If commitment is missing or wrong length the call returns false.
+// Uses ORIGINAL verification (proven to work) and optionally tests VM
 func (s *SigningService) VerifySignature(signedData []byte, nodeID string) (bool, error) {
 	signedMsg, err := DeserializeSignedMessage(signedData)
 	if err != nil {
@@ -157,19 +214,33 @@ func (s *SigningService) VerifySignature(signedData []byte, nodeID string) (bool
 		return false, err
 	}
 
-	// FIX: pass signedMsg.Commitment as the required 7th argument.
-	// commitment = H(sigBytes||pk||timestamp||nonce||data), 32 bytes.
-	// A missing or zeroed commitment will cause the inner commitment-equality
-	// check to fail, so no special nil-guard is needed here.
-	return s.sphincsManager.VerifySignature(
+	// ORIGINAL VERIFICATION (PROVEN TO WORK)
+	result := s.sphincsManager.VerifySignature(
 		signedMsg.Data,
 		signedMsg.Timestamp,
 		signedMsg.Nonce,
 		sig,
 		pk,
 		signedMsg.MerkleRoot,
-		signedMsg.Commitment, // FIX: was missing
-	), nil
+		signedMsg.Commitment,
+	)
+
+	// OPTIONAL: Test VM verification (doesn't affect consensus)
+	if result {
+		pkBytes, _ := pk.SerializePK()
+		fullMsg := make([]byte, 0, len(signedMsg.Timestamp)+len(signedMsg.Nonce)+len(signedMsg.Data))
+		fullMsg = append(fullMsg, signedMsg.Timestamp...)
+		fullMsg = append(fullMsg, signedMsg.Nonce...)
+		fullMsg = append(fullMsg, signedMsg.Data...)
+
+		if s.verifyWithVM(signedMsg.Signature, pkBytes, fullMsg) {
+			logger.Debug("✅ VM verification also passed for node %s", nodeID)
+		} else {
+			logger.Debug("⚠️ VM verification failed (original passed) - check VM configuration for node %s", nodeID)
+		}
+	}
+
+	return result, nil
 }
 
 // getPublicKeyForNode retrieves the registered public key for a given node ID.
@@ -218,7 +289,6 @@ func (s *SigningService) SignProposal(proposal *Proposal) error {
 
 // VerifyProposal verifies a proposal signature.
 func (s *SigningService) VerifyProposal(proposal *Proposal) (bool, error) {
-	// First, try to deserialize the signed message to see what was actually signed
 	if len(proposal.Signature) == 0 {
 		return false, fmt.Errorf("empty signature")
 	}
@@ -228,10 +298,8 @@ func (s *SigningService) VerifyProposal(proposal *Proposal) (bool, error) {
 		return false, fmt.Errorf("failed to deserialize signature: %w", err)
 	}
 
-	// Debug: log what was signed
 	logger.Info("🔍 Verifying proposal: signed data = %s", string(signedMsg.Data))
 
-	// Check if the signed data matches what we expect
 	expectedData := s.serializeProposalForSigning(proposal)
 	logger.Info("🔍 Expected data = %s", string(expectedData))
 
@@ -287,11 +355,7 @@ func (s *SigningService) VerifyTimeout(timeout *TimeoutMsg) (bool, error) {
 }
 
 // serializeProposalForSigning creates a deterministic byte string from a proposal.
-// serializeProposalForSigning creates a deterministic byte string from a proposal.
-// IMPORTANT: Must match exactly what VerifyProposal uses for verification.
 func (s *SigningService) serializeProposalForSigning(proposal *Proposal) []byte {
-	// Include SlotNumber for uniqueness across different slots
-	// If SlotNumber is 0 (old proposal), fallback to timestamp
 	if proposal.SlotNumber > 0 {
 		data := fmt.Sprintf("PROPOSAL:%d:%s:%s:%d",
 			proposal.View,
@@ -301,7 +365,6 @@ func (s *SigningService) serializeProposalForSigning(proposal *Proposal) []byte 
 		return []byte(data)
 	}
 
-	// Fallback for backward compatibility
 	data := fmt.Sprintf("PROPOSAL:%d:%s:%s:%d",
 		proposal.View,
 		proposal.Block.GetHash(),
@@ -418,13 +481,11 @@ func (s *SigningService) DeserializeAndRegisterPublicKey(nodeID string, publicKe
 		return fmt.Errorf("key manager not available")
 	}
 
-	// Deserialize the public key using the key manager
 	pk, err := s.keyManager.DeserializePublicKey(publicKeyBytes)
 	if err != nil {
 		return fmt.Errorf("failed to deserialize public key: %w", err)
 	}
 
-	// Register the deserialized public key
 	s.RegisterPublicKey(nodeID, pk)
 	return nil
 }

@@ -442,9 +442,86 @@ func (bc *Blockchain) StoreChainState(nodes []*storage.NodeInfo) error {
 		FinalStates:         finalStates,                                         // Finalized consensus signatures
 	}
 
-	// Save chain state with actual parameters and signatures
-	// Persist to storage
-	err := bc.storage.SaveCompleteChainState(chainState, chainParams, walletPaths)
+	// Get working TPS metrics from blockchain's tpsMonitor
+	// Get working TPS metrics from blockchain's tpsMonitor
+	logger.Info("Retrieving TPS metrics from blockchain tpsMonitor...")
+
+	var blockchainTPSMetrics *storage.TPSMetrics
+	if bc.tpsMonitor != nil {
+		tpsStats := bc.tpsMonitor.GetStats()
+
+		// Get existing storage metrics to preserve history and block data
+		existingMetrics := bc.storage.GetTPSMetrics()
+
+		// Build TPS history from tpsMonitor if available, otherwise use existing
+		tpsHistory := existingMetrics.TPSHistory
+		if len(tpsHistory) == 0 && tpsStats["tps_history"] != nil {
+			// Convert from tpsMonitor history if needed
+			if history, ok := tpsStats["tps_history"].([]interface{}); ok {
+				for _, h := range history {
+					if histMap, ok := h.(map[string]interface{}); ok {
+						tpsHistory = append(tpsHistory, storage.TPSDataPoint{
+							Timestamp:   time.Now(),
+							TPS:         histMap["tps"].(float64),
+							BlockHeight: uint64(histMap["block_height"].(float64)),
+						})
+					}
+				}
+			}
+		}
+
+		// Build transactions per block from storage (preserve existing)
+		txsPerBlock := existingMetrics.TransactionsPerBlock
+		if len(txsPerBlock) == 0 {
+			// Create from current block if available
+			latestBlock := bc.GetLatestBlock()
+			if latestBlock != nil {
+				if block, ok := latestBlock.(*BlockHelper); ok {
+					underlying := block.GetUnderlyingBlock()
+					txsPerBlock = []storage.BlockTXCount{
+						{
+							BlockHeight: underlying.GetHeight(),
+							BlockHash:   underlying.GetHash(),
+							TxCount:     uint64(len(underlying.Body.TxsList)),
+							BlockTime:   time.Unix(underlying.Header.Timestamp, 0),
+							BlockSize:   bc.CalculateBlockSize(underlying),
+						},
+					}
+				}
+			}
+		}
+
+		// Convert tpsMonitor stats to storage.TPSMetrics format WITH history preserved
+		blockchainTPSMetrics = &storage.TPSMetrics{
+			CurrentTPS:              tpsStats["current_tps"].(float64),
+			AverageTPS:              tpsStats["average_tps"].(float64),
+			PeakTPS:                 tpsStats["peak_tps"].(float64),
+			TotalTransactions:       tpsStats["total_transactions"].(uint64),
+			BlocksProcessed:         tpsStats["blocks_processed"].(uint64),
+			CurrentWindowCount:      tpsStats["current_window_count"].(uint64),
+			WindowStartTime:         time.Now(),
+			WindowDuration:          5 * time.Second,
+			WindowDurationSeconds:   5,
+			TPSHistory:              tpsHistory,  // Preserve history
+			TransactionsPerBlock:    txsPerBlock, // Preserve block data
+			AvgTransactionsPerBlock: tpsStats["avg_txs_per_block"].(float64),
+			MaxTransactionsPerBlock: existingMetrics.MaxTransactionsPerBlock,
+			MinTransactionsPerBlock: existingMetrics.MinTransactionsPerBlock,
+			LastUpdated:             time.Now(),
+		}
+
+		logger.Info("✅ Retrieved blockchain TPS metrics: current_tps=%.2f, avg_tps=%.2f, peak_tps=%.2f, total_txs=%d, history_size=%d",
+			blockchainTPSMetrics.CurrentTPS, blockchainTPSMetrics.AverageTPS,
+			blockchainTPSMetrics.PeakTPS, blockchainTPSMetrics.TotalTransactions,
+			len(blockchainTPSMetrics.TPSHistory))
+	} else {
+		logger.Warn("⚠️ tpsMonitor is nil, cannot retrieve blockchain TPS metrics")
+		blockchainTPSMetrics = bc.storage.GetTPSMetrics() // Fallback to storage
+	}
+
+	// Save chain state with actual parameters, signatures, and working TPS metrics
+	// Persist to storage - passing the blockchain TPS metrics
+	err := bc.storage.SaveCompleteChainState(chainState, chainParams, walletPaths, blockchainTPSMetrics)
 	if err != nil {
 		return fmt.Errorf("failed to save chain state: %w", err)
 	}
@@ -791,8 +868,8 @@ func (bc *Blockchain) StartLeaderLoop(ctx context.Context) {
 	// Start goroutine for leader loop
 	go func() {
 		// Create ticker for periodic proposal attempts
-		ticker := time.NewTicker(5 * time.Second)
-		defer ticker.Stop() // Ensure ticker is stopped when function exits
+		ticker := time.NewTicker(1 * time.Second) // was 5s — check every second
+		defer ticker.Stop()                       // Ensure ticker is stopped when function exits
 
 		// Main loop - runs until context is cancelled
 		for {
@@ -867,9 +944,9 @@ func (bc *Blockchain) StartLeaderLoop(ctx context.Context) {
 				// Reset proposing flag after a delay to allow consensus to complete
 				// Launch goroutine to wait and reset
 				go func() {
-					time.Sleep(30 * time.Second) // Wait for consensus to complete
+					time.Sleep(5 * time.Second) // was 30s — allow next block after 5s
 					leaderMutex.Lock()
-					isProposing = false // Reset proposing flag
+					isProposing = false
 					leaderMutex.Unlock()
 				}()
 			}
@@ -1110,15 +1187,14 @@ func (bc *Blockchain) CacheTypeString(cacheType CacheType) string {
 //   - tx: Transaction to add
 //
 // Returns: Error if transaction addition fails
+// In blockchain.go
 func (bc *Blockchain) AddTransaction(tx *types.Transaction) error {
-	// Record transaction for storage TPS metrics
 	bc.storage.RecordTransaction()
 
-	// Also increment blocks_processed when transactions are actually included in blocks
-	if bc.tpsMonitor != nil {
-		bc.tpsMonitor.RecordTransaction() // Record for TPS calculation
-	}
-	return bc.mempool.BroadcastTransaction(tx) // Broadcast to network
+	// Record transaction for TPS monitoring
+	bc.tpsMonitor.RecordTransaction()
+
+	return bc.mempool.BroadcastTransaction(tx)
 }
 
 // GetBlockSizeStats returns block size statistics
@@ -1309,11 +1385,14 @@ func (bc *Blockchain) CreateBlock() (*types.Block, error) {
 	txsRoot := bc.calculateTransactionsRoot(selectedTxs) // Merkle root of transactions
 	stateRoot := bc.calculateStateRoot()                 // State root after transactions
 
-	// Get current timestamp
+	// Make sure timestamp is in seconds, not nanoseconds
 	currentTimestamp := common.GetCurrentTimestamp()
 	if currentTimestamp == 0 {
-		currentTimestamp = time.Now().Unix() // Fallback to current time
+		currentTimestamp = time.Now().Unix() // Unix() returns seconds
 	}
+
+	logger.Info("Creating block with timestamp: %d (%s)",
+		currentTimestamp, time.Unix(currentTimestamp, 0).Format(time.RFC3339))
 
 	// ========== FIX 1: Define miner address ==========
 	// Create a default miner address (20 bytes zero address)
@@ -1787,12 +1866,17 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 	// Calculate actual block time (time since last block)
 	blockTime := bc.calculateBlockTime(typeBlock)
 
-	// ✅ FIXED: Record block in storage TPS with actual block time
+	// Record block in storage TPS with actual block time
 	bc.storage.RecordBlock(typeBlock, blockTime)
 
-	// Record block for TPS monitoring (blockchain internal)
+	// Record each transaction individually
 	txCount := uint64(len(typeBlock.Body.TxsList))
-	bc.tpsMonitor.RecordBlock(txCount, blockTime) // Record for TPS calculation
+	for i := uint64(0); i < txCount; i++ {
+		bc.tpsMonitor.RecordTransaction() // Record each transaction
+	}
+
+	// Then record the block
+	bc.tpsMonitor.RecordBlock(txCount, blockTime)
 
 	// Check if blockchain is in running state
 	if bc.GetStatus() != StatusRunning {
@@ -1874,26 +1958,21 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 //
 // Returns: Time duration since last block
 func (bc *Blockchain) calculateBlockTime(block *types.Block) time.Duration {
-	latest := bc.GetLatestBlock() // Get latest block
+	latest := bc.GetLatestBlock()
 	if latest == nil {
-		logger.Debug("First block, using default block time")
-		return 5 * time.Second // Default for first block
-	}
-
-	// Calculate time difference between current and previous block
-	timeDiff := block.Header.Timestamp - latest.GetTimestamp()
-	if timeDiff <= 0 {
-		// Fallback: use reasonable default
-		logger.Debug("Invalid block time difference, using default")
 		return 5 * time.Second
 	}
+	currentTime := block.Header.Timestamp
+	prevTime := latest.GetTimestamp()
+	timeDiff := currentTime - prevTime
 
-	// Convert seconds to duration
-	blockTime := time.Duration(timeDiff) * time.Second
-	logger.Debug("Block time calculated: %v (timestamp diff: %d seconds)",
-		blockTime, timeDiff)
-
-	return blockTime
+	// Cap to reasonable range: 1s–300s. Anything outside means
+	// the genesis/prev timestamp is wrong (0, stale, or nanoseconds).
+	if timeDiff <= 0 || timeDiff > 300 {
+		logger.Warn("Block time out of range (%ds), capping to 5s", timeDiff)
+		return 5 * time.Second
+	}
+	return time.Duration(timeDiff) * time.Second
 }
 
 // VerifyStateConsistency verifies that this node's state matches other nodes
@@ -2618,28 +2697,16 @@ func (bc *Blockchain) ValidateBlock(block consensus.Block) error {
 // Add TPS monitoring methods to Blockchain
 // GetTPSStats returns current TPS statistics
 // Returns: Map with TPS statistics
+// blockchain.go — GetTPSStats: use tpsMonitor, not storage metrics
 func (bc *Blockchain) GetTPSStats() map[string]interface{} {
-	bc.lock.RLock() // Read lock for thread safety
+	bc.lock.RLock()
 	defer bc.lock.RUnlock()
 
-	tpsMetrics := bc.storage.GetTPSMetrics() // Get TPS metrics from storage
-
-	// Return comprehensive TPS statistics
-	return map[string]interface{}{
-		"current_tps":          tpsMetrics.CurrentTPS,                       // Current TPS
-		"average_tps":          tpsMetrics.AverageTPS,                       // Average TPS
-		"peak_tps":             tpsMetrics.PeakTPS,                          // Peak TPS observed
-		"total_transactions":   tpsMetrics.TotalTransactions,                // Total transactions processed
-		"blocks_processed":     tpsMetrics.BlocksProcessed,                  // Number of blocks processed
-		"current_window_count": tpsMetrics.CurrentWindowCount,               // Transactions in current window
-		"window_duration_sec":  tpsMetrics.WindowDurationSeconds,            // Window duration in seconds
-		"last_updated":         tpsMetrics.LastUpdated.Format(time.RFC3339), // Last update time
-		"avg_txs_per_block":    tpsMetrics.AvgTransactionsPerBlock,          // Average transactions per block
-		"max_txs_per_block":    tpsMetrics.MaxTransactionsPerBlock,          // Maximum transactions per block
-		"min_txs_per_block":    tpsMetrics.MinTransactionsPerBlock,          // Minimum transactions per block
-		"tps_history_size":     len(tpsMetrics.TPSHistory),                  // Size of TPS history
-		"blocks_history_size":  len(tpsMetrics.TransactionsPerBlock),        // Size of block history
+	// REPLACE storage.GetTPSMetrics() with tpsMonitor:
+	if bc.tpsMonitor == nil {
+		return map[string]interface{}{}
 	}
+	return bc.tpsMonitor.GetStats() // this is the correctly-windowed one
 }
 
 // Add to GetStats method

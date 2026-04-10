@@ -286,6 +286,10 @@ func (s *Storage) RecordBlock(block *types.Block, blockTime time.Duration) {
 	}
 
 	txCount := uint64(len(block.Body.TxsList))
+
+	s.tpsMetrics.CurrentWindowCount += txCount // ← REMOVE THIS
+	s.tpsMetrics.TotalTransactions += txCount  // ← REMOVE THIS
+
 	s.tpsMetrics.BlocksProcessed++
 
 	// Record block transaction count
@@ -329,20 +333,37 @@ func (s *Storage) updateTPS() {
 	now := time.Now()
 	windowElapsed := now.Sub(s.tpsMetrics.WindowStartTime)
 
+	// Define max TPS constant
+	const maxTPS = 10000.0 // ← ADD THIS LINE
+
 	// Reset window if it's been too long (avoid stale calculations)
 	if windowElapsed > s.tpsMetrics.WindowDuration*2 {
 		logger.Debug("Resetting stale TPS window")
 		s.tpsMetrics.CurrentWindowCount = 0
 		s.tpsMetrics.WindowStartTime = now
+		s.tpsMetrics.CurrentTPS = 0
 		return
 	}
 
-	// Now both are time.Duration, so comparison works
-	if windowElapsed >= s.tpsMetrics.WindowDuration {
-		// Calculate TPS for completed window
-		windowTPS := float64(s.tpsMetrics.CurrentWindowCount) / windowElapsed.Seconds()
+	// ONLY calculate TPS if enough time has passed (minimum 100ms)
+	const minElapsed = 100 * time.Millisecond
+	if windowElapsed >= minElapsed {
+		s.tpsMetrics.CurrentTPS = float64(s.tpsMetrics.CurrentWindowCount) / windowElapsed.Seconds()
 
-		s.tpsMetrics.CurrentTPS = windowTPS
+		// Cap TPS at a reasonable maximum
+		if s.tpsMetrics.CurrentTPS > maxTPS {
+			s.tpsMetrics.CurrentTPS = maxTPS
+		}
+	} else {
+		// Not enough time elapsed, keep previous TPS or set to 0
+		if s.tpsMetrics.CurrentTPS == 0 {
+			s.tpsMetrics.CurrentTPS = 0
+		}
+	}
+
+	// Only finalize and reset when window completes
+	if windowElapsed >= s.tpsMetrics.WindowDuration {
+		windowTPS := float64(s.tpsMetrics.CurrentWindowCount) / s.tpsMetrics.WindowDuration.Seconds()
 
 		// Update historical data
 		tpsDataPoint := TPSDataPoint{
@@ -351,8 +372,8 @@ func (s *Storage) updateTPS() {
 		}
 		s.tpsMetrics.TPSHistory = append(s.tpsMetrics.TPSHistory, tpsDataPoint)
 
-		// Update peak TPS
-		if windowTPS > s.tpsMetrics.PeakTPS {
+		// Update peak TPS (cap at reasonable value)
+		if windowTPS > s.tpsMetrics.PeakTPS && windowTPS < maxTPS {
 			s.tpsMetrics.PeakTPS = windowTPS
 		}
 
@@ -362,14 +383,15 @@ func (s *Storage) updateTPS() {
 		// Reset window
 		s.tpsMetrics.CurrentWindowCount = 0
 		s.tpsMetrics.WindowStartTime = now
+		s.tpsMetrics.CurrentTPS = 0
 
 		// Maintain history size
 		if len(s.tpsMetrics.TPSHistory) > s.tpsConfig.MaxHistorySize {
 			s.tpsMetrics.TPSHistory = s.tpsMetrics.TPSHistory[1:]
 		}
 
-		logger.Debug("TPS updated: current=%.2f, peak=%.2f, avg=%.2f, total_txs=%d",
-			s.tpsMetrics.CurrentTPS, s.tpsMetrics.PeakTPS, s.tpsMetrics.AverageTPS,
+		logger.Debug("Window completed: TPS=%.2f, peak=%.2f, avg=%.2f, total_txs=%d",
+			windowTPS, s.tpsMetrics.PeakTPS, s.tpsMetrics.AverageTPS,
 			s.tpsMetrics.TotalTransactions)
 	}
 }
@@ -717,9 +739,9 @@ func (s *Storage) calculateBlockSize(block *types.Block) uint64 {
 	return size
 }
 
-// FIXED SaveCompleteChainState - removed all FinalState references for nodes
-// Enhanced SaveCompleteChainState with TPS metrics
-func (s *Storage) SaveCompleteChainState(chainState *ChainState, chainParams *ChainParams, walletPaths map[string]string) error {
+// SaveCompleteChainState saves the complete chain state including TPS metrics from blockchain
+// Enhanced to accept TPS metrics from the working blockchain tpsMonitor
+func (s *Storage) SaveCompleteChainState(chainState *ChainState, chainParams *ChainParams, walletPaths map[string]string, blockchainTPSMetrics *TPSMetrics) error {
 	// CRITICAL: Check if chainState is nil
 	if chainState == nil {
 		logger.Error("❌ CRITICAL: chainState is nil in SaveCompleteChainState!")
@@ -783,7 +805,7 @@ func (s *Storage) SaveCompleteChainState(chainState *ChainState, chainParams *Ch
 			Timestamp: time.Now().Format(time.RFC3339),
 			ChainParams: map[string]interface{}{
 				"chain_id":     chainParams.ChainID,
-				"chain_name":   chainParams.ChainName, // was: hardcoded via chainParams ✓ already correct
+				"chain_name":   chainParams.ChainName,
 				"symbol":       chainParams.Symbol,
 				"genesis_time": chainParams.GenesisTime,
 				"genesis_hash": actualGenesisHash,
@@ -796,10 +818,8 @@ func (s *Storage) SaveCompleteChainState(chainState *ChainState, chainParams *Ch
 				"ledger_name": chainParams.LedgerName,
 			},
 			NetworkInfo: map[string]interface{}{
-				// FIX: was hardcoded "Sphinx Mainnet" — now uses the actual chain name
 				"network_name": chainParams.ChainName,
-				// FIX: was hardcoded "SPX/1.0.0" — now reflects actual protocol version
-				"protocol": fmt.Sprintf("SPX/%s", chainParams.Version),
+				"protocol":     fmt.Sprintf("SPX/%s", chainParams.Version),
 			},
 		}
 	}
@@ -827,14 +847,52 @@ func (s *Storage) SaveCompleteChainState(chainState *ChainState, chainParams *Ch
 			chainState.BlockSizeMetrics.TotalBlocks)
 	}
 
-	// ✅ ADD TPS METRICS TO CHAIN STATE
+	// ADD TPS METRICS TO CHAIN STATE - USE BLOCKCHAIN'S WORKING DATA
 	logger.Info("Adding TPS metrics to chain state...")
-	tpsMetrics := s.GetTPSMetrics()
-	tpsMetrics.LastUpdated = time.Now()
-	chainState.TPSMetrics = tpsMetrics
 
-	logger.Info("TPS metrics added: current_tps=%.2f, total_txs=%d, blocks_processed=%d",
-		tpsMetrics.CurrentTPS, tpsMetrics.TotalTransactions, tpsMetrics.BlocksProcessed)
+	// UPDATE TPS METRICS - Preserve history while updating current values
+	logger.Info("Updating TPS metrics from blockchain data...")
+
+	var tpsMetrics *TPSMetrics
+	if blockchainTPSMetrics != nil {
+		// Get existing metrics to preserve history
+		existingMetrics := s.GetTPSMetrics()
+
+		// If existing metrics have no history but blockchain has some, use blockchain's
+		if len(existingMetrics.TPSHistory) == 0 && len(blockchainTPSMetrics.TPSHistory) > 0 {
+			existingMetrics.TPSHistory = blockchainTPSMetrics.TPSHistory
+		}
+
+		// If existing metrics have no block data but blockchain has some, use blockchain's
+		if len(existingMetrics.TransactionsPerBlock) == 0 && len(blockchainTPSMetrics.TransactionsPerBlock) > 0 {
+			existingMetrics.TransactionsPerBlock = blockchainTPSMetrics.TransactionsPerBlock
+			existingMetrics.MaxTransactionsPerBlock = blockchainTPSMetrics.MaxTransactionsPerBlock
+			existingMetrics.MinTransactionsPerBlock = blockchainTPSMetrics.MinTransactionsPerBlock
+		}
+
+		// Update only the current values from blockchain
+		existingMetrics.CurrentTPS = blockchainTPSMetrics.CurrentTPS
+		existingMetrics.AverageTPS = blockchainTPSMetrics.AverageTPS
+		existingMetrics.PeakTPS = blockchainTPSMetrics.PeakTPS
+		existingMetrics.TotalTransactions = blockchainTPSMetrics.TotalTransactions
+		existingMetrics.BlocksProcessed = blockchainTPSMetrics.BlocksProcessed
+		existingMetrics.CurrentWindowCount = blockchainTPSMetrics.CurrentWindowCount
+		existingMetrics.AvgTransactionsPerBlock = blockchainTPSMetrics.AvgTransactionsPerBlock
+		existingMetrics.LastUpdated = time.Now()
+
+		tpsMetrics = existingMetrics
+
+		logger.Info("✅ Updated TPS metrics from blockchain: current=%.2f, avg=%.2f, peak=%.2f, total_txs=%d, history_size=%d, blocks_recorded=%d",
+			tpsMetrics.CurrentTPS, tpsMetrics.AverageTPS, tpsMetrics.PeakTPS,
+			tpsMetrics.TotalTransactions, len(tpsMetrics.TPSHistory), len(tpsMetrics.TransactionsPerBlock))
+	} else {
+		// Fallback to storage's own metrics (as last resort)
+		tpsMetrics = s.GetTPSMetrics()
+		tpsMetrics.LastUpdated = time.Now()
+		logger.Warn("⚠️ No blockchain TPS metrics provided, falling back to storage TPS metrics (may be inaccurate)")
+	}
+
+	chainState.TPSMetrics = tpsMetrics
 
 	// VALIDATE AND FIX FINAL STATES BEFORE SAVING
 	if chainState.FinalStates != nil {
@@ -887,10 +945,10 @@ func (s *Storage) SaveCompleteChainState(chainState *ChainState, chainParams *Ch
 		return fmt.Errorf("failed to rename chain state file: %w", err)
 	}
 
-	// ✅ SAVE TPS METRICS SEPARATELY AS WELL
+	// SAVE TPS METRICS SEPARATELY AS WELL (using the same data)
 	logger.Info("Saving TPS metrics to separate file...")
-	if err := s.SaveTPSMetrics(); err != nil {
-		logger.Warn("Failed to save TPS metrics: %v", err)
+	if err := s.saveTPSSeparately(tpsMetrics); err != nil {
+		logger.Warn("Failed to save TPS metrics separately: %v", err)
 	} else {
 		logger.Info("✅ TPS metrics saved separately to tps_metrics.json")
 	}
@@ -918,6 +976,64 @@ func (s *Storage) SaveCompleteChainState(chainState *ChainState, chainParams *Ch
 		}
 	}
 
+	return nil
+}
+
+// saveTPSSeparately saves TPS metrics to a separate file (helper function)
+func (s *Storage) saveTPSSeparately(tpsMetrics *TPSMetrics) error {
+	if tpsMetrics == nil {
+		return fmt.Errorf("no TPS metrics to save")
+	}
+
+	// Get metrics directory path
+	metricsDir := common.GetMetricsDir(s.dataDir)
+	if err := os.MkdirAll(metricsDir, 0755); err != nil {
+		return fmt.Errorf("failed to create metrics directory: %w", err)
+	}
+
+	tpsFile := filepath.Join(metricsDir, "tps_metrics.json")
+
+	// Ensure WindowDurationSeconds is set
+	tpsMetrics.WindowDurationSeconds = tpsMetrics.WindowDuration.Seconds()
+
+	// Ensure history and block data are preserved in the saved file
+	// Create a copy to avoid modifying the original
+	saveMetrics := &TPSMetrics{
+		CurrentTPS:              tpsMetrics.CurrentTPS,
+		AverageTPS:              tpsMetrics.AverageTPS,
+		PeakTPS:                 tpsMetrics.PeakTPS,
+		TotalTransactions:       tpsMetrics.TotalTransactions,
+		BlocksProcessed:         tpsMetrics.BlocksProcessed,
+		CurrentWindowCount:      tpsMetrics.CurrentWindowCount,
+		WindowStartTime:         tpsMetrics.WindowStartTime,
+		WindowDuration:          tpsMetrics.WindowDuration,
+		WindowDurationSeconds:   tpsMetrics.WindowDurationSeconds,
+		TPSHistory:              tpsMetrics.TPSHistory,           // Preserve history
+		TransactionsPerBlock:    tpsMetrics.TransactionsPerBlock, // Preserve block data
+		AvgTransactionsPerBlock: tpsMetrics.AvgTransactionsPerBlock,
+		MaxTransactionsPerBlock: tpsMetrics.MaxTransactionsPerBlock,
+		MinTransactionsPerBlock: tpsMetrics.MinTransactionsPerBlock,
+		LastUpdated:             tpsMetrics.LastUpdated,
+	}
+
+	data, err := json.MarshalIndent(saveMetrics, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal TPS metrics: %w", err)
+	}
+
+	// Write with atomic replace
+	tmpFile := tpsFile + ".tmp"
+	if err := os.WriteFile(tmpFile, data, 0644); err != nil {
+		return fmt.Errorf("failed to write TPS metrics file: %w", err)
+	}
+
+	if err := os.Rename(tmpFile, tpsFile); err != nil {
+		return fmt.Errorf("failed to rename TPS metrics file: %w", err)
+	}
+
+	logger.Info("✅ TPS metrics saved to %s: current_tps=%.2f, total_txs=%d, history_size=%d, blocks_recorded=%d",
+		tpsFile, tpsMetrics.CurrentTPS, tpsMetrics.TotalTransactions,
+		len(tpsMetrics.TPSHistory), len(tpsMetrics.TransactionsPerBlock))
 	return nil
 }
 

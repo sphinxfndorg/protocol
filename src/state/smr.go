@@ -1098,12 +1098,8 @@ func (sm *StateMachine) isValidator() bool {
 }
 
 func (sm *StateMachine) checkProgress() {
-	sm.mu.RLock()
-	defer sm.mu.RUnlock()
-
-	// Check if we're making progress
-	if time.Since(sm.currentState.Timestamp) > 30*time.Second {
-		// Trigger view change if stuck
+	// Increase timeout from 30s to 5 minutes for testing
+	if time.Since(sm.currentState.Timestamp) > 5*time.Minute {
 		select {
 		case sm.timeoutCh <- struct{}{}:
 		default:

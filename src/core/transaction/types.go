@@ -26,6 +26,7 @@ package types
 import (
 	"math/big"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -193,4 +194,6 @@ type TPSMonitor struct {
 	// Block-based metrics
 	blocksProcessed uint64
 	txsPerBlock     []uint64
+
+	firstBlockRecorded atomic.Bool
 }

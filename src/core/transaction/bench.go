@@ -35,19 +35,38 @@ import (
 
 // NewTPSMonitor creates a new TPS monitor
 func NewTPSMonitor(windowDuration time.Duration) *TPSMonitor {
-	return &TPSMonitor{
+	tm := &TPSMonitor{
 		windowStartTime: time.Now(),
 		windowDuration:  windowDuration,
 		tpsHistory:      make([]float64, 0),
-		maxHistorySize:  1000, // Keep last 1000 measurements
+		maxHistorySize:  1000,
 		txsPerBlock:     make([]uint64, 0),
 	}
+	// Background ticker for TPS updates AND window finalization
+	go func() {
+		ticker := time.NewTicker(1 * time.Second)
+		for range ticker.C {
+			tm.updateTPS()              // Update current TPS for display
+			tm.finalizeWindowIfNeeded() // Finalize window and update peak if needed
+		}
+	}()
+	return tm
 }
 
 // RecordTransaction records a new transaction for TPS calculation
 func (tm *TPSMonitor) RecordTransaction() {
-	atomic.AddUint64(&tm.totalTransactions, 1)
-	atomic.AddUint64(&tm.currentWindowCount, 1)
+	// Reset window on first transaction if no transactions yet
+	if atomic.LoadUint64(&tm.totalTransactions) == 0 {
+		tm.mu.Lock()
+		tm.windowStartTime = time.Now()
+		atomic.StoreUint64(&tm.currentWindowCount, 0)
+		tm.mu.Unlock()
+		logger.Info("TPS: Reset window start time on first transaction")
+	}
+
+	count := atomic.AddUint64(&tm.totalTransactions, 1)
+	windowCount := atomic.AddUint64(&tm.currentWindowCount, 1)
+	logger.Info("TPS: Recorded transaction #%d (window: %d)", count, windowCount)
 	tm.updateTPS()
 }
 
@@ -56,13 +75,47 @@ func (tm *TPSMonitor) RecordBlock(txCount uint64, blockTime time.Duration) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 
+	// Reset window on first block to align timing
+	if !tm.firstBlockRecorded.Load() {
+		tm.windowStartTime = time.Now()
+		atomic.StoreUint64(&tm.currentWindowCount, 0)
+		tm.firstBlockRecorded.Store(true)
+		logger.Info("TPS: Reset window start time on first block")
+	}
+
 	atomic.AddUint64(&tm.blocksProcessed, 1)
 	tm.txsPerBlock = append(tm.txsPerBlock, txCount)
 
-	// Calculate block TPS
 	if blockTime > 0 {
 		blockTPS := float64(txCount) / blockTime.Seconds()
-		tm.updateHistory(blockTPS)
+
+		// Cap block TPS at realistic maximum
+		const maxReasonableTPS = 10000.0
+		cappedBlockTPS := blockTPS
+		if blockTPS > maxReasonableTPS {
+			logger.Warn("⚠️ Capping unrealistic block TPS: %.2f -> %.2f", blockTPS, maxReasonableTPS)
+			cappedBlockTPS = maxReasonableTPS
+		}
+
+		logger.Info("📊 Block TPS: %d txs in %v = %.2f TPS", txCount, blockTime, cappedBlockTPS)
+
+		// Add block transactions to current window
+		atomic.AddUint64(&tm.currentWindowCount, txCount)
+		tm.updateHistory(cappedBlockTPS)
+
+		// Only update peak if this is a COMPLETED WINDOW
+		// Check if window has completed
+		windowElapsed := time.Since(tm.windowStartTime)
+		if windowElapsed >= tm.windowDuration {
+			// This is a completed window, safe to update peak
+			if cappedBlockTPS > tm.peakTPS && cappedBlockTPS < maxReasonableTPS {
+				tm.peakTPS = cappedBlockTPS
+				logger.Info("📊 Peak TPS updated from completed window: %.2f", tm.peakTPS)
+			}
+			// Reset window
+			tm.windowStartTime = time.Now()
+			atomic.StoreUint64(&tm.currentWindowCount, 0)
+		}
 	}
 
 	// Keep only recent history
@@ -71,32 +124,52 @@ func (tm *TPSMonitor) RecordBlock(txCount uint64, blockTime time.Duration) {
 	}
 }
 
-// updateTPS calculates current TPS
+// updateTPS calculates current TPS (for display only, does NOT update peak)
 func (tm *TPSMonitor) updateTPS() {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 
 	now := time.Now()
 	windowElapsed := now.Sub(tm.windowStartTime)
+	windowCount := atomic.LoadUint64(&tm.currentWindowCount)
 
-	if windowElapsed >= tm.windowDuration {
-		// Calculate TPS for completed window
-		windowTPS := float64(atomic.LoadUint64(&tm.currentWindowCount)) / windowElapsed.Seconds()
+	// Only calculate current TPS for display - NEVER update peak here
+	const minElapsed = 100 * time.Millisecond
 
-		tm.currentTPS = windowTPS
-		tm.updateHistory(windowTPS)
+	if windowElapsed > minElapsed && windowCount > 0 {
+		tm.currentTPS = float64(windowCount) / windowElapsed.Seconds()
 
-		// Update peak TPS
-		if windowTPS > tm.peakTPS {
-			tm.peakTPS = windowTPS
+		// Cap at realistic maximum
+		const maxReasonableTPS = 10000.0
+		if tm.currentTPS > maxReasonableTPS {
+			tm.currentTPS = maxReasonableTPS
+		}
+	}
+	// REMOVED: peak TPS update from here
+	// Peak should only come from completed windows in RecordBlock
+}
+
+// Add a method to finalize window periodically
+func (tm *TPSMonitor) finalizeWindowIfNeeded() {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+
+	windowElapsed := time.Since(tm.windowStartTime)
+	windowCount := atomic.LoadUint64(&tm.currentWindowCount)
+
+	if windowElapsed >= tm.windowDuration && windowCount > 0 {
+		finalTPS := float64(windowCount) / tm.windowDuration.Seconds()
+
+		const maxReasonableTPS = 10000.0
+		if finalTPS > tm.peakTPS && finalTPS < maxReasonableTPS {
+			tm.peakTPS = finalTPS
+			logger.Info("📊 Peak TPS updated from auto-finalized window: %.2f (txs=%d)",
+				finalTPS, windowCount)
 		}
 
 		// Reset window
 		atomic.StoreUint64(&tm.currentWindowCount, 0)
-		tm.windowStartTime = now
-
-		logger.Debug("TPS update: current=%.2f, peak=%.2f, total_txs=%d",
-			tm.currentTPS, tm.peakTPS, atomic.LoadUint64(&tm.totalTransactions))
+		tm.windowStartTime = time.Now()
 	}
 }
 
@@ -122,14 +195,43 @@ func (tm *TPSMonitor) GetStats() map[string]interface{} {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
 
+	elapsed := time.Since(tm.windowStartTime)
+	windowCount := atomic.LoadUint64(&tm.currentWindowCount)
+
+	// Calculate current TPS one more time for accurate reading
+	var currentTPS float64
+	if elapsed > 100*time.Millisecond && windowCount > 0 {
+		currentTPS = float64(windowCount) / elapsed.Seconds()
+	} else {
+		currentTPS = tm.currentTPS
+	}
+
+	// Cap current TPS for display
+	const maxReasonableTPS = 10000.0
+	if currentTPS > maxReasonableTPS {
+		currentTPS = maxReasonableTPS
+	}
+
+	// Ensure peak TPS is also capped
+	peakTPS := tm.peakTPS
+	if peakTPS > maxReasonableTPS {
+		peakTPS = maxReasonableTPS
+	}
+
+	logger.Info("TPS Debug: current=%.2f, peak=%.2f, window_txs=%d, elapsed=%.1fs, total_txs=%d",
+		currentTPS, peakTPS, windowCount, elapsed.Seconds(),
+		atomic.LoadUint64(&tm.totalTransactions))
+
 	return map[string]interface{}{
-		"current_tps":          tm.currentTPS,
+		"current_tps":          currentTPS,
 		"average_tps":          tm.averageTPS,
-		"peak_tps":             tm.peakTPS,
+		"peak_tps":             peakTPS,
 		"total_transactions":   atomic.LoadUint64(&tm.totalTransactions),
 		"blocks_processed":     atomic.LoadUint64(&tm.blocksProcessed),
-		"current_window_count": atomic.LoadUint64(&tm.currentWindowCount),
+		"current_window_count": windowCount,
 		"window_duration_sec":  tm.windowDuration.Seconds(),
+		"window_elapsed_sec":   elapsed.Seconds(),
+		"window_start_time":    tm.windowStartTime.Format(time.RFC3339),
 		"history_size":         len(tm.tpsHistory),
 		"avg_txs_per_block":    tm.calculateAverageTxsPerBlock(),
 	}

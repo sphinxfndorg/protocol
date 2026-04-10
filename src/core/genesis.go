@@ -80,15 +80,51 @@ func DefaultGenesisState() *GenesisState {
 // the block hash — only the cryptographic fields below affect the hash.
 // This means devnet, testnet, and mainnet all produce the same genesis hash
 // as long as these four fields stay constant.
+//
+// Note: The canonical cryptographic fields (Timestamp, ExtraData, InitialDifficulty,
+// InitialGasLimit, Nonce) are normally frozen to ensure a consistent genesis hash
+// across all environments. However, if p.GenesisConfig is provided, its values
+// take precedence, allowing tests to override these fields.
 func GenesisStateFromChainParams(p *SphinxChainParameters) *GenesisState {
 	// These four fields are the only ones that feed into BuildBlock() →
-	// FinalizeHash(). They must never change across environments.
+	// FinalizeHash(). They must never change across environments in production.
+	// However, tests may override them via p.GenesisConfig.
 	const (
 		canonicalTimestamp  = int64(1732070400) // Nov 20 2024 00:00:00 UTC, frozen forever
 		canonicalDifficulty = int64(17179869184)
 		canonicalGasLimit   = int64(5000)
 	)
 	canonicalExtraData := []byte("Sphinx Network Genesis Block - Decentralized Future")
+	canonicalNonce := common.FormatNonce(1)
+
+	// Apply test overrides if GenesisConfig is provided
+	timestamp := canonicalTimestamp
+	extraData := canonicalExtraData
+	difficulty := canonicalDifficulty
+	gasLimit := canonicalGasLimit
+	nonce := canonicalNonce
+
+	if p.GenesisConfig != nil {
+		// Override extra data if provided
+		if len(p.GenesisConfig.GenesisExtraData) > 0 {
+			extraData = p.GenesisConfig.GenesisExtraData
+		}
+
+		// Override difficulty if provided
+		if p.GenesisConfig.InitialDifficulty != nil {
+			difficulty = p.GenesisConfig.InitialDifficulty.Int64()
+		}
+
+		// Override gas limit if provided
+		if p.GenesisConfig.InitialGasLimit != nil {
+			gasLimit = p.GenesisConfig.InitialGasLimit.Int64()
+		}
+
+		// Override nonce if provided (convert from uint64 to formatted string)
+		if p.GenesisConfig.GenesisNonce != 0 {
+			nonce = common.FormatNonce(p.GenesisConfig.GenesisNonce)
+		}
+	}
 
 	return &GenesisState{
 		// These fields identify the chain but do NOT affect the block hash.
@@ -98,11 +134,11 @@ func GenesisStateFromChainParams(p *SphinxChainParameters) *GenesisState {
 
 		// These fields feed into BuildBlock() and must be identical on every
 		// environment so the genesis hash is the same on devnet, testnet, mainnet.
-		Timestamp:         canonicalTimestamp,
-		ExtraData:         canonicalExtraData,
-		InitialDifficulty: big.NewInt(canonicalDifficulty),
-		InitialGasLimit:   big.NewInt(canonicalGasLimit),
-		Nonce:             common.FormatNonce(1),
+		Timestamp:         timestamp,
+		ExtraData:         extraData,
+		InitialDifficulty: big.NewInt(difficulty),
+		InitialGasLimit:   big.NewInt(gasLimit),
+		Nonce:             nonce,
 
 		Allocations:       DefaultGenesisAllocations(),
 		InitialValidators: []*GenesisValidator{},
@@ -205,10 +241,18 @@ const GenesisVaultAddress = "0000000000000000000000000000000000000001"
 // BuildBlock builds a genesis block with NO allocation transactions in the body.
 // Coins are minted to GenesisVaultAddress via mintBlockReward when block 0 is
 // executed. Distribution happens in block 1.
+// BuildBlock builds a genesis block with ALLOCATION TRANSACTIONS in the body.
+// Each genesis allocation is converted to a transaction that sends funds from
+// the genesis vault to the allocation address. This ensures the TxsRoot in the
+// header matches the actual transaction list.
 func (gs *GenesisState) BuildBlock() *types.Block {
-	// Genesis block body is empty — no funding transactions here.
-	// The vault receives coins through mintBlockReward in executor.go.
-	body := types.NewBlockBody([]*types.Transaction{}, []*types.BlockHeader{})
+	// Build transaction list from allocations
+	txs := gs.allocationsToTxList()
+
+	// Create body with the allocation transactions
+	body := types.NewBlockBody(txs, []*types.BlockHeader{})
+
+	// Calculate TxsRoot from the actual transactions
 	tempBlock := types.NewBlock(&types.BlockHeader{}, body)
 	txsRoot := tempBlock.CalculateTxsRoot()
 
@@ -227,7 +271,6 @@ func (gs *GenesisState) BuildBlock() *types.Block {
 		Miner:      make([]byte, 20),
 		ParentHash: make([]byte, 32),
 		UnclesHash: common.SpxHash([]byte("genesis-no-uncles")),
-		// ProposerID is the vault — receives the genesis mint reward
 		ProposerID: GenesisVaultAddress,
 		Hash:       []byte{},
 	}
@@ -235,8 +278,8 @@ func (gs *GenesisState) BuildBlock() *types.Block {
 	block := types.NewBlock(header, body)
 	block.FinalizeHash()
 
-	logger.Info("GenesisState.BuildBlock: hash=%s, height=0, vault=%s",
-		block.GetHash(), GenesisVaultAddress)
+	logger.Info("GenesisState.BuildBlock: hash=%s, height=0, vault=%s, txs=%d",
+		block.GetHash(), GenesisVaultAddress, len(txs))
 
 	return block
 }

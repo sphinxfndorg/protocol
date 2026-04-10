@@ -53,9 +53,9 @@ func tempDir(t *testing.T, name string) string {
 // minimalGenesisState returns a GenesisState with only 2 allocations.
 //
 // WHY: common.SpxHash uses argon2 (a memory-hard KDF).  Each call takes
-// ~8 s on typical hardware.  Building the Merkle tree for the full 15-entry
-// DefaultGenesisAllocations requires ~28 argon2 calls per BuildBlock
-// invocation (≈ 224 s) — well beyond any test timeout.
+// ~8 s on typical hardware.  Building the Merkle tree for the full 7-entry
+// DefaultGenesisAllocations requires ~14 argon2 calls per BuildBlock
+// invocation — well beyond any test timeout.
 //
 // Using 2 allocations keeps the Merkle tree to 3 nodes (2 leaves + 1 root),
 // reducing BuildBlock to ~3 argon2 calls (≈ 24 s), which fits a 60 s timeout.
@@ -72,10 +72,11 @@ func minimalGenesisState() *GenesisState {
 		InitialDifficulty: big.NewInt(17179869184),
 		InitialGasLimit:   big.NewInt(5000),
 		Nonce:             common.FormatNonce(1), // "0000000000000001"
-		// Two allocations only — enough to exercise Merkle logic.
+		// Two allocations only — enough to exercise Merkle logic without
+		// triggering the full argon2 cost of the complete genesis distribution.
 		Allocations: []*GenesisAllocation{
 			NewFounderAlloc("1000000000000000000000000000000000000001", 50_000_000),
-			NewReserveAlloc("2000000000000000000000000000000000000001", 150_000_000),
+			NewFoundationAlloc("2000000000000000000000000000000000000001", 50_000_000),
 		},
 		InitialValidators: []*GenesisValidator{},
 	}
@@ -821,7 +822,7 @@ func TestBuildAllocationRoot_ChangeSensitive(t *testing.T) {
 	gs1 := minimalGenesisState()
 	gs2 := minimalGenesisState()
 	gs2.Allocations = append(gs2.Allocations,
-		NewCommunityAlloc("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1))
+		NewCampaignAlloc("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1))
 
 	r1 := hex.EncodeToString(gs1.buildAllocationRoot())
 	r2 := hex.EncodeToString(gs2.buildAllocationRoot())

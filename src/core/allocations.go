@@ -59,38 +59,67 @@ func NewGenesisAllocationSPX(address string, spx int64, label string) *GenesisAl
 	return NewGenesisAllocation(address, nspx, label)
 }
 
-// NewFounderAlloc is a domain-specific shorthand for founder/team allocations.
-// It calls NewGenesisAllocationSPX with the label "Founders".
+// NewFounderAlloc is a domain-specific shorthand for the primary founder account.
+// Allocation: 10% — 10,000,000 SPX ($600,000 at $0.06/SPX).
+// Distribution: 3-year vesting with quarterly unlocks; includes planned charity allocation.
+// It calls NewGenesisAllocationSPX with the label "Founder".
 func NewFounderAlloc(address string, spx int64) *GenesisAllocation {
-	return NewGenesisAllocationSPX(address, spx, "Founders")
+	return NewGenesisAllocationSPX(address, spx, "Founder")
 }
 
-// NewReserveAlloc is a domain-specific shorthand for ecosystem reserve accounts.
-// It calls NewGenesisAllocationSPX with the label "Reserve".
-func NewReserveAlloc(address string, spx int64) *GenesisAllocation {
-	return NewGenesisAllocationSPX(address, spx, "Reserve")
+// NewCoFounderAlloc is a domain-specific shorthand for the co-founder account.
+// Allocation: 7% — 7,000,000 SPX ($420,000 at $0.06/SPX).
+// Distribution: 3-year vesting with quarterly unlocks; includes planned charity allocation.
+// It calls NewGenesisAllocationSPX with the label "CoFounder".
+func NewCoFounderAlloc(address string, spx int64) *GenesisAllocation {
+	return NewGenesisAllocationSPX(address, spx, "CoFounder")
 }
 
-// NewTreasuryAlloc is a domain-specific shorthand for protocol treasury accounts.
-// It calls NewGenesisAllocationSPX with the label "Treasury".
-func NewTreasuryAlloc(address string, spx int64) *GenesisAllocation {
-	return NewGenesisAllocationSPX(address, spx, "Treasury")
+// NewDevelopmentAlloc is a domain-specific shorthand for the Development Fund.
+// Allocation: 30% — 30,000,000 SPX ($1,800,000 at $0.06/SPX).
+// Distribution: Paid per completed module; the first 2,000 modules are targeted
+// for completion over approximately 2 years.
+// It calls NewGenesisAllocationSPX with the label "Development".
+func NewDevelopmentAlloc(address string, spx int64) *GenesisAllocation {
+	return NewGenesisAllocationSPX(address, spx, "Development")
 }
 
-// NewCommunityAlloc is a domain-specific shorthand for community / airdrop pools.
-// It calls NewGenesisAllocationSPX with the label "Community".
-func NewCommunityAlloc(address string, spx int64) *GenesisAllocation {
-	return NewGenesisAllocationSPX(address, spx, "Community")
+// NewContributorAlloc is a domain-specific shorthand for contributor accounts
+// (Legal, Advisors, Chief Security, Partners, Community Managers).
+// Allocation: 20% — 20,000,000 SPX ($1,200,000 at $0.06/SPX).
+// Distribution: Split based on individual roles; either vesting or
+// milestone-based schedules.
+// It calls NewGenesisAllocationSPX with the label "Contributors".
+func NewContributorAlloc(address string, spx int64) *GenesisAllocation {
+	return NewGenesisAllocationSPX(address, spx, "Contributors")
 }
 
-// NewValidatorAlloc is a domain-specific shorthand for initial validator bonded
-// accounts. It calls NewGenesisAllocationSPX with the label "Validator".
-func NewValidatorAlloc(address string, spx int64) *GenesisAllocation {
-	return NewGenesisAllocationSPX(address, spx, "Validator")
+// NewFoundationAlloc is a domain-specific shorthand for the SPHINX Foundation.
+// Allocation: 20% — 20,000,000 SPX ($1,200,000 at $0.06/SPX).
+// Distribution: Supports ecosystem growth, ongoing development, and long-term sustainability.
+// It calls NewGenesisAllocationSPX with the label "Foundation".
+func NewFoundationAlloc(address string, spx int64) *GenesisAllocation {
+	return NewGenesisAllocationSPX(address, spx, "Foundation")
+}
+
+// NewCampaignAlloc is a domain-specific shorthand for campaigns and outreach.
+// Allocation: 8% — 8,000,000 SPX ($480,000 at $0.06/SPX).
+// Distribution: Used for outreach, strategic partnerships, and awareness campaigns.
+// It calls NewGenesisAllocationSPX with the label "Campaigns".
+func NewCampaignAlloc(address string, spx int64) *GenesisAllocation {
+	return NewGenesisAllocationSPX(address, spx, "Campaigns")
+}
+
+// NewAirdropAlloc is a domain-specific shorthand for community airdrop pools.
+// Allocation: 5% — 5,000,000 SPX ($300,000 at $0.06/SPX).
+// Distribution: To incentivize user engagement and adoption.
+// It calls NewGenesisAllocationSPX with the label "Airdrops".
+func NewAirdropAlloc(address string, spx int64) *GenesisAllocation {
+	return NewGenesisAllocationSPX(address, spx, "Airdrops")
 }
 
 // ------------------------------------------------------------------------------
-// Example; DefaultGenesisAllocations — the canonical mainnet pre-funded accounts
+// DefaultGenesisAllocations — the canonical mainnet pre-funded accounts
 // ------------------------------------------------------------------------------
 
 // DefaultGenesisAllocations returns the ordered list of pre-funded accounts
@@ -99,42 +128,64 @@ func NewValidatorAlloc(address string, spx int64) *GenesisAllocation {
 // order would produce a different allocation Merkle root and therefore a
 // different genesis hash, forking the network.
 //
-// Total genesis supply  :  1,000,000,000 SPX  (10^9 SPX = 10^27 nSPX)
+// Total genesis supply  :  100,000,000 SPX  (10^8 SPX = 10^26 nSPX)
+// USD value at $0.06/SPX:  $6,000,000        (fully allocated)
 //
 // Distribution:
-//   - Founders & Team    :   150,000,000 SPX  (15%)
-//   - Ecosystem Reserve  :   300,000,000 SPX  (30%)
-//   - Protocol Treasury  :   200,000,000 SPX  (20%)
-//   - Community & Grants :   200,000,000 SPX  (20%)
-//   - Validator Bonds    :   150,000,000 SPX  (15%)
+//
+//	Category                              %     SPX           USD
+//	──────────────────────────────────────────────────────────────────
+//	Founder                              10%   10,000,000    $600,000
+//	Co-founder                            7%    7,000,000    $420,000
+//	Development Fund                     30%   30,000,000  $1,800,000
+//	Contributors (Legal, Advisors,
+//	  Chief Security, Partners,
+//	  Community Managers)                20%   20,000,000  $1,200,000
+//	SPHINX Foundation                    20%   20,000,000  $1,200,000
+//	Campaigns                             8%    8,000,000    $480,000
+//	Community Airdrops                    5%    5,000,000    $300,000
+//	──────────────────────────────────────────────────────────────────
+//	Total                               100%  100,000,000  $6,000,000
 //
 // These addresses are placeholder hex strings. Replace them with the actual
 // multisig or keystore addresses before mainnet launch.
 func DefaultGenesisAllocations() []*GenesisAllocation {
 	return []*GenesisAllocation{
-		// ── Founders & Team (15%) ─────────────────────────────────────────
-		NewFounderAlloc("1000000000000000000000000000000000000001", 50_000_000),
-		NewFounderAlloc("1000000000000000000000000000000000000002", 50_000_000),
-		NewFounderAlloc("1000000000000000000000000000000000000003", 50_000_000),
+		// ── Founder (10%) ─────────────────────────────────────────────────
+		// 10,000,000 SPX · $600,000 at $0.06/SPX.
+		// 3-year vesting, quarterly unlocks. Includes planned charity allocation.
+		NewFounderAlloc("1000000000000000000000000000000000000001", 10_000_000),
 
-		// ── Ecosystem Reserve (30%) ───────────────────────────────────────
-		NewReserveAlloc("2000000000000000000000000000000000000001", 150_000_000),
-		NewReserveAlloc("2000000000000000000000000000000000000002", 150_000_000),
+		// ── Co-founder (7%) ───────────────────────────────────────────────
+		// 7,000,000 SPX · $420,000 at $0.06/SPX.
+		// 3-year vesting, quarterly unlocks. Includes planned charity allocation.
+		NewCoFounderAlloc("2000000000000000000000000000000000000001", 7_000_000),
 
-		// ── Protocol Treasury (20%) ───────────────────────────────────────
-		NewTreasuryAlloc("3000000000000000000000000000000000000001", 100_000_000),
-		NewTreasuryAlloc("3000000000000000000000000000000000000002", 100_000_000),
+		// ── Development Fund (30%) ────────────────────────────────────────
+		// 30,000,000 SPX · $1,800,000 at $0.06/SPX.
+		// Paid per completed module. First 2,000 modules targeted over ~2 years.
+		NewDevelopmentAlloc("3000000000000000000000000000000000000001", 30_000_000),
 
-		// ── Community & Grants (20%) ──────────────────────────────────────
-		NewCommunityAlloc("4000000000000000000000000000000000000001", 100_000_000),
-		NewCommunityAlloc("4000000000000000000000000000000000000002", 100_000_000),
+		// ── Contributors (20%) ────────────────────────────────────────────
+		// 20,000,000 SPX · $1,200,000 at $0.06/SPX.
+		// Covers Legal, Advisors, Chief Security, Partners, Community Managers.
+		// Split based on roles; individual vesting or milestone-based schedules.
+		NewContributorAlloc("4000000000000000000000000000000000000001", 20_000_000),
 
-		// ── Validator Bonds (15%) ─────────────────────────────────────────
-		NewValidatorAlloc("5000000000000000000000000000000000000001", 30_000_000),
-		NewValidatorAlloc("5000000000000000000000000000000000000002", 30_000_000),
-		NewValidatorAlloc("5000000000000000000000000000000000000003", 30_000_000),
-		NewValidatorAlloc("5000000000000000000000000000000000000004", 30_000_000),
-		NewValidatorAlloc("5000000000000000000000000000000000000005", 30_000_000),
+		// ── SPHINX Foundation (20%) ───────────────────────────────────────
+		// 20,000,000 SPX · $1,200,000 at $0.06/SPX.
+		// Supports ecosystem growth, development initiatives, and sustainability.
+		NewFoundationAlloc("5000000000000000000000000000000000000001", 20_000_000),
+
+		// ── Campaigns (8%) ────────────────────────────────────────────────
+		// 8,000,000 SPX · $480,000 at $0.06/SPX.
+		// Used for outreach, strategic partnerships, and awareness campaigns.
+		NewCampaignAlloc("6000000000000000000000000000000000000001", 8_000_000),
+
+		// ── Community Airdrops (5%) ───────────────────────────────────────
+		// 5,000,000 SPX · $300,000 at $0.06/SPX.
+		// To incentivize user engagement and adoption.
+		NewAirdropAlloc("7000000000000000000000000000000000000001", 5_000_000),
 	}
 }
 

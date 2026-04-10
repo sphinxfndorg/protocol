@@ -72,11 +72,13 @@ func TestDomainConstructors_Labels(t *testing.T) {
 		alloc *GenesisAllocation
 		label string
 	}{
-		{NewFounderAlloc(addr, 1), "Founders"},
-		{NewReserveAlloc(addr, 1), "Reserve"},
-		{NewTreasuryAlloc(addr, 1), "Treasury"},
-		{NewCommunityAlloc(addr, 1), "Community"},
-		{NewValidatorAlloc(addr, 1), "Validator"},
+		{NewFounderAlloc(addr, 1), "Founder"},
+		{NewCoFounderAlloc(addr, 1), "CoFounder"},
+		{NewDevelopmentAlloc(addr, 1), "Development"},
+		{NewContributorAlloc(addr, 1), "Contributors"},
+		{NewFoundationAlloc(addr, 1), "Foundation"},
+		{NewCampaignAlloc(addr, 1), "Campaigns"},
+		{NewAirdropAlloc(addr, 1), "Airdrops"},
 	}
 	for _, tc := range cases {
 		if tc.alloc.Label != tc.label {
@@ -94,9 +96,9 @@ func TestDomainConstructors_Labels(t *testing.T) {
 
 func TestDefaultGenesisAllocations_Count(t *testing.T) {
 	allocs := DefaultGenesisAllocations()
-	// The default distribution has 14 entries (3 founders + 2 reserve +
-	// 2 treasury + 2 community + 5 validators).
-	const want = 14 // ← correct
+	// 7 entries: Founder + CoFounder + Development + Contributors +
+	// Foundation + Campaigns + Airdrops.
+	const want = 7
 	if len(allocs) != want {
 		t.Errorf("DefaultGenesisAllocations: want %d entries, got %d", want, len(allocs))
 	}
@@ -109,8 +111,8 @@ func TestDefaultGenesisAllocations_TotalSupply(t *testing.T) {
 		total.Add(total, a.BalanceNSPX)
 	}
 
-	// 1,000,000,000 SPX × 10^18 nSPX/SPX
-	wantNSPX := new(big.Int).Mul(big.NewInt(1_000_000_000), big.NewInt(1e18))
+	// 100,000,000 SPX × 10^18 nSPX/SPX
+	wantNSPX := new(big.Int).Mul(big.NewInt(100_000_000), big.NewInt(1e18))
 	if total.Cmp(wantNSPX) != 0 {
 		t.Errorf("total supply: want %s nSPX, got %s nSPX", wantNSPX.String(), total.String())
 	}
@@ -147,6 +149,42 @@ func TestDefaultGenesisAllocations_NoDuplicateAddresses(t *testing.T) {
 	}
 }
 
+// TestDefaultGenesisAllocations_CategoryTotals verifies each category carries
+// exactly the SPX amount specified in the tokenomics table.
+func TestDefaultGenesisAllocations_CategoryTotals(t *testing.T) {
+	allocs := DefaultGenesisAllocations()
+	s := SummariseAllocations(allocs)
+
+	nspx := func(spx int64) *big.Int {
+		return new(big.Int).Mul(big.NewInt(spx), big.NewInt(1e18))
+	}
+
+	cases := []struct {
+		label   string
+		wantSPX int64
+	}{
+		{"Founder", 10_000_000},
+		{"CoFounder", 7_000_000},
+		{"Development", 30_000_000},
+		{"Contributors", 20_000_000},
+		{"Foundation", 20_000_000},
+		{"Campaigns", 8_000_000},
+		{"Airdrops", 5_000_000},
+	}
+
+	for _, tc := range cases {
+		got, ok := s.ByLabel[tc.label]
+		if !ok {
+			t.Errorf("label %q not found in summary", tc.label)
+			continue
+		}
+		want := nspx(tc.wantSPX)
+		if got.Cmp(want) != 0 {
+			t.Errorf("ByLabel[%q]: want %s nSPX, got %s", tc.label, want.String(), got.String())
+		}
+	}
+}
+
 // ============================================================================
 // 3. AllocationSummary
 // ============================================================================
@@ -165,23 +203,23 @@ func TestSummariseAllocations_ByLabel(t *testing.T) {
 	allocs := []*GenesisAllocation{
 		NewFounderAlloc("1000000000000000000000000000000000000001", 100),
 		NewFounderAlloc("2000000000000000000000000000000000000002", 200),
-		NewReserveAlloc("3000000000000000000000000000000000000003", 50),
+		NewDevelopmentAlloc("3000000000000000000000000000000000000003", 50),
 	}
 	s := SummariseAllocations(allocs)
 
-	wantFounders := new(big.Int).Mul(big.NewInt(300), big.NewInt(1e18))
-	if s.ByLabel["Founders"].Cmp(wantFounders) != 0 {
-		t.Errorf("ByLabel[Founders]: want %s, got %s",
-			wantFounders.String(), s.ByLabel["Founders"].String())
+	wantFounder := new(big.Int).Mul(big.NewInt(300), big.NewInt(1e18))
+	if s.ByLabel["Founder"].Cmp(wantFounder) != 0 {
+		t.Errorf("ByLabel[Founder]: want %s, got %s",
+			wantFounder.String(), s.ByLabel["Founder"].String())
 	}
 
-	wantReserve := new(big.Int).Mul(big.NewInt(50), big.NewInt(1e18))
-	if s.ByLabel["Reserve"].Cmp(wantReserve) != 0 {
-		t.Errorf("ByLabel[Reserve]: want %s, got %s",
-			wantReserve.String(), s.ByLabel["Reserve"].String())
+	wantDev := new(big.Int).Mul(big.NewInt(50), big.NewInt(1e18))
+	if s.ByLabel["Development"].Cmp(wantDev) != 0 {
+		t.Errorf("ByLabel[Development]: want %s, got %s",
+			wantDev.String(), s.ByLabel["Development"].String())
 	}
 
-	wantTotal := new(big.Int).Add(wantFounders, wantReserve)
+	wantTotal := new(big.Int).Add(wantFounder, wantDev)
 	if s.TotalNSPX.Cmp(wantTotal) != 0 {
 		t.Errorf("TotalNSPX: want %s, got %s", wantTotal.String(), s.TotalNSPX.String())
 	}
@@ -189,7 +227,7 @@ func TestSummariseAllocations_ByLabel(t *testing.T) {
 
 func TestSummariseAllocations_TotalSPX(t *testing.T) {
 	allocs := []*GenesisAllocation{
-		NewTreasuryAlloc("1000000000000000000000000000000000000001", 1_000_000),
+		NewFoundationAlloc("1000000000000000000000000000000000000001", 1_000_000),
 	}
 	s := SummariseAllocations(allocs)
 	want := big.NewInt(1_000_000)
@@ -316,7 +354,7 @@ func TestDeterministicBytes_DifferentBalances(t *testing.T) {
 // effect on the byte encoding (it is metadata only).
 func TestDeterministicBytes_LabelIgnored(t *testing.T) {
 	addr := "abcdef1234567890abcdef1234567890abcdef12"
-	a1 := NewGenesisAllocationSPX(addr, 100, "Founders")
+	a1 := NewGenesisAllocationSPX(addr, 100, "Founder")
 	a2 := NewGenesisAllocationSPX(addr, 100, "COMPLETELY_DIFFERENT_LABEL")
 	if hex.EncodeToString(a1.deterministicBytes()) != hex.EncodeToString(a2.deterministicBytes()) {
 		t.Error("Label should not affect deterministicBytes encoding")
@@ -386,7 +424,7 @@ func TestAllocationSet_Contains(t *testing.T) {
 func TestAllocationSet_TotalSupply(t *testing.T) {
 	allocs := []*GenesisAllocation{
 		NewFounderAlloc("1000000000000000000000000000000000000001", 100),
-		NewReserveAlloc("2000000000000000000000000000000000000002", 400),
+		NewDevelopmentAlloc("2000000000000000000000000000000000000002", 400),
 	}
 	s, _ := NewAllocationSet(allocs)
 
@@ -420,7 +458,8 @@ func TestAllocationSet_TotalSupplyMatchesDefaultAllocations(t *testing.T) {
 		t.Fatalf("NewAllocationSet: %v", err)
 	}
 
-	want := new(big.Int).Mul(big.NewInt(1_000_000_000), big.NewInt(1e18))
+	// Total genesis supply: 100,000,000 SPX
+	want := new(big.Int).Mul(big.NewInt(100_000_000), big.NewInt(1e18))
 	if s.TotalSupplyNSPX().Cmp(want) != 0 {
 		t.Errorf("TotalSupplyNSPX mismatch: want %s, got %s",
 			want.String(), s.TotalSupplyNSPX().String())

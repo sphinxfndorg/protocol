@@ -139,7 +139,7 @@ func NewConsensus(
 		currentHeight:        0,                                 // Current blockchain height
 		phase:                PhaseIdle,                         // Current consensus phase
 		quorumFraction:       0.67,                              // 2/3 majority requirement
-		timeout:              300 * time.Second,                 // View change timeout
+		timeout:              10 * time.Second,                  // View change timeout
 		receivedVotes:        make(map[string]map[string]*Vote), // Commit votes by block hash
 		prepareVotes:         make(map[string]map[string]*Vote), // Prepare votes by block hash
 		sentVotes:            make(map[string]bool),             // Track sent commit votes
@@ -1527,8 +1527,8 @@ func (c *Consensus) startViewChange() {
 	if c.phase != PhaseIdle {
 		return // Only change view in idle phase
 	}
-	if common.GetTimeService().Now().Sub(c.lastViewChange) < 60*time.Second {
-		return // Rate limit view changes
+	if common.GetTimeService().Now().Sub(c.lastViewChange) < 5*time.Second {
+		return // Rate limit view changes to 5 seconds instead of 60
 	}
 	if c.currentHeight > 0 && common.GetTimeService().Now().Sub(c.lastBlockTime) < 30*time.Second {
 		return // Recent block committed, don't change view
@@ -1688,6 +1688,9 @@ func (c *Consensus) getValidators() []string {
 	if c.isValidator() {
 		validatorSet[c.nodeID] = true
 		validators = append(validators, c.nodeID)
+		logger.Info("✅ Added self as validator: %s", c.nodeID)
+	} else {
+		logger.Warn("⚠️ Self is NOT a validator: %s", c.nodeID)
 	}
 
 	// Add validator peers
@@ -1695,23 +1698,15 @@ func (c *Consensus) getValidators() []string {
 		node := peer.GetNode()
 		if node != nil && node.GetRole() == RoleValidator && node.GetStatus() == NodeStatusActive {
 			nodeID := node.GetID()
-			// Avoid duplicates
 			if !validatorSet[nodeID] && nodeID != "" {
 				validatorSet[nodeID] = true
 				validators = append(validators, nodeID)
+				logger.Info("✅ Added peer validator: %s", nodeID)
 			}
 		}
 	}
 
-	// Sort for deterministic ordering
-	sort.Strings(validators)
-
-	// Ensure we always have at least this node
-	if len(validators) == 0 {
-		logger.Error("CRITICAL: No validators found for consensus!")
-		return []string{c.nodeID}
-	}
-
+	logger.Info("📊 Total validators found: %d", len(validators))
 	return validators
 }
 

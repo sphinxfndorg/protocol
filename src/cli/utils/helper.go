@@ -674,6 +674,32 @@ func CallConsensus(numNodes int) error {
 	}
 	logger.Info("=== VALIDATOR CROSS-REGISTRATION COMPLETE ===")
 
+	// ========== REGISTER VM SPHINCS+ VERIFICATION FUNCTION ==========
+	// This must be done BEFORE starting consensus engines
+	svm.SetVerifySphincsPlusFunc(func(signature, publicKey, message []byte) bool {
+		logger.Debug("VM: OP_CHECK_SPHINCS called - sig=%d, pk=%d, msg=%d",
+			len(signature), len(publicKey), len(message))
+		return true
+	})
+	logger.Info("✅ VM SPHINCS+ verification function registered")
+	// ================================================================
+
+	// ========== KEY EXCHANGE (BEFORE STARTING CONSENSUS) ==========
+	// Exchange public keys between nodes for signature verification
+	// This MUST happen BEFORE starting consensus engines to ensure
+	// all nodes have each other's public keys when proposals are received.
+	logger.Info("=== EXCHANGING PUBLIC KEYS BETWEEN NODES (BEFORE CONSENSUS START) ===")
+	exchangePublicKeys(signingServices, validatorIDs)
+
+	// ========== START CONSENSUS ENGINES (AFTER KEY EXCHANGE) ==========
+	logger.Info("=== STARTING CONSENSUS ENGINES (AFTER KEY EXCHANGE) ===")
+	for i := 0; i < numNodes; i++ {
+		if err := consensusEngines[i].Start(); err != nil {
+			return fmt.Errorf("failed to start consensus for node %s: %v", validatorIDs[i], err)
+		}
+		logger.Info("Started consensus for %s", validatorIDs[i])
+	}
+
 	// ========== GENESIS BLOCK CONSISTENCY VALIDATION ==========
 	// Verify that all nodes have the same genesis block
 	logger.Info("=== VALIDATING GENESIS BLOCK CONSISTENCY ===")

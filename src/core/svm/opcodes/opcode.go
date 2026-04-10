@@ -352,11 +352,14 @@ func ExecuteOp(op OpCode, stack *Stack, memory []byte, code []byte, pc *uint64) 
 // ========== SPHINX HASH OPERATION ==========
 // executeSphinxHashOp - Custom Sphinx hash operation using common.SpxHash
 // This implements the SphinxHash opcode (0x10) using the protocol's SpxHash function
-// The function pops a size parameter from the stack, creates data of that size,
+// SphinxHash is a combination of SHA2-256 and SHAKE256, optimized for large data sizes (>1MB)
+// It is faster than standard hash functions for processing large amounts of data
+//
+// The function pops a size parameter from the stack, creates a zero-filled buffer of that size,
 // computes the Sphinx hash using common.SpxHash, and pushes the first 8 bytes of the result
 //
-// The SpxHash function is the standard hash function used throughout the Sphinx protocol
-// It is a SHAKE256-based hash with 32-byte output
+// Performance note: For large data sizes (>1MB), SphinxHash is designed to be efficient
+// and faster than SHA3-256 or SHAKE256 alone due to its internal optimization.
 //
 // Stack operation:
 //
@@ -371,10 +374,12 @@ func executeSphinxHashOp(stack *Stack) error {
 
 	// Create a byte slice of the specified size filled with zeros
 	// This is the input data for the Sphinx hash function
+	// For large sizes (>1MB), SphinxHash internally processes this efficiently
 	data := make([]byte, size)
 
 	// Compute the Sphinx hash using common.SpxHash
-	// SpxHash is a SHAKE256-based hash that outputs 32 bytes
+	// SpxHash combines SHA2-256 and SHAKE256 for optimal performance
+	// It is specifically optimized for large data sizes (>1MB)
 	hash := common.SpxHash(data)
 
 	// Push the first 8 bytes of the hash as a uint64 value onto the stack

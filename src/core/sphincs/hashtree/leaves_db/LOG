@@ -1,8 +1,8 @@
-=============== Apr 11, 2026 (WIB) ===============
-23:54:01.243192 log@legend F·NumFile S·FileSize N·Entry C·BadEntry B·BadBlock Ke·KeyError D·DroppedEntry L·Level Q·SeqNum T·TimeElapsed
-23:54:01.271821 db@open opening
-23:54:01.272742 version@stat F·[] S·0B[] Sc·[]
-23:54:01.283807 db@janitor F·2 G·0
-23:54:01.283892 db@open done T·12.009331ms
-23:54:23.110357 db@close closing
-23:54:23.110682 db@close done T·322.578µs
+=============== Apr 12, 2026 (WIB) ===============
+01:14:05.940519 log@legend F·NumFile S·FileSize N·Entry C·BadEntry B·BadBlock Ke·KeyError D·DroppedEntry L·Level Q·SeqNum T·TimeElapsed
+01:14:05.968932 db@open opening
+01:14:05.969633 version@stat F·[] S·0B[] Sc·[]
+01:14:05.983836 db@janitor F·2 G·0
+01:14:05.983913 db@open done T·14.938239ms
+01:14:27.654016 db@close closing
+01:14:27.654402 db@close done T·383.431µs

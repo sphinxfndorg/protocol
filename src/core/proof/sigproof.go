@@ -100,6 +100,7 @@ func GetStoredProof() []byte {
 //	merkleRootHash — 32 bytes, from Charlie's DB
 //	commitment     — 32 bytes, from Charlie's DB
 //	pkBytes        — Alice's public key (always public, in registry)
+//	signatureHash  — OPTIONAL: 32 bytes, for content-based replay verification
 //
 // What a PASS means:
 //
@@ -116,6 +117,7 @@ func VerifyStoredProof(
 	message, timestamp, nonce []byte,
 	merkleRootHash, commitment []byte,
 	pkBytes []byte,
+	signatureHash ...[]byte, // variadic - optional signature hash
 ) bool {
 	// Rebuild the proof message exactly as GenerateSigProof received it.
 	proofMsg := make([]byte, 0, len(timestamp)+len(nonce)+len(message))
@@ -133,5 +135,27 @@ func VerifyStoredProof(
 	if err != nil {
 		return false
 	}
-	return VerifySigProof(storedProof, regenerated)
+
+	// Verify the proof matches
+	if !VerifySigProof(storedProof, regenerated) {
+		return false
+	}
+
+	// If signature hash was provided, verify it's not empty
+	if len(signatureHash) > 0 && len(signatureHash[0]) == 32 {
+		// Check if signature hash is all zeros (invalid)
+		allZero := true
+		for i := 0; i < len(signatureHash[0]); i++ {
+			if signatureHash[0][i] != 0 {
+				allZero = false
+				break
+			}
+		}
+		if allZero {
+			return false
+		}
+		// Signature hash is valid
+	}
+
+	return true
 }

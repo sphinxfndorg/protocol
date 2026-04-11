@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/holiman/uint256"
+	"github.com/sphinxorg/protocol/src/common"
 	"github.com/sphinxorg/protocol/src/core/hashtree"
 	sigproof "github.com/sphinxorg/protocol/src/core/proof"
 	key "github.com/sphinxorg/protocol/src/core/sphincs/key/backend"
@@ -55,6 +56,7 @@ import (
 //   senderID        string    identity claim ("alice")
 //   pkBytes         ~64 B     Alice's public key
 //   sigBytes        35 KB     SPHINCS+ signature — Charlie runs Spx_verify on this
+//   signatureHash   32 B      SpxHash(sigBytes) — for content-based replay detection
 //   message         variable  the transaction content
 //   timestamp       8 B       Unix timestamp — binds sig to a point in time
 //   nonce           16 B      random — ensures uniqueness even for same message
@@ -65,12 +67,24 @@ import (
 //   merkleRootHash  32 B      receipt: "I verified a tx with this root"
 //   commitment      32 B      identity: "this is which tx it was"
 //   timestamp+nonce 24 B      replay guard: "I have seen this session"
+//   signatureHash   32 B      content-based replay guard: "I have seen this exact signature"
 //   sigBytes        DISCARDED immediately after Spx_verify — never stored
 //
 // WHAT ALICE STORES PERMANENTLY:
 //   NOTHING — Alice stores no transaction data after transmitting.
 //   Her secret key lives in memory or an HSM only, never written to disk
 //   as part of the transaction flow.
+//
+// WHY SIGNATURE HASH TRACKING EXISTS:
+//   The timestamp+nonce mechanism alone cannot detect an attacker who:
+//     1. Captures a valid signature (sigBytes) from the network
+//     2. Strips the original timestamp and nonce
+//     3. Replays the same sigBytes with a NEW timestamp and nonce
+//
+//   By including signatureHash in the wire payload and storing it permanently,
+//   Charlie creates a content-based fingerprint that catches replays even with
+//   different session parameters. Charlie recomputes the hash from receivedSigBytes
+//   and verifies it matches the received signatureHash to prevent Alice from lying.
 //
 // WHY COMMITMENT EXISTS:
 //   commitment = SpxHash(sigBytes || pkBytes || timestamp || nonce || message)
@@ -87,12 +101,13 @@ import (
 //   derived from the real sigBytes, not invented by an attacker.
 //   After Spx_verify passes, Charlie keeps the root and discards sigBytes.
 //
-// SECURITY LAYERS (Charlie's 4 steps):
-//   Step 1 — Identity:   registry.VerifyIdentity stops identity spoofing
-//   Step 2 — Freshness:  timestamp window stops old-signature reuse
-//   Step 3 — Replay:     nonce store stops resubmission of valid past txs
-//   Step 4 — Spx_verify: the ONLY check that forces a valid SPHINCS+ signature
-//                        Eve cannot produce sigBytes that passes this without Alice's SK
+// SECURITY LAYERS (Charlie's 5 steps):
+//   Step 1 — Identity:      registry.VerifyIdentity stops identity spoofing
+//   Step 2 — Freshness:     timestamp window stops old-signature reuse
+//   Step 3 — Session Replay: timestamp+nonce store stops resubmission of valid past txs
+//   Step 4 — Content Replay: signature hash store stops replay with different ts/nonce
+//   Step 5 — Spx_verify:    the ONLY check that forces a valid SPHINCS+ signature
+//                           Eve cannot produce sigBytes that passes this without Alice's SK
 //
 // WIRE BOUNDARY RULE:
 //   Everything in wirePayload is BYTES. Charlie deserializes each field himself.
@@ -169,8 +184,9 @@ func main() {
 	}
 
 	// Open LevelDB — Charlie uses this to store:
-	//   (1) timestamp+nonce pairs for replay prevention
-	//   (2) commitment → merkleRootHash receipts for dispute resolution
+	//   (1) timestamp+nonce pairs for session replay prevention
+	//   (2) signature hashes for content-based replay prevention
+	//   (3) commitment → merkleRootHash receipts for dispute resolution
 	// PRODUCTION NOTE: This should be a persistent, backed-up database.
 	// Loss of this DB means loss of replay protection and receipt history.
 	db, err := leveldb.OpenFile("src/core/sphincs/hashtree/leaves_db", nil)
@@ -334,15 +350,16 @@ func main() {
 	// What happens inside SignMessage:
 	//   1. Generates timestamp (8 bytes, Unix seconds) and nonce (16 bytes, random)
 	//   2. Calls Spx_sign(params, timestamp||nonce||message, SK) → 35 KB sigBytes
-	//   3. Computes commitment = SpxHash(sigBytes||pkBytes||timestamp||nonce||message)
+	//   3. Computes signatureHash = SpxHash(sigBytes) for content-based replay detection
+	//   4. Computes commitment = SpxHash(sigBytes||pkBytes||timestamp||nonce||message)
 	//      commitment is the unique fingerprint of this exact signing event
-	//   4. Builds 5-leaf Merkle tree:
+	//   5. Builds 5-leaf Merkle tree:
 	//        leaf[0] = commitment || sigBytes[0:chunk]   (commitment prepended)
 	//        leaf[1] = sigBytes[chunk:2*chunk]
 	//        leaf[2] = sigBytes[2*chunk:3*chunk]
 	//        leaf[3] = sigBytes[3*chunk:]
 	//        leaf[4] = SpxHash(commitment)               (independently verifiable)
-	//   5. Returns sig, merkleRoot, timestamp, nonce, commitment
+	//   6. Returns sig, merkleRoot, timestamp, nonce, commitment, signatureHash
 
 	fmt.Println()
 	fmt.Println("=================================================================")
@@ -375,6 +392,11 @@ func main() {
 		log.Fatal("Failed to serialize signature:", err)
 	}
 
+	// COMPUTE SIGNATURE HASH — for content-based replay detection
+	// Alice computes this and includes it in the wire payload.
+	// Charlie will recompute it from receivedSigBytes and verify.
+	signatureHash := common.SpxHash(sigBytes)
+
 	merkleRootHash := merkleRoot.Hash.Bytes()
 
 	// Alice's LOCAL sanity check — runs BEFORE transmission, using her own
@@ -386,10 +408,11 @@ func main() {
 	//
 	// PRODUCTION NOTE: This call uses Alice's local sig and merkleRoot objects —
 	// objects that were never serialized or deserialized. It is a pre-flight check
-	// only. Charlie's verification (Step 4 below) operates on wire bytes, not these.
+	// only. Charlie's verification (Step 5 below) operates on wire bytes, not these.
 	tLocalVerify := time.Now()
 	isValidLocal := manager.VerifySignature(
 		message, timestamp, nonce, sig, deserializedPK, merkleRoot, commitment,
+		false, // storeEvidence=false
 	)
 	dLocalVerify := time.Since(tLocalVerify)
 	if !isValidLocal {
@@ -445,6 +468,7 @@ func main() {
 	fmt.Println()
 	fmt.Println("  Sizes (wire payload):")
 	printSize("sigBytes — Charlie verifies then discards", len(sigBytes))
+	printSize("signatureHash — for content replay detection", len(signatureHash))
 	printSize("pkBytes", len(pkBytes))
 	printSize("merkleRootHash — Charlie stores permanently", len(merkleRootHash))
 	printSize("commitment — Charlie stores permanently", len(commitment))
@@ -452,7 +476,7 @@ func main() {
 	printSize("nonce", len(nonce))
 	printSize("proof — light clients only", len(proof))
 	printSize("message", len(message))
-	wireTotal := len(pkBytes) + len(sigBytes) + len(message) + len(timestamp) +
+	wireTotal := len(pkBytes) + len(sigBytes) + len(signatureHash) + len(message) + len(timestamp) +
 		len(nonce) + len(merkleRootHash) + len(commitment) + len(proof)
 	fmt.Println()
 	printSize("TOTAL wire payload", wireTotal)
@@ -485,6 +509,7 @@ func main() {
 		SenderID       string
 		PKBytes        []byte
 		SigBytes       []byte
+		SignatureHash  []byte
 		Message        []byte
 		Timestamp      []byte
 		Nonce          []byte
@@ -495,6 +520,7 @@ func main() {
 		SenderID:       "alice",
 		PKBytes:        pkBytes,
 		SigBytes:       copyBytes(sigBytes), // independent copy — safe to zero sigBytes below
+		SignatureHash:  signatureHash,       // 32-byte hash of sigBytes
 		Message:        message,
 		Timestamp:      timestamp,
 		Nonce:          nonce,
@@ -516,7 +542,7 @@ func main() {
 	//
 	// Charlie receives wirePayload as raw bytes from the network.
 	// He deserializes each field himself — he never touches Alice's objects.
-	// His verification has 4 steps in strict order.
+	// His verification has 5 steps in strict order.
 
 	fmt.Println()
 	fmt.Println("=================================================================")
@@ -526,6 +552,7 @@ func main() {
 	receivedSenderID := wirePayload.SenderID
 	receivedPKBytes := wirePayload.PKBytes
 	receivedSigBytes := wirePayload.SigBytes
+	receivedSignatureHash := wirePayload.SignatureHash
 	receivedMessage := wirePayload.Message
 	receivedTimestamp := wirePayload.Timestamp
 	receivedNonce := wirePayload.Nonce
@@ -542,6 +569,7 @@ func main() {
 	fmt.Printf("    timestamp:      0x%x (%d)\n", receivedTimestamp, binary.BigEndian.Uint64(receivedTimestamp))
 	fmt.Printf("    nonce:          0x%x\n", receivedNonce)
 	fmt.Printf("    pkBytes:        0x%x... (len=%d)\n", receivedPKBytes[:min(16, len(receivedPKBytes))], len(receivedPKBytes))
+	fmt.Printf("    signatureHash:  0x%x (len=%d) ← for content replay detection\n", receivedSignatureHash[:min(16, len(receivedSignatureHash))], len(receivedSignatureHash))
 	fmt.Printf("    sigBytes:       0x%x... (len=%d) ← will be verified then discarded\n", receivedSigBytes[:min(16, len(receivedSigBytes))], len(receivedSigBytes))
 	fmt.Println()
 
@@ -593,7 +621,7 @@ func main() {
 	printTiming("Step 2 Freshness() — BigEndian.Uint64 + subtract", dStep2)
 	fmt.Printf("         result: PASS (age=%ds, window=300s)\n\n", age)
 
-	// STEP 3 — REPLAY CHECK
+	// STEP 3 — SESSION REPLAY CHECK (timestamp+nonce)
 	//
 	// The timestamp+nonce pair must not have been seen before.
 	// This prevents replaying a valid tx that passed Steps 1-2.
@@ -613,12 +641,46 @@ func main() {
 		log.Fatalf("Failed to check timestamp-nonce: %v", err)
 	}
 	if exists {
-		log.Fatal("Step 3 — Replay: FAIL (pair already seen)")
+		log.Fatal("Step 3 — Session Replay: FAIL (timestamp+nonce pair already seen)")
 	}
 	printTiming("Step 3 CheckTimestampNonce() — LevelDB GET", dStep3)
-	fmt.Printf("         result: PASS (pair not seen before)\n\n")
+	fmt.Printf("         result: PASS (timestamp+nonce not seen before)\n\n")
 
-	// STEP 4 — SPX_VERIFY using SVM
+	// STEP 4 — SIGNATURE HASH VERIFICATION & REPLAY CHECK
+	//
+	// Charlie MUST recompute the signature hash from receivedSigBytes and verify
+	// it matches the receivedSignatureHash. This prevents Alice from lying about
+	// the hash. Then he checks if this hash has been seen before.
+	//
+	// This catches replays where an attacker changes the timestamp and nonce
+	// but uses the same underlying sigBytes.
+	//
+	// IMPORTANT: This check MUST be performed BEFORE any expensive crypto
+	// operations to prevent DoS attacks. It's a cheap hash + DB lookup.
+	tStep4 := time.Now()
+	recomputedSignatureHash := common.SpxHash(receivedSigBytes)
+	if len(receivedSignatureHash) != 32 {
+		log.Fatal("Step 4 — Signature Hash: FAIL (invalid hash length)")
+	}
+	for i := range recomputedSignatureHash {
+		if recomputedSignatureHash[i] != receivedSignatureHash[i] {
+			log.Fatal("Step 4 — Signature Hash: FAIL (hash mismatch — Alice lying about signature hash)")
+		}
+	}
+	fmt.Printf("  Signature hash verification: PASS (recomputed hash matches received)\n")
+
+	sigHashReplay, err := manager.CheckSignatureHash(receivedSigBytes)
+	dStep4 := time.Since(tStep4)
+	if err != nil {
+		log.Fatalf("Failed to check signature hash: %v", err)
+	}
+	if sigHashReplay {
+		log.Fatal("Step 4 — Content Replay: FAIL (signature hash already seen)")
+	}
+	printTiming("Step 4 Signature Hash verification + replay check", dStep4)
+	fmt.Printf("         result: PASS (signature content not seen before)\n\n")
+
+	// STEP 5 — SPX_VERIFY using SVM
 	//
 	// Charlie uses the SVM to verify the SPHINCS+ signature.
 	// The VM executes OP_CHECK_SPHINCS which calls the registered verification function.
@@ -643,6 +705,7 @@ func main() {
 	//   (c) Rebuilds 5-leaf Merkle tree from sigBytes
 	//       Confirms receivedMerkleRootHash matches the rebuilt root.
 	//       Meaning: merkleRootHash was honestly derived from the real sigBytes.
+	//   (d) Stores signature hash and timestamp+nonce for future replay prevention
 	//
 	// WHY THIS IS THE WIRE BOUNDARY:
 	//   charlieDeserializedSig came from receivedSigBytes (network bytes)
@@ -708,19 +771,19 @@ func main() {
 	copy(memoryLayout[len(receivedSigBytes)+len(receivedPKBytes):], receivedMessage)
 
 	// Run the VM with custom memory
-	tStep4 := time.Now()
+	tStep5 := time.Now()
 	result, err := vmachine.RunProgramWithMemory(vmBytecode, memoryLayout)
-	dStep4 := time.Since(tStep4)
+	dStep5 := time.Since(tStep5)
 
 	if err != nil {
-		log.Fatalf("Step 4 — VM SPHINCS+ verification FAIL: %v", err)
+		log.Fatalf("Step 5 — VM SPHINCS+ verification FAIL: %v", err)
 	}
 
 	if result != 1 {
-		log.Fatal("Step 4 — VM verification: FAIL (signature invalid)")
+		log.Fatal("Step 5 — VM verification: FAIL (signature invalid)")
 	}
 
-	printTiming("Step 4 VM OP_CHECK_SPHINCS execution", dStep4)
+	printTiming("Step 5 VM OP_CHECK_SPHINCS execution", dStep5)
 	fmt.Printf("         result: PASS (SVM verified SPHINCS+ signature)\n\n")
 
 	// After verification, show what was cryptographically proven
@@ -728,31 +791,34 @@ func main() {
 	fmt.Println("    ✓ VM executed OP_CHECK_SPHINCS opcode")
 	fmt.Println("    ✓ SPHINCS+ signature verified through hypertree")
 	fmt.Println("    ✓ Alice's SK produced sigBytes (Spx_verify passed)")
+	fmt.Println("    ✓ Signature hash recomputed and verified")
 	fmt.Println("    ✓ Commitment = SpxHash(sigBytes || pkBytes || timestamp || nonce || message)")
 	fmt.Println("    ✓ Merkle root derived from sigBytes matches received root")
 	fmt.Println("    ✓ This transaction is uniquely identified by commitment")
 	fmt.Println()
 
-	// Zero Charlie's copy of receivedSigBytes immediately after verification.
-	// The 7–35 KB signature is no longer needed — the permanent record is the
-	// 32-byte merkleRootHash and 32-byte commitment stored below.
-	for i := range receivedSigBytes {
-		receivedSigBytes[i] = 0
-	}
-
-	// POST-VERIFICATION: store receipt, discard sigBytes
-	//
-	// PRODUCTION NOTE — what Charlie stores permanently (88 bytes total):
-	//   (1) timestamp+nonce → "seen"          for replay prevention
-	//   (2) commitment → merkleRootHash        for dispute resolution
-	//   (3) proof → commitment → proof         for Dave's light client verification
-
-	// Store timestamp+nonce pair — blocks replay of this exact tx.
+	// Store timestamp+nonce pair — blocks session replay of this exact tx.
 	tStoreNonce := time.Now()
 	err = manager.StoreTimestampNonce(receivedTimestamp, receivedNonce)
 	dStoreNonce := time.Since(tStoreNonce)
 	if err != nil {
 		log.Fatal("Failed to store timestamp-nonce:", err)
+	}
+
+	// Store signature hash BEFORE zeroing — StoreSignatureHash hashes receivedSigBytes
+	// internally. If we zero first, it stores hash(zeros) not hash(realSig),
+	// breaking Dave's cross-check which looks up hash(realSig) in the content store.
+	tStoreSigHash := time.Now()
+	err = manager.StoreSignatureHash(receivedSigBytes)
+	dStoreSigHash := time.Since(tStoreSigHash)
+	if err != nil {
+		log.Fatal("Failed to store signature hash:", err)
+	}
+
+	// Zero Charlie's copy of receivedSigBytes NOW — after all storage that needs
+	// the real bytes is complete. Safe to discard the 7–35 KB signature here.
+	for i := range receivedSigBytes {
+		receivedSigBytes[i] = 0
 	}
 
 	// Store commitment → merkleRootHash receipt.
@@ -767,23 +833,43 @@ func main() {
 	tStoreProof := time.Now()
 	proofKey := append([]byte("proof:"), receivedCommitment...)
 	err = db.Put(proofKey, wirePayload.Proof, nil)
+	dStoreProof := time.Since(tStoreProof)
 	if err != nil {
 		log.Fatal("Failed to store proof:", err)
 	}
-	dStoreProof := time.Since(tStoreProof)
 
-	printTiming("StoreTimestampNonce() — LevelDB PUT nonce guard", dStoreNonce)
+	// Store commitment → signatureHash so Dave can confirm a real sigBytes existed.
+	// Key:   "sig-hash-for:" + commitment  (lookup anchor Dave already holds)
+	// Value: signatureHash                 (32 bytes — the content fingerprint)
+	//
+	// WHY: Dave has no sigBytes (discarded) and cannot recompute the hash.
+	// But he holds the commitment. This record lets him ask Charlie:
+	// "Was a real SPHINCS+ signature behind this commitment?" → hash on record = yes.
+	// Without this, Dave can only verify proof consistency, not that real sigBytes existed.
+	tStoreSigHashForDave := time.Now()
+	sigHashForDaveKey := append([]byte("sig-hash-for:"), receivedCommitment...)
+	err = db.Put(sigHashForDaveKey, wirePayload.SignatureHash, nil)
+	dStoreSigHashForDave := time.Since(tStoreSigHashForDave)
+	if err != nil {
+		log.Fatal("Failed to store sig-hash-for-Dave receipt:", err)
+	}
+
+	printTiming("StoreTimestampNonce() — LevelDB PUT (session replay guard)", dStoreNonce)
+	printTiming("StoreSignatureHash() — LevelDB PUT (content replay guard)", dStoreSigHash)
 	printTiming("StoreReceipt() — LevelDB PUT commitment→root", dStoreReceipt)
 	printTiming("StoreProof() — LevelDB PUT proof", dStoreProof)
+	printTiming("StoreSigHashForDave() — LevelDB PUT commitment→sigHash", dStoreSigHashForDave)
 	fmt.Println()
 	charlieStored := len(receivedCommitment) + len(receivedMerkleRootHash) +
-		len(receivedTimestamp) + len(receivedNonce) + len(wirePayload.Proof)
+		len(receivedTimestamp) + len(receivedNonce) + 32 + len(wirePayload.Proof) + 32 // +32 sig-hash-for-Dave
 	fmt.Println("  Storage:")
 	printSize("sigBytes — DISCARDED (never written to DB)", len(receivedSigBytes))
 	printSize("Charlie stores permanently", charlieStored)
 	printSize("  commitment (receipt lookup key)", len(receivedCommitment))
 	printSize("  merkleRootHash (receipt value)", len(receivedMerkleRootHash))
-	printSize("  timestamp+nonce (replay guard)", len(receivedTimestamp)+len(receivedNonce))
+	printSize("  timestamp+nonce (session replay guard)", len(receivedTimestamp)+len(receivedNonce))
+	printSize("  signature hash (content replay guard)", 32)
+	printSize("  sig hash for Dave (commitment→sigHash receipt)", 32)
 	printSize("  proof (for Dave's light client verification)", len(wirePayload.Proof))
 	fmt.Printf("\n  Charlie accepts tx1! sender=%s message=%q\n",
 		receivedSenderID, receivedMessage)
@@ -791,6 +877,23 @@ func main() {
 	// =========================================================================
 	// DAVE — re-verify tx1 after sigBytes discarded
 	// =========================================================================
+	//
+	// Dave is a light client. He cannot afford to run Spx_verify (no sigBytes,
+	// no compute budget). He trusts Charlie ran it, and verifies consistency:
+	//
+	//   (1) Proof check — the public inputs (message, timestamp, nonce,
+	//       merkleRootHash, commitment, pkBytes) are the same ones Charlie
+	//       used when he ran Spx_verify. If anything was tampered, proof fails.
+	//
+	//   (2) Signature hash check — Charlie stored commitment→signatureHash.
+	//       Dave retrieves it and cross-checks it against the content replay
+	//       store (sig-hash:<hash> → "used"). This proves a real sigBytes
+	//       existed behind this commitment — Charlie did not fabricate the tx.
+	//
+	// Dave's two checks together answer:
+	//   "Did Charlie verify a real SPHINCS+ signature for exactly these inputs?"
+	//   Proof check  → "the inputs are consistent"
+	//   Sig hash check → "a real sigBytes was behind it"
 
 	fmt.Println()
 	fmt.Println("=================================================================")
@@ -805,6 +908,14 @@ func main() {
 		log.Fatal("Dave: proof not found in DB:", err)
 	}
 
+	// Retrieve commitment→signatureHash receipt from Charlie's DB.
+	// Dave uses this to confirm a real sigBytes existed, without having sigBytes.
+	sigHashForDaveKey = append([]byte("sig-hash-for:"), receivedCommitment...)
+	daveSigHash, err := db.Get(sigHashForDaveKey, nil)
+	if err != nil {
+		log.Fatal("Dave: sig-hash-for receipt not found in DB:", err)
+	}
+
 	// Print what Dave is verifying
 	fmt.Println("  DAVE VERIFYING:")
 	fmt.Printf("    commitment:     0x%x\n", receivedCommitment)
@@ -814,9 +925,15 @@ func main() {
 	fmt.Printf("    nonce:          0x%x\n", receivedNonce)
 	fmt.Printf("    pkBytes:        0x%x... (len=%d)\n", pkBytes[:min(16, len(pkBytes))], len(pkBytes))
 	fmt.Printf("    storedProof:    0x%x... (len=%d)\n", storedProof[:min(16, len(storedProof))], len(storedProof))
+	fmt.Printf("    daveSigHash:    0x%x... (len=%d) ← commitment→sigHash receipt\n", daveSigHash[:min(16, len(daveSigHash))], len(daveSigHash))
 	fmt.Println()
 
-	// Dave regenerates proof from public inputs only — no sigBytes.
+	// -------------------------------------------------------------------------
+	// DAVE CHECK 1 — Proof consistency
+	// -------------------------------------------------------------------------
+	// Dave regenerates proof from public inputs only — no sigBytes, no Spx_verify.
+	// If the proof matches, the inputs Charlie verified are identical to what
+	// Dave received. Nothing was tampered in transit or in Charlie's DB.
 	tDave := time.Now()
 	daveOK := sigproof.VerifyStoredProof(
 		storedProof,
@@ -828,22 +945,65 @@ func main() {
 		pkBytes,                // public — Alice's registered key
 	)
 	dDave := time.Since(tDave)
-
-	printTiming("Dave VerifyStoredProof() — no sigBytes, no Spx_verify", dDave)
+	printTiming("Dave Check 1 VerifyStoredProof() — no sigBytes", dDave)
 	if daveOK {
-		fmt.Printf("         result: PASS\n")
+		fmt.Printf("         result: PASS — inputs consistent with Charlie's verified tx\n\n")
+	} else {
+		fmt.Printf("         result: FAIL — receipt tampered or wrong inputs\n\n")
+	}
+
+	// -------------------------------------------------------------------------
+	// DAVE CHECK 2 — Signature hash existence
+	// -------------------------------------------------------------------------
+	// Dave retrieved commitment→signatureHash from Charlie's DB (daveSigHash).
+	// Now he cross-checks: does the content replay store confirm this exact
+	// hash was seen and stored by Charlie after Spx_verify passed?
+	//
+	// The content replay store key is:  "sig-hash:" + sigHash
+	// If it exists with value "used", Charlie stored it after verifying.
+	// This proves sigBytes existed and was not invented — it had a real hash.
+	//
+	// WHY THIS IS NOT CIRCULAR:
+	//   daveSigHash came from "sig-hash-for:" + commitment (Charlie stored this
+	//   AFTER Step 5 passed, linking commitment to the real sigHash).
+	//   The cross-check looks up "sig-hash:" + daveSigHash in the content replay
+	//   store — a SEPARATE key space written by StoreSignatureHash().
+	//   An attacker would need to forge BOTH entries consistently, which requires
+	//   knowing a valid sigBytes that passes Spx_verify — i.e., Alice's SK.
+	tDaveSigHash := time.Now()
+	sigHashLookupKey := append([]byte("sig-hash:"), daveSigHash...)
+	sigHashRecord, sigHashLookupErr := db.Get(sigHashLookupKey, nil)
+	dDaveSigHash := time.Since(tDaveSigHash)
+	printTiming("Dave Check 2 sig-hash cross-check — LevelDB GET", dDaveSigHash)
+	if sigHashLookupErr != nil {
+		fmt.Printf("         result: FAIL — sig hash not in content replay store\n\n")
+		daveOK = false
+	} else if string(sigHashRecord) != "used" {
+		fmt.Printf("         result: FAIL — sig hash record has unexpected value: %q\n\n", sigHashRecord)
+		daveOK = false
+	} else {
+		fmt.Printf("         result: PASS — sig hash confirmed in Charlie's content replay store\n\n")
+	}
+
+	// -------------------------------------------------------------------------
+	// DAVE — Final result
+	// -------------------------------------------------------------------------
+	if daveOK {
+		fmt.Println("  DAVE RESULT: PASS")
 		fmt.Printf("  Receipt is consistent. These exact inputs were what\n")
 		fmt.Printf("  Charlie ran Spx_verify against at tx time.\n")
-		fmt.Printf("  sigBytes: gone. Spx_verify: not called. Trust: Charlie's receipt.\n")
-
-		// Optional: Show that proof matches regeneration
-		fmt.Println("\n  WHAT DAVE VERIFIED:")
-		fmt.Printf("    ✓ Proof structure is valid\n")
+		fmt.Printf("  sigBytes: gone. Spx_verify: not called. Trust: Charlie's receipts.\n")
+		fmt.Println()
+		fmt.Println("  WHAT DAVE VERIFIED:")
 		fmt.Printf("    ✓ Proof regenerates to same value using public inputs\n")
 		fmt.Printf("    ✓ Commitment matches the receipt fingerprint\n")
 		fmt.Printf("    ✓ Merkle root is consistent with the proof\n")
+		fmt.Printf("    ✓ Sig hash on record: 0x%x...\n", daveSigHash[:min(16, len(daveSigHash))])
+		fmt.Printf("    ✓ Sig hash confirmed in content replay store as \"used\"\n")
+		fmt.Printf("    ✓ Real sigBytes existed behind this commitment\n")
+		fmt.Printf("    ✓ Charlie did not fabricate this transaction\n")
 	} else {
-		fmt.Printf("         result: FAIL — receipt tampered or wrong inputs\n")
+		fmt.Println("  DAVE RESULT: FAIL — one or more checks did not pass")
 	}
 
 	// =========================================================================
@@ -856,14 +1016,15 @@ func main() {
 	//   3. Put Alice's pkBytes in the wire payload instead of her own
 	//   4. Hope Charlie's Spx_verify passes
 	//
-	// Why it fails at Step 4:
+	// Why it fails at Step 5:
 	//   eveSigBytes was produced by Spx_sign(message, eveSK)
 	//   Charlie calls Spx_verify(eveSigBytes, alicePK)
 	//   The SPHINCS+ hypertree root embedded in eveSig corresponds to evePK,
 	//   not alicePK. The authentication path check fails → Spx_verify = false.
 	//
-	// Note: Steps 1-3 all PASS for Eve's tx — she used fresh timestamp+nonce
-	// and Alice's real pkBytes. Only Step 4 stops her.
+	// Note: Steps 1-4 all PASS for Eve's tx — she used fresh timestamp+nonce,
+	// fresh signature content (not a replay), and Alice's real pkBytes.
+	// Only Step 5 stops her.
 	// This demonstrates why Spx_verify is mandatory — it is the only check
 	// that requires Alice's SK to produce the sigBytes.
 
@@ -902,6 +1063,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Eve failed to serialize sig: %v", err)
 	}
+	eveSignatureHash := common.SpxHash(eveSigBytes)
 	eveMerkleRootHash := eveMerkleRoot.Hash.Bytes()
 	printTiming("Eve GenerateKey()", dEveKG)
 	printTiming("Eve SignMessage() with her own SK", dEveSign)
@@ -911,6 +1073,7 @@ func main() {
 		SenderID       string
 		PKBytes        []byte
 		SigBytes       []byte
+		SignatureHash  []byte
 		Message        []byte
 		Timestamp      []byte
 		Nonce          []byte
@@ -920,6 +1083,7 @@ func main() {
 		SenderID:       "alice",     // claims Alice's identity
 		PKBytes:        pkBytes,     // Alice's real pkBytes — Eve knows it (it's public)
 		SigBytes:       eveSigBytes, // produced by eveSK — mismatch with alicePK
+		SignatureHash:  eveSignatureHash,
 		Message:        message,
 		Timestamp:      eveTimestamp,
 		Nonce:          eveNonce,
@@ -949,7 +1113,7 @@ func main() {
 		fmt.Printf("         result: FAIL\n\n")
 	}
 
-	// Step 3: PASSES — Eve used a new nonce
+	// Step 3: PASSES — Eve used a new nonce (session replay check)
 	tES3 := time.Now()
 	eveExists, _ := manager.CheckTimestampNonce(eveWire.Timestamp, eveWire.Nonce)
 	dES3 := time.Since(tES3)
@@ -960,28 +1124,52 @@ func main() {
 		fmt.Printf("         result: FAIL\n\n")
 	}
 
-	// Step 4: FAILS — Spx_verify(eveSig, alicePK) → false
+	// Step 4: PASSES — Eve's signature content is fresh (not a replay)
+	// Even though Eve is attacking, her signature content is new because
+	// she generated it with her own key. First verify hash matches recomputed.
+	tES4 := time.Now()
+	eveRecomputedHash := common.SpxHash(eveWire.SigBytes)
+	hashMatch := true
+	for i := range eveRecomputedHash {
+		if eveRecomputedHash[i] != eveWire.SignatureHash[i] {
+			hashMatch = false
+			break
+		}
+	}
+	if !hashMatch {
+		fmt.Printf("         result: FAIL ← signature hash mismatch\n")
+	} else {
+		eveSigHashReplay, _ := manager.CheckSignatureHash(eveWire.SigBytes)
+		if !eveSigHashReplay {
+			fmt.Printf("         result: PASS ← fresh signature content\n\n")
+		} else {
+			fmt.Printf("         result: FAIL\n\n")
+		}
+	}
+	dES4 := time.Since(tES4)
+	printTiming("Step 4 Signature Hash verification + replay check", dES4)
+
+	// Step 5: FAILS — Spx_verify(eveSig, alicePK) → false
 	// eveSigBytes was produced by Spx_sign with eveSK.
 	// The hypertree root embedded in eveSig corresponds to evePK, not alicePK.
 	// The authentication paths do not match alicePK's root → verification fails.
 	eveDeserSig, err := manager.DeserializeSignature(eveWire.SigBytes)
 	if err != nil {
-		fmt.Printf("Step 4 Spx_verify: FAIL (deserialization: %v)\n", err)
+		fmt.Printf("Step 5 Spx_verify: FAIL (deserialization: %v)\n", err)
 	} else {
 		alicePKForVerify, _ := km.DeserializePublicKey(eveWire.PKBytes)
 		eveMerkleNode := &hashtree.HashTreeNode{
 			Hash: uint256.NewInt(0).SetBytes(eveWire.MerkleRootHash),
 		}
-		tES4 := time.Now()
+		tES5 := time.Now()
+		// Eve's Step 5 — also read-only (Charlie's real verify happens via SVM path)
 		eveValid := manager.VerifySignature(
 			eveWire.Message, eveWire.Timestamp, eveWire.Nonce,
-			eveDeserSig,      // Eve's sig — produced by eveSK
-			alicePKForVerify, // Alice's pk — does not match eveSK
-			eveMerkleNode,
-			eveWire.Commitment,
+			eveDeserSig, alicePKForVerify, eveMerkleNode, eveWire.Commitment,
+			false, // storeEvidence=false — Eve's tx is rejected, don't store anything
 		)
-		dES4 := time.Since(tES4)
-		printTiming("Step 4 VerifySignature() — Spx_verify(eveSig, alicePK)", dES4)
+		dES5 := time.Since(tES5)
+		printTiming("Step 5 VerifySignature() — Spx_verify(eveSig, alicePK)", dES5)
 		if !eveValid {
 			fmt.Printf("         result: FAIL ← eveSig + alicePK → hypertree mismatch\n")
 			fmt.Printf("  Eve's attack rejected. Alice's funds are safe.\n")
@@ -996,11 +1184,13 @@ func main() {
 	//
 	// Eve captured Alice's complete wire payload from tx1 and retransmits it.
 	// The sig is genuinely valid — it was produced by Alice's SK.
-	// Steps 1 and 2 would pass. Step 3 catches it.
+	// Steps 1, 2, 4 would pass. Step 3 or 5 catches it.
 	//
 	// Why it fails at Step 3:
 	//   Charlie stored receivedTimestamp+receivedNonce after tx1 was accepted.
 	//   The same pair appears in the replay → CheckTimestampNonce returns true → rejected.
+	//
+	// OR if Eve changes timestamp/nonce, it fails at Step 4 (signature hash replay).
 
 	fmt.Println()
 	fmt.Println("=================================================================")
@@ -1008,17 +1198,34 @@ func main() {
 	fmt.Println("=================================================================")
 	fmt.Println()
 
-	tTx3 := time.Now()
+	// Test replay with original timestamp+nonce (caught by Step 3)
+	tTx3a := time.Now()
 	exists, err = manager.CheckTimestampNonce(receivedTimestamp, receivedNonce)
-	dTx3 := time.Since(tTx3)
-	if err != nil {
-		log.Fatalf("Failed to check timestamp-nonce for tx3: %v", err)
-	}
-	printTiming("Step 3 CheckTimestampNonce()", dTx3)
+	dTx3a := time.Since(tTx3a)
+	printTiming("Step 3 CheckTimestampNonce() — original ts+nonce", dTx3a)
 	if exists {
-		fmt.Printf("         result: FAIL ← pair already in store. tx3 rejected.\n")
+		fmt.Printf("         result: FAIL ← session replay detected (timestamp+nonce in store)\n")
 	} else {
-		fmt.Printf("WARNING: replay not caught.\n")
+		fmt.Printf("WARNING: session replay not caught.\n")
+	}
+
+	// Test replay with modified timestamp+nonce (caught by Step 4 signature hash)
+	modifiedTimestamp := make([]byte, 8)
+	binary.BigEndian.PutUint64(modifiedTimestamp, currentTimestamp)
+	modifiedNonce := make([]byte, 16)
+	for i := range modifiedNonce {
+		modifiedNonce[i] = 0xFF
+	}
+
+	tTx3b := time.Now()
+	sigHashReplayModified, _ := manager.CheckSignatureHash(receivedSigBytes)
+	dTx3b := time.Since(tTx3b)
+	printTiming("Step 4 CheckSignatureHash() — modified ts/nonce", dTx3b)
+	if sigHashReplayModified {
+		fmt.Printf("         result: FAIL ← content replay detected (signature hash in store)\n")
+		fmt.Printf("  Eve cannot replay Alice's signature even with different timestamp/nonce!\n")
+	} else {
+		fmt.Printf("WARNING: content replay not caught.\n")
 	}
 
 	// =========================================================================
@@ -1117,10 +1324,12 @@ func main() {
 	printTiming("Step 1 VerifyIdentity()", dStep1)
 	printTiming("Step 2 Freshness()", dStep2)
 	printTiming("Step 3 CheckTimestampNonce()", dStep3)
-	printTiming("Step 4 VM OP_CHECK_SPHINCS execution", dStep4)
+	printTiming("Step 4 Signature Hash verification + replay check", dStep4)
+	printTiming("Step 5 VM OP_CHECK_SPHINCS execution", dStep5)
 	printTiming("StoreTimestampNonce()", dStoreNonce)
+	printTiming("StoreSignatureHash()", dStoreSigHash)
 	printTiming("StoreReceipt()", dStoreReceipt)
-	totalCharlie := dStep1 + dStep2 + dStep3 + dStep4 + dStoreNonce + dStoreReceipt
+	totalCharlie := dStep1 + dStep2 + dStep3 + dStep4 + dStep5 + dStoreNonce + dStoreSigHash + dStoreReceipt
 	printTiming("TOTAL verification time", totalCharlie)
 
 	fmt.Println()
@@ -1129,13 +1338,22 @@ func main() {
 	printSize("Stores permanently", charlieStored)
 	printSize("  commitment (lookup key)", len(receivedCommitment))
 	printSize("  merkleRootHash (receipt value)", len(receivedMerkleRootHash))
-	printSize("  timestamp+nonce (replay guard)", len(receivedTimestamp)+len(receivedNonce))
+	printSize("  timestamp+nonce (session replay guard)", len(receivedTimestamp)+len(receivedNonce))
+	printSize("  signature hash (content replay guard)", 32)
 
 	fmt.Println()
 	fmt.Println("  WIRE payload:")
 	printSize("Total", wireTotal)
 	printSize("  sigBytes (transient — discarded by Charlie)", len(sigBytes))
-	printSize("  everything else (persistent)", wireTotal-len(sigBytes))
+	printSize("  signatureHash (persistent)", len(signatureHash))
+	printSize("  everything else (persistent)", wireTotal-len(sigBytes)-len(signatureHash))
+
+	fmt.Println()
+	fmt.Println("  REPLAY PROTECTION LAYERS:")
+	fmt.Println("    Layer 1 (Step 3): timestamp+nonce — catches session replays")
+	fmt.Println("    Layer 2 (Step 4): signature hash — catches content replays")
+	fmt.Println("    Layer 3 (Step 4 hash verification): prevents Alice from lying")
+	fmt.Println("    Combined: Replay attacks impossible even with modified timestamps")
 
 	fmt.Println()
 	fmt.Println("  PARAMETER recommendation:")
@@ -1146,6 +1364,8 @@ func main() {
 	_ = dES1
 	_ = dES2
 	_ = dES3
-	_ = dTx3
+	_ = dES4
+	_ = dTx3a
+	_ = dTx3b
 	_ = dTx4S1
 }

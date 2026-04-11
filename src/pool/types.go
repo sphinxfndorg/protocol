@@ -21,6 +21,7 @@
 // SOFTWARE.
 
 // go/src/core/types.go
+// go/src/pool/types.go
 package pool
 
 import (
@@ -28,6 +29,7 @@ import (
 	"sync"
 	"time"
 
+	sign "github.com/sphinxorg/protocol/src/core/sphincs/sign/backend" // ADD THIS
 	types "github.com/sphinxorg/protocol/src/core/transaction"
 )
 
@@ -91,7 +93,10 @@ type Mempool struct {
 	config *MempoolConfig
 
 	// Memory tracking
-	currentBytes uint64 // ADD THIS FIELD - tracks total bytes used by transactions
+	currentBytes uint64 // tracks total bytes used by transactions
+
+	// ADD THIS: SPHINCS+ manager for signature hash verification
+	sphincsManager *sign.SphincsManager
 
 	// Statistics
 	stats struct {

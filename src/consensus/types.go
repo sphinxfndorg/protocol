@@ -69,10 +69,11 @@ type Proposal struct {
 
 // Vote represents a vote from a validator
 type Vote struct {
-	BlockHash string `json:"block_hash"`
-	View      uint64 `json:"view"`
-	VoterID   string `json:"voter_id"`
-	Signature []byte `json:"signature"`
+	BlockHash     string `json:"block_hash"`
+	View          uint64 `json:"view"`
+	VoterID       string `json:"voter_id"`
+	Signature     []byte `json:"signature"`
+	SignatureHash []byte `json:"signature_hash,omitempty"` // Optional: for debugging
 }
 
 // Attestation represents a validator's vote with epoch information
@@ -292,26 +293,28 @@ type SigningService struct {
 
 // SignedMessage represents a complete signed message with all components
 type SignedMessage struct {
-	Signature  []byte                 // Serialized SPHINCS+ signature bytes
-	Timestamp  []byte                 // 8-byte big-endian Unix timestamp (from SignMessage)
-	Nonce      []byte                 // 16-byte random nonce (from SignMessage)
-	MerkleRoot *hashtree.HashTreeNode // Merkle root node built from sig chunks
-	Commitment []byte                 // H(sigBytes||pk||timestamp||nonce||data), 32 bytes
-	Data       []byte                 // Original message data that was signed
+	Signature     []byte                 // Serialized SPHINCS+ signature bytes
+	SignatureHash []byte                 // ← MISSING: 32-byte hash of signature for content replay detection
+	Timestamp     []byte                 // 8-byte big-endian Unix timestamp (from SignMessage)
+	Nonce         []byte                 // 16-byte random nonce (from SignMessage)
+	MerkleRoot    *hashtree.HashTreeNode // Merkle root node built from sig chunks
+	Commitment    []byte                 // H(sigBytes||pk||timestamp||nonce||data), 32 bytes
+	Data          []byte                 // Original message data that was signed
 }
 
 // ConsensusSignature represents a captured signature from consensus messages
 type ConsensusSignature struct {
-	BlockHash    string `json:"block_hash"`
-	BlockHeight  uint64 `json:"block_height"`
-	SignerNodeID string `json:"signer_node_id"`
-	Signature    string `json:"signature"`
-	MessageType  string `json:"message_type"`
-	View         uint64 `json:"view"`
-	Timestamp    string `json:"timestamp"`
-	Valid        bool   `json:"valid"`
-	MerkleRoot   string `json:"merkle_root"`
-	Status       string `json:"status"`
+	BlockHash     string `json:"block_hash"`
+	BlockHeight   uint64 `json:"block_height"`
+	SignerNodeID  string `json:"signer_node_id"`
+	Signature     string `json:"signature"`
+	SignatureHash string `json:"signature_hash"` // ← ADD THIS - for content replay detection
+	MessageType   string `json:"message_type"`
+	View          uint64 `json:"view"`
+	Timestamp     string `json:"timestamp"`
+	Valid         bool   `json:"valid"`
+	MerkleRoot    string `json:"merkle_root"`
+	Status        string `json:"status"`
 }
 
 // SignatureValidation contains statistics about signature validation

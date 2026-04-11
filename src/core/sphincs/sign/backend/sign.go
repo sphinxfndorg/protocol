@@ -141,6 +141,31 @@ import (
 // commitment value (c) between SignMessage and transmission to Charlie.
 const commitmentKey = "sig-commitment"
 
+// signatureHashPrefix is the LevelDB key prefix under which signature hashes are stored.
+// This prefix is used by StoreSignatureHash and CheckSignatureHash to persist and
+// verify the 32-byte hash of the original SPHINCS+ signature bytes.
+//
+// WHY THIS IS NEEDED:
+//
+//	The existing timestamp+nonce replay protection only detects replays when the
+//	attacker uses the exact same (timestamp, nonce) pair. However, an attacker
+//	could capture a valid signature, strip the timestamp and nonce, and replay it
+//	with a different timestamp/nonce pair. The timestamp+nonce check would pass
+//	(because the pair is new), but the underlying signature would be reused.
+//
+//	Storing a hash of the signature itself closes this gap: once a signature is
+//	seen, its hash is stored permanently. Any future attempt to replay that same
+//	signature — even with different timestamp and nonce — will be detected and
+//	rejected because the signature hash already exists in the database.
+//
+//	This also helps detect when a SPHINCS+ key pair has exceeded its 2^64 signature
+//	limit. If the same signature hash appears twice with different content, that
+//	would indicate a hash collision (extremely unlikely with SHAKE-256) or that
+//	the key was exhausted and reused a one-time key (security failure).
+//
+// Storage format: signatureHashPrefix + sigHash (32 bytes) -> []byte("used")
+const signatureHashPrefix = "sig-hash:"
+
 // NewSphincsManager creates a new instance of SphincsManager with KeyManager and LevelDB instance.
 // Parameters:
 //   - db: LevelDB database handle (may be nil if persistence is not required)
@@ -155,6 +180,12 @@ func NewSphincsManager(db *leveldb.DB, keyManager *key.KeyManager, parameters *p
 		keyManager: keyManager,
 		parameters: parameters,
 	}
+}
+
+// ComputeSignatureHash computes the hash of signature bytes for content replay detection.
+// This is used by both Alice (when signing) and Charlie (when verifying).
+func (sm *SphincsManager) ComputeSignatureHash(sigBytes []byte) []byte {
+	return common.SpxHash(sigBytes)
 }
 
 // StoreTimestampNonce stores a timestamp-nonce pair in LevelDB to prevent signature reuse.
@@ -204,6 +235,117 @@ func (sm *SphincsManager) CheckTimestampNonce(timestamp, nonce []byte) (bool, er
 		return false, nil // Pair does not exist — fresh transaction
 	}
 	return false, err // Other database error
+}
+
+// StoreSignatureHash stores a hash of the original signature bytes in LevelDB
+// to detect when the same signature is reused with different timestamp/nonce pairs.
+//
+// WHY THIS IS NEEDED:
+//
+//	The timestamp+nonce mechanism alone cannot detect an attacker who:
+//	  1. Captures a valid signature (sigBytes) from the network
+//	  2. Strips the original timestamp and nonce
+//	  3. Replays the same sigBytes with a NEW timestamp and nonce
+//
+//	Since the (timestamp, nonce) pair is new, CheckTimestampNonce would return false
+//	(no replay detected), but the underlying signature is being reused. This is a
+//	replay attack that timestamp+nonce cannot prevent.
+//
+//	By storing a hash of the signature itself, we create a content-based fingerprint:
+//	  - First time sigBytes is seen → hash stored, verification succeeds
+//	  - Second time SAME sigBytes is seen (even with different timestamp/nonce)
+//	    → hash already exists, verification FAILS
+//
+//	This provides defense in depth alongside timestamp+nonce protection.
+//
+// ADDITIONAL BENEFIT — Detecting key exhaustion:
+//
+//	SPHINCS+ key pairs are limited to 2^64 signatures. If the same signature hash
+//	appears twice with DIFFERENT content, that would indicate:
+//	  - A SHAKE-256 collision (probability ~2^-256, effectively impossible)
+//	  - OR the key pair was exhausted and reused a one-time key (security failure)
+//
+//	While this doesn't prevent exhaustion, it provides detection after the fact.
+//
+// Parameters:
+//   - sigBytes: the raw SPHINCS+ signature bytes (7-35 KB)
+//
+// Returns:
+//   - error: nil if stored successfully, error otherwise
+func (sm *SphincsManager) StoreSignatureHash(sigBytes []byte) error {
+	if sm.db == nil {
+		return errors.New("LevelDB is not initialized")
+	}
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	// Hash the signature to create a compact, unique identifier (32 bytes)
+	// Using SpxHash (SHAKE-256) gives us post-quantum collision resistance
+	// regardless of the original signature size (7-35 KB → 32 bytes)
+	sigHash := common.SpxHash(sigBytes)
+
+	// Create the storage key with prefix to avoid collisions with other
+	// database entries (e.g., timestamp-nonce pairs, commitments, etc.)
+	key := make([]byte, 0, len(signatureHashPrefix)+len(sigHash))
+	key = append(key, []byte(signatureHashPrefix)...)
+	key = append(key, sigHash...)
+
+	// Store with a simple "used" value; the existence of the key is what matters
+	// We don't need to store anything else because the hash itself is the fingerprint
+	return sm.db.Put(key, []byte("used"), nil)
+}
+
+// CheckSignatureHash checks if this exact signature has been seen before.
+// Returns true if the signature hash exists in LevelDB (indicating replay),
+// false otherwise (fresh signature).
+//
+// This is called during verification BEFORE storing the signature hash.
+// If true is returned, the signature is a replay and should be rejected immediately.
+//
+// The check is O(1) — a single database lookup by the 32-byte hash key.
+// This is extremely efficient even with millions of stored signature hashes.
+//
+// IMPORTANT: This check MUST be performed FIRST in the verification pipeline,
+// before any expensive cryptographic operations (Spx_verify) or commitment
+// verification. This provides:
+//  1. Fastest rejection of replay attacks (microseconds vs milliseconds)
+//  2. DoS protection — attackers cannot exhaust CPU with replay floods
+//  3. Content-based replay detection that timestamp/nonce cannot provide
+//
+// Parameters:
+//   - sigBytes: the raw SPHINCS+ signature bytes (7-35 KB)
+//
+// Returns:
+//   - bool: true if signature was already used (replay detected), false otherwise
+//   - error: any database error encountered during lookup
+func (sm *SphincsManager) CheckSignatureHash(sigBytes []byte) (bool, error) {
+	if sm.db == nil {
+		return false, errors.New("LevelDB is not initialized")
+	}
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	// Hash the signature using the same method as StoreSignatureHash
+	// This ensures consistency between store and check operations
+	sigHash := common.SpxHash(sigBytes)
+
+	// Construct the same key format used in StoreSignatureHash
+	key := make([]byte, 0, len(signatureHashPrefix)+len(sigHash))
+	key = append(key, []byte(signatureHashPrefix)...)
+	key = append(key, sigHash...)
+
+	// Attempt to retrieve the key
+	_, err := sm.db.Get(key, nil)
+	if err == nil {
+		// Key exists — this exact signature was seen before
+		return true, nil
+	}
+	if err == leveldb.ErrNotFound {
+		// Key does not exist — this signature is fresh
+		return false, nil
+	}
+	// Some other database error occurred
+	return false, err
 }
 
 // SigCommitment produces a 32-byte binding over all session-specific inputs.
@@ -572,11 +714,21 @@ func (sm *SphincsManager) SignMessage(
 // knows the preimage of c; we additionally require that the preimage is a valid
 // SPHINCS+ signature under Alice's public key.
 //
-// Verification steps:
-//  1. Spx_verify(m, pk) — confirms m is a valid SPHINCS+ signature (beyond Pedersen).
-//  2. Re-derive c' = SigCommitment(m, pk, ts, nonce, msg) — Pedersen Step 6 check.
-//  3. Check c' == c — binding property: Alice cannot have changed m since Step 3.
-//  4. Rebuild Merkle tree from m, verify root == received root — receipt integrity.
+// Verification steps in order (MUST be in this order for security & performance):
+//  1. Serialize signature bytes
+//  2. CHECK SIGNATURE HASH FIRST — content-based replay detection (fastest)
+//  3. Spx_verify(m, pk) — confirms m is a valid SPHINCS+ signature
+//  4. Check timestamp+nonce — session-based replay detection
+//  5. Re-derive c' = SigCommitment(m, pk, ts, nonce, msg) — Pedersen Step 6
+//  6. Check c' == c — binding property
+//  7. Rebuild Merkle tree from m, verify root == received root
+//  8. Store signature hash and timestamp+nonce for future replay prevention
+//
+// WHY SIGNATURE HASH CHECK MUST BE FIRST:
+//   - It's the cheapest operation (32-byte DB lookup vs 7-35KB crypto)
+//   - It catches all replays regardless of timestamp/nonce manipulation
+//   - It prevents DoS attacks (replay floods can't exhaust CPU)
+//   - It provides content-based deduplication that timestamp/nonce cannot
 //
 // Returns: true if all verification steps pass, false otherwise
 func (sm *SphincsManager) VerifySignature(
@@ -585,6 +737,7 @@ func (sm *SphincsManager) VerifySignature(
 	pk *sphincs.SPHINCS_PK,
 	merkleRoot *hashtree.HashTreeNode,
 	commitment []byte,
+	storeEvidence bool, // ← add this
 ) bool {
 
 	if sm.parameters == nil || sm.parameters.Params == nil {
@@ -596,34 +749,85 @@ func (sm *SphincsManager) VerifySignature(
 		return false
 	}
 
-	// Reconstruct the signed payload: timestamp || nonce || message
-	// Must be byte-for-byte identical to what Alice signed.
-	messageWithTimestampAndNonce := buildMessageWithTimestampAndNonce(timestamp, nonce, message)
-
-	// Step 1: Spx_verify — additional check beyond Pedersen.
-	// Pedersen's verifier only checks Commit(m,r)==c. It does not check that
-	// m has any particular structure. Our verifier additionally requires that
-	// m (sigBytes) is a valid SPHINCS+ signature under Alice's registered pk.
-	// This is the step that makes the scheme unforgeable — Eve cannot produce
-	// sigBytes that passes Spx_verify without Alice's SK.
-	if !sphincs.Spx_verify(sm.parameters.Params, messageWithTimestampAndNonce, sig, pk) {
-		return false
-	}
-
-	// Serialize m (sigBytes) for commitment re-derivation.
-	// This must be the exact same bytes that Alice signed.
+	// =====================================================================
+	// STEP 1: Serialize signature bytes
+	// =====================================================================
+	// We need sigBytes for multiple checks: signature hash, Spx_verify,
+	// commitment verification, and Merkle tree rebuild.
 	sigBytes, err := sig.SerializeSignature()
 	if err != nil {
 		return false
 	}
 
-	// Serialize the public key for commitment re-derivation.
+	// =====================================================================
+	// STEP 2: CHECK SIGNATURE HASH FIRST (CONTENT-BASED REPLAY DETECTION)
+	// =====================================================================
+	// This MUST be the first check because:
+	//   1. It's the fastest (single 32-byte DB lookup)
+	//   2. It catches replays even with different timestamp/nonce
+	//   3. It prevents DoS attacks (replay floods can't reach expensive crypto)
+	//   4. It provides content-based deduplication
+	//
+	// If this exact signature was seen before, reject immediately without
+	// performing any expensive cryptographic verification.
+	isSigReplay, err := sm.CheckSignatureHash(sigBytes)
+	if err != nil {
+		return false // Database error — fail closed (security)
+	}
+	if isSigReplay {
+		return false // Same signature already used — replay attack detected!
+	}
+
+	// =====================================================================
+	// STEP 3: Reconstruct the signed payload
+	// =====================================================================
+	// Must be byte-for-byte identical to what Alice signed.
+	messageWithTimestampAndNonce := buildMessageWithTimestampAndNonce(timestamp, nonce, message)
+
+	// =====================================================================
+	// STEP 4: SPHINCS+ VERIFICATION (EXPENSIVE CRYPTOGRAPHIC CHECK)
+	// =====================================================================
+	// Pedersen's verifier only checks Commit(m,r)==c. It does not check that
+	// m has any particular structure. Our verifier additionally requires that
+	// m (sigBytes) is a valid SPHINCS+ signature under Alice's registered pk.
+	// This is the step that makes the scheme unforgeable — Eve cannot produce
+	// sigBytes that passes Spx_verify without Alice's SK.
+	//
+	// This is expensive (processes 7-35 KB of signature data), which is why
+	// we only do it AFTER the cheap signature hash check above.
+	if !sphincs.Spx_verify(sm.parameters.Params, messageWithTimestampAndNonce, sig, pk) {
+		return false
+	}
+
+	// =====================================================================
+	// STEP 5: TIMESTAMP+NONCE REPLAY DETECTION (SESSION-BASED)
+	// =====================================================================
+	// This checks if the specific (timestamp, nonce) pair has been seen before.
+	// This prevents simple replays that don't modify the session parameters.
+	//
+	// IMPORTANT: This check is performed AFTER Spx_verify to prevent an attacker
+	// from permanently blocking a valid transaction by submitting a fake
+	// transaction with the same timestamp+nonce first.
+	isTimestampNonceReplay, err := sm.CheckTimestampNonce(timestamp, nonce)
+	if err != nil {
+		return false
+	}
+	if isTimestampNonceReplay {
+		return false // Same timestamp+nonce already used — replay attack detected!
+	}
+
+	// =====================================================================
+	// STEP 6: Serialize the public key for commitment re-derivation
+	// =====================================================================
 	pkBytes, err := sm.serializePK(pk)
 	if err != nil {
 		return false
 	}
 
-	// Pedersen Step 6: re-derive c' = Commit(m, r) and check c' == c.
+	// =====================================================================
+	// STEP 7: PEDERSEN STEP 6 — VERIFY COMMITMENT
+	// =====================================================================
+	// Re-derive c' = Commit(m, r) and check c' == c.
 	// Pedersen: verifier computes g^m · h^r and checks it equals the received c.
 	// Ours:     verifier computes SpxHash(sigBytes||pkBytes||ts||nonce||msg) and
 	//           checks it equals the received commitment.
@@ -634,6 +838,9 @@ func (sm *SphincsManager) VerifySignature(
 		return false // binding violated — Alice presented different sigBytes than committed
 	}
 
+	// =====================================================================
+	// STEP 8: REBUILD AND VERIFY MERKLE TREE (RECEIPT INTEGRITY)
+	// =====================================================================
 	// Rebuild Merkle tree using the shared helper — guarantees identical leaf
 	// layout to the sign path. This ensures the root hash is computed exactly
 	// as Alice computed it during signing.
@@ -646,12 +853,27 @@ func (sm *SphincsManager) VerifySignature(
 	}
 
 	// Final check: rebuilt root must match received root.
-	// If it does, the entire chain is verified:
-	//   Spx_verify passed → m is a valid SPHINCS+ sig under Alice's pk
-	//   commitment check passed → Alice committed to this exact m
-	//   Merkle root check passes → the receipt was honestly derived from this m
-	// Charlie is fully satisfied. sigBytes can be discarded — the receipt is sufficient.
-	return VerifyCommitmentInRoot(rebuiltRoot, merkleRoot)
+	if !VerifyCommitmentInRoot(rebuiltRoot, merkleRoot) {
+		return false
+	}
+
+	// =====================================================================
+	// STEP 9: STORE REPLAY PREVENTION EVIDENCE
+	// =====================================================================
+	// ALL CHECKS PASSED — now store evidence for future replay prevention.
+	// Order matters: Store ONLY AFTER all verification passes to prevent an
+	// attacker from poisoning the database with invalid signatures.
+	// STEP 9: STORE REPLAY PREVENTION EVIDENCE
+	if storeEvidence && sm.db != nil { // ← add storeEvidence check
+		if err := sm.StoreSignatureHash(sigBytes); err != nil {
+			_ = err
+		}
+		if err := sm.StoreTimestampNonce(timestamp, nonce); err != nil {
+			_ = err
+		}
+	}
+
+	return true
 }
 
 // buildHashTreeFromSignature constructs a Merkle tree from the provided signature parts

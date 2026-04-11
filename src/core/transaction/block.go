@@ -28,6 +28,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math/big"
@@ -896,6 +897,8 @@ func (tx *Transaction) SanityCheck() error {
 	if tx.GasPrice.Sign() == -1 {
 		return fmt.Errorf("invalid gas price: %s", tx.GasPrice.String())
 	}
-
+	if tx.SignatureHash != nil && len(tx.SignatureHash) != 32 {
+		return errors.New("signature hash must be 32 bytes")
+	}
 	return nil
 }

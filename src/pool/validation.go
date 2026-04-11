@@ -37,7 +37,35 @@ import (
 
 // verifyTransactionSignature uses SVM to verify transaction signature
 // This is the core cryptographic verification using OP_CHECK_SPHINCS
+// It also uses the SphincsManager for signature hash verification
 func (mp *Mempool) verifyTransactionSignature(tx *types.Transaction) error {
+	// ========== SIGNATURE HASH VERIFICATION ==========
+	// First, verify the signature hash matches the signature
+	// This prevents Alice from lying about the signature hash
+	if len(tx.SignatureHash) != 32 {
+		return fmt.Errorf("invalid signature hash length: expected 32, got %d", len(tx.SignatureHash))
+	}
+
+	// Compute the expected signature hash from the signature bytes
+	expectedSigHash := mp.sphincsManager.ComputeSignatureHash(tx.Signature)
+
+	// Verify the signature hash matches
+	for i := range expectedSigHash {
+		if expectedSigHash[i] != tx.SignatureHash[i] {
+			return errors.New("signature hash mismatch - possible tampering")
+		}
+	}
+
+	// Check if this signature hash has been seen before (replay detection)
+	isReplay, err := mp.sphincsManager.CheckSignatureHash(tx.Signature)
+	if err != nil {
+		return fmt.Errorf("signature hash check failed: %w", err)
+	}
+	if isReplay {
+		return errors.New("signature replay detected - same signature already used")
+	}
+	// =================================================
+
 	// Prepare signature verification parameters
 	sigLen := len(tx.Signature)
 	senderLen := len(tx.Sender)
@@ -93,6 +121,13 @@ func (mp *Mempool) verifyTransactionSignature(tx *types.Transaction) error {
 
 	if result != 1 {
 		return errors.New("invalid transaction signature")
+	}
+
+	// Store signature hash for future replay detection
+	if err := mp.sphincsManager.StoreSignatureHash(tx.Signature); err != nil {
+		logger.Warn("Failed to store signature hash: %v", err)
+		// Don't fail the transaction, just log the warning
+		// The signature hash check above already confirmed it's fresh
 	}
 
 	return nil
@@ -292,10 +327,6 @@ func (mp *Mempool) validateTransaction(pooledTx *PooledTransaction) {
 	// ========== OP_RETURN VALIDATION ==========
 	const maxReturnSize = 80
 	if len(tx.ReturnData) > maxReturnSize {
-		// Reject transaction with too much OP_RETURN data
-		pooledTx.Status = StatusInvalid
-		pooledTx.Error = fmt.Sprintf("OP_RETURN data exceeds maximum size of %d bytes", maxReturnSize)
-
 		mp.lock.Lock()
 		defer mp.lock.Unlock()
 
@@ -308,7 +339,7 @@ func (mp *Mempool) validateTransaction(pooledTx *PooledTransaction) {
 
 		mp.stats.totalInvalid++
 		logger.Warn("Transaction validation failed: ID=%s, OP_RETURN size exceeded", tx.ID)
-		return // Just return, don't return an error
+		return
 	}
 	// ==========================================
 
@@ -346,6 +377,7 @@ func (mp *Mempool) validateTransaction(pooledTx *PooledTransaction) {
 // This is the MAIN validation function that all transactions go through
 // It performs comprehensive validation including:
 //   - Transaction size and sanity checks
+//   - Signature and signature hash verification (using SVM + SphincsManager)
 //   - Nonce validation (using SVM)
 //   - Balance checks (using SVM)
 //   - Gas validation (using SVM)
@@ -354,7 +386,6 @@ func (mp *Mempool) performValidation(tx *types.Transaction) error {
 	// ========== SKIP VALIDATION FOR GENESIS VAULT TRANSACTIONS ==========
 	// Genesis vault transactions are trusted protocol transactions
 	// They don't have signatures and bypass normal validation rules
-	// This address is defined in core.GenesisVaultAddress (see genesis.go)
 	const genesisVaultAddress = "0000000000000000000000000000000000000001"
 	if tx.Sender == genesisVaultAddress {
 		logger.Debug("Skipping validation for genesis vault transaction: %s", tx.ID)
@@ -389,26 +420,30 @@ func (mp *Mempool) performValidation(tx *types.Transaction) error {
 
 	// ========== SVM-BASED VALIDATIONS ==========
 
-	// 1. Nonce validation using SVM
-	// Get current nonce for sender (would come from state)
+	// 1. Signature and signature hash verification (CRITICAL - must be first)
+	if err := mp.verifyTransactionSignature(tx); err != nil {
+		return fmt.Errorf("signature validation failed: %w", err)
+	}
+
+	// 2. Nonce validation using SVM
 	currentNonce := mp.getSenderNonce(tx.Sender)
 	if err := mp.verifyTransactionNonce(tx, currentNonce); err != nil {
 		return fmt.Errorf("nonce validation failed: %w", err)
 	}
 
-	// 2. Balance check using SVM
+	// 3. Balance check using SVM
 	senderBalance := mp.getSenderBalance(tx.Sender)
 	if err := mp.verifyTransactionBalance(tx, senderBalance); err != nil {
 		return fmt.Errorf("balance validation failed: %w", err)
 	}
 
-	// 3. Gas validation using SVM
+	// 4. Gas validation using SVM
 	minGasPrice := mp.getMinimumGasPrice()
 	if err := mp.verifyTransactionGas(tx, minGasPrice); err != nil {
 		return fmt.Errorf("gas validation failed: %w", err)
 	}
 
-	// 4. Replay protection using SVM
+	// 5. Replay protection using SVM
 	lastTimestamp := mp.getLastTransactionTimestamp(tx.Sender)
 	if err := mp.verifyTransactionReplayProtection(tx, lastTimestamp); err != nil {
 		return fmt.Errorf("replay protection failed: %w", err)
@@ -425,7 +460,7 @@ func (mp *Mempool) performValidation(tx *types.Transaction) error {
 func (mp *Mempool) getSenderNonce(sender string) uint64 {
 	// This would query the blockchain state for the sender's nonce
 	// In production: stateDB.GetNonce(sender)
-	_ = sender // Mark as used to avoid linter warning
+	_ = sender
 	return 0
 }
 
@@ -433,7 +468,7 @@ func (mp *Mempool) getSenderNonce(sender string) uint64 {
 func (mp *Mempool) getSenderBalance(sender string) *big.Int {
 	// This would query the blockchain state for the sender's balance
 	// In production: stateDB.GetBalance(sender)
-	_ = sender // Mark as used to avoid linter warning
+	_ = sender
 	return new(big.Int).SetUint64(1000000000000000000)
 }
 
@@ -447,7 +482,7 @@ func (mp *Mempool) getMinimumGasPrice() *big.Int {
 func (mp *Mempool) getLastTransactionTimestamp(sender string) uint64 {
 	// This would query the blockchain state for the sender's last tx timestamp
 	// In production: stateDB.GetLastTxTimestamp(sender)
-	_ = sender // Mark as used to avoid linter warning
+	_ = sender
 	return 0
 }
 

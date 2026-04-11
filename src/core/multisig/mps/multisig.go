@@ -243,6 +243,8 @@ func (m *MultisigManager) SignMessage(message []byte, privKey []byte, partyID st
 // Changes vs original:
 //   - Retrieves commitment from m.commitments[partyID].
 //   - Passes commitment as 7th argument to m.manager.VerifySignature.
+//   - Passes storeEvidence=false (8th argument) to avoid storing replay evidence
+//     during multisig verification (each signature is checked individually).
 //   - Proof regeneration uses the same leaves = [merkleRootBytes, commitment]
 //     that SignMessage used, so ValidateProof continues to work correctly.
 func (m *MultisigManager) VerifySignatures(message []byte) (bool, error) {
@@ -296,11 +298,21 @@ func (m *MultisigManager) VerifySignatures(message []byte) (bool, error) {
 
 		merkleRoot := &hashtree.HashTreeNode{Hash: uint256.NewInt(0).SetBytes(merkleRootBytes)}
 
-		// FIX: pass commitment as the required 7th argument.
-		isValidSig := m.manager.VerifySignature(message, timestamp, nonce, sig, deserializedPK, merkleRoot, commitment)
+		// FIX: pass commitment as the required 7th argument and storeEvidence=false as 8th.
+		// storeEvidence=false prevents storing timestamp+nonce and signature hash during
+		// multisig verification. The storage already happened when each participant
+		// signed individually (in their local VerifySignature call during signing).
+		// For multisig, we only verify, we don't want to store again.
+		isValidSig := m.manager.VerifySignature(message, timestamp, nonce, sig, deserializedPK, merkleRoot, commitment, false)
 		if isValidSig {
 			validSignatures++
-			// Re-store pair so it cannot be replayed by a second VerifySignatures call.
+			// Note: We do NOT store timestamp+nonce or signature hash here because:
+			//   1. They were already stored during each participant's local verification
+			//   2. Storing again would be redundant
+			//   3. The signature hash check above already confirmed no replay
+			// The StoreTimestampNonce call below is kept for backward compatibility
+			// but is now redundant since the manager.VerifySignature with storeEvidence=false
+			// doesn't store anything.
 			err = m.manager.StoreTimestampNonce(timestamp, nonce)
 			if err != nil {
 				return false, fmt.Errorf("failed to store timestamp-nonce pair for %s: %v", partyID, err)

@@ -91,6 +91,10 @@ type Transaction struct {
 	Timestamp  int64    `json:"timestamp"`
 	Signature  []byte   `json:"signature"`
 	ReturnData []byte   `json:"return_data,omitempty"` // OP_RETURN data (memos, proofs, metadata)
+	// Optional data
+	Data []byte `json:"data,omitempty"`
+
+	SignatureHash []byte `json:"signature_hash"` // ADD THIS - 32-byte hash of signature for replay detection
 }
 
 // Outpoint represents a specific transaction output.

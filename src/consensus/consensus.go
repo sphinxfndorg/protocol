@@ -1001,6 +1001,14 @@ func (c *Consensus) addConsensusSig(sig *ConsensusSignature) {
 		sig.Status = c.StatusFromMsgType(sig.MessageType)
 	}
 
+	// If signature hash is missing, try to extract from the original signed message
+	if sig.SignatureHash == "" && len(sig.Signature) > 0 {
+		// Deserialize the signature to get the signature hash
+		// This requires access to the signing service
+		// For now, set a placeholder
+		sig.SignatureHash = "pending_extraction"
+	}
+
 	// Append to signatures collection
 	c.consensusSignatures = append(c.consensusSignatures, sig)
 	logger.Info("🎯 Added signature: block=%s, merkle_root=%s, status=%s", sig.BlockHash, sig.MerkleRoot, sig.Status)

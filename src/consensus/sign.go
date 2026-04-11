@@ -21,7 +21,6 @@
 // SOFTWARE.
 
 // go/src/consensus/signing.go
-// go/src/consensus/signing.go - Complete working version with VM
 package consensus
 
 import (
@@ -39,6 +38,28 @@ import (
 	"github.com/sphinxorg/protocol/src/crypto/SPHINCSPLUS-golang/sphincs"
 	logger "github.com/sphinxorg/protocol/src/log"
 )
+
+// SigningService handles all signing and verification operations for consensus messages.
+// It uses SVM for signature verification to ensure security and consistency across nodes.
+// The service maintains a registry of public keys for other nodes to enable cross-node verification.
+// The signing flow is as follows:
+// SignProposal() → SignMessage() → SphincsManager.SignMessage() → Sphincs.Sign()
+// VerifyProposal() → VerifySignature() → verifyWithVM() → VM execution with OP_CHECK_SPHINCS
+// The same flow applies to votes and timeouts, with the respective signing and verification methods.
+//
+// VerifyProposal()
+//    ↓
+//   calls → VerifySignature()
+//                ↓
+//                calls → verifyWithVM()
+//                            ↓
+//                            creates VM with OP_CHECK_SPHINCS
+//                            ↓
+//                            VM executes and returns result
+//                            ↓
+//                returns result to VerifySignature
+//    ↓
+//    returns result to Consensus
 
 // RegisterPublicKey registers a public key for another node.
 // This enables cross-node signature verification by maintaining a registry of public keys.
@@ -118,20 +139,38 @@ func (s *SigningService) SignMessage(data []byte) ([]byte, error) {
 		return nil, err
 	}
 
+	// Compute signature hash using the sphincsManager method
+	signatureHash := s.sphincsManager.ComputeSignatureHash(sigBytes)
+
 	signedMsg := &SignedMessage{
-		Signature:  sigBytes,
-		Timestamp:  timestamp,
-		Nonce:      nonce,
-		MerkleRoot: merkleRoot,
-		Commitment: commitment,
-		Data:       data,
+		Signature:     sigBytes,
+		SignatureHash: signatureHash,
+		Timestamp:     timestamp,
+		Nonce:         nonce,
+		MerkleRoot:    merkleRoot,
+		Commitment:    commitment,
+		Data:          data,
 	}
 
 	return signedMsg.Serialize()
 }
 
-// verifyWithVM uses SVM to verify SPHINCS+ signature
-func (s *SigningService) verifyWithVM(signature, publicKey, message []byte) bool {
+// verifyWithVM uses SVM to verify SPHINCS+ signature - THIS IS THE ONLY VERIFICATION METHOD
+func (s *SigningService) verifyWithVM(signature, signatureHash, publicKey, message []byte) bool {
+	// First, verify the signature hash matches the signature
+	computedHash := s.sphincsManager.ComputeSignatureHash(signature)
+	if len(signatureHash) != 32 {
+		logger.Warn("Invalid signature hash length: %d", len(signatureHash))
+		return false
+	}
+	for i := range computedHash {
+		if computedHash[i] != signatureHash[i] {
+			logger.Warn("Signature hash mismatch — possible tampering")
+			return false
+		}
+	}
+
+	// Then verify the signature itself via VM
 	sigLen := len(signature)
 	pkLen := len(publicKey)
 	msgLen := len(message)
@@ -196,15 +235,9 @@ func (s *SigningService) verifyWithVM(signature, publicKey, message []byte) bool
 	return result == 1
 }
 
-// VerifySignature verifies a signature for a message.
-// Uses ORIGINAL verification (proven to work) and optionally tests VM
+// VerifySignature verifies a signature for a message using VM ONLY.
 func (s *SigningService) VerifySignature(signedData []byte, nodeID string) (bool, error) {
 	signedMsg, err := DeserializeSignedMessage(signedData)
-	if err != nil {
-		return false, err
-	}
-
-	sig, err := s.sphincsManager.DeserializeSignature(signedMsg.Signature)
 	if err != nil {
 		return false, err
 	}
@@ -214,30 +247,28 @@ func (s *SigningService) VerifySignature(signedData []byte, nodeID string) (bool
 		return false, err
 	}
 
-	// ORIGINAL VERIFICATION (PROVEN TO WORK)
-	result := s.sphincsManager.VerifySignature(
-		signedMsg.Data,
-		signedMsg.Timestamp,
-		signedMsg.Nonce,
-		sig,
-		pk,
-		signedMsg.MerkleRoot,
-		signedMsg.Commitment,
-	)
+	// Serialize public key for VM
+	pkBytes, err := pk.SerializePK()
+	if err != nil {
+		return false, err
+	}
 
-	// OPTIONAL: Test VM verification (doesn't affect consensus)
+	// Build the full message (timestamp + nonce + data)
+	fullMsg := make([]byte, 0, len(signedMsg.Timestamp)+len(signedMsg.Nonce)+len(signedMsg.Data))
+	fullMsg = append(fullMsg, signedMsg.Timestamp...)
+	fullMsg = append(fullMsg, signedMsg.Nonce...)
+	fullMsg = append(fullMsg, signedMsg.Data...)
+
+	// DIRECT VM VERIFICATION with signature hash check
+	result := s.verifyWithVM(signedMsg.Signature, signedMsg.SignatureHash, pkBytes, fullMsg)
+
 	if result {
-		pkBytes, _ := pk.SerializePK()
-		fullMsg := make([]byte, 0, len(signedMsg.Timestamp)+len(signedMsg.Nonce)+len(signedMsg.Data))
-		fullMsg = append(fullMsg, signedMsg.Timestamp...)
-		fullMsg = append(fullMsg, signedMsg.Nonce...)
-		fullMsg = append(fullMsg, signedMsg.Data...)
-
-		if s.verifyWithVM(signedMsg.Signature, pkBytes, fullMsg) {
-			logger.Debug("✅ VM verification also passed for node %s", nodeID)
-		} else {
-			logger.Debug("⚠️ VM verification failed (original passed) - check VM configuration for node %s", nodeID)
-		}
+		// Print signature hash when verification passes
+		sigHashHex := hex.EncodeToString(signedMsg.SignatureHash)
+		logger.Info("✅ VM verification passed for node %s (signature hash: %s...)",
+			nodeID, sigHashHex[:min(16, len(sigHashHex))])
+	} else {
+		logger.Warn("❌ VM verification failed for node %s", nodeID)
 	}
 
 	return result, nil
@@ -287,7 +318,7 @@ func (s *SigningService) SignProposal(proposal *Proposal) error {
 	return nil
 }
 
-// VerifyProposal verifies a proposal signature.
+// VerifyProposal verifies a proposal signature using VM.
 func (s *SigningService) VerifyProposal(proposal *Proposal) (bool, error) {
 	if len(proposal.Signature) == 0 {
 		return false, fmt.Errorf("empty signature")
@@ -309,7 +340,19 @@ func (s *SigningService) VerifyProposal(proposal *Proposal) (bool, error) {
 		return false, fmt.Errorf("signed data does not match proposal content")
 	}
 
-	return s.VerifySignature(proposal.Signature, proposal.ProposerID)
+	valid, err := s.VerifySignature(proposal.Signature, proposal.ProposerID)
+	if err != nil {
+		return false, err
+	}
+
+	if valid {
+		// Print the signature hash value when signature is valid
+		sigHashHex := hex.EncodeToString(signedMsg.SignatureHash)
+		logger.Info("✅ Valid signature for proposal from %s (signature hash: %s...)",
+			proposal.ProposerID, sigHashHex[:min(16, len(sigHashHex))])
+	}
+
+	return valid, nil
 }
 
 // SignVote signs a vote (prepare or commit).
@@ -332,9 +375,26 @@ func (s *SigningService) SignVote(vote *Vote) error {
 	return nil
 }
 
-// VerifyVote verifies a vote signature.
+// VerifyVote verifies a vote signature using VM.
 func (s *SigningService) VerifyVote(vote *Vote) (bool, error) {
-	return s.VerifySignature(vote.Signature, vote.VoterID)
+	valid, err := s.VerifySignature(vote.Signature, vote.VoterID)
+	if err != nil {
+		return false, err
+	}
+
+	if valid {
+		// Deserialize to get signature hash for logging
+		signedMsg, err := DeserializeSignedMessage(vote.Signature)
+		if err == nil && len(signedMsg.SignatureHash) > 0 {
+			sigHashHex := hex.EncodeToString(signedMsg.SignatureHash)
+			logger.Info("✅ Valid vote signature from %s (signature hash: %s...)",
+				vote.VoterID, sigHashHex[:min(16, len(sigHashHex))])
+		} else {
+			logger.Info("✅ Valid vote signature from %s", vote.VoterID)
+		}
+	}
+
+	return valid, nil
 }
 
 // SignTimeout signs a timeout message.
@@ -349,9 +409,26 @@ func (s *SigningService) SignTimeout(timeout *TimeoutMsg) error {
 	return nil
 }
 
-// VerifyTimeout verifies a timeout signature.
+// VerifyTimeout verifies a timeout signature using VM.
 func (s *SigningService) VerifyTimeout(timeout *TimeoutMsg) (bool, error) {
-	return s.VerifySignature(timeout.Signature, timeout.VoterID)
+	valid, err := s.VerifySignature(timeout.Signature, timeout.VoterID)
+	if err != nil {
+		return false, err
+	}
+
+	if valid {
+		// Deserialize to get signature hash for logging
+		signedMsg, err := DeserializeSignedMessage(timeout.Signature)
+		if err == nil && len(signedMsg.SignatureHash) > 0 {
+			sigHashHex := hex.EncodeToString(signedMsg.SignatureHash)
+			logger.Info("✅ Valid timeout signature from %s (signature hash: %s...)",
+				timeout.VoterID, sigHashHex[:min(16, len(sigHashHex))])
+		} else {
+			logger.Info("✅ Valid timeout signature from %s", timeout.VoterID)
+		}
+	}
+
+	return valid, nil
 }
 
 // serializeProposalForSigning creates a deterministic byte string from a proposal.
@@ -432,7 +509,7 @@ func (s *SigningService) SignBlock(block Block) error {
 	return nil
 }
 
-// VerifyBlockSignature verifies the proposer's signature on a block.
+// VerifyBlockSignature verifies the proposer's signature on a block using VM.
 func (s *SigningService) VerifyBlockSignature(block Block) (bool, error) {
 	tb, ok := block.(*types.Block)
 	if !ok {
@@ -465,7 +542,18 @@ func (s *SigningService) VerifyBlockSignature(block Block) (bool, error) {
 		return false, fmt.Errorf("signature data does not match block hash")
 	}
 
-	return s.VerifySignature(tb.Header.ProposerSignature, tb.Header.ProposerID)
+	valid, err := s.VerifySignature(tb.Header.ProposerSignature, tb.Header.ProposerID)
+	if err != nil {
+		return false, err
+	}
+
+	if valid {
+		sigHashHex := hex.EncodeToString(signedMsg.SignatureHash)
+		logger.Info("✅ Valid block signature from %s (signature hash: %s...)",
+			tb.Header.ProposerID, sigHashHex[:min(16, len(sigHashHex))])
+	}
+
+	return valid, nil
 }
 
 // GetSigningService returns the signing service instance

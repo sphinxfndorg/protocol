@@ -32,12 +32,17 @@ import (
 )
 
 // Serialize the signed message to bytes
+// Serialize the signed message to bytes
 func (sm *SignedMessage) Serialize() ([]byte, error) {
 	var buf bytes.Buffer
 
 	// Write signature length and data
 	binary.Write(&buf, binary.BigEndian, uint32(len(sm.Signature)))
 	buf.Write(sm.Signature)
+
+	// Write signature hash (NEW) - FIXED: use &buf
+	binary.Write(&buf, binary.BigEndian, uint32(len(sm.SignatureHash)))
+	buf.Write(sm.SignatureHash)
 
 	// Write timestamp length and data (flexible size)
 	binary.Write(&buf, binary.BigEndian, uint32(len(sm.Timestamp)))
@@ -61,11 +66,9 @@ func (sm *SignedMessage) Serialize() ([]byte, error) {
 		buf.Write(make([]byte, 32))
 	}
 
-	// ========== FIX: Write commitment length and data ==========
-	// Commitment is 32 bytes from SPHINCS+ signing
+	// Write commitment length and data
 	binary.Write(&buf, binary.BigEndian, uint32(len(sm.Commitment)))
 	buf.Write(sm.Commitment)
-	// =========================================================
 
 	// Write original data
 	binary.Write(&buf, binary.BigEndian, uint32(len(sm.Data)))
@@ -74,6 +77,7 @@ func (sm *SignedMessage) Serialize() ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// DeserializeSignedMessage parses bytes into a SignedMessage
 // DeserializeSignedMessage parses bytes into a SignedMessage
 func DeserializeSignedMessage(data []byte) (*SignedMessage, error) {
 	if len(data) < 16 { // Minimum reasonable size
@@ -90,6 +94,16 @@ func DeserializeSignedMessage(data []byte) (*SignedMessage, error) {
 	}
 	msg.Signature = make([]byte, sigLen)
 	if _, err := buf.Read(msg.Signature); err != nil {
+		return nil, err
+	}
+
+	// Read signature hash (NEW)
+	var sigHashLen uint32
+	if err := binary.Read(buf, binary.BigEndian, &sigHashLen); err != nil {
+		return nil, err
+	}
+	msg.SignatureHash = make([]byte, sigHashLen)
+	if _, err := buf.Read(msg.SignatureHash); err != nil {
 		return nil, err
 	}
 
@@ -122,7 +136,7 @@ func DeserializeSignedMessage(data []byte) (*SignedMessage, error) {
 		Hash: BytesToUint256(merkleBytes),
 	}
 
-	// ========== FIX: Read commitment length and data ==========
+	// Read commitment length and data
 	var commitLen uint32
 	if err := binary.Read(buf, binary.BigEndian, &commitLen); err != nil {
 		return nil, err
@@ -131,7 +145,6 @@ func DeserializeSignedMessage(data []byte) (*SignedMessage, error) {
 	if _, err := buf.Read(msg.Commitment); err != nil {
 		return nil, err
 	}
-	// =========================================================
 
 	// Read original data
 	var dataLen uint32

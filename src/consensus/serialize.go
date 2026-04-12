@@ -27,6 +27,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 
 	"github.com/sphinxorg/protocol/src/core/hashtree"
 )
@@ -157,4 +158,24 @@ func DeserializeSignedMessage(data []byte) (*SignedMessage, error) {
 	}
 
 	return msg, nil
+}
+
+// DeserializeAndRegisterPublicKey deserializes a public key from bytes and registers it.
+// This is the main method used during public key exchange to register other nodes' keys.
+// It converts raw bytes back into a SPHINCS_PK object and stores it in the registry.
+func (s *SigningService) DeserializeAndRegisterPublicKey(nodeID string, publicKeyBytes []byte) error {
+	// Validate that the key manager is available for deserialization
+	if s.keyManager == nil {
+		return fmt.Errorf("key manager not available")
+	}
+
+	// Deserialize the bytes back into a SPHINCS_PK object
+	pk, err := s.keyManager.DeserializePublicKey(publicKeyBytes)
+	if err != nil {
+		return fmt.Errorf("failed to deserialize public key: %w", err)
+	}
+
+	// Register the deserialized public key for the given node ID
+	s.RegisterPublicKey(nodeID, pk)
+	return nil
 }

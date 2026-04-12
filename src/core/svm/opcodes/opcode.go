@@ -25,6 +25,7 @@ package svm
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"time"
 
@@ -150,23 +151,108 @@ func sha3_shake256(data []byte, length int) []byte {
 // The application registers its SPHINCS+ verification implementation here
 var verifySphincsPlusFunc func(signature, publicKey, message []byte) bool
 
+// sphincsVerifyFunc holds the real deserialization+crypto implementation.
+// Populated by SetSphincsVerifier at node startup.
+// Kept separate from verifySphincsPlusFunc so the two registration paths
+// are explicit and cannot be confused.
+// SetVerifySphincsPlusFunc remains available for tests that need a simple override.
+var sphincsVerifyFunc func(signature, publicKey, message []byte) bool
+
+// Global storage for signature hashes (content-based replay prevention)
+// This stores hashes of SPHINCS+ signatures that have been seen
+// Key: signature hash (32 bytes as string), Value: used flag
+var signatureHashStore = make(map[string]bool)
+
 // SetVerifySphincsPlusFunc sets the verification function for SPHINCS+ signatures
 // Called by the application once during initialization to register its crypto
 // Example: svm.SetVerifySphincsPlusFunc(myApp.VerifySPHINCS)
+// NOTE: For real SPHINCS+ verification, prefer SetSphincsVerifier which wires in
+// actual deserialization and Spx_verify. This function is retained for tests
+// that need a lightweight override without real crypto.
 func SetVerifySphincsPlusFunc(verifyFunc func([]byte, []byte, []byte) bool) {
 	verifySphincsPlusFunc = verifyFunc // Store the function pointer
+}
+
+// SetSphincsVerifier registers the real SPHINCS+ verification implementation.
+// Must be called once at node startup, before any VM execution.
+//
+// Parameters:
+//
+//	deserializePK  — converts raw public key bytes → opaque PK handle (interface{})
+//	deserializeSig — converts raw signature bytes  → opaque SIG handle (interface{})
+//	verify         — calls the real Spx_verify(msg, sig, pk) using the handles above
+//
+// Using interface{} parameters keeps opcode.go free of a direct import of the
+// sphincs package, which avoids import cycles, while still performing real crypto.
+//
+// The registered function handles TWO execution paths distinguished by pkLen:
+//
+//	pkLen == 0 → light-client sig-hash lookup path (Dave's convention).
+//	             Rejected in full-node context — return false explicitly.
+//
+//	pkLen >  0 → full-node SPHINCS+ verification path (Charlie's path).
+//	             Deserializes pk and sig then calls real Spx_verify.
+//
+// This replaces the devnet placeholder that returned true unconditionally.
+// Call this instead of SetVerifySphincsPlusFunc for production/mainnet nodes.
+func SetSphincsVerifier(
+	deserializePK func([]byte) (interface{}, error),
+	deserializeSig func([]byte) (interface{}, error),
+	verify func(msg []byte, sig interface{}, pk interface{}) bool,
+) {
+	sphincsVerifyFunc = func(signature, publicKey, message []byte) bool {
+		if len(publicKey) == 0 {
+			// Light-client path (Dave): signature = daveSigHash (32 bytes).
+			// Do LevelDB lookup: "sig-hash:" + sigHash → "used".
+			// In the consensus/helper context there is no Dave DB —
+			// this path is unused here. Return false to be explicit and safe.
+			logger.Warn("OP_CHECK_SPHINCS: light-client path rejected in full-node context")
+			return false
+		}
+
+		// Full-node path (Charlie): real SPHINCS+ verification.
+		// Deserialize the public key from raw bytes.
+		pk, err := deserializePK(publicKey)
+		if err != nil {
+			logger.Warn("OP_CHECK_SPHINCS: pk deserialization failed: %v", err)
+			return false
+		}
+
+		// Deserialize the signature from raw bytes.
+		sig, err := deserializeSig(signature)
+		if err != nil {
+			logger.Warn("OP_CHECK_SPHINCS: sig deserialization failed: %v", err)
+			return false
+		}
+
+		// Call the real Spx_verify provided by the caller.
+		// This is the actual post-quantum cryptographic verification.
+		valid := verify(message, sig, pk)
+		logger.Debug("OP_CHECK_SPHINCS: sig=%d pk=%d msg=%d valid=%v",
+			len(signature), len(publicKey), len(message), valid)
+		return valid
+	}
+
+	// Wire into the existing dispatch path so executeCheckSphincs and
+	// executeVerifySphincs both benefit from the real verifier automatically.
+	verifySphincsPlusFunc = sphincsVerifyFunc
+	logger.Info("✅ OP_CHECK_SPHINCS: real SPHINCS+ verifier registered")
 }
 
 // verifySphincsPlus calls the registered verification function
 // Used by OP_CHECK_SPHINCS and OP_VERIFY_SPHINCS opcodes
 // Returns true if the signature is valid, false otherwise
-// If no function is registered, falls back to simple non-empty check
+// Fails closed — returns false and logs a warning if no verifier has been registered.
+// Previously fell back to a non-empty check (fail-open); that has been removed
+// because an unregistered verifier on a blockchain node must hard-reject, not silently pass.
 func verifySphincsPlus(signature, publicKey, message []byte) bool {
-	if verifySphincsPlusFunc != nil {
-		return verifySphincsPlusFunc(signature, publicKey, message) // Call registered function
+	if verifySphincsPlusFunc == nil {
+		// No verifier registered — fail closed.
+		// This prevents silent pass-through if node startup skipped registration.
+		logger.Warn("OP_CHECK_SPHINCS: no verifier registered — rejecting (fail-closed)")
+		return false
 	}
-	// Fallback: only check that all inputs are non-empty
-	return len(signature) > 0 && len(publicKey) > 0 && len(message) > 0
+	return verifySphincsPlusFunc(signature, publicKey, message) // Call registered function
 }
 
 // Global storage for nonce and receipt
@@ -402,6 +488,15 @@ func ExecuteOp(op OpCode, stack *Stack, memory []byte, code []byte, pc *uint64) 
 	// Pushes 1 on success, 0 on failure
 	case OP_RETURN:
 		return executeReturn(stack, memory)
+
+	case OP_CHECK_SIGNATURE_HASH:
+		return executeCheckSignatureHash(stack, memory)
+
+	case OP_VERIFY_SIGNATURE_HASH:
+		return executeVerifySignatureHash(stack, memory)
+
+	case OP_STORE_SIGNATURE_HASH:
+		return executeStoreSignatureHash(stack, memory)
 
 	default:
 		return fmt.Errorf("unknown opcode: 0x%x", op) // Invalid opcode
@@ -1167,9 +1262,12 @@ func executeReturn(stack *Stack, memory []byte) error {
 
 	// Log the embedded memo if it's readable text
 	// Check if data contains only printable ASCII characters
+	// Log the embedded memo if it's readable text
+	// Check if data contains only printable ASCII characters
 	isText := true
-	for _, b := range data {
+	for i, b := range data {
 		if b < 32 || b > 126 {
+			logger.Debug("OP_RETURN: Non-printable char at position %d: %d (hex: %x)", i, b, b)
 			isText = false
 			break
 		}
@@ -1178,9 +1276,15 @@ func executeReturn(stack *Stack, memory []byte) error {
 	if isText && len(data) > 0 {
 		logger.Info("📝 OP_RETURN: Embedded %d bytes of text: %s", len(data), string(data))
 	} else {
-		logger.Debug("OP_RETURN: Embedded %d bytes of binary data (hash: %s)", len(data), key)
+		// Log first few bytes as hex for debugging
+		hexPreview := ""
+		if len(data) > 16 {
+			hexPreview = hex.EncodeToString(data[:16]) + "..."
+		} else {
+			hexPreview = hex.EncodeToString(data)
+		}
+		logger.Info("📝 OP_RETURN: Embedded %d bytes of data (hex preview: %s)", len(data), hexPreview)
 	}
-
 	// Push success onto stack
 	stack.Push(1)
 	return nil
@@ -1863,6 +1967,173 @@ func executeBitcoinScriptStackOp(op OpCode, stack *Stack) error {
 	return nil
 }
 
+// OP_CHECK_SIGNATURE_HASH - Verifies signature hash and checks for replay
+// Expected stack layout (top to bottom):
+//
+//	sigHash_len, sigHash_ptr, sig_len, sig_ptr
+//
+// This opcode:
+//  1. Recomputes signature hash from signature bytes in memory
+//  2. Compares with expected signature hash from stack
+//  3. Checks if this signature hash has been seen before (replay detection)
+//  4. Pushes 1 if hash matches AND not seen before, 0 otherwise
+func executeCheckSignatureHash(stack *Stack, memory []byte) error {
+	// Pop expected signature hash length (should be 32 bytes)
+	expectedHashLen, err := stack.Pop()
+	if err != nil {
+		return fmt.Errorf("missing expected signature hash length: %v", err)
+	}
+
+	// Pop expected signature hash pointer
+	expectedHashPtr, err := stack.Pop()
+	if err != nil {
+		return fmt.Errorf("missing expected signature hash pointer: %v", err)
+	}
+
+	// Pop signature length
+	sigLen, err := stack.Pop()
+	if err != nil {
+		return fmt.Errorf("missing signature length: %v", err)
+	}
+
+	// Pop signature pointer
+	sigPtr, err := stack.Pop()
+	if err != nil {
+		return fmt.Errorf("missing signature pointer: %v", err)
+	}
+
+	// Validate memory bounds
+	if sigPtr+sigLen > uint64(len(memory)) {
+		return fmt.Errorf("signature out of bounds: ptr=%d, len=%d, mem=%d", sigPtr, sigLen, len(memory))
+	}
+	if expectedHashPtr+expectedHashLen > uint64(len(memory)) {
+		return fmt.Errorf("expected hash out of bounds")
+	}
+
+	// Extract signature bytes from memory
+	signature := memory[sigPtr : sigPtr+sigLen]
+
+	// Extract expected signature hash from memory
+	expectedHash := memory[expectedHashPtr : expectedHashPtr+expectedHashLen]
+
+	// Step 1: Recompute signature hash from signature bytes
+	recomputedHash := sha3_256(signature) // Use SHA3-256 for hash
+
+	// Step 2: Verify hash matches
+	if len(recomputedHash) != len(expectedHash) {
+		stack.Push(0) // Length mismatch
+		return nil
+	}
+
+	for i := range recomputedHash {
+		if recomputedHash[i] != expectedHash[i] {
+			stack.Push(0) // Hash mismatch - Alice lying or data corruption
+			return nil
+		}
+	}
+
+	// Step 3: Check if this signature hash has been seen before (replay detection)
+	hashKey := string(recomputedHash)
+	exists := signatureHashStore[hashKey]
+
+	if exists {
+		stack.Push(0) // Signature already used - replay attack
+	} else {
+		stack.Push(1) // Hash matches and is fresh
+	}
+
+	return nil
+}
+
+// OP_VERIFY_SIGNATURE_HASH - Same as CHECK but fails on invalid or replay
+// This opcode halts execution if the signature hash is invalid or already used
+func executeVerifySignatureHash(stack *Stack, memory []byte) error {
+	// Same parameter popping as executeCheckSignatureHash
+	expectedHashLen, err := stack.Pop()
+	if err != nil {
+		return fmt.Errorf("missing expected signature hash length: %v", err)
+	}
+
+	expectedHashPtr, err := stack.Pop()
+	if err != nil {
+		return fmt.Errorf("missing expected signature hash pointer: %v", err)
+	}
+
+	sigLen, err := stack.Pop()
+	if err != nil {
+		return fmt.Errorf("missing signature length: %v", err)
+	}
+
+	sigPtr, err := stack.Pop()
+	if err != nil {
+		return fmt.Errorf("missing signature pointer: %v", err)
+	}
+
+	// Validate bounds
+	if sigPtr+sigLen > uint64(len(memory)) {
+		return fmt.Errorf("signature out of bounds")
+	}
+	if expectedHashPtr+expectedHashLen > uint64(len(memory)) {
+		return fmt.Errorf("expected hash out of bounds")
+	}
+
+	// Extract data
+	signature := memory[sigPtr : sigPtr+sigLen]
+	expectedHash := memory[expectedHashPtr : expectedHashPtr+expectedHashLen]
+
+	// Recompute and verify hash
+	recomputedHash := sha3_256(signature)
+
+	if len(recomputedHash) != len(expectedHash) {
+		return fmt.Errorf("signature hash verification failed: length mismatch")
+	}
+
+	for i := range recomputedHash {
+		if recomputedHash[i] != expectedHash[i] {
+			return fmt.Errorf("signature hash verification failed: hash mismatch")
+		}
+	}
+
+	// Check for replay
+	hashKey := string(recomputedHash)
+	if signatureHashStore[hashKey] {
+		return fmt.Errorf("signature hash replay detected: this signature has been used before")
+	}
+
+	// All checks passed
+	return nil
+}
+
+// OP_STORE_SIGNATURE_HASH - Stores signature hash after successful verification
+// This should be called after OP_VERIFY_SIGNATURE_HASH passes
+// Pushes 1 on success
+func executeStoreSignatureHash(stack *Stack, memory []byte) error {
+	// Pop signature hash length and pointer
+	hashLen, err := stack.Pop()
+	if err != nil {
+		return err
+	}
+	hashPtr, err := stack.Pop()
+	if err != nil {
+		return err
+	}
+
+	// Validate bounds
+	if hashPtr+hashLen > uint64(len(memory)) {
+		return fmt.Errorf("signature hash out of bounds")
+	}
+
+	// Extract signature hash
+	signatureHash := memory[hashPtr : hashPtr+hashLen]
+
+	// Store in signatureHashStore to prevent future replays
+	hashKey := string(signatureHash)
+	signatureHashStore[hashKey] = true
+
+	stack.Push(1) // Success
+	return nil
+}
+
 // ========== OPCODE CONSTANTS ==========
 // All opcodes are single-byte values that the VM interprets
 // Opcodes are grouped by functionality with gaps for future expansion
@@ -1989,17 +2260,18 @@ const (
 	OP_SPLIT  OpCode = 0x8D // Split at position
 
 	// SPHINCS+ protocol opcodes (0xD0-0xDA) - Post-quantum signature operations
-	OP_CHECK_SPHINCS      OpCode = 0xD0 // Verify signature, push 1/0 on stack
-	OP_VERIFY_SPHINCS     OpCode = 0xD1 // Verify signature, fail if invalid
-	OP_DUP_SPHINCS        OpCode = 0xD2 // Duplicate top 6 SPHINCS stack items
-	OP_CHECK_TIMESTAMP    OpCode = 0xD3 // Verify timestamp freshness (5 min window)
-	OP_CHECK_NONCE        OpCode = 0xD4 // Verify nonce uniqueness (replay protection)
-	OP_STORE_NONCE        OpCode = 0xD5 // Store nonce for replay protection
-	OP_VERIFY_MERKLE_ROOT OpCode = 0xD6 // Verify Merkle root matches signature
-	OP_VERIFY_COMMITMENT  OpCode = 0xD7 // Verify commitment hash matches
-	OP_BUILD_MERKLE_TREE  OpCode = 0xD8 // Build Merkle tree from signature
-	OP_STORE_RECEIPT      OpCode = 0xD9 // Store transaction receipt (commitment->root)
-	OP_VERIFY_PROOF       OpCode = 0xDA // Verify light client proof
+	OP_CHECK_SPHINCS        OpCode = 0xD0 // Verify signature, push 1/0 on stack
+	OP_VERIFY_SPHINCS       OpCode = 0xD1 // Verify signature, fail if invalid
+	OP_DUP_SPHINCS          OpCode = 0xD2 // Duplicate top 6 SPHINCS stack items
+	OP_CHECK_TIMESTAMP      OpCode = 0xD3 // Verify timestamp freshness (5 min window)
+	OP_CHECK_NONCE          OpCode = 0xD4 // Verify nonce uniqueness (replay protection)
+	OP_STORE_NONCE          OpCode = 0xD5 // Store nonce for replay protection
+	OP_VERIFY_MERKLE_ROOT   OpCode = 0xD6 // Verify Merkle root matches signature
+	OP_VERIFY_COMMITMENT    OpCode = 0xD7 // Verify commitment hash matches
+	OP_BUILD_MERKLE_TREE    OpCode = 0xD8 // Build Merkle tree from signature
+	OP_STORE_RECEIPT        OpCode = 0xD9 // Store transaction receipt (commitment->root)
+	OP_VERIFY_PROOF         OpCode = 0xDA // Verify light client proof
+	OP_STORE_SIGNATURE_HASH OpCode = 0xDD // Store signature hash after verification
 
 	// Legacy SPHINCS+ Multisig operations (0xE0-0xE3) - Placeholder for multisignatures
 	OP_SPHINCS_MULTISIG_INIT   OpCode = 0xE0 // Initialize multisignature context
@@ -2011,6 +2283,10 @@ const (
 	// Similar to Bitcoin's OP_RETURN - stores data without affecting state
 	// Maximum size is configurable (default 80 bytes like Bitcoin)
 	OP_RETURN OpCode = 0xFD
+
+	// Add this with the other SPHINCS+ protocol opcodes (0xD0-0xDA)
+	OP_CHECK_SIGNATURE_HASH  OpCode = 0xDB // Verify signature hash and check replay
+	OP_VERIFY_SIGNATURE_HASH OpCode = 0xDC // Verify signature hash, fail if invalid or replay
 )
 
 // ========== STRING TO OPCODE MAPPING ==========
@@ -2115,6 +2391,9 @@ var stringToOp = map[string]OpCode{
 	"SPHINCS_MULTISIG_PROOF":  OP_SPHINCS_MULTISIG_PROOF,
 	"RETURN":                  OP_RETURN, // Alias for OP_RETURN
 	"OP_RETURN":               OP_RETURN,
+	"CHECK_SIGNATURE_HASH":    OP_CHECK_SIGNATURE_HASH,
+	"VERIFY_SIGNATURE_HASH":   OP_VERIFY_SIGNATURE_HASH,
+	"STORE_SIGNATURE_HASH":    OP_STORE_SIGNATURE_HASH,
 }
 
 // OpCodeFromString returns the OpCode corresponding to a given string

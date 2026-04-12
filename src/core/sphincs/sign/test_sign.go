@@ -161,6 +161,7 @@ var (
 	vmCapturedNonce          []byte
 	vmCapturedMerkleRootHash []byte
 	vmCapturedCommitment     []byte
+	vmCapturedSignatureHash  []byte // ADD THIS
 	vmManager                *sign.SphincsManager
 	vmKeyManager             *key.KeyManager
 )
@@ -720,10 +721,12 @@ func main() {
 	// Storing 35 KB per tx in a database would make the node unscalable.
 
 	// Set the global captured variables BEFORE running the VM
+	// Set the global captured variables BEFORE running the VM
 	vmCapturedTimestamp = receivedTimestamp
 	vmCapturedNonce = receivedNonce
 	vmCapturedMerkleRootHash = receivedMerkleRootHash
 	vmCapturedCommitment = receivedCommitment
+	vmCapturedSignatureHash = receivedSignatureHash // ADD THIS
 
 	// Print what Charlie is about to cryptographically verify
 	fmt.Println("  CHARLIE CRYPTOGRAPHIC VERIFICATION (SPHINCS+ via SVM):")
@@ -741,34 +744,58 @@ func main() {
 
 	vmBytecode := []byte{}
 
-	// Push signature (push these last so they end up on top of stack)
-	vmBytecode = append(vmBytecode, byte(svm.PUSH4))
-	vmBytecode = append(vmBytecode, uint32ToBytes(uint32(len(receivedSigBytes)))...)
+	// Push in REVERSE pop order for OP_CHECK_SIGNATURE_HASH.
+	// Pop order: expectedHashLen, expectedHashPtr, sigLen, sigPtr
+	// So push: sigPtr first, then sigLen, then expectedHashPtr, then expectedHashLen
+
+	// sig at offset 0
 	vmBytecode = append(vmBytecode, byte(svm.PUSH4))
 	vmBytecode = append(vmBytecode, uint32ToBytes(0)...)
-
-	// Push public key
-	pkOffset := uint32(len(receivedSigBytes))
+	// sig length
 	vmBytecode = append(vmBytecode, byte(svm.PUSH4))
-	vmBytecode = append(vmBytecode, uint32ToBytes(uint32(len(receivedPKBytes)))...)
+	vmBytecode = append(vmBytecode, uint32ToBytes(uint32(len(receivedSigBytes)))...)
+	// signatureHash offset = sigBytes + pkBytes + message
+	signatureHashOffset := uint32(len(receivedSigBytes) + len(receivedPKBytes) + len(receivedMessage))
+	vmBytecode = append(vmBytecode, byte(svm.PUSH4))
+	vmBytecode = append(vmBytecode, uint32ToBytes(signatureHashOffset)...)
+	// signatureHash length
+	vmBytecode = append(vmBytecode, byte(svm.PUSH4))
+	vmBytecode = append(vmBytecode, uint32ToBytes(uint32(len(receivedSignatureHash)))...)
+
+	vmBytecode = append(vmBytecode, byte(svm.OP_CHECK_SIGNATURE_HASH))
+
+	// Push in REVERSE pop order for OP_CHECK_SPHINCS.
+	// Pop order: msgLen, msgPtr, pkLen, pkPtr, sigLen, sigPtr
+	// So push: sigPtr first (bottom), ..., msgLen last (top)
+
+	pkOffset := uint32(len(receivedSigBytes))
+	msgOffset := uint32(len(receivedSigBytes) + len(receivedPKBytes))
+
+	// sig (bottom of what CHECK_SPHINCS needs)
+	vmBytecode = append(vmBytecode, byte(svm.PUSH4))
+	vmBytecode = append(vmBytecode, uint32ToBytes(0)...)
+	vmBytecode = append(vmBytecode, byte(svm.PUSH4))
+	vmBytecode = append(vmBytecode, uint32ToBytes(uint32(len(receivedSigBytes)))...)
+	// pk
 	vmBytecode = append(vmBytecode, byte(svm.PUSH4))
 	vmBytecode = append(vmBytecode, uint32ToBytes(pkOffset)...)
-
-	// Push message (push these first so they end up at bottom of stack)
-	msgOffset := uint32(len(receivedSigBytes) + len(receivedPKBytes))
 	vmBytecode = append(vmBytecode, byte(svm.PUSH4))
-	vmBytecode = append(vmBytecode, uint32ToBytes(uint32(len(receivedMessage)))...)
+	vmBytecode = append(vmBytecode, uint32ToBytes(uint32(len(receivedPKBytes)))...)
+	// message (top — popped first)
 	vmBytecode = append(vmBytecode, byte(svm.PUSH4))
 	vmBytecode = append(vmBytecode, uint32ToBytes(msgOffset)...)
+	vmBytecode = append(vmBytecode, byte(svm.PUSH4))
+	vmBytecode = append(vmBytecode, uint32ToBytes(uint32(len(receivedMessage)))...)
 
-	// Add CHECK opcode - this will push result onto stack
 	vmBytecode = append(vmBytecode, byte(svm.OP_CHECK_SPHINCS))
 
 	// Prepare memory layout: signature + public key + message
-	memoryLayout := make([]byte, len(receivedSigBytes)+len(receivedPKBytes)+len(receivedMessage))
+	memoryLayout := make([]byte,
+		len(receivedSigBytes)+len(receivedPKBytes)+len(receivedMessage)+len(receivedSignatureHash))
 	copy(memoryLayout[0:], receivedSigBytes)
 	copy(memoryLayout[len(receivedSigBytes):], receivedPKBytes)
 	copy(memoryLayout[len(receivedSigBytes)+len(receivedPKBytes):], receivedMessage)
+	copy(memoryLayout[len(receivedSigBytes)+len(receivedPKBytes)+len(receivedMessage):], receivedSignatureHash)
 
 	// Run the VM with custom memory
 	tStep5 := time.Now()
@@ -875,24 +902,24 @@ func main() {
 		receivedSenderID, receivedMessage)
 
 	// =========================================================================
-	// DAVE — re-verify tx1 after sigBytes discarded
+	// DAVE — re-verify tx1 after sigBytes discarded (light client — SVM only)
 	// =========================================================================
 	//
 	// Dave is a light client. He cannot afford to run Spx_verify (no sigBytes,
 	// no compute budget). He trusts Charlie ran it, and verifies consistency:
 	//
-	//   (1) Proof check — the public inputs (message, timestamp, nonce,
-	//       merkleRootHash, commitment, pkBytes) are the same ones Charlie
-	//       used when he ran Spx_verify. If anything was tampered, proof fails.
+	//   (1) Proof check — OP_VERIFY_PROOF confirms the proof blob is valid.
+	//       The VM checks the proof Charlie generated at tx time is non-empty
+	//       and well-formed. Dave supplies public inputs only — no sigBytes.
 	//
-	//   (2) Signature hash check — Dave verifies the signature hash is valid
-	//       (non-zero) as part of VerifyStoredProof. This proves a real sigBytes
-	//       existed behind this commitment — Charlie did not fabricate the tx.
+	//   (2) Signature hash check — OP_CHECK_SPHINCS with pkLen=0 signals the
+	//       light-client path inside the registered verification function.
+	//       The function does the LevelDB lookup (sig-hash: + daveSigHash → "used")
+	//       and returns true if a real sigBytes existed behind this commitment.
+	//       Dave never touches SetVerifySphincsPlusFunc — that is full-node only.
 	//
-	// Dave's checks together answer:
-	//   "Did Charlie verify a real SPHINCS+ signature for exactly these inputs?"
-	//   Proof check  → "the inputs are consistent"
-	//   Sig hash check → "a real sigBytes was behind it"
+	// Dave's role: build bytecode, supply memory, run VM, read result (0 or 1).
+	// Dave's invariant: zero Go logic beyond bytecode construction and printing.
 
 	fmt.Println()
 	fmt.Println("=================================================================")
@@ -901,14 +928,23 @@ func main() {
 	fmt.Println()
 
 	// Retrieve proof from Charlie's DB by commitment key.
-	// Charlie stored this as "proof:" + commitment after verification passed.
+	// In production: Dave queries Charlie's node over RPC/P2P — never touches DB directly.
+	// Here we read the same LevelDB instance for simplicity.
 	storedProofKey := append([]byte("proof:"), receivedCommitment...)
 	storedProof, err := db.Get(storedProofKey, nil)
 	if err != nil {
 		log.Fatal("Dave: proof not found in DB:", err)
 	}
 
-	// Print what Dave is verifying - all public inputs that Dave can access
+	// Retrieve commitment→signatureHash receipt from Charlie's DB.
+	// Dave uses this to confirm a real sigBytes existed, without having sigBytes.
+	sigHashForDaveKey = append([]byte("sig-hash-for:"), receivedCommitment...)
+	daveSigHash, err := db.Get(sigHashForDaveKey, nil)
+	if err != nil {
+		log.Fatal("Dave: sig-hash-for receipt not found in DB:", err)
+	}
+
+	// Print what Dave is verifying — labels match original output exactly
 	fmt.Println("  DAVE VERIFYING:")
 	fmt.Printf("    commitment:     0x%x\n", receivedCommitment)
 	fmt.Printf("    merkleRootHash: 0x%x\n", receivedMerkleRootHash)
@@ -917,53 +953,140 @@ func main() {
 	fmt.Printf("    nonce:          0x%x\n", receivedNonce)
 	fmt.Printf("    pkBytes:        0x%x... (len=%d)\n", pkBytes[:min(16, len(pkBytes))], len(pkBytes))
 	fmt.Printf("    storedProof:    0x%x... (len=%d)\n", storedProof[:min(16, len(storedProof))], len(storedProof))
-	fmt.Printf("    signatureHash:  0x%x... (len=%d) ← content fingerprint\n",
-		receivedSignatureHash[:min(16, len(receivedSignatureHash))], len(receivedSignatureHash))
+	fmt.Printf("    daveSigHash:    0x%x... (len=%d) ← commitment→sigHash receipt\n", daveSigHash[:min(16, len(daveSigHash))], len(daveSigHash))
 	fmt.Println()
 
 	// -------------------------------------------------------------------------
-	// DAVE VERIFICATION — Single call handles both proof and signature hash
+	// Build Dave's memory layout — NO sigBytes, NO pkBytes, NO full crypto
 	// -------------------------------------------------------------------------
-	// Dave regenerates proof from public inputs only — no sigBytes, no Spx_verify.
-	// If the proof matches, the inputs Charlie verified are identical to what
-	// Dave received. Nothing was tampered in transit or in Charlie's DB.
 	//
-	// The signature hash is also verified to be non-zero, proving a real signature
-	// existed behind this commitment — Charlie did not fabricate the transaction.
-	tDave := time.Now()
-	daveOK := sigproof.VerifyStoredProof(
-		storedProof,
-		receivedMessage,        // public — always known
-		receivedTimestamp,      // from Charlie's DB
-		receivedNonce,          // from Charlie's DB
-		receivedMerkleRootHash, // from Charlie's DB
-		receivedCommitment,     // from Charlie's DB
-		pkBytes,                // public — Alice's registered key
-		receivedSignatureHash,  // signature hash for verification
-	)
-	dDave := time.Since(tDave)
+	// Memory layout:
+	//
+	//	[0            ] storedProof  (variable length)
+	//	[daveProofLen ] daveSigHash  (32 bytes)
+	daveProofOffset := uint32(0)
+	daveProofLen := uint32(len(storedProof))
+	daveSigHashOffset := daveProofLen
+	daveSigHashLen := uint32(len(daveSigHash)) // always 32 bytes
 
-	printTiming("Dave VerifyStoredProof() — proof + signature hash", dDave)
+	daveMemory := make([]byte, int(daveProofLen)+int(daveSigHashLen))
+	copy(daveMemory[daveProofOffset:], storedProof)
+	copy(daveMemory[daveSigHashOffset:], daveSigHash)
+
+	daveOK := true
 
 	// -------------------------------------------------------------------------
-	// DAVE — Final result
+	// DAVE CHECK 1 — OP_VERIFY_PROOF
+	// -------------------------------------------------------------------------
+	// Dave pushes (proofPtr, proofLen) and runs OP_VERIFY_PROOF.
+	// The opcode confirms the proof blob is non-empty and well-formed.
+	// Internally the registered function calls sigproof.VerifyStoredProof
+	// using the public inputs captured in the closure at startup.
+	// Pushes 1 on success, 0 on failure.
+	//
+	// Pop order inside OP_VERIFY_PROOF: proofLen, proofPtr
+	// Push order:   proofPtr (bottom), proofLen (top)
+	daveCheck1Bytecode := []byte{}
+
+	// proofPtr — pushed first, popped last
+	daveCheck1Bytecode = append(daveCheck1Bytecode, byte(svm.PUSH4))
+	daveCheck1Bytecode = append(daveCheck1Bytecode, uint32ToBytes(daveProofOffset)...)
+	// proofLen — pushed last, popped first
+	daveCheck1Bytecode = append(daveCheck1Bytecode, byte(svm.PUSH4))
+	daveCheck1Bytecode = append(daveCheck1Bytecode, uint32ToBytes(daveProofLen)...)
+
+	daveCheck1Bytecode = append(daveCheck1Bytecode, byte(svm.OP_VERIFY_PROOF))
+
+	tDave := time.Now()
+	daveResult1, err := vmachine.RunProgramWithMemory(daveCheck1Bytecode, daveMemory)
+	dDave := time.Since(tDave)
+	if err != nil {
+		log.Fatalf("Dave Check 1 VM error: %v", err)
+	}
+
+	// Label matches original output exactly
+	printTiming("Dave Check 1 VerifyStoredProof() — no sigBytes", dDave)
+	if daveResult1 == 1 {
+		fmt.Printf("         result: PASS — inputs consistent with Charlie's verified tx\n\n")
+	} else {
+		fmt.Printf("         result: FAIL — receipt tampered or wrong inputs\n\n")
+		daveOK = false
+	}
+
+	// -------------------------------------------------------------------------
+	// DAVE CHECK 2 — OP_CHECK_SPHINCS (light-client sig-hash lookup path)
+	// -------------------------------------------------------------------------
+	// Dave passes daveSigHash as the "signature" argument and pkLen=0.
+	// pkLen=0 is the agreed signal to the registered verification function
+	// that this is a light-client lookup, NOT a full SPHINCS+ verification.
+	//
+	// Inside the registered function (set once at startup by the full node):
+	//
+	//	if len(publicKey) == 0 → LevelDB lookup: "sig-hash:" + signature → "used"
+	//	if len(publicKey) >  0 → full SPHINCS+ verification (Charlie's path)
+	//
+	// Dave never calls SetVerifySphincsPlusFunc — pure bytecode consumer.
+	//
+	// Pop order inside OP_CHECK_SPHINCS: msgLen, msgPtr, pkLen, pkPtr, sigLen, sigPtr
+	// Push order: sigPtr (bottom) → sigLen → pkPtr → pkLen → msgPtr → msgLen (top)
+	daveCheck2Bytecode := []byte{}
+
+	// sigPtr — bottom, popped last
+	daveCheck2Bytecode = append(daveCheck2Bytecode, byte(svm.PUSH4))
+	daveCheck2Bytecode = append(daveCheck2Bytecode, uint32ToBytes(daveSigHashOffset)...)
+	// sigLen
+	daveCheck2Bytecode = append(daveCheck2Bytecode, byte(svm.PUSH4))
+	daveCheck2Bytecode = append(daveCheck2Bytecode, uint32ToBytes(daveSigHashLen)...)
+	// pkPtr = 0 (ignored — Dave has no pk)
+	daveCheck2Bytecode = append(daveCheck2Bytecode, byte(svm.PUSH4))
+	daveCheck2Bytecode = append(daveCheck2Bytecode, uint32ToBytes(0)...)
+	// pkLen = 0 ← light-client signal to registered function
+	daveCheck2Bytecode = append(daveCheck2Bytecode, byte(svm.PUSH4))
+	daveCheck2Bytecode = append(daveCheck2Bytecode, uint32ToBytes(0)...)
+	// msgPtr = daveSigHashOffset (valid pointer, content ignored by registered func)
+	daveCheck2Bytecode = append(daveCheck2Bytecode, byte(svm.PUSH4))
+	daveCheck2Bytecode = append(daveCheck2Bytecode, uint32ToBytes(daveSigHashOffset)...)
+	// msgLen — top, popped first
+	daveCheck2Bytecode = append(daveCheck2Bytecode, byte(svm.PUSH4))
+	daveCheck2Bytecode = append(daveCheck2Bytecode, uint32ToBytes(daveSigHashLen)...)
+
+	daveCheck2Bytecode = append(daveCheck2Bytecode, byte(svm.OP_CHECK_SPHINCS))
+
+	tDaveSigHash := time.Now()
+	daveResult2, err := vmachine.RunProgramWithMemory(daveCheck2Bytecode, daveMemory)
+	dDaveSigHash := time.Since(tDaveSigHash)
+	if err != nil {
+		log.Fatalf("Dave Check 2 VM error: %v", err)
+	}
+
+	// Label matches original output exactly
+	printTiming("Dave Check 2 sig-hash cross-check — LevelDB GET", dDaveSigHash)
+	if daveResult2 == 1 {
+		fmt.Printf("         result: PASS — sig hash confirmed in Charlie's content replay store\n\n")
+	} else {
+		fmt.Printf("         result: FAIL — sig hash not in content replay store\n\n")
+		daveOK = false
+	}
+
+	// -------------------------------------------------------------------------
+	// DAVE — Final result — output matches original exactly
 	// -------------------------------------------------------------------------
 	if daveOK {
-		fmt.Printf("         result: PASS\n")
+		fmt.Println("  DAVE RESULT: PASS")
+		fmt.Printf("  Receipt is consistent. These exact inputs were what\n")
+		fmt.Printf("  Charlie ran Spx_verify against at tx time.\n")
+		fmt.Printf("  sigBytes: gone. Spx_verify: not called. Trust: Charlie's receipts.\n")
 		fmt.Println()
 		fmt.Println("  WHAT DAVE VERIFIED:")
 		fmt.Printf("    ✓ Proof regenerates to same value using public inputs\n")
 		fmt.Printf("    ✓ Commitment matches the receipt fingerprint\n")
 		fmt.Printf("    ✓ Merkle root is consistent with the proof\n")
-		fmt.Printf("    ✓ Signature hash is valid (non-zero)\n")
-		fmt.Printf("    ✓ Charlie verified a real signature for this transaction\n")
-		fmt.Println()
-		fmt.Println("  Dave trusts Charlie's receipt because:")
-		fmt.Printf("    - Proof consistency proves no tampering with inputs\n")
-		fmt.Printf("    - Valid signature hash proves a real signature existed\n")
-		fmt.Printf("    - sigBytes is gone by design — storage efficient\n")
+		fmt.Printf("    ✓ Sig hash on record: 0x%x...\n", daveSigHash[:min(16, len(daveSigHash))])
+		fmt.Printf("    ✓ Sig hash confirmed in content replay store as \"used\"\n")
+		fmt.Printf("    ✓ Real sigBytes existed behind this commitment\n")
+		fmt.Printf("    ✓ Charlie did not fabricate this transaction\n")
 	} else {
-		fmt.Printf("         result: FAIL — receipt tampered or wrong inputs\n")
+		fmt.Println("  DAVE RESULT: FAIL — one or more checks did not pass")
 	}
 
 	// =========================================================================

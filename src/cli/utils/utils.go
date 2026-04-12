@@ -24,54 +24,70 @@
 package utils
 
 import (
+	"encoding/hex"
+
 	"github.com/sphinxorg/protocol/src/consensus"
-	"github.com/sphinxorg/protocol/src/crypto/SPHINCSPLUS-golang/sphincs"
+	"github.com/sphinxorg/protocol/src/core"
 	logger "github.com/sphinxorg/protocol/src/log"
 )
 
-// Add this function to exchange public keys between nodes
-// Enhanced key exchange function
-func exchangePublicKeys(signingServices map[string]*consensus.SigningService, nodeIDs []string) {
-	logger.Info("=== EXCHANGING PUBLIC KEYS BETWEEN %d NODES ===", len(nodeIDs))
+// inspectConsensusTypes logs the consensus message types for debugging
+// This helps verify the correct types are being used in the consensus layer
+func inspectConsensusTypes() {
+	logger.Info("=== CONSENSUS TYPE INSPECTION ===")
+	// Create empty instances of each consensus message type
+	proposal := &consensus.Proposal{}
+	vote := &consensus.Vote{}
+	timeout := &consensus.TimeoutMsg{}
+	// Log their types for debugging
+	logger.Info("Proposal type: %T", proposal)
+	logger.Info("Vote type: %T", vote)
+	logger.Info("TimeoutMsg type: %T", timeout)
+	logger.Info("=== END TYPE INSPECTION ===")
+}
 
-	// First, collect all public keys
-	publicKeys := make(map[string]*sphincs.SPHINCS_PK)
-	for _, nodeID := range nodeIDs {
-		signingService := signingServices[nodeID]
-		if signingService == nil {
-			logger.Warn("No signing service for node %s", nodeID)
-			continue
-		}
-
-		publicKey := signingService.GetPublicKeyObject()
-		if publicKey == nil {
-			logger.Warn("No public key for node %s", nodeID)
-			continue
-		}
-
-		publicKeys[nodeID] = publicKey
-		logger.Info("Collected public key for node %s", nodeID)
+// PrintBlockchainData prints detailed blockchain data for a node
+// This provides comprehensive information about a node's blockchain state
+func PrintBlockchainData(bc *core.Blockchain, nodeID string) {
+	// Get latest block
+	latestBlock := bc.GetLatestBlock()
+	if latestBlock == nil {
+		logger.Info("Node %s: No blocks available", nodeID)
+		return
 	}
 
-	// Then register all public keys with all nodes
-	for _, nodeID := range nodeIDs {
-		signingService := signingServices[nodeID]
-		if signingService == nil {
-			continue
+	// Get chain parameters
+	chainParams := bc.GetChainParams()
+
+	// Extract block details using BlockHelper if available
+	if blockAdapter, ok := latestBlock.(*core.BlockHelper); ok {
+		underlyingBlock := blockAdapter.GetUnderlyingBlock()
+		// Get merkle roots for comparison
+		txsRoot := hex.EncodeToString(underlyingBlock.Header.TxsRoot)
+		calculatedMerkleRoot := hex.EncodeToString(underlyingBlock.CalculateTxsRoot())
+		rootsMatch := txsRoot == calculatedMerkleRoot
+
+		// Print comprehensive block information
+		logger.Info("=== NODE %s BLOCKCHAIN DATA ===", nodeID)
+		logger.Info("Block Height: %d", latestBlock.GetHeight())
+		logger.Info("Block Hash: %s", latestBlock.GetHash())
+		logger.Info("TxsRoot (from header): %s", txsRoot)
+		logger.Info("MerkleRoot (calculated): %s", calculatedMerkleRoot)
+		logger.Info("TxsRoot = MerkleRoot: %v", rootsMatch)
+		logger.Info("Magic Number: 0x%x", chainParams.MagicNumber)
+		logger.Info("Timestamp: %d", underlyingBlock.Header.Timestamp)
+		logger.Info("Difficulty: %s", underlyingBlock.Header.Difficulty.String())
+		logger.Info("Nonce: %s", underlyingBlock.Header.Nonce)
+		logger.Info("Gas Limit: %s", underlyingBlock.Header.GasLimit.String())
+		logger.Info("Gas Used: %s", underlyingBlock.Header.GasUsed.String())
+		logger.Info("Transaction Count: %d", len(underlyingBlock.Body.TxsList))
+		logger.Info("Chain ID: %d", chainParams.ChainID)
+		logger.Info("Chain Name: %s", chainParams.ChainName)
+		logger.Info("=================================")
+
+		// Warn if merkle roots don't match
+		if !rootsMatch {
+			logger.Warn("❌ WARNING: TxsRoot does not match MerkleRoot!")
 		}
-
-		registeredCount := 0
-		for otherNodeID, publicKey := range publicKeys {
-			if nodeID == otherNodeID {
-				continue // Don't register our own key
-			}
-
-			signingService.RegisterPublicKey(otherNodeID, publicKey)
-			registeredCount++
-		}
-
-		logger.Info("Node %s registered %d public keys", nodeID, registeredCount)
 	}
-
-	logger.Info("✅ Public key exchange completed: %d nodes exchanged keys", len(nodeIDs))
 }

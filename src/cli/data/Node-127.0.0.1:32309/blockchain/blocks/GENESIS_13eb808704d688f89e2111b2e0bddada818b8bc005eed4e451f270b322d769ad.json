@@ -1,11 +1,11 @@
 {
   "header": {
-    "hash": "GENESIS_70dad2710674b1af76360665fe352f4e984e74cb6e484d0501a24cd0cb3bffcb",
+    "hash": "GENESIS_13eb808704d688f89e2111b2e0bddada818b8bc005eed4e451f270b322d769ad",
     "txs_root": "059fef9dfae5d7565f2753703c8e6cc4228fbe75a928eedb555fc5444e0a0dd8",
     "state_root": "6bd593c675ee90f411c64f9f56ff743cae4219b1581efac28458b63ae550cf77",
     "parent_hash": "0000000000000000000000000000000000000000000000000000000000000000",
     "uncles_hash": "3916d45c66e84c612c8a4a403702ec44cc575fc2383dbe4e861dd29ef892bee3",
-    "extra_data": "Sphinx Network Genesis Block - Decentralized Future",
+    "extra_data": "The Times 20/Nov/2024 Sphinx Genesis. Privacy, sovereignty, human dignity. No surveillance.",
     "miner": "0000000000000000000000000000000000000000",
     "version": 1,
     "nblock": 0,

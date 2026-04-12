@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/sphinxorg/protocol/src/common"
+	sign "github.com/sphinxorg/protocol/src/core/sphincs/sign/backend"
 	types "github.com/sphinxorg/protocol/src/core/transaction"
 	logger "github.com/sphinxorg/protocol/src/log"
 )
@@ -51,24 +52,49 @@ func NewMempool(config *MempoolConfig) *Mempool {
 	}
 
 	mp := &Mempool{
-		broadcastPool:   make(map[string]*PooledTransaction),
-		pendingPool:     make(map[string]*PooledTransaction),
-		validationPool:  make(map[string]*PooledTransaction),
-		invalidPool:     make(map[string]*PooledTransaction),
-		allTransactions: make(map[string]*PooledTransaction),
-		config:          config,
-		currentBytes:    0,
-		broadcastChan:   make(chan *types.Transaction, 1000),
-		validationChan:  make(chan *PooledTransaction, 1000),
-		cleanupChan:     make(chan struct{}, 1),
-		stopChan:        make(chan struct{}),
-		running:         false,
+		broadcastPool:     make(map[string]*PooledTransaction),
+		pendingPool:       make(map[string]*PooledTransaction),
+		validationPool:    make(map[string]*PooledTransaction),
+		invalidPool:       make(map[string]*PooledTransaction),
+		allTransactions:   make(map[string]*PooledTransaction),
+		config:            config,
+		currentBytes:      0,
+		broadcastChan:     make(chan *types.Transaction, 1000),
+		validationChan:    make(chan *PooledTransaction, 1000),
+		cleanupChan:       make(chan struct{}, 1),
+		stopChan:          make(chan struct{}),
+		running:           false,
+		publicKeyRegistry: make(map[string][]byte),
+		sphincsManager:    nil, // Leave as nil for now
 	}
 
 	// Start background workers
 	mp.startWorkers()
 
 	return mp
+}
+
+// Add a setter method to set the sphincs manager later
+func (mp *Mempool) SetSphincsManager(manager *sign.SphincsManager) {
+	mp.lock.Lock()
+	defer mp.lock.Unlock()
+	mp.sphincsManager = manager
+}
+
+// AddPublicKeyToRegistry registers a public key for a sender address
+func (mp *Mempool) AddPublicKeyToRegistry(senderAddress string, publicKey []byte) {
+	mp.lock.Lock()
+	defer mp.lock.Unlock()
+	mp.publicKeyRegistry[senderAddress] = publicKey
+	logger.Debug("Registered public key for sender: %s", senderAddress)
+}
+
+// GetPublicKeyFromRegistry retrieves a public key for a sender address
+func (mp *Mempool) GetPublicKeyFromRegistry(senderAddress string) ([]byte, bool) {
+	mp.lock.RLock()
+	defer mp.lock.RUnlock()
+	pk, ok := mp.publicKeyRegistry[senderAddress]
+	return pk, ok
 }
 
 // Start background workers for processing

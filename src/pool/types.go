@@ -98,6 +98,9 @@ type Mempool struct {
 	// ADD THIS: SPHINCS+ manager for signature hash verification
 	sphincsManager *sign.SphincsManager
 
+	// ADD THIS FIELD:
+	publicKeyRegistry map[string][]byte // Maps sender address -> serialized SPHINCS+ public key
+
 	// Statistics
 	stats struct {
 		totalAdded     uint64

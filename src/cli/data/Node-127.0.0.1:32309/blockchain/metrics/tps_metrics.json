@@ -1,20 +1,20 @@
 {
-  "current_tps": 1.1944500080361657,
+  "current_tps": 1.3871675397529217,
   "average_tps": 1.4,
   "peak_tps": 1.4,
   "total_transactions": 14,
   "blocks_processed": 1,
-  "last_updated": "2026-04-12T00:05:43.461127+07:00",
+  "last_updated": "2026-04-13T03:24:48.217678+07:00",
   "current_window_count": 0,
-  "window_start_time": "2026-04-12T00:03:09.161712+07:00",
+  "window_start_time": "2026-04-13T03:22:03.454369+07:00",
   "window_duration_seconds": 5,
   "tps_history": [
     {
-      "timestamp": "2026-04-12T00:03:09.161712+07:00",
+      "timestamp": "2026-04-13T03:22:03.454369+07:00",
       "tps": 0.2
     },
     {
-      "timestamp": "2026-04-12T00:04:17.350238+07:00",
+      "timestamp": "2026-04-13T03:23:12.426961+07:00",
       "tps": 1.4,
       "block_height": 1
     }
@@ -22,9 +22,9 @@
   "transactions_per_block": [
     {
       "block_height": 1,
-      "block_hash": "0ab6a963c55faf6dd9753153646590785197512b610f9e0cfd08e3129018e675",
+      "block_hash": "47703a19986e79d88403175b35826b26ece84c2efec912c4b891122b10761dd9",
       "tx_count": 7,
-      "block_time": "2026-04-12T00:03:16+07:00",
+      "block_time": "2026-04-13T03:22:11+07:00",
       "block_size_bytes": 1872
     }
   ],

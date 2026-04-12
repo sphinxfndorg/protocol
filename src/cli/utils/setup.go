@@ -20,13 +20,14 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-// go/src/cli/utils/helper.go
+// go/src/cli/utils/setup.go
 package utils
 
 import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"math/big"
 	"net"
 	"os"
@@ -42,6 +43,7 @@ import (
 	sign "github.com/sphinxorg/protocol/src/core/sphincs/sign/backend"
 	database "github.com/sphinxorg/protocol/src/core/state"
 	types "github.com/sphinxorg/protocol/src/core/transaction"
+	"github.com/sphinxorg/protocol/src/crypto/SPHINCSPLUS-golang/sphincs"
 	security "github.com/sphinxorg/protocol/src/handshake"
 	logger "github.com/sphinxorg/protocol/src/log"
 	"github.com/sphinxorg/protocol/src/network"
@@ -55,236 +57,54 @@ import (
 	vmachine "github.com/sphinxorg/protocol/src/core/svm/vm"
 )
 
-// inspectConsensusTypes logs the consensus message types for debugging
-// This helps verify the correct types are being used in the consensus layer
-func inspectConsensusTypes() {
-	logger.Info("=== CONSENSUS TYPE INSPECTION ===")
-	// Create empty instances of each consensus message type
-	proposal := &consensus.Proposal{}
-	vote := &consensus.Vote{}
-	timeout := &consensus.TimeoutMsg{}
-	// Log their types for debugging
-	logger.Info("Proposal type: %T", proposal)
-	logger.Info("Vote type: %T", vote)
-	logger.Info("TimeoutMsg type: %T", timeout)
-	logger.Info("=== END TYPE INSPECTION ===")
-}
-
-// runDevnetDistributionLoop runs consensus blocks until all genesis allocations
-// have been distributed from the vault.  It replaces the simple 3-minute wait
-// and keeps proposing blocks until IsDistributionComplete() == true on all nodes.
-//
-// Returns the final block height once distribution is complete.
-// runDevnetDistributionLoop runs consensus blocks until all genesis allocations
-// have been distributed from the vault.
-func runDevnetDistributionLoop(
-	blockchains []*core.Blockchain,
-	consensusEngines []*consensus.Consensus,
-	validatorIDs []string,
-	numNodes int,
-) (uint64, error) {
-	const maxRounds = 500 // hard cap — each round proposes one block
-	checkEvery := 5       // check vault every N rounds
-
-	logger.Info("=== DEVNET DISTRIBUTION LOOP STARTED ===")
-	logger.Info("Target: drain vault %s of all genesis allocations", core.GenesisVaultAddress)
-
-	// Get the time converter from the first consensus engine to calculate epoch
-	// Note: All nodes should have the same time converter (same genesis time)
-	var timeConverter *consensus.TimeConverter
-	if len(consensusEngines) > 0 && consensusEngines[0] != nil {
-		// You'll need to add a GetTimeConverter() method to Consensus
-		// For now, we'll create a new one from genesis time
-		genesisTime := blockchains[0].GetGenesisTime()
-		timeConverter = consensus.NewTimeConverter(genesisTime)
-	}
-
-	for round := 0; round < maxRounds; round++ {
-		// ========== SUBMIT VDF OUTPUTS FIRST ==========
-		// Get current epoch from time converter
-		currentEpoch := uint64(0)
-		if timeConverter != nil {
-			currentEpoch = timeConverter.CurrentEpoch()
-		}
-
-		// Have all nodes submit VDF outputs for this epoch
-		for i := 0; i < numNodes; i++ {
-			submission, err := consensusEngines[i].GetRANDAO().EvalVDF(validatorIDs[i], currentEpoch, 0)
-			if err != nil {
-				logger.Warn("%s VDF eval failed: %v", validatorIDs[i], err)
-				continue
-			}
-
-			// Submit to all nodes to ensure everyone gets the VDF output
-			for j := 0; j < numNodes; j++ {
-				if err := consensusEngines[j].GetRANDAO().Submit(0, submission); err != nil {
-					logger.Warn("%s failed to submit VDF to %s: %v", validatorIDs[i], validatorIDs[j], err)
-				}
-			}
-			logger.Debug("%s submitted VDF output for epoch %d", validatorIDs[i], currentEpoch)
-		}
-
-		// Give time for VDF outputs to propagate and mix to update
-		time.Sleep(100 * time.Millisecond)
-		// ============================================
-
-		// Check if all nodes have completed distribution.
-		if round%checkEvery == 0 {
-			allDone := true
-			for i := 0; i < numNodes; i++ {
-				if !blockchains[i].IsDistributionComplete() {
-					allDone = false
-					break
-				}
-			}
-			if allDone {
-				tip := blockchains[0].GetLatestBlock()
-				tipHeight := uint64(0)
-				if tip != nil {
-					tipHeight = tip.GetHeight()
-				}
-				logger.Info("✅ DEVNET DISTRIBUTION COMPLETE at block height %d (round %d)",
-					tipHeight, round)
-				return tipHeight, nil
-			}
-
-			// Log progress.
-			for i := 0; i < numNodes; i++ {
-				tip := blockchains[i].GetLatestBlock()
-				h := uint64(0)
-				if tip != nil {
-					h = tip.GetHeight()
-				}
-				logger.Info("  %s: height=%d, distribution_complete=%v",
-					validatorIDs[i], h, blockchains[i].IsDistributionComplete())
-			}
-		}
-
-		// Elect leader and propose the next block.
-		for i := 0; i < numNodes; i++ {
-			consensusEngines[i].UpdateLeaderStatus()
-		}
-		time.Sleep(50 * time.Millisecond)
-
-		leaderIdx := -1
-		for i := 0; i < numNodes; i++ {
-			if consensusEngines[i].IsLeader() {
-				leaderIdx = i
-				break
-			}
-		}
-		if leaderIdx == -1 {
-			logger.Warn("distribution round %d: no leader elected, retrying", round)
-			time.Sleep(200 * time.Millisecond)
-			continue
-		}
-
-		pendingTxs := blockchains[leaderIdx].GetMempool().GetPendingTransactions()
-		if len(pendingTxs) == 0 {
-			// No pending transactions means either distribution is done or
-			// the next batch hasn't been added yet.
-			logger.Debug("distribution round %d: leader mempool empty", round)
-			time.Sleep(100 * time.Millisecond)
-			continue
-		}
-
-		newBlock, err := blockchains[leaderIdx].CreateBlock()
-		if err != nil {
-			logger.Warn("distribution round %d: CreateBlock failed: %v", round, err)
-			continue
-		}
-
-		// ========== CALL VM FOR BLOCK EXECUTION ==========
-		// For each transaction in the block, execute VM state transitions
-		if newBlock != nil && len(newBlock.Body.TxsList) > 0 {
-			logger.Info("VM: Executing %d transactions in block", len(newBlock.Body.TxsList))
-			for txIdx := range newBlock.Body.TxsList {
-				// Simple VM for balance transfer verification
-				balanceVM := vmachine.NewVM([]byte{
-					byte(svm.PUSH1), 0x01, // Push 1 (success)
-				})
-				if err := balanceVM.Run(); err != nil {
-					logger.Warn("VM: Block transaction %d execution failed: %v", txIdx, err)
-				} else {
-					logger.Debug("VM: Executed transaction %d in block", txIdx)
-				}
-			}
-			logger.Info("VM: Block execution complete")
-		}
-		// =================================================
-
-		consensusBlock := core.NewBlockHelper(newBlock)
-		if err := consensusEngines[leaderIdx].ProposeBlock(consensusBlock); err != nil {
-			logger.Warn("distribution round %d: ProposeBlock failed: %v", round, err)
-			continue
-		}
-
-		// Wait for commit to propagate.
-		time.Sleep(500 * time.Millisecond)
-	}
-
-	return 0, fmt.Errorf("distribution did not complete within %d rounds", maxRounds)
-}
-
 // CallConsensus runs the full PBFT integration test using natural stake-weighted
 // RANDAO leader election instead of manually forcing a leader.
-// This function sets up a multi-node network, initializes all components,
-// creates transactions, runs leader election, and validates consensus.
 func CallConsensus(numNodes int) error {
-	// Validate minimum node requirement for PBFT (needs at least 3 nodes for fault tolerance)
 	if numNodes < 3 {
 		return fmt.Errorf("PBFT requires at least 3 validator nodes, got %d", numNodes)
 	}
 
-	// State variables for tracking test progress
-	var firstBlock consensus.Block // Stores the first block for validation
-	var firstGenesisHash string    // Stores the genesis hash for comparison
+	var firstBlock consensus.Block
+	var firstGenesisHash string
 
 	// ========== BLOCKCHAIN IDENTIFICATION AND CONFIGURATION ==========
 	logger.Info("=== SPHINX BLOCKCHAIN IDENTIFICATION ===")
 
-	// Retrieve and display mainnet chain parameters from commit package
 	chainParams := commit.SphinxChainParams()
-	logger.Info("Chain: %s", chainParams.ChainName)                                             // Display chain name (Mainnet/Testnet/Devnet)
-	logger.Info("Chain ID: %d", chainParams.ChainID)                                            // Display unique chain identifier
-	logger.Info("Symbol: %s", chainParams.Symbol)                                               // Display token symbol (SPX)
-	logger.Info("Protocol Version: %s", chainParams.Version)                                    // Display protocol version
-	logger.Info("Genesis Time: %s", time.Unix(chainParams.GenesisTime, 0).Format(time.RFC1123)) // Genesis timestamp
-	logger.Info("Genesis Hash: %s", chainParams.GenesisHash)                                    // Genesis block hash
-	logger.Info("Magic Number: 0x%x", chainParams.MagicNumber)                                  // Network magic number for message validation
-	logger.Info("Default Port: %d", chainParams.DefaultPort)                                    // Default P2P port
-	logger.Info("BIP44 Coin Type: %d", chainParams.BIP44CoinType)                               // BIP44 coin type for wallet derivation
-	logger.Info("Ledger Name: %s", chainParams.LedgerName)                                      // Ledger hardware wallet app name
+	logger.Info("Chain: %s", chainParams.ChainName)
+	logger.Info("Chain ID: %d", chainParams.ChainID)
+	logger.Info("Symbol: %s", chainParams.Symbol)
+	logger.Info("Protocol Version: %s", chainParams.Version)
+	logger.Info("Genesis Time: %s", time.Unix(chainParams.GenesisTime, 0).Format(time.RFC1123))
+	logger.Info("Genesis Hash: %s", chainParams.GenesisHash)
+	logger.Info("Magic Number: 0x%x", chainParams.MagicNumber)
+	logger.Info("Default Port: %d", chainParams.DefaultPort)
+	logger.Info("BIP44 Coin Type: %d", chainParams.BIP44CoinType)
+	logger.Info("Ledger Name: %s", chainParams.LedgerName)
 
-	// Display SPX token economics and denominations from params package
 	tokenInfo := params.GetSPXTokenInfo()
-	logger.Info("Token Name: %s", tokenInfo.Name)                                          // Token name (Sphinx)
-	logger.Info("Token Symbol: %s", tokenInfo.Symbol)                                      // Token symbol (SPX)
-	logger.Info("Decimals: %d", tokenInfo.Decimals)                                        // Number of decimal places (18)
-	logger.Info("Total Supply: %.2f %s", float64(tokenInfo.TotalSupply), tokenInfo.Symbol) // Total token supply
-	logger.Info("Base Unit: nSPX (1e0)")                                                   // Nano SPX (smallest unit)
-	logger.Info("Intermediate Unit: gSPX (1e9)")                                           // Giga SPX (intermediate unit)
-	logger.Info("Main Unit: SPX (1e18)")                                                   // Main SPX unit
+	logger.Info("Token Name: %s", tokenInfo.Name)
+	logger.Info("Token Symbol: %s", tokenInfo.Symbol)
+	logger.Info("Decimals: %d", tokenInfo.Decimals)
+	logger.Info("Total Supply: %.2f %s", float64(tokenInfo.TotalSupply), tokenInfo.Symbol)
+	logger.Info("Base Unit: nSPX (1e0)")
+	logger.Info("Intermediate Unit: gSPX (1e9)")
+	logger.Info("Main Unit: SPX (1e18)")
 
-	// Generate and display standard wallet derivation paths based on BIP44 coin type
 	walletPaths := map[string]string{
-		"BIP44":  fmt.Sprintf("m/44'/%d'/0'/0/0", chainParams.BIP44CoinType), // Legacy path
-		"BIP49":  fmt.Sprintf("m/49'/%d'/0'/0/0", chainParams.BIP44CoinType), // SegWit path
-		"BIP84":  fmt.Sprintf("m/84'/%d'/0'/0/0", chainParams.BIP44CoinType), // Native SegWit path
-		"Ledger": fmt.Sprintf("m/44'/%d'/0'", chainParams.BIP44CoinType),     // Ledger hardware wallet path
+		"BIP44":  fmt.Sprintf("m/44'/%d'/0'/0/0", chainParams.BIP44CoinType),
+		"BIP49":  fmt.Sprintf("m/49'/%d'/0'/0/0", chainParams.BIP44CoinType),
+		"BIP84":  fmt.Sprintf("m/84'/%d'/0'/0/0", chainParams.BIP44CoinType),
+		"Ledger": fmt.Sprintf("m/44'/%d'/0'", chainParams.BIP44CoinType),
 	}
 	logger.Info("Wallet Derivation Paths:")
 	for name, path := range walletPaths {
 		logger.Info("  %s: %s", name, path)
 	}
 
-	// Determine network configuration based on chain name
-	// In helper.go — change the default networkType so every node boots as devnet.
-	// Swap this out for "testnet" or "mainnet" when you promote the chain.
-	networkType := "devnet" // hardcoded — change to "testnet" or "mainnet" to promote
+	networkType := "devnet"
 	networkDisplayName := "Sphinx Devnet"
 
-	// Using a switch statement for cleaner network identification
 	switch chainParams.ChainName {
 	case "Sphinx Testnet":
 		networkDisplayName = "Sphinx Testnet"
@@ -298,12 +118,11 @@ func CallConsensus(numNodes int) error {
 	}
 
 	logger.Info("Network: %s", networkDisplayName)
-	logger.Info("Consensus: PBFT") // Practical Byzantine Fault Tolerance
+	logger.Info("Consensus: PBFT")
 	logger.Info("========================================")
 
 	// ========== TEST ENVIRONMENT SETUP ==========
-	testDataDir := common.DataDir // Get base data directory path
-	// Check if test data directory exists and clean it for a fresh test
+	testDataDir := common.DataDir
 	if _, err := os.Stat(testDataDir); err == nil {
 		logger.Info("Cleaning up previous test data...")
 		if err := os.RemoveAll(testDataDir); err != nil {
@@ -312,54 +131,60 @@ func CallConsensus(numNodes int) error {
 		logger.Info("Previous test data cleaned successfully")
 	}
 
-	// Ensure the base data directory exists with proper permissions
 	if err := os.MkdirAll(testDataDir, 0755); err != nil {
 		return fmt.Errorf("failed to create data directory: %v", err)
 	}
 
-	// Debug consensus message types by logging their structures
 	inspectConsensusTypes()
 
+	// ========== CREATE SHARED SPHINCS PARAMETERS (ONCE) ==========
+	// ALL nodes and the global verifier MUST use the exact same KeyManager
+	// and SPHINCSParameters instance. Creating separate instances via
+	// NewKeyManager() can produce different internal parameters, causing
+	// DeserializePublicKey to fail with "Public key is of incorrect length"
+	// because the serialised key bytes don't match the deserialiser's params.
+	sharedKeyManager, err := key.NewKeyManager()
+	if err != nil {
+		return fmt.Errorf("failed to create shared key manager: %v", err)
+	}
+	sharedSphincsParams, err := config.NewSPHINCSParameters()
+	if err != nil {
+		return fmt.Errorf("failed to create shared SPHINCS parameters: %v", err)
+	}
+	logger.Info("✅ Shared SPHINCS parameters created (all nodes will use the same instance)")
+
 	// ========== NODE INFRASTRUCTURE INITIALIZATION ==========
-	var wg sync.WaitGroup                                 // WaitGroup for goroutine synchronization
-	_, cancel := context.WithCancel(context.Background()) // Context for graceful shutdown
-	defer cancel()                                        // Ensure cancel is called on function exit
+	var wg sync.WaitGroup
+	_, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	// Initialize slices to hold node components for all nodes
-	dbs := make([]*leveldb.DB, numNodes)                       // LevelDB instances for each node
-	stateDBs := make([]*leveldb.DB, numNodes)                  // State LevelDB instances for each node
-	sphincsMgrs := make([]*sign.SphincsManager, numNodes)      // SPHINCS+ crypto managers
-	blockchains := make([]*core.Blockchain, numNodes)          // Blockchain instances
-	consensusEngines := make([]*consensus.Consensus, numNodes) // Consensus engines
-	networkNodes := make([]*network.Node, numNodes)            // Network node instances
+	dbs := make([]*leveldb.DB, numNodes)
+	stateDBs := make([]*leveldb.DB, numNodes)
+	sphincsMgrs := make([]*sign.SphincsManager, numNodes)
+	blockchains := make([]*core.Blockchain, numNodes)
+	consensusEngines := make([]*consensus.Consensus, numNodes)
+	networkNodes := make([]*network.Node, numNodes)
 
-	// Generate network addresses and validator IDs FIRST
-	// This ensures consistent addressing across all nodes
-	networkAddresses := make([]string, numNodes) // P2P addresses (IP:port)
-	validatorIDs := make([]string, numNodes)     // Unique validator identifiers
+	networkAddresses := make([]string, numNodes)
+	validatorIDs := make([]string, numNodes)
 	for i := 0; i < numNodes; i++ {
-		// Create incrementing ports starting from base port 32307
 		address := fmt.Sprintf("127.0.0.1:%d", 32307+i)
 		networkAddresses[i] = address
-		validatorIDs[i] = fmt.Sprintf("Node-%s", address) // Node-ID format
+		validatorIDs[i] = fmt.Sprintf("Node-%s", address)
 	}
 
-	// Create a map of signing services for key exchange between nodes
 	signingServices := make(map[string]*consensus.SigningService)
 
-	// Initialize each validator node in the network
 	for i := 0; i < numNodes; i++ {
-		address := networkAddresses[i] // Get node's network address
-		nodeID := validatorIDs[i]      // Get node's validator ID
+		address := networkAddresses[i]
+		nodeID := validatorIDs[i]
 
-		// Create node data directory structure (blockchain, keys, etc.)
 		if err := common.EnsureNodeDirs(address); err != nil {
 			return fmt.Errorf("failed to create node directories for %s: %v", address, err)
 		}
 		logger.Info("Created directories for node: %s", nodeID)
 
-		// ========== CREATE MAIN BLOCKCHAIN DATABASE ==========
-		// Initialize LevelDB storage for blockchain data (blocks, transactions, indices)
+		// ========== MAIN BLOCKCHAIN DATABASE ==========
 		mainDBPath := common.GetLevelDBPath(address)
 		logger.Info("Creating main blockchain DB for %s at: %s", nodeID, mainDBPath)
 
@@ -367,16 +192,14 @@ func CallConsensus(numNodes int) error {
 		if err != nil {
 			return fmt.Errorf("failed to open main LevelDB for node %s: %v", nodeID, err)
 		}
-		dbs[i] = db // Store database reference for cleanup
+		dbs[i] = db
 
-		// Convert LevelDB to database.DB interface for compatibility
 		mainDatabase, err := database.NewLevelDB(mainDBPath)
 		if err != nil {
 			return fmt.Errorf("failed to create main database for node %s: %v", nodeID, err)
 		}
 
-		// ========== CREATE STATE DATABASE ==========
-		// Create separate state database for consensus state (validators, view numbers, final states)
+		// ========== STATE DATABASE ==========
 		stateDBPath := common.GetStateDBPath(address)
 		logger.Info("Creating state DB for %s at: %s", nodeID, stateDBPath)
 
@@ -384,130 +207,91 @@ func CallConsensus(numNodes int) error {
 		if err != nil {
 			return fmt.Errorf("failed to open state DB for node %s: %v", nodeID, err)
 		}
-		stateDBs[i] = stateLevelDB // Store state DB reference for cleanup
+		stateDBs[i] = stateLevelDB
 
-		// Convert to database.DB interface for state machine
 		stateDatabase, err := database.NewLevelDB(stateDBPath)
 		if err != nil {
 			return fmt.Errorf("failed to create state database for node %s: %v", nodeID, err)
 		}
 
-		// Create actual network node with P2P capabilities
 		networkNode := network.NewNode(
-			address,                    // Full address (IP:port)
-			"127.0.0.1",                // Local IP
-			fmt.Sprintf("%d", 32307+i), // P2P port
-			fmt.Sprintf("%d", 32308+i), // RPC port (offset by 1)
-			true,                       // Is validator node
-			network.RoleValidator,      // Node role
-			mainDatabase,               // Database instance (use mainDatabase, not nodeDB)
+			address,
+			"127.0.0.1",
+			fmt.Sprintf("%d", 32307+i),
+			fmt.Sprintf("%d", 32308+i),
+			true,
+			network.RoleValidator,
+			mainDatabase,
 		)
 
 		if networkNode == nil {
 			return fmt.Errorf("failed to create network node %s", nodeID)
 		}
 
-		networkNodes[i] = networkNode // Store network node
+		networkNodes[i] = networkNode
 		logger.Info("Created network node %s with keys stored in config directory", nodeID)
 
-		// Initialize SPHINCS+ cryptographic components for post-quantum security
-		km, err := key.NewKeyManager() // Create key manager
-		if err != nil {
-			return err
-		}
-		sphincsParams, err := config.NewSPHINCSParameters() // Get SPHINCS+ parameters
-		if err != nil {
-			return err
-		}
-		// Create SPHINCS+ manager for signing and verification
-		sphincsMgrs[i] = sign.NewSphincsManager(db, km, sphincsParams)
+		// Use shared key manager and params — NOT new instances per node.
+		sphincsMgrs[i] = sign.NewSphincsManager(db, sharedKeyManager, sharedSphincsParams)
 
 		// ========== NODE MANAGER AND PEER CONNECTIONS ==========
-		var dhtInstance network.DHT = nil // Distributed Hash Table (disabled for test)
+		var dhtInstance network.DHT = nil
+		nodeMgr := network.NewNodeManager(16, dhtInstance, mainDatabase)
 
-		// Initialize node manager for peer management
-		nodeMgr := network.NewNodeManager(16, dhtInstance, mainDatabase) // Max 16 peers
-
-		// Create and add local node to the manager
 		if err := nodeMgr.CreateLocalNode(
-			address,                    // Local node address
-			"127.0.0.1",                // Local IP
-			fmt.Sprintf("%d", 32307+i), // P2P port
-			fmt.Sprintf("%d", 32308+i), // RPC port
-			network.RoleValidator,      // Node role
+			address,
+			"127.0.0.1",
+			fmt.Sprintf("%d", 32307+i),
+			fmt.Sprintf("%d", 32308+i),
+			network.RoleValidator,
 		); err != nil {
 			return fmt.Errorf("failed to create local node for node manager: %v", err)
 		}
 
-		// Add all other validator nodes as peers to this node
 		for j := range validatorIDs {
-			if i != j { // Skip self
+			if i != j {
 				remoteAddress := networkAddresses[j]
-				// Create remote node representation
 				remoteNode := network.NewNode(
 					remoteAddress,
 					"127.0.0.1",
 					fmt.Sprintf("%d", 32307+j),
 					fmt.Sprintf("%d", 32308+j),
-					false, // Not local
+					false,
 					network.RoleValidator,
-					nil, // No DB for remote nodes
+					nil,
 				)
 				if remoteNode != nil {
-					nodeMgr.AddNode(remoteNode) // Add to peer list
+					nodeMgr.AddNode(remoteNode)
 				}
 			}
 		}
 
 		logger.Info("%s peer connections established", nodeID)
 
-		// Create blockchain instance
 		bc, err := core.NewBlockchain(address, nodeID, validatorIDs, networkType)
 		if err != nil {
 			return fmt.Errorf("failed to create blockchain for node %s: %v", nodeID, err)
 		}
 
-		// Share both DB handles with the blockchain's storage layer
-		// SetStorageDB shares the main database (blocks, transactions, indices)
 		bc.SetStorageDB(mainDatabase)
-
-		// SetStateDB shares the state database (consensus state, validators, final states)
 		bc.SetStateDB(stateDatabase)
 
-		// Execute genesis block now that the DB handles are live.
-		// This fires mintBlockReward for block 0, crediting the vault with
-		// the full 1,000,000,000 SPX that block 1 will distribute.
 		if err := bc.ExecuteGenesisBlock(); err != nil {
 			logger.Warn("ExecuteGenesisBlock failed for %s: %v", nodeID, err)
 		} else {
 			logger.Info("✅ Genesis vault funded for %s", nodeID)
 		}
 
-		// ========== REGISTER VDF GENESIS HASH PROVIDER (FIRST NODE ONLY) ==========
-		// InitVDFFromGenesis must be called exactly once, before any NewConsensus call.
-		// It is placed here because:
-		//   1. bc is fully initialized and the genesis block is stored on disk
-		//   2. ExecuteGenesisBlock() has already run so block 0 exists
-		//   3. All nodes share the same genesis hash, so registering from node 0 is sufficient
-		//   4. NewConsensus() is called below this block — the provider must be ready first
-		//
-		// The provider walks back to height 0 the same way getExpectedVDFParams does,
-		// handling both fresh chains (latest block IS genesis) and chains that have
-		// already advanced past height 0 (traverses parent hashes to reach height 0).
 		if i == 0 {
-			bcRef := bc // capture bc in closure — bc will be overwritten by the loop
+			bcRef := bc
 			consensus.InitVDFFromGenesis(func() (string, error) {
-				// Get the latest block — on first boot this is the genesis block itself
 				latest := bcRef.GetLatestBlock()
 				if latest == nil {
 					return "", fmt.Errorf("no blocks in storage — genesis not yet applied")
 				}
-				// If we are already at height 0, return immediately
 				if latest.GetHeight() == 0 {
 					return latest.GetHash(), nil
 				}
-				// Otherwise walk backwards through parent hashes until height 0
-				// This handles nodes that restart after having produced blocks
 				current := latest.GetHash()
 				for {
 					block := bcRef.GetBlockByHash(current)
@@ -515,16 +299,14 @@ func CallConsensus(numNodes int) error {
 						return "", fmt.Errorf("chain traversal broken at hash %s", current)
 					}
 					if block.GetHeight() == 0 {
-						return block.GetHash(), nil // Found genesis
+						return block.GetHash(), nil
 					}
-					current = block.GetPrevHash() // Move to parent
+					current = block.GetPrevHash()
 				}
 			})
 			logger.Info("✅ VDF genesis hash provider registered from node 0")
 		}
-		// =========================================================================f
 
-		// Capture genesis block from first node for validation against other nodes
 		if i == 0 {
 			firstBlock = bc.GetLatestBlock()
 			if firstBlock != nil {
@@ -537,7 +319,6 @@ func CallConsensus(numNodes int) error {
 			}
 		}
 
-		// Display node chain configuration for verification
 		chainInfo := bc.GetChainInfo()
 		logger.Info("%s Chain Configuration:", nodeID)
 		logger.Info("  Chain: %s", chainInfo["chain_name"])
@@ -548,76 +329,51 @@ func CallConsensus(numNodes int) error {
 		logger.Info("  BIP44 Coin Type: %d", chainInfo["bip44_coin_type"])
 		logger.Info("  Ledger Name: %s", chainInfo["ledger_name"])
 
-		// Validate storage layer integrity
 		logger.Info("%s: Validating storage layer...", nodeID)
 		if debugErr := bc.DebugStorage(); debugErr != nil {
 			logger.Warn("%s storage validation warning: %v", nodeID, debugErr)
 		}
-		blockchains[i] = bc // Store blockchain instance
+		blockchains[i] = bc
 
 		// ========== CONSENSUS CONFIGURATION ==========
-		// Create test node manager for consensus (simplified for testing)
 		testNodeMgr := network.NewCallNodeManager()
-
-		// Add all validator nodes as peers to the test manager
 		for _, id := range validatorIDs {
 			testNodeMgr.AddPeer(id)
 		}
 
-		// Initialize SPHINCS+ signing service for cryptographic operations
-		keyManager, err := key.NewKeyManager() // Create key manager
-		if err != nil {
-			return fmt.Errorf("failed to create key manager for node %s: %v", nodeID, err)
-		}
+		// Use shared key manager and params for the signing service.
+		// This is the critical fix: every SigningService must use the same
+		// sharedKeyManager so that SerializePK() and DeserializePublicKey()
+		// operate on identical parameter sets.
+		sphincsManager := sign.NewSphincsManager(db, sharedKeyManager, sharedSphincsParams)
+		signingService := consensus.NewSigningService(sphincsManager, sharedKeyManager, nodeID)
 
-		// Get SPHINCS parameters for signature scheme
-		sphincsParams, err = config.NewSPHINCSParameters()
-		if err != nil {
-			return fmt.Errorf("failed to get SPHINCS parameters for node %s: %v", nodeID, err)
-		}
-
-		// Initialize SPHINCS manager for signing operations
-		sphincsManager := sign.NewSphincsManager(db, keyManager, sphincsParams)
-
-		// Create signing service that wraps SPHINCS+ functionality
-		signingService := consensus.NewSigningService(sphincsManager, keyManager, nodeID)
-
-		// ========== REGISTER SELF PUBLIC KEY IMMEDIATELY ==========
-		// Register self public key so the node can verify its own signatures
+		// Register self public key so the node can verify its own signatures.
 		if selfPK := signingService.GetPublicKeyObject(); selfPK != nil {
 			signingService.RegisterPublicKey(nodeID, selfPK)
 			logger.Info("✅ Registered self public key for %s", nodeID)
 		}
-		// =========================================================
 
-		// Store the signing service for key exchange later
 		signingServices[nodeID] = signingService
 
-		// Get the minimum stake from core chain parameters
 		coreChainParams := core.GetSphinxChainParams()
 		minStakeAmount := coreChainParams.ConsensusConfig.MinStakeAmount
 
-		// Log minimum stake for verification
 		minSPX := new(big.Int).Div(minStakeAmount, big.NewInt(1e18))
 		logger.Info("📊 Min stake from params: %d SPX (%v nSPX)", minSPX.Uint64(), minStakeAmount)
 
-		// Pass to consensus - create new consensus engine instance
 		cons := consensus.NewConsensus(
 			nodeID,
 			testNodeMgr,
 			bc,
 			signingService,
-			nil, // onCommit is nil — blockChain.CommitBlock already commits
+			nil,
 			minStakeAmount,
 		)
 
-		// Initialize stake - now using validator set methods
-		validatorSet := cons.GetValidatorSet() // Get validator set from consensus
+		validatorSet := cons.GetValidatorSet()
 		if validatorSet != nil {
-			// Get the minimum stake from the validator set itself
 			stakeSPX := validatorSet.GetMinStakeSPX()
-
-			// Add this node as a validator with minimum stake
 			err := validatorSet.AddValidator(nodeID, stakeSPX)
 			if err != nil {
 				logger.Warn("Failed to add validator %s with stake %d SPX: %v", nodeID, stakeSPX, err)
@@ -626,41 +382,30 @@ func CallConsensus(numNodes int) error {
 			}
 		}
 
-		consensusEngines[i] = cons  // Store consensus engine
-		bc.SetConsensusEngine(cons) // Link blockchain to consensus
-		bc.SetConsensus(cons)       // Set consensus reference
+		consensusEngines[i] = cons
+		bc.SetConsensusEngine(cons)
+		bc.SetConsensus(cons)
 
-		// Register consensus with network layer for message handling
 		network.RegisterConsensus(nodeID, cons)
-
-		// Set a long timeout to prevent automatic view changes during test
 		cons.SetTimeout(1 * time.Hour)
-
-		// DO NOT START CONSENSUS YET - wait for key exchange first
-		// cons.Start() will be called after all keys are exchanged
 	}
 
-	// ========== CROSS-REGISTER ALL VALIDATORS IN EVERY NODE'S VALIDATOR SET ==========
-	// This ensures every node recognizes all other nodes as validators
+	// ========== CROSS-REGISTER ALL VALIDATORS ==========
 	logger.Info("=== REGISTERING ALL VALIDATORS ACROSS ALL NODES ===")
 
-	// Get chain parameters for stake configuration
 	coreChainParams := core.GetSphinxChainParams()
 	minStakeAmount := coreChainParams.ConsensusConfig.MinStakeAmount
-	// Convert to SPX units for display
 	minSPX := new(big.Int).Div(minStakeAmount, big.NewInt(1e18)).Uint64()
 
-	// For each node, add all other nodes to its validator set
 	for i := 0; i < numNodes; i++ {
-		vs := consensusEngines[i].GetValidatorSet() // Get validator set
+		vs := consensusEngines[i].GetValidatorSet()
 		if vs == nil {
 			logger.Warn("Node %s has nil validator set", validatorIDs[i])
 			continue
 		}
-		// Add each other node as validator
 		for j := 0; j < numNodes; j++ {
 			if i == j {
-				continue // Skip self (already added)
+				continue
 			}
 			if err := vs.AddValidator(validatorIDs[j], minSPX); err != nil {
 				logger.Warn("Failed to register %s in %s validator set: %v",
@@ -675,21 +420,62 @@ func CallConsensus(numNodes int) error {
 	logger.Info("=== VALIDATOR CROSS-REGISTRATION COMPLETE ===")
 
 	// ========== REGISTER VM SPHINCS+ VERIFICATION FUNCTION ==========
-	// This must be done BEFORE starting consensus engines
-	svm.SetVerifySphincsPlusFunc(func(signature, publicKey, message []byte) bool {
-		logger.Debug("VM: OP_CHECK_SPHINCS called - sig=%d, pk=%d, msg=%d",
-			len(signature), len(publicKey), len(message))
-		return true
-	})
-	logger.Info("✅ VM SPHINCS+ verification function registered")
-	// ================================================================
+	// Use the SAME sharedKeyManager that was used to create all signing services.
+	// This ensures DeserializePublicKey uses identical SPHINCS+ parameters as
+	// SerializePK, preventing the "Public key is of incorrect length" error.
+	// Do NOT create a new key.NewKeyManager() here — that is what caused the bug.
+	if sharedKeyManager == nil {
+		log.Fatal("sharedKeyManager is nil — cannot register SPHINCS verifier")
+	}
+
+	svm.SetSphincsVerifier(
+		func(b []byte) (interface{}, error) {
+			return sharedKeyManager.DeserializePublicKey(b)
+		},
+		func(b []byte) (interface{}, error) {
+			return sphincs.DeserializeSignature(sharedKeyManager.GetSPHINCSParameters().Params, b)
+		},
+		func(msg []byte, sig interface{}, pk interface{}) bool {
+			return sphincs.Spx_verify(
+				sharedKeyManager.GetSPHINCSParameters().Params,
+				msg,
+				sig.(*sphincs.SPHINCS_SIG),
+				pk.(*sphincs.SPHINCS_PK),
+			)
+		},
+	)
+	logger.Info("✅ VM SPHINCS+ verifier registered using sharedKeyManager")
 
 	// ========== KEY EXCHANGE (BEFORE STARTING CONSENSUS) ==========
-	// Exchange public keys between nodes for signature verification
-	// This MUST happen BEFORE starting consensus engines to ensure
-	// all nodes have each other's public keys when proposals are received.
 	logger.Info("=== EXCHANGING PUBLIC KEYS BETWEEN NODES (BEFORE CONSENSUS START) ===")
 	exchangePublicKeys(signingServices, validatorIDs)
+
+	// ========== VERIFY KEY SERIALIZATION ROUND-TRIP ==========
+	// Confirm every node's public key can be serialised and deserialised with
+	// the shared parameters before consensus starts. A failure here means the
+	// key exchange produced bad bytes and proposal verification will fail.
+	logger.Info("=== VERIFYING KEY SERIALIZATION ROUND-TRIP ===")
+	roundTripOK := true
+	for _, id := range validatorIDs {
+		ss := signingServices[id]
+		pkBytes, err := ss.GetPublicKey()
+		if err != nil {
+			logger.Error("❌ Cannot get PK bytes for %s: %v", id, err)
+			roundTripOK = false
+			continue
+		}
+		_, err = sharedKeyManager.DeserializePublicKey(pkBytes)
+		if err != nil {
+			logger.Error("❌ PK round-trip FAILED for %s (%d bytes): %v", id, len(pkBytes), err)
+			roundTripOK = false
+		} else {
+			logger.Info("✅ PK round-trip OK for %s (%d bytes)", id, len(pkBytes))
+		}
+	}
+	if !roundTripOK {
+		return fmt.Errorf("public key round-trip verification failed — all nodes must use the same SPHINCS parameters")
+	}
+	logger.Info("✅ All public keys serialise/deserialise correctly with sharedKeyManager")
 
 	// ========== START CONSENSUS ENGINES (AFTER KEY EXCHANGE) ==========
 	logger.Info("=== STARTING CONSENSUS ENGINES (AFTER KEY EXCHANGE) ===")
@@ -700,14 +486,14 @@ func CallConsensus(numNodes int) error {
 		logger.Info("Started consensus for %s", validatorIDs[i])
 	}
 
+	time.Sleep(100 * time.Millisecond)
+
 	// ========== GENESIS BLOCK CONSISTENCY VALIDATION ==========
-	// Verify that all nodes have the same genesis block
 	logger.Info("=== VALIDATING GENESIS BLOCK CONSISTENCY ===")
 
-	expectedGenesisHash := core.GetGenesisHash() // Get expected genesis hash
+	expectedGenesisHash := core.GetGenesisHash()
 	logger.Info("Expected genesis hash for all nodes: %s", expectedGenesisHash)
 
-	// Check each node's genesis block
 	for i := 0; i < numNodes; i++ {
 		genesis := blockchains[i].GetLatestBlock()
 		if genesis == nil || genesis.GetHeight() != 0 {
@@ -717,12 +503,10 @@ func CallConsensus(numNodes int) error {
 		actualHash := genesis.GetHash()
 		logger.Info("%s genesis: height=%d, hash=%s", validatorIDs[i], genesis.GetHeight(), actualHash)
 
-		// Handle potential "GENESIS_" prefix in hash strings
 		if actualHash != expectedGenesisHash {
 			normalizedActual := actualHash
 			normalizedExpected := expectedGenesisHash
 
-			// Strip "GENESIS_" prefix if present
 			if strings.HasPrefix(actualHash, "GENESIS_") && len(actualHash) > 8 {
 				normalizedActual = actualHash[8:]
 			}
@@ -730,7 +514,6 @@ func CallConsensus(numNodes int) error {
 				normalizedExpected = expectedGenesisHash[8:]
 			}
 
-			// Compare normalized hashes
 			if normalizedActual != normalizedExpected {
 				return fmt.Errorf("genesis block hash mismatch: %s=%s (normalized: %s) expected=%s (normalized: %s)",
 					validatorIDs[i], actualHash, normalizedActual, expectedGenesisHash, normalizedExpected)
@@ -739,39 +522,18 @@ func CallConsensus(numNodes int) error {
 	}
 	logger.Info("✅ All nodes have consistent genesis blocks: %s", expectedGenesisHash)
 
-	// ========== KEY EXCHANGE (BEFORE STARTING CONSENSUS) ==========
-	// Exchange public keys between nodes for signature verification
-	// This MUST happen BEFORE starting consensus engines to ensure
-	// all nodes have each other's public keys when proposals are received.
-	logger.Info("=== EXCHANGING PUBLIC KEYS BETWEEN NODES (BEFORE CONSENSUS START) ===")
-	exchangePublicKeys(signingServices, validatorIDs)
-
-	// ========== START CONSENSUS ENGINES (AFTER KEY EXCHANGE) ==========
-	logger.Info("=== STARTING CONSENSUS ENGINES (AFTER KEY EXCHANGE) ===")
-	for i := 0; i < numNodes; i++ {
-		if err := consensusEngines[i].Start(); err != nil {
-			return fmt.Errorf("failed to start consensus for node %s: %v", validatorIDs[i], err)
-		}
-		logger.Info("Started consensus for %s", validatorIDs[i])
-	}
-
-	// Allow consensus engines to fully initialize
-	time.Sleep(100 * time.Millisecond)
-
-	// Verify key directories were created properly
+	// ========== VERIFY KEY DIRECTORY CREATION ==========
 	logger.Info("=== VERIFYING KEY DIRECTORY CREATION ===")
 	for i := 0; i < numNodes; i++ {
 		address := networkAddresses[i]
 		nodeID := validatorIDs[i]
-		keysDir := common.GetKeysDataDir(address) // Get keys directory path
+		keysDir := common.GetKeysDataDir(address)
 
-		// Check if keys directory exists
 		if _, err := os.Stat(keysDir); os.IsNotExist(err) {
 			logger.Warn("Keys directory not created for node %s: %s", nodeID, keysDir)
 		} else {
 			logger.Info("Keys directory exists for node %s: %s", nodeID, keysDir)
 
-			// Check private and public key files
 			privateKeyPath := common.GetPrivateKeyPath(address)
 			publicKeyPath := common.GetPublicKeyPath(address)
 
@@ -790,56 +552,45 @@ func CallConsensus(numNodes int) error {
 	}
 
 	// ========== JSON-RPC SERVER INITIALIZATION ==========
-	// Set up RPC servers for each node to handle API requests
 	for i := 0; i < numNodes; i++ {
 		address := networkAddresses[i]
 		nodeID := validatorIDs[i]
 
 		logger.Info("Setting up RPC server for node with address: %s", address)
 
-		// Create message channel for RPC communication
 		msgCh := make(chan *security.Message, 100)
-		// Create new RPC server for this node
 		rpcSrv := rpc.NewServer(msgCh, blockchains[i])
 
-		// Start goroutine to handle RPC messages
 		go func(ch chan *security.Message, srv *rpc.Server, nodeIdx int, nodeAddr string) {
-			// Process incoming messages
 			for secMsg := range ch {
-				// Only process RPC type messages
 				if secMsg.Type != "rpc" {
 					continue
 				}
 
-				// Extract data from message
 				data, ok := secMsg.Data.([]byte)
 				if !ok {
 					logger.Warn("%s: Invalid RPC data type: %T", validatorIDs[nodeIdx], secMsg.Data)
 					continue
 				}
 
-				// Unmarshal RPC message
 				var rpcMsg rpc.Message
 				if err := rpcMsg.Unmarshal(data); err != nil {
 					logger.Warn("%s: Failed to unmarshal RPC message: %v", validatorIDs[nodeIdx], err)
 					continue
 				}
 
-				// Handle the RPC request
 				resp, err := srv.HandleRequest(data)
 				if err != nil {
 					logger.Warn("%s: RPC request handling error: %v", validatorIDs[nodeIdx], err)
 					continue
 				}
 
-				// Send response back to client
 				addr := rpcMsg.From.Address.String()
 				conn, err := net.Dial("udp", addr)
 				if err != nil {
 					logger.Warn("%s: Failed to connect to %s: %v", validatorIDs[nodeIdx], addr, err)
 					continue
 				}
-				// Encode and send secure response
 				secResp := &security.Message{Type: "rpc", Data: resp}
 				enc, _ := secResp.Encode()
 				conn.Write(enc)
@@ -847,16 +598,13 @@ func CallConsensus(numNodes int) error {
 			}
 		}(msgCh, rpcSrv, i, address)
 
-		// Log RPC endpoint (HTTP port starts at 8545)
 		httpPort := 8545 + i
 		logger.Info("%s JSON-RPC server listening on http://127.0.0.1:%d", nodeID, httpPort)
 	}
 
-	// Allow nodes to synchronize genesis state
 	logger.Info("Synchronizing genesis blocks across nodes...")
 	time.Sleep(3 * time.Second)
 
-	// Verify all nodes have properly initialized genesis
 	for i := 0; i < numNodes; i++ {
 		genesis := blockchains[i].GetLatestBlock()
 		if genesis == nil || genesis.GetHeight() != 0 {
@@ -868,156 +616,120 @@ func CallConsensus(numNodes int) error {
 	// ========== TRANSACTION CREATION AND PROPAGATION ==========
 	logger.Info("=== CREATING AND DISTRIBUTING MULTIPLE TRANSACTIONS VIA NOTES ===")
 
-	// Load the canonical genesis allocation list
 	allocs := core.DefaultGenesisAllocations()
 	if len(allocs) == 0 {
 		return fmt.Errorf("DefaultGenesisAllocations is empty")
 	}
 
-	// Build one Note per allocation
+	// Create notes and transactions
 	notes := make([]*types.Note, len(allocs))
-	// In CallConsensus, when building notes:
+	transactions := make([]*types.Transaction, len(allocs))
+	senderNonces := make(map[string]uint64)
+
 	for i, alloc := range allocs {
+		// Create a note for this allocation
 		notes[i] = &types.Note{
 			From:       core.GenesisVaultAddress,
 			To:         alloc.Address,
 			Fee:        0,
 			AmountNSPX: new(big.Int).Set(alloc.BalanceNSPX),
 			Storage:    fmt.Sprintf("genesis-dist-%d-%s", i, alloc.Label),
-			ReturnData: []byte(fmt.Sprintf("Genesis distribution to %s", alloc.Address)), // ADD THIS
+			ReturnData: []byte(fmt.Sprintf("Genesis distribution to %s", alloc.Address)),
 		}
+
+		// Convert note to transaction
+		nonce := senderNonces[notes[i].From]
+		// In helper.go when creating genesis distribution transactions
+		tx := notes[i].ToTxs(nonce, big.NewInt(0), big.NewInt(0)) // Zero gas limit and price
+
+		// Genesis vault transactions are TRUSTED - they don't need SPHINCS+ signatures
+		// Set empty signature and hash - mempool validation will skip them
+		if notes[i].From == core.GenesisVaultAddress {
+			tx.Signature = []byte{}             // Empty signature
+			tx.SignatureHash = make([]byte, 32) // Zero hash (all zeros)
+			tx.PublicKey = []byte{}             // Empty public key
+			logger.Debug("Created trusted genesis vault transaction from %s to %s", tx.Sender, tx.Receiver)
+		} else {
+			// For regular users, we would sign the transaction here
+			// This path is for future user transactions
+			logger.Debug("Created regular transaction from %s to %s", tx.Sender, tx.Receiver)
+		}
+
+		transactions[i] = tx
+		senderNonces[notes[i].From]++
 	}
 
-	// Convert each Note into a Transaction (unsigned - genesis vault transactions are trusted)
-	transactions := make([]*types.Transaction, len(notes))
-	senderNonces := make(map[string]uint64)
-	for i, note := range notes {
-		nonce := senderNonces[note.From]
-		transactions[i] = note.ToTxs(nonce, big.NewInt(0), big.NewInt(0))
-		senderNonces[note.From]++
+	// Log transaction details
+	logger.Info("=== TRANSACTION DETAILS ===")
+	for i, tx := range transactions {
+		logger.Info("TX%d: %s → %s (Amount: %s nSPX, Gas: %s, ID: %s, HasSig: %v)",
+			i+1, tx.Sender, tx.Receiver, tx.Amount.String(), tx.GasLimit.String(),
+			tx.ID, len(tx.Signature) > 0)
 	}
+	logger.Info("Total transactions created: %d", len(transactions))
 
-	// Replicate the full transaction set into every node's mempool
+	// Add transactions to each node's mempool
 	for i := 0; i < numNodes; i++ {
 		nodeID := validatorIDs[i]
 		nodeSuccessCount := 0
 
+		logger.Info("Adding transactions to node %s...", nodeID)
+
 		for _, tx := range transactions {
-			// Deep copy the transaction
+			// Create a copy of the transaction
 			txCopy := &types.Transaction{
-				ID:        tx.ID,
-				Sender:    tx.Sender,
-				Receiver:  tx.Receiver,
-				Amount:    new(big.Int).Set(tx.Amount),
-				GasLimit:  new(big.Int).Set(tx.GasLimit),
-				GasPrice:  new(big.Int).Set(tx.GasPrice),
-				Nonce:     tx.Nonce,
-				Timestamp: tx.Timestamp,
-				Signature: make([]byte, len(tx.Signature)),
+				ID:            tx.ID,
+				Sender:        tx.Sender,
+				Receiver:      tx.Receiver,
+				Amount:        new(big.Int).Set(tx.Amount),
+				GasLimit:      new(big.Int).Set(tx.GasLimit),
+				GasPrice:      new(big.Int).Set(tx.GasPrice),
+				Nonce:         tx.Nonce,
+				Timestamp:     tx.Timestamp,
+				Signature:     make([]byte, len(tx.Signature)),
+				SignatureHash: make([]byte, len(tx.SignatureHash)),
+				PublicKey:     make([]byte, len(tx.PublicKey)),
+				ReturnData:    tx.ReturnData,
 			}
 			copy(txCopy.Signature, tx.Signature)
+			copy(txCopy.SignatureHash, tx.SignatureHash)
+			copy(txCopy.PublicKey, tx.PublicKey)
 
-			// ========== VM VALIDATION FOR NON-GENESIS TRANSACTIONS ==========
-			// Skip VM validation for genesis vault transactions (they are trusted protocol transactions)
-			// For normal user transactions, the VM would validate signatures here
-			if txCopy.Sender != core.GenesisVaultAddress {
-				// Create VM bytecode to verify transaction signature
-				sigLen := len(txCopy.Signature)
-				senderLen := len(txCopy.Sender)
-				msgLen := len(txCopy.ID)
-
-				fullMsg := make([]byte, 0, 8+16+msgLen)
-				timestamp := make([]byte, 8)
-				nonce := make([]byte, 16)
-				fullMsg = append(fullMsg, timestamp...)
-				fullMsg = append(fullMsg, nonce...)
-				fullMsg = append(fullMsg, []byte(txCopy.ID)...)
-
-				vmBytecode := []byte{
-					byte(svm.PUSH4), byte(sigLen >> 24), byte(sigLen >> 16), byte(sigLen >> 8), byte(sigLen),
-					byte(svm.PUSH4), 0x00, 0x00, 0x00, 0x00,
-					byte(svm.PUSH4), byte(senderLen >> 24), byte(senderLen >> 16), byte(senderLen >> 8), byte(senderLen),
-					byte(svm.PUSH4), byte(sigLen >> 24), byte(sigLen >> 16), byte(sigLen >> 8), byte(sigLen),
-					byte(svm.PUSH4), byte(len(fullMsg) >> 24), byte(len(fullMsg) >> 16), byte(len(fullMsg) >> 8), byte(len(fullMsg)),
-					byte(svm.PUSH4), byte((sigLen + senderLen) >> 24), byte((sigLen + senderLen) >> 16), byte((sigLen + senderLen) >> 8), byte(sigLen + senderLen),
-					byte(svm.OP_CHECK_SPHINCS),
-				}
-
-				memoryLayout := make([]byte, sigLen+senderLen+len(fullMsg))
-				copy(memoryLayout[0:], txCopy.Signature)
-				copy(memoryLayout[sigLen:], []byte(txCopy.Sender))
-				copy(memoryLayout[sigLen+senderLen:], fullMsg)
-
-				vm := vmachine.NewVM(vmBytecode)
-				if err := vm.SetMemoryBytes(0, memoryLayout); err != nil {
-					logger.Warn("%s VM memory setup failed: %v", nodeID, err)
-					continue
-				}
-				if err := vm.Run(); err != nil {
-					logger.Warn("%s transaction VM validation failed: %v", nodeID, err)
-					continue
-				}
-				result, err := vm.GetResult()
-				if err != nil {
-					logger.Warn("%s VM result error: %v", nodeID, err)
-					continue
-				}
-				if result != 1 {
-					logger.Warn("%s transaction signature invalid", nodeID)
-					continue
-				}
-				logger.Debug("%s transaction VM validation passed", nodeID)
-			} else {
-				logger.Debug("%s: Skipping VM validation for genesis vault transaction (trusted)", nodeID)
-			}
-			// =====================================================
-
+			// Add to blockchain's mempool
 			if err := blockchains[i].AddTransaction(txCopy); err != nil {
 				logger.Warn("%s failed to add transaction %s: %v", nodeID, tx.ID, err)
 			} else {
 				nodeSuccessCount++
+				logger.Debug("%s added transaction %s to mempool", nodeID, tx.ID)
 			}
 		}
+
 		logger.Info("%s added %d/%d transactions to mempool", nodeID, nodeSuccessCount, len(transactions))
 	}
-	// Log transaction details for verification
-	logger.Info("=== TRANSACTION DETAILS ===")
-	for i, tx := range transactions {
-		logger.Info("TX%d: %s → %s (Amount: %s, Gas: %s, ID: %s)",
-			i+1, tx.Sender, tx.Receiver, tx.Amount.String(), tx.GasLimit.String(), tx.ID)
-	}
-	logger.Info("Total transactions created: %d", len(transactions))
 
-	// Give a short time for transactions to propagate through the network
 	logger.Info("Waiting briefly for transactions to propagate...")
 	time.Sleep(2 * time.Second)
 
+	// Verify mempool contents
+	for i := 0; i < numNodes; i++ {
+		nodeID := validatorIDs[i]
+		pendingTxs := blockchains[i].GetMempool().GetPendingTransactions()
+		logger.Info("%s mempool has %d pending transactions", nodeID, len(pendingTxs))
+	}
+
 	// ========== NATURAL STAKE-WEIGHTED RANDAO LEADER ELECTION ==========
-	// Each consensus engine runs its own stake-weighted RANDAO selection.
-	// The terminal will reveal which node is elected and why.
 	logger.Info("=== INITIATING NATURAL LEADER ELECTION (STAKE-WEIGHTED RANDAO) ===")
 	logger.Info("Running stake-weighted RANDAO proposer selection on all %d nodes...", numNodes)
 
 	for i := 0; i < numNodes; i++ {
-		// UpdateLeaderStatus triggers the internal updateLeaderStatus() which:
-		//   1. Gets the current slot from TimeConverter
-		//   2. Derives the RANDAO seed for that slot
-		//   3. Runs StakeWeightedSelector.SelectProposer(epoch, seed)
-		//   4. Sets c.isLeader = (selected.ID == c.nodeID)
-		// The result is logged as either:
-		//   "✅ Node X selected as proposer for slot Y with stake Z SPX"
-		//   "Node X NOT selected for slot Y (selected: Y with Z SPX)"
 		consensusEngines[i].UpdateLeaderStatus()
 	}
 
-	// Brief pause so all goroutines flush their log lines before we read IsLeader()
 	time.Sleep(200 * time.Millisecond)
 
-	// ========== REVEAL ELECTION RESULT ==========
 	logger.Info("=== LEADER ELECTION RESULT ===")
 
 	electedLeaderIndex := -1
-	// Determine which node was elected leader
 	for i := 0; i < numNodes; i++ {
 		if consensusEngines[i].IsLeader() {
 			logger.Info("🏆 ELECTED LEADER : %s (stake-weighted RANDAO)", validatorIDs[i])
@@ -1027,11 +739,7 @@ func CallConsensus(numNodes int) error {
 		}
 	}
 
-	// Safety fallback: if RANDAO produced no leader (e.g. all stakes equal and
-	// slot boundary lands between nodes), fall back to deterministic round-robin
-	// for view 0 so the test can complete.
 	if electedLeaderIndex == -1 {
-		// Log each node's elected leader for diagnosis
 		for i := 0; i < numNodes; i++ {
 			logger.Error("Node %s electedLeaderID=%s, isLeader=%v",
 				validatorIDs[i],
@@ -1041,12 +749,10 @@ func CallConsensus(numNodes int) error {
 		return fmt.Errorf("RANDAO elected no leader — all nodes must agree on a single winner; check genesis time alignment")
 	}
 
-	// Get references to the elected leader's components
-	leaderNode := blockchains[electedLeaderIndex]           // Leader's blockchain
-	leaderConsensus := consensusEngines[electedLeaderIndex] // Leader's consensus engine
-	leaderID := validatorIDs[electedLeaderIndex]            // Leader's ID
+	leaderNode := blockchains[electedLeaderIndex]
+	leaderConsensus := consensusEngines[electedLeaderIndex]
+	leaderID := validatorIDs[electedLeaderIndex]
 
-	// Confirm the elected leader's mempool is ready with transactions
 	pendingTxs := leaderNode.GetMempool().GetPendingTransactions()
 	txCount := len(pendingTxs)
 	logger.Info("Leader %s has %d pending transactions in mempool.", leaderID, txCount)
@@ -1058,45 +764,28 @@ func CallConsensus(numNodes int) error {
 	// ========== LEADER CREATES AND PROPOSES BLOCK ==========
 	logger.Info("=== LEADER CREATING BLOCK ===")
 
-	// Create a new block from pending transactions
 	newBlock, err := leaderNode.CreateBlock()
 	if err != nil {
 		return fmt.Errorf("failed to create block: %v", err)
 	}
 
-	// ========== CALL VM FOR BLOCK EXECUTION ==========
-	// For each transaction in the block, execute VM state transitions
 	if newBlock != nil && len(newBlock.Body.TxsList) > 0 {
 		logger.Info("VM: Executing %d transactions in proposed block", len(newBlock.Body.TxsList))
 		for txIdx := range newBlock.Body.TxsList {
-			// Simple VM for balance transfer verification
-			balanceVM := vmachine.NewVM([]byte{
-				byte(svm.PUSH1), 0x01, // Push 1 (success)
-			})
-			if err := balanceVM.Run(); err != nil {
-				logger.Warn("VM: Block transaction %d execution failed: %v", txIdx, err)
-			} else {
-				logger.Debug("VM: Executed transaction %d in block", txIdx)
-			}
+			logger.Debug("VM: Transaction %d committed to block", txIdx)
 		}
 		logger.Info("VM: Block execution complete")
 	}
-	// =================================================
 
 	logger.Info("✅ Leader %s created block: height=%d, hash=%s, transactions=%d",
 		leaderID, newBlock.GetHeight(), newBlock.GetHash(), len(newBlock.Body.TxsList))
 
-	// Wrap in consensus.Block adapter for consensus layer compatibility
 	consensusBlock := core.NewBlockHelper(newBlock)
 
-	// Propose the block to all peers
 	logger.Info("Leader %s proposing block %s...", leaderID, consensusBlock.GetHash())
 
-	// ========== CALL VM FOR CONSENSUS VERIFICATION ==========
-	// The PBFT consensus engine already validates blocks. This VM call is for demonstration.
-	// We push a success value (1) to show VM integration.
 	consensusVM := vmachine.NewVM([]byte{
-		byte(svm.PUSH1), 0x01, // Push 1 (success)
+		byte(svm.PUSH1), 0x01,
 	})
 
 	if err := consensusVM.Run(); err != nil {
@@ -1113,7 +802,6 @@ func CallConsensus(numNodes int) error {
 		return fmt.Errorf("block failed consensus")
 	}
 	logger.Info("VM: Consensus verification passed for block height %d", newBlock.GetHeight())
-	// =====================================================
 
 	if err := leaderConsensus.ProposeBlock(consensusBlock); err != nil {
 		logger.Error("❌ Leader %s failed to propose block: %v", leaderID, err)
@@ -1125,7 +813,6 @@ func CallConsensus(numNodes int) error {
 	logger.Info("Waiting for consensus to complete...")
 	time.Sleep(2 * time.Second)
 
-	// Enhanced consensus diagnostics
 	logger.Info("=== ENHANCED CONSENSUS STATE DIAGNOSTICS ===")
 	for i := 0; i < numNodes; i++ {
 		leaderStatus := "follower"
@@ -1139,14 +826,9 @@ func CallConsensus(numNodes int) error {
 	logger.Info("====================================")
 
 	// ========== PHASE-AWARE CONSENSUS COMPLETION ==========
-	// consensusOK is declared here so both branches can set it.
 	consensusOK := false
 
 	if networkType == "devnet" {
-		// Devnet must run until every genesis allocation has left the vault.
-		// runDevnetDistributionLoop keeps proposing blocks until
-		// IsDistributionComplete() == true on all nodes, then writes the
-		// chain_checkpoint.json that testnet/mainnet will validate on boot.
 		finalHeight, err := runDevnetDistributionLoop(
 			blockchains, consensusEngines, validatorIDs, numNodes,
 		)
@@ -1164,7 +846,6 @@ func CallConsensus(numNodes int) error {
 		consensusOK = true
 
 	} else {
-		// Testnet / mainnet: verify we are continuing from a completed devnet.
 		cp, cpErr := core.LoadChainCheckpoint(common.GetBlockchainDataDir(networkAddresses[0]))
 		if cpErr != nil {
 			logger.Warn("No devnet checkpoint found (%v) — starting from genesis", cpErr)
@@ -1176,7 +857,6 @@ func CallConsensus(numNodes int) error {
 				cp.TipHeight, cp.TipHash)
 		}
 
-		// Normal fixed-timeout wait for testnet/mainnet block 1+.
 		const timeout = 3 * time.Minute
 		start := time.Now()
 		logger.Info("Waiting for block commitment (timeout: %v)...", timeout)
@@ -1247,7 +927,6 @@ func CallConsensus(numNodes int) error {
 	}
 
 	// ========== BLOCKCHAIN STATE CONSISTENCY VALIDATION ==========
-	// Verify all nodes have the same latest block hash
 	firstBlock = blockchains[0].GetLatestBlock()
 	if firstBlock == nil {
 		return fmt.Errorf("%s has no committed block", validatorIDs[0])
@@ -1483,6 +1162,9 @@ func CallConsensus(numNodes int) error {
 		_ = blockchains[i].Close()
 	}
 
+	_ = sphincsMgrs
+	_ = networkNodes
+
 	logger.Info("=== PBFT INTEGRATION TEST COMPLETED ===")
 	logger.Info("Test artifacts:")
 	logger.Info("  - data/Node-127.0.0.1:32307/blockchain/state/chain_state.json")
@@ -1494,50 +1176,4 @@ func CallConsensus(numNodes int) error {
 	}
 
 	return nil
-}
-
-// PrintBlockchainData prints detailed blockchain data for a node
-// This provides comprehensive information about a node's blockchain state
-func PrintBlockchainData(bc *core.Blockchain, nodeID string) {
-	// Get latest block
-	latestBlock := bc.GetLatestBlock()
-	if latestBlock == nil {
-		logger.Info("Node %s: No blocks available", nodeID)
-		return
-	}
-
-	// Get chain parameters
-	chainParams := bc.GetChainParams()
-
-	// Extract block details using BlockHelper if available
-	if blockAdapter, ok := latestBlock.(*core.BlockHelper); ok {
-		underlyingBlock := blockAdapter.GetUnderlyingBlock()
-		// Get merkle roots for comparison
-		txsRoot := hex.EncodeToString(underlyingBlock.Header.TxsRoot)
-		calculatedMerkleRoot := hex.EncodeToString(underlyingBlock.CalculateTxsRoot())
-		rootsMatch := txsRoot == calculatedMerkleRoot
-
-		// Print comprehensive block information
-		logger.Info("=== NODE %s BLOCKCHAIN DATA ===", nodeID)
-		logger.Info("Block Height: %d", latestBlock.GetHeight())
-		logger.Info("Block Hash: %s", latestBlock.GetHash())
-		logger.Info("TxsRoot (from header): %s", txsRoot)
-		logger.Info("MerkleRoot (calculated): %s", calculatedMerkleRoot)
-		logger.Info("TxsRoot = MerkleRoot: %v", rootsMatch)
-		logger.Info("Magic Number: 0x%x", chainParams.MagicNumber)
-		logger.Info("Timestamp: %d", underlyingBlock.Header.Timestamp)
-		logger.Info("Difficulty: %s", underlyingBlock.Header.Difficulty.String())
-		logger.Info("Nonce: %s", underlyingBlock.Header.Nonce)
-		logger.Info("Gas Limit: %s", underlyingBlock.Header.GasLimit.String())
-		logger.Info("Gas Used: %s", underlyingBlock.Header.GasUsed.String())
-		logger.Info("Transaction Count: %d", len(underlyingBlock.Body.TxsList))
-		logger.Info("Chain ID: %d", chainParams.ChainID)
-		logger.Info("Chain Name: %s", chainParams.ChainName)
-		logger.Info("=================================")
-
-		// Warn if merkle roots don't match
-		if !rootsMatch {
-			logger.Warn("❌ WARNING: TxsRoot does not match MerkleRoot!")
-		}
-	}
 }

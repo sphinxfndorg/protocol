@@ -57,7 +57,7 @@ func DefaultGenesisState() *GenesisState {
 		ChainName:         "Sphinx Mainnet",
 		Symbol:            "SPX",
 		Timestamp:         1732070400, // Nov 20 2024 00:00:00 UTC — MUST match genesisBlockDefinition
-		ExtraData:         []byte("Sphinx Network Genesis Block - Decentralized Future"),
+		ExtraData:         []byte("The Times 20/Nov/2024 Sphinx Genesis. Privacy, sovereignty, human dignity. No surveillance."),
 		InitialDifficulty: big.NewInt(17179869184),
 		InitialGasLimit:   big.NewInt(5000),
 		Nonce:             common.FormatNonce(1), // "0000000000000001"
@@ -94,7 +94,7 @@ func GenesisStateFromChainParams(p *SphinxChainParameters) *GenesisState {
 		canonicalDifficulty = int64(17179869184)
 		canonicalGasLimit   = int64(5000)
 	)
-	canonicalExtraData := []byte("Sphinx Network Genesis Block - Decentralized Future")
+	canonicalExtraData := []byte("The Times 20/Nov/2024 Sphinx Genesis. Privacy, sovereignty, human dignity. No surveillance.")
 	canonicalNonce := common.FormatNonce(1)
 
 	// Apply test overrides if GenesisConfig is provided

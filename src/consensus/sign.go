@@ -155,7 +155,16 @@ func (s *SigningService) SignMessage(data []byte) ([]byte, error) {
 	return signedMsg.Serialize()
 }
 
-// verifyWithVM uses SVM to verify SPHINCS+ signature - THIS IS THE ONLY VERIFICATION METHOD
+func uint32ToBytes(n uint32) []byte {
+	return []byte{
+		byte(n >> 24),
+		byte(n >> 16),
+		byte(n >> 8),
+		byte(n),
+	}
+}
+
+// verifyWithVM uses SVM to verify SPHINCS+ signature
 func (s *SigningService) verifyWithVM(signature, signatureHash, publicKey, message []byte) bool {
 	// First, verify the signature hash matches the signature
 	computedHash := s.sphincsManager.ComputeSignatureHash(signature)
@@ -170,10 +179,18 @@ func (s *SigningService) verifyWithVM(signature, signatureHash, publicKey, messa
 		}
 	}
 
-	// Then verify the signature itself via VM
+	// Validate public key length
+	expectedPKLen := 32
+	if len(publicKey) != expectedPKLen {
+		logger.Warn("Invalid public key length: expected %d, got %d", expectedPKLen, len(publicKey))
+		return false
+	}
+
 	sigLen := len(signature)
 	pkLen := len(publicKey)
 	msgLen := len(message)
+
+	logger.Debug("VM verification: sigLen=%d, pkLen=%d, msgLen=%d", sigLen, pkLen, msgLen)
 
 	// Calculate memory pointers
 	sigPtr := uint32(0)
@@ -181,33 +198,37 @@ func (s *SigningService) verifyWithVM(signature, signatureHash, publicKey, messa
 	msgPtr := uint32(sigLen + pkLen)
 
 	// Build VM bytecode for OP_CHECK_SPHINCS
-	// Stack layout after pushes (top to bottom):
-	//   msg_len, msg_ptr, pk_len, pk_ptr, sig_len, sig_ptr
+	// IMPORTANT: Push in REVERSE order so that when OP_CHECK_SPHINCS pops,
+	// it gets: sig_ptr, sig_len, pk_ptr, pk_len, msg_ptr, msg_len
+	// But OP_CHECK_SPHINCS actually expects: msg_len, msg_ptr, pk_len, pk_ptr, sig_len, sig_ptr
+	// So we need to push in this order (bottom to top):
+	//   sig_ptr, sig_len, pk_ptr, pk_len, msg_ptr, msg_len
+
 	vmBytecode := []byte{}
 
-	// Push message length (will be popped first)
+	// Push signature pointer (will be popped first)
 	vmBytecode = append(vmBytecode, byte(svm.PUSH4))
-	vmBytecode = append(vmBytecode, byte(msgLen>>24), byte(msgLen>>16), byte(msgLen>>8), byte(msgLen))
-
-	// Push message pointer
-	vmBytecode = append(vmBytecode, byte(svm.PUSH4))
-	vmBytecode = append(vmBytecode, byte(msgPtr>>24), byte(msgPtr>>16), byte(msgPtr>>8), byte(msgPtr))
-
-	// Push public key length
-	vmBytecode = append(vmBytecode, byte(svm.PUSH4))
-	vmBytecode = append(vmBytecode, byte(pkLen>>24), byte(pkLen>>16), byte(pkLen>>8), byte(pkLen))
-
-	// Push public key pointer
-	vmBytecode = append(vmBytecode, byte(svm.PUSH4))
-	vmBytecode = append(vmBytecode, byte(pkPtr>>24), byte(pkPtr>>16), byte(pkPtr>>8), byte(pkPtr))
+	vmBytecode = append(vmBytecode, uint32ToBytes(sigPtr)...)
 
 	// Push signature length
 	vmBytecode = append(vmBytecode, byte(svm.PUSH4))
-	vmBytecode = append(vmBytecode, byte(sigLen>>24), byte(sigLen>>16), byte(sigLen>>8), byte(sigLen))
+	vmBytecode = append(vmBytecode, uint32ToBytes(uint32(sigLen))...)
 
-	// Push signature pointer
+	// Push public key pointer
 	vmBytecode = append(vmBytecode, byte(svm.PUSH4))
-	vmBytecode = append(vmBytecode, byte(sigPtr>>24), byte(sigPtr>>16), byte(sigPtr>>8), byte(sigPtr))
+	vmBytecode = append(vmBytecode, uint32ToBytes(pkPtr)...)
+
+	// Push public key length
+	vmBytecode = append(vmBytecode, byte(svm.PUSH4))
+	vmBytecode = append(vmBytecode, uint32ToBytes(uint32(pkLen))...)
+
+	// Push message pointer
+	vmBytecode = append(vmBytecode, byte(svm.PUSH4))
+	vmBytecode = append(vmBytecode, uint32ToBytes(msgPtr)...)
+
+	// Push message length (will be popped last)
+	vmBytecode = append(vmBytecode, byte(svm.PUSH4))
+	vmBytecode = append(vmBytecode, uint32ToBytes(uint32(msgLen))...)
 
 	// Add CHECK opcode
 	vmBytecode = append(vmBytecode, byte(svm.OP_CHECK_SPHINCS))
@@ -236,6 +257,7 @@ func (s *SigningService) verifyWithVM(signature, signatureHash, publicKey, messa
 }
 
 // VerifySignature verifies a signature for a message using VM ONLY.
+// VerifySignature verifies a signature for a message using VM ONLY.
 func (s *SigningService) VerifySignature(signedData []byte, nodeID string) (bool, error) {
 	signedMsg, err := DeserializeSignedMessage(signedData)
 	if err != nil {
@@ -253,6 +275,21 @@ func (s *SigningService) VerifySignature(signedData []byte, nodeID string) (bool
 		return false, err
 	}
 
+	// CRITICAL DEBUG: Log the public key length and first few bytes
+	logger.Info("🔍 Verifying signature for node %s:", nodeID)
+	logger.Info("   Public key length: %d bytes", len(pkBytes))
+	logger.Info("   Public key (first 8): %x", pkBytes[:min(8, len(pkBytes))])
+	logger.Info("   Signature length: %d bytes", len(signedMsg.Signature))
+	logger.Info("   Signature hash length: %d bytes", len(signedMsg.SignatureHash))
+	logger.Info("   Message length: %d bytes", len(signedMsg.Data))
+
+	// Validate public key length before proceeding
+	if len(pkBytes) != 32 {
+		logger.Error("❌ Invalid public key length for node %s: expected 32, got %d",
+			nodeID, len(pkBytes))
+		return false, fmt.Errorf("invalid public key length: %d", len(pkBytes))
+	}
+
 	// Build the full message (timestamp + nonce + data)
 	fullMsg := make([]byte, 0, len(signedMsg.Timestamp)+len(signedMsg.Nonce)+len(signedMsg.Data))
 	fullMsg = append(fullMsg, signedMsg.Timestamp...)
@@ -263,7 +300,6 @@ func (s *SigningService) VerifySignature(signedData []byte, nodeID string) (bool
 	result := s.verifyWithVM(signedMsg.Signature, signedMsg.SignatureHash, pkBytes, fullMsg)
 
 	if result {
-		// Print signature hash when verification passes
 		sigHashHex := hex.EncodeToString(signedMsg.SignatureHash)
 		logger.Info("✅ VM verification passed for node %s (signature hash: %s...)",
 			nodeID, sigHashHex[:min(16, len(sigHashHex))])
@@ -280,14 +316,39 @@ func (s *SigningService) getPublicKeyForNode(nodeID string) (*sphincs.SPHINCS_PK
 	defer s.registryMutex.RUnlock()
 
 	if publicKey, exists := s.publicKeyRegistry[nodeID]; exists {
+		// Validate the public key serialization
+		pkBytes, err := publicKey.SerializePK()
+		if err != nil {
+			return nil, fmt.Errorf("failed to serialize public key for %s: %w", nodeID, err)
+		}
+
+		// Check if the serialized key has the expected length
+		expectedLen := 32 // Adjust based on your SPHINCS+ parameters
+		if len(pkBytes) != expectedLen {
+			logger.Warn("Public key for %s has incorrect length: expected %d, got %d",
+				nodeID, expectedLen, len(pkBytes))
+			return nil, fmt.Errorf("invalid public key length for node %s", nodeID)
+		}
+
 		return publicKey, nil
 	}
 
 	if nodeID == s.nodeID && s.publicKey != nil {
+		pkBytes, err := s.publicKey.SerializePK()
+		if err == nil {
+			logger.Debug("Using self public key for %s (len=%d)", nodeID, len(pkBytes))
+		}
 		return s.publicKey, nil
 	}
 
 	return nil, fmt.Errorf("public key not available for node %s", nodeID)
+}
+
+// GetExpectedPublicKeyLength returns the expected SPHINCS+ public key length
+func (s *SigningService) GetExpectedPublicKeyLength() int {
+	// SPHINCS+-128s (SPHINXHASH128s) uses 32-byte public keys
+	// Confirmed by test output: "Serialized public key (32 bytes)"
+	return 32
 }
 
 // GenerateMessageHash generates a SHA-256 hash for consensus messages.

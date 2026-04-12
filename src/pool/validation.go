@@ -24,6 +24,7 @@
 package pool
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"math/big"
@@ -35,278 +36,285 @@ import (
 	logger "github.com/sphinxorg/protocol/src/log"
 )
 
-// verifyTransactionSignature uses SVM to verify transaction signature
-// This is the core cryptographic verification using OP_CHECK_SPHINCS
-// It also uses the SphincsManager for signature hash verification
+// uint32ToBytesPool converts uint32 to big-endian 4 bytes for VM PUSH4 operands.
+func uint32ToBytesPool(n uint32) []byte {
+	return []byte{byte(n >> 24), byte(n >> 16), byte(n >> 8), byte(n)}
+}
+
+// uint64ToBytesPool converts uint64 to big-endian 8 bytes for VM PUSH8 operands.
+func uint64ToBytesPool(n uint64) []byte {
+	return []byte{
+		byte(n >> 56), byte(n >> 48), byte(n >> 40), byte(n >> 32),
+		byte(n >> 24), byte(n >> 16), byte(n >> 8), byte(n),
+	}
+}
+
+// verifyTransactionSignature uses SVM to verify transaction signature.
+//
+// Memory layout:  [0 .. sigLen)             → signature bytes
+//
+//	[sigLen .. sigLen+pkLen)   → public key bytes (real SPHINCS+ key, NOT sender address)
+//	[sigLen+pkLen .. end)      → full message bytes
+//
+// OP_CHECK_SPHINCS pop order: msgLen, msgPtr, pkLen, pkPtr, sigLen, sigPtr
+// Push order (bottom→top):   sigPtr, sigLen, pkPtr, pkLen, msgPtr, msgLen
+//
+// IMPORTANT: tx.PublicKey must carry the sender's serialized SPHINCS+ public key.
+// tx.Sender is a human-readable address string and must NOT be used as pkBytes —
+// passing an address string to DeserializePublicKey causes "incorrect length" errors.
+// go/src/pool/validation.go
+
 func (mp *Mempool) verifyTransactionSignature(tx *types.Transaction) error {
-	// ========== SIGNATURE HASH VERIFICATION ==========
-	// First, verify the signature hash matches the signature
-	// This prevents Alice from lying about the signature hash
+	// Genesis vault transactions are TRUSTED protocol transactions
+	// They don't have SPHINCS+ signatures - skip all cryptographic verification
+	if tx.Sender == "0000000000000000000000000000000000000001" {
+		logger.Debug("Genesis vault transaction %s is trusted, skipping signature verification", tx.ID)
+		return nil
+	}
+
+	// For NON-genesis transactions, we REQUIRE full SPHINCS+ verification
+	if len(tx.SignatureHash) == 0 {
+		return fmt.Errorf("missing signature hash for transaction %s", tx.ID)
+	}
+
 	if len(tx.SignatureHash) != 32 {
-		return fmt.Errorf("invalid signature hash length: expected 32, got %d", len(tx.SignatureHash))
+		return fmt.Errorf("invalid signature hash length: expected 32, got %d for tx %s",
+			len(tx.SignatureHash), tx.ID)
 	}
 
-	// Compute the expected signature hash from the signature bytes
-	expectedSigHash := mp.sphincsManager.ComputeSignatureHash(tx.Signature)
-
-	// Verify the signature hash matches
-	for i := range expectedSigHash {
-		if expectedSigHash[i] != tx.SignatureHash[i] {
-			return errors.New("signature hash mismatch - possible tampering")
-		}
+	if len(tx.Signature) == 0 {
+		return fmt.Errorf("missing signature for transaction %s", tx.ID)
 	}
 
-	// Check if this signature hash has been seen before (replay detection)
-	isReplay, err := mp.sphincsManager.CheckSignatureHash(tx.Signature)
-	if err != nil {
-		return fmt.Errorf("signature hash check failed: %w", err)
+	if len(tx.PublicKey) == 0 {
+		return fmt.Errorf("missing public key for transaction %s", tx.ID)
 	}
-	if isReplay {
-		return errors.New("signature replay detected - same signature already used")
-	}
-	// =================================================
 
-	// Prepare signature verification parameters
-	sigLen := len(tx.Signature)
-	senderLen := len(tx.Sender)
-	msgLen := len(tx.ID)
+	// Get the public key (already set in tx.PublicKey for non-genesis)
+	pkBytes := tx.PublicKey
 
-	// Create full message for signature verification
-	// The message includes timestamp and nonce as per SPHINCS+ protocol
-	fullMsg := make([]byte, 0, 8+16+msgLen)
-	timestamp := make([]byte, 8) // 8-byte timestamp (zero for now, will be from tx)
-	nonce := make([]byte, 16)    // 16-byte nonce (zero for now, will be from tx)
-	fullMsg = append(fullMsg, timestamp...)
-	fullMsg = append(fullMsg, nonce...)
+	// Build the message that was signed
+	// Format: timestamp(8) || nonce(16) || txID
+	fullMsg := make([]byte, 0, 8+16+len(tx.ID))
+	tsBytes := uint64ToBytesPool(uint64(tx.Timestamp))
+	fullMsg = append(fullMsg, tsBytes...)
+
+	nonceBytes := make([]byte, 16)
+	binary.BigEndian.PutUint64(nonceBytes[0:8], tx.Nonce)
+	fullMsg = append(fullMsg, nonceBytes...)
 	fullMsg = append(fullMsg, []byte(tx.ID)...)
 
-	// Build VM bytecode for OP_CHECK_SPHINCS
-	// Stack layout expected by executeCheckSphincs:
-	//   It pops: msg_len, msg_ptr, pk_len, pk_ptr, sig_len, sig_ptr
-	//   Then pushes 1 for success, 0 for failure
-	vmBytecode := []byte{
-		// Push message length and pointer
-		byte(svm.PUSH4), byte(len(fullMsg) >> 24), byte(len(fullMsg) >> 16), byte(len(fullMsg) >> 8), byte(len(fullMsg)),
-		byte(svm.PUSH4), byte((sigLen + senderLen) >> 24), byte((sigLen + senderLen) >> 16), byte((sigLen + senderLen) >> 8), byte(sigLen + senderLen),
-		// Push public key length and pointer
-		byte(svm.PUSH4), byte(senderLen >> 24), byte(senderLen >> 16), byte(senderLen >> 8), byte(senderLen),
-		byte(svm.PUSH4), byte(sigLen >> 24), byte(sigLen >> 16), byte(sigLen >> 8), byte(sigLen),
-		// Push signature length and pointer
-		byte(svm.PUSH4), byte(sigLen >> 24), byte(sigLen >> 16), byte(sigLen >> 8), byte(sigLen),
-		byte(svm.PUSH4), 0x00, 0x00, 0x00, 0x00,
-		// Execute CHECK opcode - pushes 1 on success, 0 on failure
-		byte(svm.OP_CHECK_SPHINCS),
-	}
+	// Setup memory layout for SVM verification
+	sigLen := len(tx.Signature)
+	pkLen := len(pkBytes)
+	msgLen := len(fullMsg)
 
-	// Prepare memory layout: signature + public key + full message
-	memoryLayout := make([]byte, sigLen+senderLen+len(fullMsg))
-	copy(memoryLayout[0:], tx.Signature)
-	copy(memoryLayout[sigLen:], []byte(tx.Sender))
-	copy(memoryLayout[sigLen+senderLen:], fullMsg)
+	hashOffset := sigLen
+	pkOffset := hashOffset + 32
+	msgOffset := pkOffset + pkLen
 
-	// Create and run VM
-	vm := vmachine.NewVM(vmBytecode)
-	if err := vm.SetMemoryBytes(0, memoryLayout); err != nil {
-		return fmt.Errorf("VM memory setup failed: %w", err)
-	}
+	memoryLayout := make([]byte, sigLen+32+pkLen+msgLen)
+	copy(memoryLayout[0:sigLen], tx.Signature)
+	copy(memoryLayout[hashOffset:hashOffset+32], tx.SignatureHash)
+	copy(memoryLayout[pkOffset:pkOffset+pkLen], pkBytes)
+	copy(memoryLayout[msgOffset:msgOffset+msgLen], fullMsg)
 
-	if err := vm.Run(); err != nil {
-		return fmt.Errorf("VM execution failed: %w", err)
-	}
+	// Build bytecode for verification
+	bc := []byte{}
 
-	result, err := vm.GetResult()
+	// OP_CHECK_SIGNATURE_HASH
+	bc = append(bc, byte(svm.PUSH4))
+	bc = append(bc, uint32ToBytesPool(32)...)
+	bc = append(bc, byte(svm.PUSH4))
+	bc = append(bc, uint32ToBytesPool(uint32(hashOffset))...)
+	bc = append(bc, byte(svm.PUSH4))
+	bc = append(bc, uint32ToBytesPool(uint32(sigLen))...)
+	bc = append(bc, byte(svm.PUSH4))
+	bc = append(bc, uint32ToBytesPool(0)...)
+	bc = append(bc, byte(svm.OP_CHECK_SIGNATURE_HASH))
+	bc = append(bc, byte(svm.OP_VERIFY))
+
+	// OP_CHECK_SPHINCS
+	bc = append(bc, byte(svm.PUSH4))
+	bc = append(bc, uint32ToBytesPool(uint32(msgLen))...)
+	bc = append(bc, byte(svm.PUSH4))
+	bc = append(bc, uint32ToBytesPool(uint32(msgOffset))...)
+	bc = append(bc, byte(svm.PUSH4))
+	bc = append(bc, uint32ToBytesPool(uint32(pkLen))...)
+	bc = append(bc, byte(svm.PUSH4))
+	bc = append(bc, uint32ToBytesPool(uint32(pkOffset))...)
+	bc = append(bc, byte(svm.PUSH4))
+	bc = append(bc, uint32ToBytesPool(uint32(sigLen))...)
+	bc = append(bc, byte(svm.PUSH4))
+	bc = append(bc, uint32ToBytesPool(0)...)
+	bc = append(bc, byte(svm.OP_CHECK_SPHINCS))
+	bc = append(bc, byte(svm.OP_VERIFY))
+
+	// Store the signature hash to prevent replay attacks
+	bc = append(bc, byte(svm.PUSH4))
+	bc = append(bc, uint32ToBytesPool(32)...)
+	bc = append(bc, byte(svm.PUSH4))
+	bc = append(bc, uint32ToBytesPool(uint32(hashOffset))...)
+	bc = append(bc, byte(svm.OP_STORE_SIGNATURE_HASH))
+
+	// Execute verification
+	result, err := vmachine.RunProgramWithMemory(bc, memoryLayout)
 	if err != nil {
-		return fmt.Errorf("VM result error: %w", err)
+		return fmt.Errorf("signature verification failed for tx %s: %w", tx.ID, err)
 	}
 
-	if result != 1 {
-		return errors.New("invalid transaction signature")
-	}
+	_ = result
 
-	// Store signature hash for future replay detection
-	if err := mp.sphincsManager.StoreSignatureHash(tx.Signature); err != nil {
-		logger.Warn("Failed to store signature hash: %v", err)
-		// Don't fail the transaction, just log the warning
-		// The signature hash check above already confirmed it's fresh
-	}
-
+	logger.Debug("Transaction signature verified successfully: %s", tx.ID)
 	return nil
 }
 
-// verifyTransactionNonce uses SVM to validate transaction nonce
-// Nonce validation ensures transactions are processed in order
-// Uses XOR + NOT to check equality (since we don't have SUB or GT)
+// verifyTransactionNonce uses SVM to validate transaction nonce.
 func (mp *Mempool) verifyTransactionNonce(tx *types.Transaction, currentNonce uint64) error {
-	// Create VM bytecode for nonce validation
-	// Stack layout: nonce value, expected nonce, then compare using XOR + NOT
-	// If a ^ b == 0 then they are equal, NOT makes it 1 (true)
-	vmBytecode := []byte{
-		// Push transaction nonce (actual)
-		byte(svm.PUSH8), byte(tx.Nonce >> 56), byte(tx.Nonce >> 48), byte(tx.Nonce >> 40),
-		byte(tx.Nonce >> 32), byte(tx.Nonce >> 24), byte(tx.Nonce >> 16), byte(tx.Nonce >> 8), byte(tx.Nonce),
-		// Push current nonce from sender's account (expected)
-		byte(svm.PUSH8), byte(currentNonce >> 56), byte(currentNonce >> 48), byte(currentNonce >> 40),
-		byte(currentNonce >> 32), byte(currentNonce >> 24), byte(currentNonce >> 16), byte(currentNonce >> 8), byte(currentNonce),
-		// Compare nonces using XOR (if equal, result is 0)
-		byte(svm.Xor),
-		// NOT makes 0 become 1 (equal), non-zero becomes 0 (not equal)
-		byte(svm.Not),
-		// AND with 1 to ensure result is 0 or 1
-		byte(svm.PUSH1), 0x01,
-		byte(svm.And),
-	}
+	bc := []byte{}
 
-	// Create and run VM
-	vm := vmachine.NewVM(vmBytecode)
+	bc = append(bc, byte(svm.PUSH8))
+	bc = append(bc, uint64ToBytesPool(currentNonce)...)
+
+	bc = append(bc, byte(svm.PUSH8))
+	bc = append(bc, uint64ToBytesPool(tx.Nonce)...)
+
+	bc = append(bc, byte(svm.EQ))
+
+	vm := vmachine.NewVM(bc)
 	if err := vm.Run(); err != nil {
 		return fmt.Errorf("VM nonce validation failed: %w", err)
 	}
-
 	result, err := vm.GetResult()
 	if err != nil {
 		return fmt.Errorf("VM result error: %w", err)
 	}
-
 	if result != 1 {
 		return fmt.Errorf("invalid nonce: expected %d, got %d", currentNonce, tx.Nonce)
 	}
-
 	return nil
 }
 
-// verifyTransactionBalance uses SVM to check if sender has sufficient balance
-// Performs balance check using XOR comparison (since we don't have SUB or GT)
-// Checks if amount <= balance by verifying that (balance - amount) doesn't underflow
+// verifyTransactionBalance uses SVM to check sender has sufficient balance.
 func (mp *Mempool) verifyTransactionBalance(tx *types.Transaction, senderBalance *big.Int) error {
-	// Convert sender balance and amount to uint64 for VM (simplified)
+	if senderBalance.Cmp(tx.Amount) < 0 {
+		return fmt.Errorf("insufficient balance: have %s, need %s",
+			senderBalance.String(), tx.Amount.String())
+	}
+
+	if !senderBalance.IsUint64() || !tx.Amount.IsUint64() {
+		return nil
+	}
+
 	balanceUint := senderBalance.Uint64()
 	amountUint := tx.Amount.Uint64()
 
-	// Create VM bytecode for balance validation
-	// Since we don't have SUB, we use XOR to check if amount is within balance
-	// A simple approach: check if amount <= balance by verifying amount doesn't exceed balance
-	vmBytecode := []byte{
-		// Push transaction amount
-		byte(svm.PUSH8), byte(amountUint >> 56), byte(amountUint >> 48), byte(amountUint >> 40),
-		byte(amountUint >> 32), byte(amountUint >> 24), byte(amountUint >> 16), byte(amountUint >> 8), byte(amountUint),
-		// Push sender balance
-		byte(svm.PUSH8), byte(balanceUint >> 56), byte(balanceUint >> 48), byte(balanceUint >> 40),
-		byte(balanceUint >> 32), byte(balanceUint >> 24), byte(balanceUint >> 16), byte(balanceUint >> 8), byte(balanceUint),
-		// Check if amount <= balance using XOR comparison
-		// This is simplified - in production, proper big.Int comparison needed
-		byte(svm.Xor),
-		byte(svm.Not),
-		byte(svm.PUSH1), 0x01,
-		byte(svm.And),
-	}
+	bc := []byte{}
 
-	// Create and run VM
-	vm := vmachine.NewVM(vmBytecode)
+	bc = append(bc, byte(svm.PUSH8))
+	bc = append(bc, uint64ToBytesPool(balanceUint)...)
+
+	bc = append(bc, byte(svm.PUSH8))
+	bc = append(bc, uint64ToBytesPool(amountUint)...)
+
+	bc = append(bc, byte(svm.LT))
+	bc = append(bc, byte(svm.ISZERO))
+
+	vm := vmachine.NewVM(bc)
 	if err := vm.Run(); err != nil {
 		return fmt.Errorf("VM balance validation failed: %w", err)
 	}
-
 	result, err := vm.GetResult()
 	if err != nil {
 		return fmt.Errorf("VM result error: %w", err)
 	}
-
 	if result != 1 {
 		return fmt.Errorf("insufficient balance: have %d, need %d", balanceUint, amountUint)
 	}
-
 	return nil
 }
 
-// verifyTransactionGas uses SVM to validate gas parameters
-// Checks if gas limit and gas price are within acceptable ranges
+// verifyTransactionGas uses SVM to validate gas parameters.
 func (mp *Mempool) verifyTransactionGas(tx *types.Transaction, minGasPrice *big.Int) error {
+	const maxGasLimit = uint64(1_000_000)
+
 	gasLimitUint := tx.GasLimit.Uint64()
 	gasPriceUint := tx.GasPrice.Uint64()
 	minGasPriceUint := minGasPrice.Uint64()
 
-	// Create VM bytecode for gas validation using available opcodes
-	vmBytecode := []byte{
-		// Validate gas limit is within block limits (using XOR comparison)
-		// Push gas limit
-		byte(svm.PUSH8), byte(gasLimitUint >> 56), byte(gasLimitUint >> 48), byte(gasLimitUint >> 40),
-		byte(gasLimitUint >> 32), byte(gasLimitUint >> 24), byte(gasLimitUint >> 16), byte(gasLimitUint >> 8), byte(gasLimitUint),
-		// Push max gas limit (1,000,000)
-		byte(svm.PUSH4), 0x00, 0x0F, 0x42, 0x40,
-		// Compare using XOR (simplified)
-		byte(svm.Xor),
-		byte(svm.Not),
+	bc := []byte{}
 
-		// Validate gas price >= minimum
-		// Push gas price
-		byte(svm.PUSH8), byte(gasPriceUint >> 56), byte(gasPriceUint >> 48), byte(gasPriceUint >> 40),
-		byte(gasPriceUint >> 32), byte(gasPriceUint >> 24), byte(gasPriceUint >> 16), byte(gasPriceUint >> 8), byte(gasPriceUint),
-		// Push min gas price
-		byte(svm.PUSH8), byte(minGasPriceUint >> 56), byte(minGasPriceUint >> 48), byte(minGasPriceUint >> 40),
-		byte(minGasPriceUint >> 32), byte(minGasPriceUint >> 24), byte(minGasPriceUint >> 16), byte(minGasPriceUint >> 8), byte(minGasPriceUint),
-		// Compare using XOR (if gasPrice >= minGasPrice)
-		byte(svm.Xor),
-		byte(svm.Not),
-		byte(svm.And), // Combine both checks
-		byte(svm.PUSH1), 0x01,
-		byte(svm.And),
-	}
+	bc = append(bc, byte(svm.PUSH8))
+	bc = append(bc, uint64ToBytesPool(gasLimitUint)...)
 
-	vm := vmachine.NewVM(vmBytecode)
+	bc = append(bc, byte(svm.PUSH8))
+	bc = append(bc, uint64ToBytesPool(maxGasLimit)...)
+
+	bc = append(bc, byte(svm.GT))
+	bc = append(bc, byte(svm.ISZERO))
+
+	bc = append(bc, byte(svm.PUSH8))
+	bc = append(bc, uint64ToBytesPool(gasPriceUint)...)
+
+	bc = append(bc, byte(svm.PUSH8))
+	bc = append(bc, uint64ToBytesPool(minGasPriceUint)...)
+
+	bc = append(bc, byte(svm.LT))
+	bc = append(bc, byte(svm.ISZERO))
+
+	bc = append(bc, byte(svm.And))
+
+	vm := vmachine.NewVM(bc)
 	if err := vm.Run(); err != nil {
 		return fmt.Errorf("VM gas validation failed: %w", err)
 	}
-
 	result, err := vm.GetResult()
 	if err != nil {
 		return fmt.Errorf("VM result error: %w", err)
 	}
-
 	if result != 1 {
-		return fmt.Errorf("gas validation failed: limit=%d, price=%d, min=%d",
-			gasLimitUint, gasPriceUint, minGasPriceUint)
+		return fmt.Errorf("gas validation failed: limit=%d (max=%d), price=%d (min=%d)",
+			gasLimitUint, maxGasLimit, gasPriceUint, minGasPriceUint)
 	}
-
 	return nil
 }
 
-// verifyTransactionReplayProtection uses SVM to check timestamp+nonce pair
-// Prevents replay attacks by verifying transaction freshness using XOR comparison
-func (mp *Mempool) verifyTransactionReplayProtection(tx *types.Transaction, lastTimestamp uint64) error {
-	// Create VM bytecode for replay protection using XOR comparison
-	vmBytecode := []byte{
-		// Push transaction timestamp
-		byte(svm.PUSH8), byte(tx.Timestamp >> 56), byte(tx.Timestamp >> 48), byte(tx.Timestamp >> 40),
-		byte(tx.Timestamp >> 32), byte(tx.Timestamp >> 24), byte(tx.Timestamp >> 16), byte(tx.Timestamp >> 8), byte(tx.Timestamp),
-		// Push last timestamp from sender
-		byte(svm.PUSH8), byte(lastTimestamp >> 56), byte(lastTimestamp >> 48), byte(lastTimestamp >> 40),
-		byte(lastTimestamp >> 32), byte(lastTimestamp >> 24), byte(lastTimestamp >> 16), byte(lastTimestamp >> 8), byte(lastTimestamp),
-		// Check if tx.timestamp > lastTimestamp using XOR
-		// This is simplified - proper comparison needs GT opcode
-		byte(svm.Xor),
-		byte(svm.Not),
-		byte(svm.PUSH1), 0x01,
-		byte(svm.And),
+// verifyTransactionReplayProtection uses SVM to check tx.Timestamp > lastTimestamp.
+func (mp *Mempool) verifyTransactionReplayProtection(tx *types.Transaction, lastTimestamp int64) error {
+	if lastTimestamp == 0 {
+		return nil
 	}
 
-	vm := vmachine.NewVM(vmBytecode)
+	bc := []byte{}
+
+	bc = append(bc, byte(svm.PUSH8))
+	bc = append(bc, uint64ToBytesPool(uint64(tx.Timestamp))...)
+
+	bc = append(bc, byte(svm.PUSH8))
+	bc = append(bc, uint64ToBytesPool(uint64(lastTimestamp))...)
+
+	bc = append(bc, byte(svm.GT))
+
+	vm := vmachine.NewVM(bc)
 	if err := vm.Run(); err != nil {
 		return fmt.Errorf("VM replay protection validation failed: %w", err)
 	}
-
 	result, err := vm.GetResult()
 	if err != nil {
 		return fmt.Errorf("VM result error: %w", err)
 	}
-
 	if result != 1 {
-		return fmt.Errorf("replay protection failed: timestamp %d <= last %d", tx.Timestamp, lastTimestamp)
+		return fmt.Errorf("replay protection failed: timestamp %d must be > last %d",
+			tx.Timestamp, lastTimestamp)
 	}
-
 	return nil
 }
 
-// validationProcessor handles transaction validation
+func (mp *Mempool) getLastTransactionTimestamp(sender string) int64 {
+	_ = sender
+	return 0
+}
+
 func (mp *Mempool) validationProcessor() {
 	for {
 		select {
@@ -318,13 +326,10 @@ func (mp *Mempool) validationProcessor() {
 	}
 }
 
-// validateTransaction performs comprehensive validation
-// Uses SVM for all cryptographic and business logic validation
 func (mp *Mempool) validateTransaction(pooledTx *PooledTransaction) {
 	startTime := time.Now()
 	tx := pooledTx.Transaction
 
-	// ========== OP_RETURN VALIDATION ==========
 	const maxReturnSize = 80
 	if len(tx.ReturnData) > maxReturnSize {
 		mp.lock.Lock()
@@ -341,7 +346,6 @@ func (mp *Mempool) validateTransaction(pooledTx *PooledTransaction) {
 		logger.Warn("Transaction validation failed: ID=%s, OP_RETURN size exceeded", tx.ID)
 		return
 	}
-	// ==========================================
 
 	err := mp.performValidation(tx)
 
@@ -373,38 +377,43 @@ func (mp *Mempool) validateTransaction(pooledTx *PooledTransaction) {
 	}
 }
 
-// performValidation executes the actual validation logic
-// This is the MAIN validation function that all transactions go through
-// It performs comprehensive validation including:
-//   - Transaction size and sanity checks
-//   - Signature and signature hash verification (using SVM + SphincsManager)
-//   - Nonce validation (using SVM)
-//   - Balance checks (using SVM)
-//   - Gas validation (using SVM)
-//   - Replay protection (using SVM)
+// go/src/pool/validation.go
+
 func (mp *Mempool) performValidation(tx *types.Transaction) error {
-	// ========== SKIP VALIDATION FOR GENESIS VAULT TRANSACTIONS ==========
-	// Genesis vault transactions are trusted protocol transactions
-	// They don't have signatures and bypass normal validation rules
 	const genesisVaultAddress = "0000000000000000000000000000000000000001"
+
+	// Genesis vault transactions are TRUSTED protocol transactions
+	// They don't have SPHINCS+ signatures because they're system-level distributions
 	if tx.Sender == genesisVaultAddress {
-		logger.Debug("Skipping validation for genesis vault transaction: %s", tx.ID)
+		logger.Debug("Genesis vault transaction %s is trusted, skipping cryptographic verification", tx.ID)
+
+		// Still do basic sanity checks
+		if err := tx.SanityCheck(); err != nil {
+			return fmt.Errorf("sanity check failed: %w", err)
+		}
+
+		if tx.Sender == "" || tx.Receiver == "" {
+			return errors.New("empty sender or receiver")
+		}
+
+		if tx.Amount == nil || tx.Amount.Cmp(big.NewInt(0)) <= 0 {
+			return errors.New("invalid amount")
+		}
+
+		// No signature verification needed for genesis vault
 		return nil
 	}
-	// ================================================================
 
-	// Validate transaction size
+	// For NON-genesis transactions, ALL verifications must pass
 	txSize := mp.CalculateTransactionSize(tx)
 	if txSize > mp.config.MaxTxSize {
 		return fmt.Errorf("transaction size %d exceeds maximum %d bytes", txSize, mp.config.MaxTxSize)
 	}
 
-	// Perform transaction sanity checks
 	if err := tx.SanityCheck(); err != nil {
 		return fmt.Errorf("sanity check failed: %w", err)
 	}
 
-	// Validate transaction fields
 	if tx.Sender == "" || tx.Receiver == "" {
 		return errors.New("empty sender or receiver")
 	}
@@ -413,37 +422,30 @@ func (mp *Mempool) performValidation(tx *types.Transaction) error {
 		return errors.New("invalid amount")
 	}
 
-	// Validate gas parameters
 	if tx.GasLimit == nil || tx.GasPrice == nil {
 		return errors.New("missing gas parameters")
 	}
 
-	// ========== SVM-BASED VALIDATIONS ==========
-
-	// 1. Signature and signature hash verification (CRITICAL - must be first)
+	// This will fail if signature is invalid or public key missing
 	if err := mp.verifyTransactionSignature(tx); err != nil {
 		return fmt.Errorf("signature validation failed: %w", err)
 	}
 
-	// 2. Nonce validation using SVM
 	currentNonce := mp.getSenderNonce(tx.Sender)
 	if err := mp.verifyTransactionNonce(tx, currentNonce); err != nil {
 		return fmt.Errorf("nonce validation failed: %w", err)
 	}
 
-	// 3. Balance check using SVM
 	senderBalance := mp.getSenderBalance(tx.Sender)
 	if err := mp.verifyTransactionBalance(tx, senderBalance); err != nil {
 		return fmt.Errorf("balance validation failed: %w", err)
 	}
 
-	// 4. Gas validation using SVM
 	minGasPrice := mp.getMinimumGasPrice()
 	if err := mp.verifyTransactionGas(tx, minGasPrice); err != nil {
 		return fmt.Errorf("gas validation failed: %w", err)
 	}
 
-	// 5. Replay protection using SVM
 	lastTimestamp := mp.getLastTransactionTimestamp(tx.Sender)
 	if err := mp.verifyTransactionReplayProtection(tx, lastTimestamp); err != nil {
 		return fmt.Errorf("replay protection failed: %w", err)
@@ -453,52 +455,29 @@ func (mp *Mempool) performValidation(tx *types.Transaction) error {
 	return nil
 }
 
-// Helper methods for getting state information
-// These would typically query the blockchain state
-
-// getSenderNonce returns the current nonce for a sender address
 func (mp *Mempool) getSenderNonce(sender string) uint64 {
-	// This would query the blockchain state for the sender's nonce
-	// In production: stateDB.GetNonce(sender)
 	_ = sender
 	return 0
 }
 
-// getSenderBalance returns the current balance for a sender address
 func (mp *Mempool) getSenderBalance(sender string) *big.Int {
-	// This would query the blockchain state for the sender's balance
-	// In production: stateDB.GetBalance(sender)
 	_ = sender
 	return new(big.Int).SetUint64(1000000000000000000)
 }
 
-// getMinimumGasPrice returns the minimum acceptable gas price
 func (mp *Mempool) getMinimumGasPrice() *big.Int {
-	// This would come from chain parameters or governance
-	return new(big.Int).SetUint64(1000000000) // 1 Gwei
+	return new(big.Int).SetUint64(1000000000)
 }
 
-// getLastTransactionTimestamp returns the last timestamp for a sender
-func (mp *Mempool) getLastTransactionTimestamp(sender string) uint64 {
-	// This would query the blockchain state for the sender's last tx timestamp
-	// In production: stateDB.GetLastTxTimestamp(sender)
-	_ = sender
-	return 0
-}
-
-// validateTransactionBasic performs quick basic validation
 func (mp *Mempool) validateTransactionBasic(tx *types.Transaction) error {
 	if tx == nil {
 		return errors.New("nil transaction")
 	}
-
 	if tx.Sender == "" || tx.Receiver == "" {
 		return errors.New("empty sender or receiver")
 	}
-
 	if tx.Amount == nil || tx.Amount.Cmp(big.NewInt(0)) <= 0 {
 		return errors.New("invalid amount")
 	}
-
 	return nil
 }

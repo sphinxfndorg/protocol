@@ -1414,23 +1414,20 @@ func (bc *Blockchain) CreateBlock() (*types.Block, error) {
 	emptyUncles := []*types.BlockHeader{}
 	// ================================================
 
-	// ========== FIX 3: Prepare extraData with OP_RETURN hash ==========
-	// Start with base extra data
-	extraData := []byte("Sphinx Network Block")
+	// ========== FIX 3: Prepare extraData ==========
+	// ExtraData should be simple block metadata, NOT containing OP_RETURN hashes
+	extraData := []byte(fmt.Sprintf("Sphinx Block %d", prevBlock.GetHeight()+1))
 
-	// If there are transactions with OP_RETURN data, include a hash of them in ExtraData
-	var returnDataHash []byte
-	for _, tx := range selectedTxs {
-		if tx.HasReturnData() && len(tx.ReturnData) > 0 {
-			// Hash all OP_RETURN data together
-			returnDataHash = common.SpxHash(append(returnDataHash, tx.ReturnData...))
-		}
-	}
-	if len(returnDataHash) > 0 {
-		// Include the hash of all OP_RETURN data in ExtraData
-		extraData = append(extraData, returnDataHash...)
-		logger.Info("Including OP_RETURN data hash in ExtraData: %x", returnDataHash)
-	}
+	// REMOVE THIS ENTIRE BLOCK - DO NOT PUT OP_RETURN HASH IN EXTRA_DATA
+	// var returnDataHash []byte
+	// for _, tx := range selectedTxs {
+	//     if tx.HasReturnData() && len(tx.ReturnData) > 0 {
+	//         returnDataHash = common.SpxHash(append(returnDataHash, tx.ReturnData...))
+	//     }
+	// }
+	// if len(returnDataHash) > 0 {
+	//     extraData = append(extraData, returnDataHash...)
+	// }
 	// ================================================================
 
 	newHeader := types.NewBlockHeader(
@@ -1894,32 +1891,46 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 	// Process OP_RETURN data in transactions
 	for _, tx := range typeBlock.Body.TxsList {
 		if tx.HasReturnData() {
-			// Validate OP_RETURN with VM
 			dataLen := len(tx.ReturnData)
-			vmBytecode := []byte{
-				byte(svm.PUSH4), byte(dataLen >> 24), byte(dataLen >> 16), byte(dataLen >> 8), byte(dataLen),
-				byte(svm.PUSH4), 0x00, 0x00, 0x00, 0x00,
-				byte(svm.OP_RETURN),
-			}
 
+			logger.Info("DEBUG: Preparing OP_RETURN for tx %s, dataLen=%d, data=%s",
+				tx.ID, dataLen, string(tx.ReturnData))
+
+			// CORRECT: Push in reverse order so that when OP_RETURN pops:
+			// First pop = dataLen (what we want)
+			// Second pop = dataPtr (what we want)
+			vmBytecode := []byte{}
+
+			// Push data pointer FIRST (will be popped SECOND)
+			vmBytecode = append(vmBytecode, byte(svm.PUSH4))
+			vmBytecode = append(vmBytecode, 0x00, 0x00, 0x00, 0x00) // pointer 0
+
+			// Push data length SECOND (will be popped FIRST)
+			vmBytecode = append(vmBytecode, byte(svm.PUSH4))
+			vmBytecode = append(vmBytecode, byte(dataLen>>24), byte(dataLen>>16), byte(dataLen>>8), byte(dataLen))
+
+			// OP_RETURN
+			vmBytecode = append(vmBytecode, byte(svm.OP_RETURN))
+
+			// Create memory layout with the data at position 0
 			memoryLayout := make([]byte, dataLen)
 			copy(memoryLayout, tx.ReturnData)
 
-			// Fix vmachine import - change to vm.NewVM
-			vm := vm.NewVM(vmBytecode) // Was vmachine.NewVM
+			vm := vm.NewVM(vmBytecode)
 			if err := vm.SetMemoryBytes(0, memoryLayout); err != nil {
-				return fmt.Errorf("OP_RETURN VM memory setup failed: %w", err) // Remove nil return
+				return fmt.Errorf("OP_RETURN VM memory setup failed: %w", err)
 			}
 			if err := vm.Run(); err != nil {
-				return fmt.Errorf("OP_RETURN execution failed: %w", err) // Remove nil return
+				return fmt.Errorf("OP_RETURN execution failed: %w", err)
 			}
 
-			// Store return data for light clients
+			// Store return data
 			if err := bc.storeReturnData(tx.ID, tx.ReturnData); err != nil {
 				logger.Warn("Failed to store OP_RETURN data for tx %s: %v", tx.ID, err)
 			}
 
-			logger.Info("📝 OP_RETURN: Transaction %s embedded %d bytes", tx.ID, dataLen)
+			logger.Info("📝 OP_RETURN: Transaction %s embedded %d bytes: %s",
+				tx.ID, dataLen, string(tx.ReturnData))
 		}
 	}
 

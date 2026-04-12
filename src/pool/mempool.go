@@ -32,7 +32,6 @@ import (
 	"time"
 
 	"github.com/sphinxorg/protocol/src/common"
-	sign "github.com/sphinxorg/protocol/src/core/sphincs/sign/backend"
 	types "github.com/sphinxorg/protocol/src/core/transaction"
 	logger "github.com/sphinxorg/protocol/src/log"
 )
@@ -65,20 +64,12 @@ func NewMempool(config *MempoolConfig) *Mempool {
 		stopChan:          make(chan struct{}),
 		running:           false,
 		publicKeyRegistry: make(map[string][]byte),
-		sphincsManager:    nil, // Leave as nil for now
 	}
 
 	// Start background workers
 	mp.startWorkers()
 
 	return mp
-}
-
-// Add a setter method to set the sphincs manager later
-func (mp *Mempool) SetSphincsManager(manager *sign.SphincsManager) {
-	mp.lock.Lock()
-	defer mp.lock.Unlock()
-	mp.sphincsManager = manager
 }
 
 // AddPublicKeyToRegistry registers a public key for a sender address

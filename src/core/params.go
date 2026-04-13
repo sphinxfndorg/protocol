@@ -69,6 +69,10 @@ func GetSphinxChainParams() *SphinxChainParameters {
 	// This ensures all nodes have the same genesis block
 	genesisHash := GetGenesisHash()
 
+	// Use the canonical extra data from DefaultGenesisState() to ensure consistency
+	// This guarantees the genesis extra data matches genesis.go
+	canonicalExtraData := DefaultGenesisState().ExtraData
+
 	// Return complete mainnet configuration
 	return &SphinxChainParameters{
 		// Network Identification - unique identifiers for the blockchain
@@ -91,19 +95,18 @@ func GetSphinxChainParams() *SphinxChainParameters {
 		},
 
 		// Block Configuration - size and gas limits
-		MaxBlockSize:       2 * 1024 * 1024,      // 2MB - maximum block size
-		MaxTransactionSize: 100 * 1024,           // 100KB - maximum transaction size
-		TargetBlockSize:    1 * 1024 * 1024,      // 1MB - target block size for optimization
-		BlockGasLimit:      big.NewInt(10000000), // 10 million gas - maximum gas per block
-		// GetSphinxChainParams()
-		BaseBlockReward: new(big.Int).Mul(big.NewInt(5), big.NewInt(1e18)), // 5 SPX = 5×10^18 nSPX
+		MaxBlockSize:       2 * 1024 * 1024,                                   // 2MB - maximum block size
+		MaxTransactionSize: 100 * 1024,                                        // 100KB - maximum transaction size
+		TargetBlockSize:    1 * 1024 * 1024,                                   // 1MB - target block size for optimization
+		BlockGasLimit:      big.NewInt(10000000),                              // 10 million gas - maximum gas per block
+		BaseBlockReward:    new(big.Int).Mul(big.NewInt(5), big.NewInt(1e18)), // 5 SPX = 5×10^18 nSPX
 
-		// Genesis-specific configuration - MUST MATCH genesisBlockDefinition
+		// Genesis-specific configuration - MUST MATCH genesis.go's DefaultGenesisState()
 		GenesisConfig: &GenesisConfig{
-			InitialDifficulty: big.NewInt(17179869184),                                       // Initial mining difficulty
-			InitialGasLimit:   big.NewInt(5000),                                              // Initial gas limit per block
-			GenesisNonce:      66,                                                            // Genesis block nonce
-			GenesisExtraData:  []byte("Sphinx Network Genesis Block - Decentralized Future"), // Genesis message
+			InitialDifficulty: big.NewInt(17179869184), // Initial mining difficulty
+			InitialGasLimit:   big.NewInt(5000),        // Initial gas limit per block
+			GenesisNonce:      66,                      // Genesis block nonce
+			GenesisExtraData:  canonicalExtraData,      // Use canonical extra data from genesis.go
 		},
 
 		// Mempool Configuration - transaction pool settings

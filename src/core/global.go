@@ -28,7 +28,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sphinxorg/protocol/src/common"
 	types "github.com/sphinxorg/protocol/src/core/transaction"
 	logger "github.com/sphinxorg/protocol/src/log"
 	denom "github.com/sphinxorg/protocol/src/params/denom"
@@ -64,29 +63,13 @@ const (
 	CacheTypeState
 )
 
-// genesisBlockDefinition is the single canonical source for fields that feed
-// into the genesis hash. It is environment-agnostic: devnet, testnet, and
-// mainnet all derive their genesis block from these exact values so that a
-// validator who started on devnet can verify ancestry on testnet or mainnet
-// without rebuilding or re-downloading block 0.
-var genesisBlockDefinition = &types.BlockHeader{
-	Version:   1,
-	Height:    0,
-	Timestamp: 1732070400, // Nov 20 2024 00:00:00 UTC — FROZEN, never change
-
-	// Difficulty and GasLimit must match GenesisStateFromChainParams constants.
-	Difficulty: big.NewInt(17179869184),
-	GasLimit:   big.NewInt(5000),
-
-	GasUsed:    big.NewInt(0),
-	Nonce:      common.FormatNonce(1),
-	TxsRoot:    common.SpxHash([]byte{}),
-	StateRoot:  common.SpxHash([]byte("sphinx-genesis-state-root")),
-	ExtraData:  []byte("Sphinx Network Genesis Block - Decentralized Future"),
-	Miner:      make([]byte, 20),
-	ParentHash: make([]byte, 32),
-	UnclesHash: common.SpxHash([]byte("genesis-no-uncles")),
-}
+// genesisOnce ensures BuildBlock() runs exactly once per process.
+// argon2 takes ~134s — running it 3 times (one per node) would hang for 400s+.
+var (
+	genesisOnce      sync.Once
+	genesisHashValue string
+	genesisCached    *types.Block
+)
 
 // GetGenesisTime returns the genesis block timestamp
 func (bc *Blockchain) GetGenesisTime() time.Time {
@@ -148,73 +131,36 @@ func (bc *Blockchain) UpdateValidatorStake(validatorID string, delta *big.Int) e
 }
 
 // GetGenesisBlockDefinition returns the standardized genesis block definition
+// DEPRECATED: Use GetCachedGenesisBlock() or DefaultGenesisState().BuildBlock() instead
 func GetGenesisBlockDefinition() *types.BlockHeader {
-	// Return a copy to prevent modification
+	// Use the canonical genesis block from genesis.go
+	canonicalGenesis := DefaultGenesisState().BuildBlock()
+
+	// Return a copy of the header to prevent modification
+	header := canonicalGenesis.Header
 	return &types.BlockHeader{
-		Version:    genesisBlockDefinition.Version,
-		Height:     genesisBlockDefinition.Height,
-		Timestamp:  genesisBlockDefinition.Timestamp,
-		Difficulty: new(big.Int).Set(genesisBlockDefinition.Difficulty),
-		Nonce:      common.FormatNonce(1), // FIXED: Ensure consistent nonce format "0000000000000001"
-		TxsRoot:    append([]byte{}, genesisBlockDefinition.TxsRoot...),
-		StateRoot:  append([]byte{}, genesisBlockDefinition.StateRoot...),
-		GasLimit:   new(big.Int).Set(genesisBlockDefinition.GasLimit),
-		GasUsed:    new(big.Int).Set(genesisBlockDefinition.GasUsed),
-		ExtraData:  append([]byte{}, genesisBlockDefinition.ExtraData...),
-		Miner:      append([]byte{}, genesisBlockDefinition.Miner...),
-		ParentHash: append([]byte{}, genesisBlockDefinition.ParentHash...),
-		UnclesHash: append([]byte{}, genesisBlockDefinition.UnclesHash...),
+		Version:    header.Version,
+		Height:     header.Height,
+		Timestamp:  header.Timestamp,
+		Difficulty: new(big.Int).Set(header.Difficulty),
+		Nonce:      header.Nonce,
+		TxsRoot:    append([]byte{}, header.TxsRoot...),
+		StateRoot:  append([]byte{}, header.StateRoot...),
+		GasLimit:   new(big.Int).Set(header.GasLimit),
+		GasUsed:    new(big.Int).Set(header.GasUsed),
+		ExtraData:  append([]byte{}, header.ExtraData...),
+		Miner:      append([]byte{}, header.Miner...),
+		ParentHash: append([]byte{}, header.ParentHash...),
+		UnclesHash: append([]byte{}, header.UnclesHash...),
 	}
 }
 
 // CreateStandardGenesisBlock creates a standardized genesis block that all nodes should use
+// DEPRECATED: Use DefaultGenesisState().BuildBlock() instead
 func CreateStandardGenesisBlock() *types.Block {
-	// Create the genesis header directly to ensure all fields are properly set
-	genesisHeader := &types.BlockHeader{
-		Version:    1,
-		Block:      0, // Same as Height
-		Height:     0,
-		Timestamp:  1732070400,               // Fixed: Nov 20, 2024 00:00:00 UTC
-		Difficulty: big.NewInt(17179869184),  // Substantial initial difficulty
-		Nonce:      common.FormatNonce(1),    // FIXED: "0000000000000001"
-		TxsRoot:    common.SpxHash([]byte{}), // Empty transactions root
-		StateRoot:  common.SpxHash([]byte("sphinx-genesis-state-root")),
-		GasLimit:   big.NewInt(5000), // Initial gas limit
-		GasUsed:    big.NewInt(0),
-		ExtraData:  []byte("Sphinx Network Genesis Block - Decentralized Future"),
-		Miner:      make([]byte, 20), // Zero address for genesis
-		ParentHash: make([]byte, 32), // Genesis has no parent
-		UnclesHash: common.SpxHash([]byte("genesis-no-uncles")),
-		Hash:       []byte{}, // Will be set by FinalizeHash
-	}
-
-	// Create empty uncles slice for genesis
-	emptyUncles := []*types.BlockHeader{}
-
-	// Create block body with empty transactions and uncles
-	genesisBody := types.NewBlockBody([]*types.Transaction{}, emptyUncles)
-	genesis := types.NewBlock(genesisHeader, genesisBody)
-
-	// Finalize the hash
-	genesis.FinalizeHash()
-
-	// Log the genesis block details for verification
-	logger.Info("✅ Created standardized genesis block:")
-	logger.Info("   - Height: %d", genesis.Header.Height)
-	logger.Info("   - Nonce: %s", genesis.Header.Nonce)
-	logger.Info("   - Hash: %s", genesis.GetHash())
-	logger.Info("   - Difficulty: %s", genesis.Header.Difficulty.String())
-
-	return genesis
+	// Delegate to the canonical genesis builder from genesis.go
+	return DefaultGenesisState().BuildBlock()
 }
-
-// genesisOnce ensures BuildBlock() runs exactly once per process.
-// argon2 takes ~134s — running it 3 times (one per node) would hang for 400s+.
-var (
-	genesisOnce      sync.Once
-	genesisHashValue string
-	genesisCached    *types.Block
-)
 
 // getCachedGenesisBlock builds the genesis block exactly once per process.
 // It uses DefaultGenesisState() only for the cryptographic fields (timestamp,

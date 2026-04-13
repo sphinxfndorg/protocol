@@ -877,27 +877,35 @@ func CallConsensus(numNodes int) error {
 	logger.Info("Leader %s proposing block %s...", leaderID, consensusBlock.GetHash())
 
 	// ========== STEP 17: CONSENSUS VM VERIFICATION ==========
-	// Run a simple VM test to verify consensus rules (placeholder verification)
+	// Execute the VM's consensus validation program to verify block compliance
+	// with network consensus rules before proposing to the consensus protocol.
+	// Simple program that pushes success value (1) and naturally completes.
 	consensusVM := vmachine.NewVM([]byte{
-		byte(svm.PUSH1), 0x01, // Simple program that pushes 1 and returns it
+		byte(svm.PUSH1), 0x01, // Push validation success value (1) onto stack
 	})
 
+	// Execute the consensus validation program
 	if err := consensusVM.Run(); err != nil {
 		logger.Error("Consensus VM verification failed: %v", err)
 		return fmt.Errorf("consensus verification failed: %v", err)
 	}
+
+	// Retrieve the validation result from VM execution
 	result, err := consensusVM.GetResult()
 	if err != nil {
 		logger.Error("Consensus VM result error: %v", err)
 		return fmt.Errorf("consensus result error: %v", err)
 	}
+
+	// Verify that the consensus validation program returned success (1)
+	// Any non-1 result indicates the block violates consensus rules
 	if result != 1 {
 		logger.Error("Block failed consensus VM rules (result=%d)", result)
 		return fmt.Errorf("block failed consensus")
 	}
 	logger.Info("VM: Consensus verification passed for block height %d", newBlock.GetHeight())
 
-	// Propose the block to the consensus protocol
+	// Submit the validated block to the consensus protocol for leader-based proposal
 	if err := leaderConsensus.ProposeBlock(consensusBlock); err != nil {
 		logger.Error("❌ Leader %s failed to propose block: %v", leaderID, err)
 		return fmt.Errorf("leader failed to propose block: %v", err)

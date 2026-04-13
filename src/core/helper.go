@@ -90,29 +90,6 @@ func (a *BlockHelper) GetUnderlyingBlock() *types.Block {
 	return a.block
 }
 
-// GetMerkleRoot returns the merkle root as a string
-func (b *BlockHelper) GetMerkleRoot() string {
-	if b.block != nil && b.block.Header != nil {
-		return fmt.Sprintf("%x", b.block.Header.TxsRoot)
-	}
-	return ""
-}
-
-// ExtractMerkleRoot returns the merkle root as a string
-func (b *BlockHelper) ExtractMerkleRoot() string {
-	if b.block != nil && b.block.Header != nil {
-		return fmt.Sprintf("%x", b.block.Header.TxsRoot)
-	}
-	return ""
-}
-
-// GetStateMachine returns the state machine instance
-func (bc *Blockchain) GetStateMachine() *storage.StateMachine {
-	bc.lock.RLock()
-	defer bc.lock.RUnlock()
-	return bc.stateMachine
-}
-
 // SetConsensus sets the consensus module for the state machine
 func (bc *Blockchain) SetConsensus(consensus *consensus.Consensus) {
 	bc.stateMachine.SetConsensus(consensus)
@@ -190,19 +167,6 @@ func (bc *Blockchain) SetStateDB(db *database.DB) {
 	bc.storage.SetStateDB(db)
 }
 
-// Helper function to check if string is hex
-func isHexString(s string) bool {
-	if len(s)%2 != 0 {
-		return false
-	}
-	for _, c := range s {
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
-			return false
-		}
-	}
-	return true
-}
-
 // RequiresDistributionBeforePromotion returns true for devnet — the network
 // must drain the genesis vault before it can be promoted to testnet/mainnet.
 func (p *SphinxChainParameters) RequiresDistributionBeforePromotion() bool {
@@ -257,45 +221,19 @@ func (p *SphinxChainParameters) IsBlockSizeValid(blockSize uint64) bool {
 	return blockSize <= p.MaxBlockSize && blockSize > 0
 }
 
-// storeReturnData stores OP_RETURN data for light clients
-func (bc *Blockchain) storeReturnData(txID string, data []byte) error {
-	if bc.storage == nil {
-		return fmt.Errorf("storage not initialized")
-	}
-
-	// Get the underlying database from storage - note it returns (db, error)
-	db, err := bc.storage.GetDB()
-	if err != nil {
-		return fmt.Errorf("failed to get database: %w", err)
-	}
-	if db == nil {
-		return fmt.Errorf("database is nil")
-	}
-
-	// Store in a separate "return_data" bucket/prefix
-	key := fmt.Sprintf("return:%s", txID)
-
-	// Use the database's Put method
-	return db.Put(key, data)
+// VerifyStateConsistency verifies that this node's state matches other nodes
+// Parameters:
+//   - otherState: State snapshot from another node
+//
+// Returns: true if states are consistent, error if verification fails
+func (bc *Blockchain) VerifyStateConsistency(otherState *storage.StateSnapshot) (bool, error) {
+	// Delegate to state machine for verification
+	return bc.stateMachine.VerifyState(otherState)
 }
 
-// GetReturnData retrieves OP_RETURN data by transaction ID
-func (bc *Blockchain) GetReturnData(txID string) ([]byte, error) {
-	if bc.storage == nil {
-		return nil, fmt.Errorf("storage not initialized")
-	}
-
-	// Get the underlying database from storage - note it returns (db, error)
-	db, err := bc.storage.GetDB()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get database: %w", err)
-	}
-	if db == nil {
-		return nil, fmt.Errorf("database is nil")
-	}
-
-	key := fmt.Sprintf("return:%s", txID)
-
-	// Use the database's Get method
-	return db.Get(key)
+// GetCurrentState returns the current state snapshot
+// Returns: Current state snapshot
+func (bc *Blockchain) GetCurrentState() *storage.StateSnapshot {
+	// Get current state from state machine
+	return bc.stateMachine.GetCurrentState()
 }

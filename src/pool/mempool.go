@@ -534,11 +534,18 @@ func (mp *Mempool) CalculateTransactionSize(tx *types.Transaction) uint64 {
 		size += uint64(len(tx.GasPrice.Bytes()))
 	}
 
-	size += 8 // for Nonce
+	size += 8 // for Nonce (uint64)
+	size += 8 // for Timestamp (int64)
 	size += uint64(len(tx.ID))
 
 	if tx.Signature != nil {
 		size += uint64(len(tx.Signature))
+	}
+
+	// CRITICAL: Include OP_RETURN data size - this data occupies real block space
+	if tx.HasReturnData() && len(tx.ReturnData) > 0 {
+		size += uint64(len(tx.ReturnData))
+		logger.Debug("CalculateTransactionSize: including OP_RETURN data size=%d bytes", len(tx.ReturnData))
 	}
 
 	return size

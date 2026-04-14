@@ -70,7 +70,49 @@ func NewStateMachine(storage *Storage, nodeID string, validators []string) *Stat
 		sm.createInitialState()
 	}
 
+	// Clean up any stale final states from previous runs
+	sm.CleanupStaleFinalStates()
+
 	return sm
+}
+
+// CleanupStaleFinalStates removes final states for blocks that don't exist in storage
+func (sm *StateMachine) CleanupStaleFinalStates() {
+	sm.stateMutex.Lock()
+	defer sm.stateMutex.Unlock()
+
+	var cleaned []*FinalStateInfo
+	removedCount := 0
+
+	for _, state := range sm.finalStates {
+		if state == nil {
+			removedCount++
+			continue
+		}
+
+		// Check if block exists in storage
+		block, err := sm.storage.GetBlockByHash(state.BlockHash)
+		if err != nil || block == nil {
+			logger.Info("🧹 Removing stale final state for block %s (height=%d, status=%s)",
+				state.BlockHash, state.BlockHeight, state.Status)
+			removedCount++
+			continue
+		}
+
+		// Also fix empty merkle roots for existing states
+		if state.MerkleRoot == "" {
+			state.MerkleRoot = sm.extractMerkleRootFromBlock(block)
+			logger.Info("🔄 Fixed empty merkle_root for block %s: %s", state.BlockHash, state.MerkleRoot)
+		}
+
+		cleaned = append(cleaned, state)
+	}
+
+	sm.finalStates = cleaned
+	if removedCount > 0 {
+		logger.Info("✅ Cleaned up %d stale final states, %d remaining",
+			removedCount, len(sm.finalStates))
+	}
 }
 
 // SetConsensus sets the consensus module for the state machine
@@ -254,14 +296,12 @@ func mapMessageTypeToStatus(messageType string) string {
 	}
 }
 
-// ULTIMATE FIX: syncFinalStates with emergency fallbacks
 func (sm *StateMachine) syncFinalStates() {
 	if sm.consensus == nil {
 		logger.Debug("Cannot sync final states: consensus engine is nil")
 		return
 	}
 
-	// Force immediate population in consensus layer first
 	sm.consensus.ForcePopulateAllSignatures()
 
 	sm.stateMutex.Lock()
@@ -274,6 +314,14 @@ func (sm *StateMachine) syncFinalStates() {
 	sm.finalStates = make([]*FinalStateInfo, 0)
 
 	for _, rawSig := range rawSignatures {
+		// CRITICAL FIX: Only include blocks that exist in storage
+		block, err := sm.storage.GetBlockByHash(rawSig.BlockHash)
+		if err != nil || block == nil {
+			logger.Warn("Skipping final state for block %s: block not found in storage (height=%d, type=%s)",
+				rawSig.BlockHash, rawSig.BlockHeight, rawSig.MessageType)
+			continue // Skip this stale signature
+		}
+
 		// Convert ConsensusSignature to FinalStateInfo with proper population
 		finalState := sm.convertToFinalStateInfo(rawSig)
 
@@ -340,11 +388,13 @@ func (sm *StateMachine) convertToFinalStateInfo(sig *consensus.ConsensusSignatur
 	var blockTimestamp int64
 
 	if err == nil && block != nil {
+		// Extract real merkle root from the block
 		merkleRoot = sm.extractMerkleRootFromBlock(block)
 		blockTimestamp = block.GetTimestamp()
 	} else {
-		merkleRoot = "block_not_found"
-		blockTimestamp = 0
+		// Don't create final state for missing blocks
+		logger.Warn("Block not found for hash %s, cannot create final state", sig.BlockHash)
+		return nil
 	}
 
 	// Determine proper status
@@ -539,14 +589,16 @@ func (sm *StateMachine) createFinalStateFromBlock(block *types.Block) *FinalStat
 
 // ensureFinalStatePopulated guarantees critical fields are never empty
 func (sm *StateMachine) FinalStatePopulated(state *FinalStateInfo) *FinalStateInfo {
-	// EMERGENCY: Ensure merkle_root is NEVER empty
 	if state.MerkleRoot == "" || state.MerkleRoot == "pending_calculation" {
 		block, err := sm.storage.GetBlockByHash(state.BlockHash)
 		if err == nil && block != nil {
 			state.MerkleRoot = sm.extractMerkleRootFromBlock(block)
 			logger.Info("🔄 Fixed empty merkle_root for %s: %s", state.BlockHash, state.MerkleRoot)
 		} else {
-			state.MerkleRoot = fmt.Sprintf("calculated_%s", state.BlockHash[:16])
+			// DON'T create fake merkle root - leave empty or use "pending"
+			state.MerkleRoot = "" // Empty means not available yet
+			// Or use: state.MerkleRoot = "pending"
+			logger.Debug("Block %s not found in storage, leaving merkle_root empty", state.BlockHash)
 		}
 	}
 

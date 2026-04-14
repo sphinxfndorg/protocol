@@ -210,7 +210,7 @@ func (d *DB) Get(key string) ([]byte, error) {
 	}
 
 	// Successfully retrieved value
-	logger.Info("Successfully retrieved key %s from LevelDB", key)
+	logger.Debug("Successfully retrieved key %s from LevelDB", key)
 	return data, nil
 }
 

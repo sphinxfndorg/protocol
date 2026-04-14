@@ -24,6 +24,7 @@
 package state
 
 import (
+	"math/big"
 	"sync"
 	"time"
 
@@ -281,13 +282,14 @@ type FinalStateInfo struct {
 
 // Operation represents a state machine operation (block or transaction)
 type Operation struct {
-	Type        OperationType      `json:"type"`
-	Block       *types.Block       `json:"block,omitempty"`
-	Transaction *types.Transaction `json:"transaction,omitempty"`
-	View        uint64             `json:"view"`
-	Sequence    uint64             `json:"sequence"`
-	Proposer    string             `json:"proposer"`
-	Signature   []byte             `json:"signature"`
+	Type            OperationType      `json:"type"`
+	Block           *types.Block       `json:"block,omitempty"`
+	Transaction     *types.Transaction `json:"transaction,omitempty"`
+	StateTransition *StateTransition   // ADD THIS FIELD
+	View            uint64             `json:"view"`
+	Sequence        uint64             `json:"sequence"`
+	Proposer        string             `json:"proposer"`
+	Signature       []byte             `json:"signature"`
 
 	// UPDATED: Use FinalStateInfo instead of ConsensusSignature
 	FinalStates []*FinalStateInfo `json:"final_states,omitempty"`
@@ -370,4 +372,14 @@ type StorageState struct {
 	BlocksDir     string `json:"blocks_dir"`
 	IndexDir      string `json:"index_dir"`
 	StateDir      string `json:"state_dir"`
+}
+
+// StateTransition represents a state transition operation (validator changes, parameter updates, etc.)
+type StateTransition struct {
+	TransitionType string      `json:"transition_type"` // "validator_add", "validator_remove", "stake_update", "param_change"
+	ValidatorID    string      `json:"validator_id,omitempty"`
+	StakeAmount    *big.Int    `json:"stake_amount,omitempty"`
+	ParamName      string      `json:"param_name,omitempty"`
+	ParamValue     interface{} `json:"param_value,omitempty"`
+	Timestamp      int64       `json:"timestamp,omitempty"`
 }

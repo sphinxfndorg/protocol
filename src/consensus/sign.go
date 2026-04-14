@@ -25,6 +25,7 @@ package consensus
 
 import (
 	"crypto"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -439,20 +440,37 @@ func (s *SigningService) GenerateMessageHash(messageType string, data []byte) []
 // SignProposal signs a block proposal.
 // This creates a cryptographic signature for the proposal that can be verified
 // by other nodes in the consensus protocol.
+// SignProposal signs a block proposal.
 func (s *SigningService) SignProposal(proposal *Proposal) error {
-	// Serialize the proposal to a deterministic byte string for signing
-	data := s.serializeProposalForSigning(proposal)
-	logger.Info("🔐 SIGNING PROPOSAL for node %s - Data: %s", s.nodeID, string(data))
+	// Build the raw string for logging
+	var dataStr string
+	if proposal.SlotNumber > 0 {
+		dataStr = fmt.Sprintf("PROPOSAL:%d:%s:%s:%d",
+			proposal.View,
+			proposal.Block.GetHash(),
+			proposal.ProposerID,
+			proposal.SlotNumber)
+	} else {
+		dataStr = fmt.Sprintf("PROPOSAL:%d:%s:%s",
+			proposal.View,
+			proposal.Block.GetHash(),
+			proposal.ProposerID)
+	}
 
-	// Sign the serialized data using the SignMessage function
+	// Hash it for signing
+	dataHash := sha256.Sum256([]byte(dataStr))
+	data := dataHash[:]
+
+	logger.Info("🔐 SIGNING PROPOSAL for node %s - Raw: %s", s.nodeID, dataStr)
+	logger.Info("🔐 SIGNING PROPOSAL for node %s - Hash: %x", s.nodeID, data)
+
+	// Sign the hash
 	signedData, err := s.SignMessage(data)
 	if err != nil {
 		return err
 	}
-	// Attach the signature to the proposal
 	proposal.Signature = signedData
 
-	// Log the signature for debugging
 	signatureHex := hex.EncodeToString(signedData)
 	logger.Info("🔐 CREATED PROPOSAL SIGNATURE for node %s: %s... (length: %d chars)",
 		s.nodeID,
@@ -509,20 +527,22 @@ func (s *SigningService) VerifyProposal(proposal *Proposal) (bool, error) {
 
 // SignVote signs a vote (prepare or commit).
 // Votes are used in the consensus protocol to indicate agreement on a block.
+// SignVote signs a vote (prepare or commit).
 func (s *SigningService) SignVote(vote *Vote) error {
-	// Serialize the vote to a deterministic byte string for signing
+	// Use the serializer method (returns hash directly)
 	data := s.serializeVoteForSigning(vote)
-	logger.Info("🔐 SIGNING VOTE for node %s - Data: %s", s.nodeID, string(data))
 
-	// Sign the serialized data
+	// Log the raw string for debugging (optional - you'd need to reconstruct it)
+	dataStr := fmt.Sprintf("VOTE:%d:%s:%s", vote.View, vote.BlockHash, vote.VoterID)
+	logger.Info("🔐 SIGNING VOTE for node %s - Raw: %s", s.nodeID, dataStr)
+	logger.Info("🔐 SIGNING VOTE for node %s - Hash: %x", s.nodeID, data)
+
 	signature, err := s.SignMessage(data)
 	if err != nil {
 		return err
 	}
-	// Attach the signature to the vote
 	vote.Signature = signature
 
-	// Log the signature for debugging
 	signatureHex := hex.EncodeToString(signature)
 	logger.Info("🔐 CREATED VOTE SIGNATURE for node %s: %s... (length: %d chars)",
 		s.nodeID,
@@ -560,15 +580,18 @@ func (s *SigningService) VerifyVote(vote *Vote) (bool, error) {
 // SignTimeout signs a timeout message.
 // Timeout messages are used in consensus to signal that a round has timed out.
 func (s *SigningService) SignTimeout(timeout *TimeoutMsg) error {
-	// Serialize the timeout message to a deterministic byte string for signing
+	// Use the serializer method (returns hash directly)
 	data := s.serializeTimeoutForSigning(timeout)
 
-	// Sign the serialized data
+	// Log the raw string for debugging
+	dataStr := fmt.Sprintf("TIMEOUT:%d:%s:%d", timeout.View, timeout.VoterID, timeout.Timestamp)
+	logger.Info("🔐 SIGNING TIMEOUT for node %s - Raw: %s", s.nodeID, dataStr)
+	logger.Info("🔐 SIGNING TIMEOUT for node %s - Hash: %x", s.nodeID, data)
+
 	signature, err := s.SignMessage(data)
 	if err != nil {
 		return err
 	}
-	// Attach the signature to the timeout message
 	timeout.Signature = signature
 	return nil
 }
@@ -601,48 +624,52 @@ func (s *SigningService) VerifyTimeout(timeout *TimeoutMsg) (bool, error) {
 // serializeProposalForSigning creates a deterministic byte string from a proposal.
 // This ensures that the same proposal always produces the same bytes for signing.
 // The format includes: message type, view number, block hash, proposer ID, and either slot number or timestamp.
+// Fixed version for proposals
 func (s *SigningService) serializeProposalForSigning(proposal *Proposal) []byte {
-	// Check if this proposal has a slot number (post-aggregation)
+	var dataStr string
 	if proposal.SlotNumber > 0 {
-		// Format: PROPOSAL:VIEW:BLOCKHASH:PROPOSERID:SLOTNUMBER
-		data := fmt.Sprintf("PROPOSAL:%d:%s:%s:%d",
+		dataStr = fmt.Sprintf("PROPOSAL:%d:%s:%s:%d",
 			proposal.View,
 			proposal.Block.GetHash(),
 			proposal.ProposerID,
 			proposal.SlotNumber)
-		return []byte(data)
+	} else {
+		dataStr = fmt.Sprintf("PROPOSAL:%d:%s:%s",
+			proposal.View,
+			proposal.Block.GetHash(),
+			proposal.ProposerID)
 	}
 
-	// Fallback: use block timestamp instead of slot number
-	// Format: PROPOSAL:VIEW:BLOCKHASH:PROPOSERID:TIMESTAMP
-	data := fmt.Sprintf("PROPOSAL:%d:%s:%s:%d",
-		proposal.View,
-		proposal.Block.GetHash(),
-		proposal.ProposerID,
-		proposal.Block.GetTimestamp())
-	return []byte(data)
+	// SIGN THE HASH, not the raw string!
+	hash := sha256.Sum256([]byte(dataStr))
+	return hash[:] // Return 32-byte hash
 }
 
-// serializeVoteForSigning creates a deterministic byte string from a vote.
-// Format: VOTE:VIEW:BLOCKHASH:VOTERID
-// This ensures votes for the same view and block produce consistent signing bytes.
+// Fixed version for votes
 func (s *SigningService) serializeVoteForSigning(vote *Vote) []byte {
-	data := fmt.Sprintf("VOTE:%d:%s:%s",
+	dataStr := fmt.Sprintf("VOTE:%d:%s:%s",
 		vote.View,
 		vote.BlockHash,
 		vote.VoterID)
-	return []byte(data)
+
+	// SIGN THE HASH
+	hash := sha256.Sum256([]byte(dataStr))
+	return hash[:] // Return 32-byte hash
 }
 
 // serializeTimeoutForSigning creates a deterministic byte string from a timeout.
 // Format: TIMEOUT:VIEW:VOTERID:TIMESTAMP
 // The timestamp ensures each timeout message is unique even for the same view.
+// FIX THIS - currently signing raw data
 func (s *SigningService) serializeTimeoutForSigning(timeout *TimeoutMsg) []byte {
-	data := fmt.Sprintf("TIMEOUT:%d:%s:%d",
+	dataStr := fmt.Sprintf("TIMEOUT:%d:%s:%d",
 		timeout.View,
 		timeout.VoterID,
 		timeout.Timestamp)
-	return []byte(data)
+
+	// SIGN THE HASH, not the raw string!
+	hash := sha256.Sum256([]byte(dataStr))
+	return hash[:] // Return 32-byte hash
 }
 
 // GetPublicKey returns the public key for this node as bytes.
@@ -669,7 +696,6 @@ func (s *SigningService) SignBlock(block Block) error {
 	// Try to unwrap the block to get the underlying types.Block
 	tb, ok := block.(*types.Block)
 	if !ok {
-		// Check if the block implements the underlying block getter interface
 		type underlyingBlockGetter interface {
 			GetUnderlyingBlock() *types.Block
 		}
@@ -677,22 +703,34 @@ func (s *SigningService) SignBlock(block Block) error {
 			tb = getter.GetUnderlyingBlock()
 		}
 	}
-	// Validate we successfully unwrapped the block
 	if tb == nil {
 		return fmt.Errorf("SignBlock: cannot unwrap *types.Block from interface")
 	}
-	// Ensure the block has been hashed before signing
-	if tb.Header == nil || len(tb.Header.Hash) == 0 {
-		return fmt.Errorf("block must be hashed before signing")
+
+	// Ensure the block hash is finalized before signing
+	if tb.Header == nil || len(tb.Header.SigDataHash) == 0 {
+		// Finalize the hash if not already done (this sets SigDataHash to raw hash)
+		tb.FinalizeHash()
 	}
 
-	// Sign the block header hash
-	signedData, err := s.SignMessage(tb.Header.Hash)
+	// CORRECT: Sign the RAW block hash (32 bytes), not the hex string
+	rawHash := tb.Header.SigDataHash
+	if len(rawHash) == 0 {
+		return fmt.Errorf("block hash not finalized")
+	}
+
+	logger.Info("🔐 Signing raw block hash: %x", rawHash)
+
+	signedData, err := s.SignMessage(rawHash) // ← Sign raw bytes!
 	if err != nil {
 		return fmt.Errorf("failed to sign block: %w", err)
 	}
 
-	// Attach the signature and proposer ID to the block header
+	// CORRECT: SigDataHash already contains raw hash from FinalizeHash
+	// No need to set it again (it's already the raw hash)
+	// tb.Header.SigDataHash is already set correctly in FinalizeHash
+
+	// Attach the signature and proposer ID
 	tb.Header.ProposerSignature = signedData
 	tb.Header.ProposerID = s.nodeID
 	return nil
@@ -700,6 +738,7 @@ func (s *SigningService) SignBlock(block Block) error {
 
 // VerifyBlockSignature verifies the proposer's signature on a block using VM.
 // This validates that the block was actually proposed and signed by the claimed proposer.
+// VerifyBlockSignature verifies the proposer's signature on a block using VM.
 func (s *SigningService) VerifyBlockSignature(block Block) (bool, error) {
 	// Unwrap the block to access the underlying types.Block
 	tb, ok := block.(*types.Block)
@@ -733,8 +772,17 @@ func (s *SigningService) VerifyBlockSignature(block Block) (bool, error) {
 		return false, fmt.Errorf("failed to deserialize block signature: %w", err)
 	}
 
-	// Verify that the signed data matches the block hash
-	if string(signedMsg.Data) != string(tb.Header.Hash) {
+	// FIX: Compare with RAW hash (SigDataHash), not hex string (Hash)
+	// The signature signs the raw 32-byte hash, not the hex string
+	rawHash := tb.Header.SigDataHash
+	if len(rawHash) == 0 {
+		return false, fmt.Errorf("block has no raw hash (SigDataHash)")
+	}
+
+	// Verify that the signed data matches the raw block hash
+	if string(signedMsg.Data) != string(rawHash) {
+		logger.Warn("Signature data mismatch: signed=%x, expected=%x",
+			signedMsg.Data, rawHash)
 		return false, fmt.Errorf("signature data does not match block hash")
 	}
 

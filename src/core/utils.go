@@ -25,6 +25,7 @@ package core
 
 import (
 	"context"
+	"crypto/sha3"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -259,26 +260,141 @@ func (bc *Blockchain) GetNetworkInfo() map[string]interface{} {
 	return info
 }
 
-// storeReturnData stores OP_RETURN data for light clients
+// storeReturnData stores OP_RETURN data for light clients and in-memory cache
 func (bc *Blockchain) storeReturnData(txID string, data []byte) error {
+	// Store in-memory first for fast access
+	bc.svmMutex.Lock()
+	if bc.returnDataStore == nil {
+		bc.returnDataStore = make(map[string][]byte)
+	}
+	bc.returnDataStore[txID] = data
+
+	// Also store by content hash for lookup
+	dataHash := sha3.Sum256(data)
+	hashKey := hex.EncodeToString(dataHash[:])
+	bc.returnDataStore["hash:"+hashKey] = data
+
+	// Limit in-memory store size
+	const maxStoreSize = 10000
+	if len(bc.returnDataStore) > maxStoreSize {
+		// Remove oldest entries (simple cleanup)
+		toRemove := maxStoreSize / 10
+		removed := 0
+		for k := range bc.returnDataStore {
+			if removed >= toRemove {
+				break
+			}
+			delete(bc.returnDataStore, k)
+			removed++
+		}
+		logger.Debug("Cleaned up %d old OP_RETURN entries, store size now %d",
+			removed, len(bc.returnDataStore))
+	}
+	bc.svmMutex.Unlock()
+
+	// Also persist to storage for durability
 	if bc.storage == nil {
-		return fmt.Errorf("storage not initialized")
+		return nil // No storage available, but in-memory is fine
 	}
 
-	// Get the underlying database from storage - note it returns (db, error)
+	// Get the underlying database from storage
 	db, err := bc.storage.GetDB()
 	if err != nil {
-		return fmt.Errorf("failed to get database: %w", err)
+		logger.Warn("Failed to get database for OP_RETURN storage: %v", err)
+		return nil // Don't fail - in-memory is enough
 	}
 	if db == nil {
-		return fmt.Errorf("database is nil")
+		return nil
 	}
 
 	// Store in a separate "return_data" bucket/prefix
 	key := fmt.Sprintf("return:%s", txID)
-
-	// Use the database's Put method
 	return db.Put(key, data)
+}
+
+// GetReturnDataByHash retrieves OP_RETURN data by content hash
+func (bc *Blockchain) GetReturnDataByHash(hash string) ([]byte, error) {
+	bc.svmMutex.RLock()
+	defer bc.svmMutex.RUnlock()
+
+	if bc.returnDataStore == nil {
+		return nil, fmt.Errorf("return data store not initialized")
+	}
+
+	data, exists := bc.returnDataStore["hash:"+hash]
+	if !exists {
+		return nil, fmt.Errorf("return data not found for hash %s", hash)
+	}
+
+	return data, nil
+}
+
+// GetSVMStats returns statistics about SVM operations
+func (bc *Blockchain) GetSVMStats() map[string]interface{} {
+	bc.svmMutex.RLock()
+	defer bc.svmMutex.RUnlock()
+
+	stats := map[string]interface{}{
+		"stored_return_data_count": 0,
+		"failure_count":            0,
+		"failures":                 []map[string]interface{}{},
+	}
+
+	if bc.returnDataStore != nil {
+		stats["stored_return_data_count"] = len(bc.returnDataStore)
+	}
+
+	if bc.svmFailures != nil {
+		stats["failure_count"] = len(bc.svmFailures)
+		// Return a copy of failures (last 10 for safety)
+		if len(bc.svmFailures) > 10 {
+			stats["failures"] = bc.svmFailures[len(bc.svmFailures)-10:]
+		} else {
+			stats["failures"] = bc.svmFailures
+		}
+	}
+
+	return stats
+}
+
+// recordSVMFailure records SVM execution failures for monitoring
+// This does NOT affect consensus - purely for observability
+func (bc *Blockchain) recordSVMFailure(blockHash, txHash string, err error) {
+	bc.svmMutex.Lock()
+	defer bc.svmMutex.Unlock()
+
+	if bc.svmFailures == nil {
+		bc.svmFailures = make([]map[string]interface{}, 0)
+	}
+
+	bc.svmFailures = append(bc.svmFailures, map[string]interface{}{
+		"block_hash": blockHash,
+		"tx_hash":    txHash,
+		"error":      err.Error(),
+		"timestamp":  time.Now().Unix(),
+	})
+
+	// Keep only last 1000 failures to prevent memory bloat
+	const maxFailures = 1000
+	if len(bc.svmFailures) > maxFailures {
+		bc.svmFailures = bc.svmFailures[len(bc.svmFailures)-maxFailures:]
+	}
+}
+
+// ClearSVMData clears SVM stored data for testing or maintenance
+func (bc *Blockchain) ClearSVMData(clearFailures, clearReturnData bool) {
+	bc.svmMutex.Lock()
+	defer bc.svmMutex.Unlock()
+
+	if clearFailures && bc.svmFailures != nil {
+		bc.svmFailures = make([]map[string]interface{}, 0)
+		logger.Info("Cleared SVM failure records")
+	}
+
+	if clearReturnData && bc.returnDataStore != nil {
+		bc.returnDataStore = make(map[string][]byte)
+		logger.Info("Cleared SVM return data store")
+	}
 }
 
 // GetReturnData retrieves OP_RETURN data by transaction ID

@@ -459,7 +459,6 @@ func (b *Block) CalculateTxsRoot() []byte {
 }
 
 // FinalizeHash ensures all roots are properly set before finalizing the block hash
-// This should be called before final block submission
 func (b *Block) FinalizeHash() {
 	// Check if header exists
 	if b.Header == nil {
@@ -467,33 +466,64 @@ func (b *Block) FinalizeHash() {
 	}
 
 	// Ensure TxsRoot is calculated before generating the final hash
-	// Calculate transaction root from current transactions
 	b.Header.TxsRoot = b.CalculateTxsRoot()
 
 	// Ensure UnclesHash is calculated from actual uncle blocks WITH HEIGHT
-	// Calculate uncles hash from current uncles
-	b.Header.UnclesHash = CalculateUnclesHash(b.Body.Uncles, b.Header.Height) // Pass height here
+	b.Header.UnclesHash = CalculateUnclesHash(b.Body.Uncles, b.Header.Height)
 
-	// Generate the hash (this now returns hex-encoded bytes)
-	hashBytes := b.GenerateBlockHash()
+	// ========== STEP 1: Calculate RAW hash (32 bytes) ==========
+	// Collect all header fields for hashing
+	versionBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(versionBytes, b.Header.Version)
 
-	// Validate the generated hash is printable
-	// Check for non-printable characters in the hash
-	hashStr := string(hashBytes)
-	for i, r := range hashStr {
-		if r < 32 || r > 126 {
-			log.Printf("❌ CRITICAL: Generated hash still contains non-printable char at position %d: %d", i, r)
-			// Force hex encoding as fallback
-			hashBytes = []byte(hex.EncodeToString(hashBytes))
-			break
-		}
+	blockNumBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(blockNumBytes, b.Header.Block)
+
+	timestampBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(timestampBytes, uint64(b.Header.Timestamp))
+
+	nonceBytes, err := common.NonceToBytes(b.Header.Nonce)
+	if err != nil {
+		logger.Warn("Failed to convert nonce to bytes: %v, using zero nonce", err)
+		nonceBytes = make([]byte, 8)
 	}
 
-	// Store the final hash
-	b.Header.Hash = hashBytes
-	log.Printf("✅ Finalized block %d hash: %s", b.Header.Height, string(hashBytes))
-	log.Printf("✅ ParentHash: %x", b.Header.ParentHash)
-	log.Printf("✅ UnclesHash: %x (%d uncle blocks)", b.Header.UnclesHash, len(b.Body.Uncles))
+	// Concatenate all header fields
+	headerData := versionBytes
+	headerData = append(headerData, blockNumBytes...)
+	headerData = append(headerData, timestampBytes...)
+	headerData = append(headerData, b.Header.ParentHash...)
+	headerData = append(headerData, b.Header.TxsRoot...)
+	headerData = append(headerData, b.Header.StateRoot...)
+	headerData = append(headerData, nonceBytes...)
+	headerData = append(headerData, b.Header.Difficulty.Bytes()...)
+	headerData = append(headerData, b.Header.GasLimit.Bytes()...)
+	headerData = append(headerData, b.Header.GasUsed.Bytes()...)
+	headerData = append(headerData, b.Header.UnclesHash...)
+	headerData = append(headerData, b.Header.ExtraData...)
+	headerData = append(headerData, b.Header.Miner...)
+
+	// Calculate RAW hash (32 bytes) - THIS IS WHAT GETS SIGNED
+	rawHash := common.SpxHash(headerData)
+
+	// ========== STEP 2: Store RAW hash in SigDataHash (for signing) ==========
+	b.Header.SigDataHash = rawHash // 32 raw bytes
+
+	// ========== STEP 3: Convert to hex string for JSON display ==========
+	hexHash := hex.EncodeToString(rawHash)
+
+	// SPECIAL CASE: Genesis block
+	if b.Header.Height == 0 {
+		hexHash = "GENESIS_" + hexHash
+	}
+
+	b.Header.Hash = []byte(hexHash) // Store hex string for display
+
+	log.Printf("✅ Finalized block %d", b.Header.Height)
+	log.Printf("   Raw hash (signed): %x", rawHash)
+	log.Printf("   Hex hash (display): %s", hexHash)
+	log.Printf("   ParentHash: %x", b.Header.ParentHash)
+	log.Printf("   UnclesHash: %x (%d uncles)", b.Header.UnclesHash, len(b.Body.Uncles))
 }
 
 // ValidateUnclesHash validates that UnclesHash matches the calculated uncles
@@ -711,7 +741,7 @@ func (h *BlockHeader) UnmarshalJSON(data []byte) error {
 	}
 	h.ProposerID = aux.ProposerID
 
-	return nil // only one return nil here — the duplicate is removed
+	return nil
 }
 
 // MarshalJSON for Block

@@ -20,7 +20,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-// go/src/state/storage.go
+// go/src/state/state.go
 package state
 
 import (
@@ -1633,23 +1633,24 @@ func (s *Storage) storeBlockToDisk(block *types.Block) error {
 	// Create a custom serialization structure with ISO timestamp
 	type SerializableBlock struct {
 		Header struct {
-			Hash              string `json:"hash"`               // This block's hash
-			TxsRoot           string `json:"txs_root"`           // Merkle root of transactions
-			StateRoot         string `json:"state_root"`         // State Merkle root
-			ParentHash        string `json:"parent_hash"`        // Hash of the previous block (chain continuity)
-			UnclesHash        string `json:"uncles_hash"`        // Hash of uncle blocks
-			ExtraData         string `json:"extra_data"`         // Additional block data
-			Miner             string `json:"miner"`              // Miner address
-			Version           uint64 `json:"version"`            // Block version
-			NBlock            uint64 `json:"nblock"`             // Block number/height
-			Height            uint64 `json:"height"`             // Block height
-			Timestamp         string `json:"timestamp"`          // Block timestamp in ISO RFC format
-			Difficulty        string `json:"difficulty"`         // Mining difficulty
-			Nonce             string `json:"nonce"`              // Mining nonce
-			GasLimit          string `json:"gas_limit"`          // Gas limit
-			GasUsed           string `json:"gas_used"`           // Gas used
-			ProposerSignature string `json:"proposer_signature"` // was missing
-			ProposerID        string `json:"proposer_id"`        // was missing
+			Hash              string `json:"hash"`                    // This block's hash
+			TxsRoot           string `json:"txs_root"`                // Merkle root of transactions
+			StateRoot         string `json:"state_root"`              // State Merkle root
+			ParentHash        string `json:"parent_hash"`             // Hash of the previous block (chain continuity)
+			UnclesHash        string `json:"uncles_hash"`             // Hash of uncle blocks
+			ExtraData         string `json:"extra_data"`              // Additional block data
+			Miner             string `json:"miner"`                   // Miner address
+			Version           uint64 `json:"version"`                 // Block version
+			NBlock            uint64 `json:"nblock"`                  // Block number/height
+			Height            uint64 `json:"height"`                  // Block height
+			Timestamp         string `json:"timestamp"`               // Block timestamp in ISO RFC format
+			Difficulty        string `json:"difficulty"`              // Mining difficulty
+			Nonce             string `json:"nonce"`                   // Mining nonce
+			GasLimit          string `json:"gas_limit"`               // Gas limit
+			GasUsed           string `json:"gas_used"`                // Gas used
+			ProposerSignature string `json:"proposer_signature"`      // was missing
+			ProposerID        string `json:"proposer_id"`             // was missing
+			SigDataHash       string `json:"sig_data_hash,omitempty"` // ← ADD THIS
 			CommitStatus      string `json:"commit_status"`
 			SigValid          bool   `json:"signature_valid"`
 		} `json:"header"`
@@ -1847,7 +1848,7 @@ func (s *Storage) loadBlockFromDisk(hash string) (*types.Block, error) {
 		timestamp = time.Now().Unix()
 	}
 
-	// var block is declared here — ALL assignments must come after this line
+	// ✅ DECLARE block HERE first
 	var block types.Block
 	block.Header = &types.BlockHeader{
 		Version:    tempBlock.Header.Version,

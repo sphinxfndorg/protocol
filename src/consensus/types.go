@@ -391,3 +391,18 @@ type SlotInfo struct {
 	Committee []*StakedValidator
 	Timestamp time.Time
 }
+
+// StateMachineInterface defines the methods needed for state transitions
+type StateMachineInterface interface {
+	ProposeStateTransition(transition *StateTransition) error
+}
+
+// StateTransition defines the structure for state changes
+type StateTransition struct {
+	TransitionType string      `json:"transition_type"`
+	ValidatorID    string      `json:"validator_id,omitempty"`
+	StakeAmount    *big.Int    `json:"stake_amount,omitempty"`
+	ParamName      string      `json:"param_name,omitempty"`
+	ParamValue     interface{} `json:"param_value,omitempty"`
+	Timestamp      int64       `json:"timestamp,omitempty"`
+}

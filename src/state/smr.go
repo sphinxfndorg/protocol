@@ -28,12 +28,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/big"
 	"strings"
 	"time"
 
 	"github.com/sphinxorg/protocol/src/consensus"
 	types "github.com/sphinxorg/protocol/src/core/transaction"
 	logger "github.com/sphinxorg/protocol/src/log"
+	denom "github.com/sphinxorg/protocol/src/params/denom"
 )
 
 const (
@@ -745,6 +747,80 @@ func (sm *StateMachine) ProposeTransaction(tx *types.Transaction) error {
 	}
 }
 
+// ProposeStateTransition proposes a state transition (validator changes, param changes, etc.)
+func (sm *StateMachine) ProposeStateTransition(transition *StateTransition) error {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	if !sm.isValidator() {
+		return fmt.Errorf("node %s is not a validator", sm.nodeID)
+	}
+
+	// Validate the state transition
+	if err := sm.validateStateTransition(transition); err != nil {
+		return fmt.Errorf("invalid state transition: %w", err)
+	}
+
+	// Create operation with state transition
+	op := &Operation{
+		Type:            OpStateTransition,
+		StateTransition: transition,
+		View:            sm.currentView,
+		Sequence:        sm.currentState.Height + 1,
+		Proposer:        sm.nodeID,
+		Signature:       []byte{},
+	}
+
+	// Send to operation channel
+	select {
+	case sm.opCh <- op:
+		log.Printf("Proposed state transition: type=%s, validator=%s",
+			transition.TransitionType, transition.ValidatorID)
+		return nil
+	default:
+		return fmt.Errorf("operation channel full")
+	}
+}
+
+// validateStateTransition validates a state transition
+func (sm *StateMachine) validateStateTransition(transition *StateTransition) error {
+	if transition == nil {
+		return fmt.Errorf("state transition is nil")
+	}
+
+	switch transition.TransitionType {
+	case "validator_add":
+		if transition.ValidatorID == "" {
+			return fmt.Errorf("validator ID required for add")
+		}
+		if transition.StakeAmount == nil || transition.StakeAmount.Cmp(big.NewInt(0)) <= 0 {
+			return fmt.Errorf("stake amount must be positive for validator add")
+		}
+	case "validator_remove":
+		if transition.ValidatorID == "" {
+			return fmt.Errorf("validator ID required for remove")
+		}
+		if !sm.validators[transition.ValidatorID] {
+			return fmt.Errorf("validator %s does not exist", transition.ValidatorID)
+		}
+	case "stake_update":
+		if transition.ValidatorID == "" {
+			return fmt.Errorf("validator ID required for stake update")
+		}
+		if transition.StakeAmount == nil || transition.StakeAmount.Cmp(big.NewInt(0)) <= 0 {
+			return fmt.Errorf("stake amount must be positive")
+		}
+	case "param_change":
+		if transition.ParamName == "" {
+			return fmt.Errorf("parameter name required")
+		}
+	default:
+		return fmt.Errorf("unknown transition type: %s", transition.TransitionType)
+	}
+
+	return nil
+}
+
 // HandleOperation processes an incoming operation from other nodes
 func (sm *StateMachine) HandleOperation(op *Operation) error {
 	// Validate operation
@@ -963,7 +1039,54 @@ func (sm *StateMachine) applyTransactionOperation(op *Operation) error {
 
 func (sm *StateMachine) applyStateTransitionOperation(op *Operation) error {
 	// Handle state transitions (validator set changes, etc.)
-	log.Printf("State transition operation received")
+	log.Printf("State transition operation received: type=%d, proposer=%s, view=%d, sequence=%d",
+		op.Type, op.Proposer, op.View, op.Sequence)
+
+	// Check if this operation contains state transition data
+	if op.StateTransition == nil {
+		return fmt.Errorf("state transition operation missing transition data")
+	}
+
+	// Handle different types of state transitions
+	switch op.StateTransition.TransitionType {
+	case "validator_add":
+		// Call the consensus validator set's AddValidator method
+		if sm.consensus != nil && sm.consensus.GetValidatorSet() != nil {
+			// Convert stake from nSPX to SPX for the AddValidator method
+			stakeSPX := new(big.Int).Div(op.StateTransition.StakeAmount, big.NewInt(denom.SPX))
+			err := sm.consensus.GetValidatorSet().AddValidator(
+				op.StateTransition.ValidatorID,
+				stakeSPX.Uint64(),
+			)
+			if err != nil {
+				return fmt.Errorf("failed to add validator: %w", err)
+			}
+		}
+		// Use op.StateTransition.ValidatorID instead of undefined validatorID
+		sm.validators[op.StateTransition.ValidatorID] = true
+
+	case "validator_remove":
+		// Remove an existing validator
+		validatorID := op.StateTransition.ValidatorID
+		log.Printf("Removing validator %s", validatorID)
+		delete(sm.validators, validatorID)
+
+	case "stake_update":
+		// Update validator stake
+		validatorID := op.StateTransition.ValidatorID
+		newStake := op.StateTransition.StakeAmount
+		log.Printf("Updating stake for validator %s to %v", validatorID, newStake)
+
+	case "param_change":
+		// Change chain parameters
+		paramName := op.StateTransition.ParamName
+		paramValue := op.StateTransition.ParamValue
+		log.Printf("Changing parameter %s to %v", paramName, paramValue)
+
+	default:
+		log.Printf("Unknown state transition type: %s", op.StateTransition.TransitionType)
+	}
+
 	return nil
 }
 

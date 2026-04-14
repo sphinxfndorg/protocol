@@ -94,6 +94,9 @@ func NewBlockchain(dataDir string, nodeID string, validators []string, networkTy
 		chainParams:     nil,                                  // Chain parameters (set later after genesis)
 		merkleRootCache: make(map[string]string),              // Cache for Merkle roots to avoid recalculation
 		tpsMonitor:      types.NewTPSMonitor(5 * time.Second), // Monitor transactions per second with 5-second window
+		// SVM data stores
+		returnDataStore: make(map[string][]byte),           // Initialize OP_RETURN data store
+		svmFailures:     make([]map[string]interface{}, 0), // Initialize failure tracking
 	}
 
 	// ── Resolve chain parameters BEFORE initializeChain so that
@@ -1513,6 +1516,7 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 	}
 
 	// Process OP_RETURN data in transactions
+	// In CommitBlock function, update the OP_RETURN processing loop:
 	for _, tx := range typeBlock.Body.TxsList {
 		if tx.HasReturnData() {
 			dataLen := len(tx.ReturnData)
@@ -1542,15 +1546,22 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 
 			vm := vm.NewVM(vmBytecode)
 			if err := vm.SetMemoryBytes(0, memoryLayout); err != nil {
-				return fmt.Errorf("OP_RETURN VM memory setup failed: %w", err)
+				// Record failure but don't fail block commit
+				bc.recordSVMFailure(typeBlock.GetHash(), tx.ID, err)
+				logger.Error("OP_RETURN VM memory setup failed for tx %s: %v", tx.ID, err)
+				continue
 			}
 			if err := vm.Run(); err != nil {
-				return fmt.Errorf("OP_RETURN execution failed: %w", err)
+				// Record failure but don't fail block commit
+				bc.recordSVMFailure(typeBlock.GetHash(), tx.ID, err)
+				logger.Error("OP_RETURN execution failed for tx %s: %v", tx.ID, err)
+				continue
 			}
 
 			// Store return data
 			if err := bc.storeReturnData(tx.ID, tx.ReturnData); err != nil {
 				logger.Warn("Failed to store OP_RETURN data for tx %s: %v", tx.ID, err)
+				// Don't record as failure - storage is optional
 			}
 
 			logger.Info("📝 OP_RETURN: Transaction %s embedded %d bytes: %s",

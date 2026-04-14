@@ -145,6 +145,11 @@ type Blockchain struct {
 
 	// TPS Monitoring
 	tpsMonitor *types.TPSMonitor // Add this line
+
+	// SVM integration - ONE-WAY relationship: replication drives SVM execution
+	svmMutex        sync.RWMutex             // Mutex for SVM data access
+	returnDataStore map[string][]byte        // In-memory store for OP_RETURN data
+	svmFailures     []map[string]interface{} // Tracks SVM failures for monitoring
 }
 
 // GenesisState holds the complete genesis configuration used to bootstrap a node.

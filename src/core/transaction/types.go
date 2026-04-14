@@ -50,6 +50,7 @@ type BlockHeader struct {
 	// NEW: PoS signature fields
 	ProposerSignature []byte `json:"proposer_signature"` // Signature by the block proposer
 	ProposerID        string `json:"proposer_id"`        // Which validator proposed this block
+	SigDataHash       []byte `json:"-"`                  // Exclude from JSON entirely
 
 	// NEW: explicit status fields
 	CommitStatus string `json:"commit_status"`   // "proposed" | "prepared" | "committed"

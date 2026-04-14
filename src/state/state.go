@@ -1058,7 +1058,10 @@ func (s *Storage) ensureFinalStateValues(state *FinalStateInfo) *FinalStateInfo 
 		if err == nil && block != nil {
 			state.MerkleRoot = hex.EncodeToString(block.CalculateTxsRoot())
 		} else {
-			state.MerkleRoot = fmt.Sprintf("calculated_%s", state.BlockHash[:16])
+			// DON'T create fake merkle root - leave empty or use "pending"
+			state.MerkleRoot = "" // Empty means not available yet
+			// Or use: state.MerkleRoot = "pending"
+			logger.Debug("Block %s not found in storage, leaving merkle_root empty", state.BlockHash)
 		}
 	}
 

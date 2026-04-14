@@ -2,9 +2,9 @@
   "phase": "devnet",
   "genesis_hash": "GENESIS_13eb808704d688f89e2111b2e0bddada818b8bc005eed4e451f270b322d769ad",
   "tip_height": 1,
-  "tip_hash": "4e534cb929b4be5b169bc774912e6316459395759e65573c4d9c45bf8199bb99",
+  "tip_hash": "f45450d2dabefb779d180d4ded30af043a2e3fde268281f471105d23e95e3fee",
   "vault_balance": "0",
   "total_supply": "100000000000000000000000000",
-  "timestamp": "2026-04-13T11:47:28Z",
+  "timestamp": "2026-04-14T05:14:04Z",
   "distributed_n_spx": "100000000000000000000000000"
 }

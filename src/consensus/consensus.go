@@ -534,6 +534,10 @@ func (c *Consensus) consensusLoop() {
 	viewTimer := time.NewTimer(c.timeout)
 	defer viewTimer.Stop() // Ensure timer is stopped on exit
 
+	// Create ticker for cleaning up stale signatures (every 30 seconds)
+	cleanupTicker := time.NewTicker(30 * time.Second)
+	defer cleanupTicker.Stop() // Ensure ticker is stopped on exit
+
 	for {
 		select {
 		case <-viewTimer.C:
@@ -568,10 +572,40 @@ func (c *Consensus) consensusLoop() {
 			c.startViewChange()
 			viewTimer.Reset(c.timeout)
 
+		case <-cleanupTicker.C:
+			c.CleanupStaleSignatures() // Clean up stale signatures
+
 		case <-c.ctx.Done(): // Consensus stopping
 			logger.Info("Consensus loop stopped for node %s", c.nodeID)
 			return
 		}
+	}
+}
+
+// CleanupStaleSignatures removes signatures for blocks that don't exist in storage
+func (c *Consensus) CleanupStaleSignatures() {
+	c.signatureMutex.Lock()
+	defer c.signatureMutex.Unlock()
+
+	var cleaned []*ConsensusSignature
+	removedCount := 0
+
+	for _, sig := range c.consensusSignatures {
+		// Check if block exists in storage
+		block := c.blockChain.GetBlockByHash(sig.BlockHash)
+		if block == nil {
+			logger.Info("🧹 Removing stale signature for block %s (height=%d, type=%s)",
+				sig.BlockHash, sig.BlockHeight, sig.MessageType)
+			removedCount++
+			continue // Skip this signature
+		}
+		cleaned = append(cleaned, sig)
+	}
+
+	c.consensusSignatures = cleaned
+	if removedCount > 0 {
+		logger.Info("✅ Cleaned up %d stale consensus signatures, %d remaining",
+			removedCount, len(c.consensusSignatures))
 	}
 }
 

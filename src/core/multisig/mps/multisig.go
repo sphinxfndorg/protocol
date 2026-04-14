@@ -36,6 +36,7 @@ import (
 	sigproof "github.com/sphinxorg/protocol/src/core/proof"
 	key "github.com/sphinxorg/protocol/src/core/sphincs/key/backend"
 	sign "github.com/sphinxorg/protocol/src/core/sphincs/sign/backend"
+	"github.com/sphinxorg/protocol/src/crypto/STHINCS/sthincs"
 
 	"github.com/syndtr/goleveldb/leveldb"
 )
@@ -46,7 +47,7 @@ import (
 // key generation, signing, and verification.
 type MultisigManager struct {
 	km          *key.KeyManager
-	manager     *sign.SphincsManager
+	manager     *sign.STHINCSManager // FIXED: changed from SphincsManager to STHINCSManager
 	quorum      int
 	signatures  map[string][]byte
 	partyPK     map[string][]byte
@@ -89,7 +90,8 @@ func NewMultiSig(n int) (*MultisigManager, error) {
 		return nil, fmt.Errorf("failed to open LevelDB: %v", err)
 	}
 
-	manager := sign.NewSphincsManager(db, km, parameters)
+	// FIXED: NewSTHINCSManager returns *sign.STHINCSManager, which matches the struct field type
+	manager := sign.NewSTHINCSManager(db, km, parameters)
 
 	pubKeys := make([][]byte, n)
 	privKeys := make([][]byte, n)
@@ -144,15 +146,6 @@ func NewMultiSig(n int) (*MultisigManager, error) {
 
 // SignMessage signs a given message for a party and stores all verification
 // material including the new 32-byte commitment.
-//
-// Changes vs original:
-//   - DeserializeKeyPair now uses the stored pkBytes (index i) so we have a
-//     real *sphincs.SPHINCS_PK to pass to manager.SignMessage.
-//   - manager.SignMessage called with (message, sk, pk) — 3 args.
-//   - 6 return values captured: sig, merkleRoot, timestamp, nonce, commitment, err.
-//   - commitment stored in m.commitments[partyID].
-//   - proof leaves = [merkleRootBytes, commitment] to fold commitment into the
-//     proof without changing GenerateSigProof's 3-arg signature.
 func (m *MultisigManager) SignMessage(message []byte, privKey []byte, partyID string) ([]byte, []byte, []byte, []byte, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -160,8 +153,6 @@ func (m *MultisigManager) SignMessage(message []byte, privKey []byte, partyID st
 	log.Printf("Private Key Length: %d", len(privKey))
 
 	// Find matching public key bytes for this private key.
-	// storedSK and storedPK are parallel slices built in NewMultiSig, so we
-	// locate the index by comparing private key bytes.
 	var matchingPKBytes []byte
 	for i, skBytes := range m.storedSK {
 		if bytes.Equal(skBytes, privKey) {
@@ -180,14 +171,14 @@ func (m *MultisigManager) SignMessage(message []byte, privKey []byte, partyID st
 		return nil, nil, nil, nil, fmt.Errorf("failed to deserialize key pair: %v", err)
 	}
 
-	// FIX: pass pk as third argument; capture all 6 return values.
-	// commitment = H(sigBytes||pk||timestamp||nonce||message), 32 bytes.
+	// FIXED: SignMessage returns 6 values
 	sig, merkleRoot, timestamp, nonce, commitment, err := m.manager.SignMessage(message, sk, pk)
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("failed to sign message: %v", err)
 	}
 
-	sigBytes, err := m.manager.SerializeSignature(sig)
+	// FIXED: SerializeSignature is a method on the signature object, not the manager
+	sigBytes, err := sig.SerializeSignature()
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("failed to serialize signature: %v", err)
 	}
@@ -219,10 +210,9 @@ func (m *MultisigManager) SignMessage(message []byte, privKey []byte, partyID st
 	m.timestamps[partyID] = timestamp
 	m.nonces[partyID] = nonce
 	m.merkleRoots[partyID] = merkleRootBytes
-	m.commitments[partyID] = commitment // FIX: persist commitment for VerifySignatures
+	m.commitments[partyID] = commitment
 
-	// FIX: fold commitment into proof leaves so GenerateSigProof stays at 3 args.
-	// Both sign and verify sides must use leaves = [merkleRootBytes, commitment].
+	// Fold commitment into proof leaves
 	proofLeaves := [][]byte{merkleRootBytes, commitment}
 	proof, err := sigproof.GenerateSigProof(
 		[][]byte{append(timestamp, append(nonce, message...)...)},
@@ -239,14 +229,7 @@ func (m *MultisigManager) SignMessage(message []byte, privKey []byte, partyID st
 }
 
 // VerifySignatures checks if enough valid signatures have been collected.
-//
-// Changes vs original:
-//   - Retrieves commitment from m.commitments[partyID].
-//   - Passes commitment as 7th argument to m.manager.VerifySignature.
-//   - Passes storeEvidence=false (8th argument) to avoid storing replay evidence
-//     during multisig verification (each signature is checked individually).
-//   - Proof regeneration uses the same leaves = [merkleRootBytes, commitment]
-//     that SignMessage used, so ValidateProof continues to work correctly.
+// VerifySignatures checks if enough valid signatures have been collected.
 func (m *MultisigManager) VerifySignatures(message []byte) (bool, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -262,14 +245,11 @@ func (m *MultisigManager) VerifySignatures(message []byte) (bool, error) {
 		timestamp := m.timestamps[partyID]
 		nonce := m.nonces[partyID]
 		merkleRootBytes := m.merkleRoots[partyID]
-		// FIX: retrieve the stored commitment for this party.
 		commitment := m.commitments[partyID]
 
 		if publicKey == nil || timestamp == nil || nonce == nil || merkleRootBytes == nil {
 			return false, fmt.Errorf("missing public key, timestamp, nonce, or Merkle root for %s", partyID)
 		}
-		// A missing or wrong-length commitment will cause VerifySignature to
-		// return false at its own guard, but we catch it early for a clear error.
 		if len(commitment) != 32 {
 			return false, fmt.Errorf("missing or malformed commitment for %s", partyID)
 		}
@@ -281,42 +261,24 @@ func (m *MultisigManager) VerifySignatures(message []byte) (bool, error) {
 			return false, fmt.Errorf("timestamp for %s is too old, possible reuse attempt", partyID)
 		}
 
-		// Replay check — the pair was stored at signing time, so it will exist
-		// here. We skip this check during verification to avoid a false positive;
-		// the timestamp freshness window above is the replay guard at verify time.
-		// (Storing again below after a valid sig is still correct behaviour.)
-
 		deserializedPK, err := m.km.DeserializePublicKey(publicKey)
 		if err != nil {
 			return false, fmt.Errorf("error deserializing public key for %s: %v", partyID, err)
 		}
 
-		sig, err := m.manager.DeserializeSignature(sigBytes)
+		// FIXED: Use sthincs.DeserializeSignature instead of sign.DeserializeSignature
+		// You need to import the sthincs package at the top of the file
+		sig, err := sthincs.DeserializeSignature(m.km.GetSPHINCSParameters().Params, sigBytes)
 		if err != nil {
 			return false, fmt.Errorf("error deserializing signature for %s: %v", partyID, err)
 		}
 
 		merkleRoot := &hashtree.HashTreeNode{Hash: uint256.NewInt(0).SetBytes(merkleRootBytes)}
 
-		// FIX: pass commitment as the required 7th argument and storeEvidence=false as 8th.
-		// storeEvidence=false prevents storing timestamp+nonce and signature hash during
-		// multisig verification. The storage already happened when each participant
-		// signed individually (in their local VerifySignature call during signing).
-		// For multisig, we only verify, we don't want to store again.
+		// Verify the signature
 		isValidSig := m.manager.VerifySignature(message, timestamp, nonce, sig, deserializedPK, merkleRoot, commitment, false)
 		if isValidSig {
 			validSignatures++
-			// Note: We do NOT store timestamp+nonce or signature hash here because:
-			//   1. They were already stored during each participant's local verification
-			//   2. Storing again would be redundant
-			//   3. The signature hash check above already confirmed no replay
-			// The StoreTimestampNonce call below is kept for backward compatibility
-			// but is now redundant since the manager.VerifySignature with storeEvidence=false
-			// doesn't store anything.
-			err = m.manager.StoreTimestampNonce(timestamp, nonce)
-			if err != nil {
-				return false, fmt.Errorf("failed to store timestamp-nonce pair for %s: %v", partyID, err)
-			}
 		} else {
 			return false, fmt.Errorf("signature from participant %s is invalid", partyID)
 		}
@@ -330,10 +292,6 @@ func (m *MultisigManager) VerifySignatures(message []byte) (bool, error) {
 }
 
 // ValidateProof validates the proof for a specific participant.
-//
-// FIX: proof regeneration now uses leaves = [merkleRootBytes, commitment],
-// matching what SignMessage produced. Using only [merkleRootBytes] would produce
-// a different hash and always fail.
 func (m *MultisigManager) ValidateProof(partyID string, message []byte) (bool, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -346,7 +304,7 @@ func (m *MultisigManager) ValidateProof(partyID string, message []byte) (bool, e
 	merkleRootHash := m.merkleRoots[partyID]
 	timestamp := m.timestamps[partyID]
 	nonce := m.nonces[partyID]
-	commitment := m.commitments[partyID] // FIX: retrieve commitment
+	commitment := m.commitments[partyID]
 	if merkleRootHash == nil || timestamp == nil || nonce == nil {
 		return false, fmt.Errorf("missing Merkle root, timestamp, or nonce for %s", partyID)
 	}
@@ -357,7 +315,6 @@ func (m *MultisigManager) ValidateProof(partyID string, message []byte) (bool, e
 	resultChan := make(chan bool, 1)
 
 	go func() {
-		// FIX: use the same leaves = [merkleRootHash, commitment] that SignMessage used.
 		proofLeaves := [][]byte{merkleRootHash, commitment}
 		regeneratedProof, err := sigproof.GenerateSigProof(
 			[][]byte{append(timestamp, append(nonce, message...)...)},

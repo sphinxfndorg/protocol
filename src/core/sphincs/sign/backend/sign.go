@@ -28,12 +28,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/sphinxorg/protocol/src/common"
 	"github.com/sphinxorg/protocol/src/core/hashtree"
 	params "github.com/sphinxorg/protocol/src/core/sphincs/config"
 	key "github.com/sphinxorg/protocol/src/core/sphincs/key/backend"
-	"github.com/sphinxorg/protocol/src/crypto/SPHINCSPLUS-golang/sphincs"
+	"github.com/sphinxorg/protocol/src/crypto/STHINCS/sthincs"
 	"github.com/syndtr/goleveldb/leveldb"
 )
 
@@ -136,6 +137,10 @@ import (
 //   be the correct design. That is a significantly larger change and a different
 //   protocol goal than what this commitment achieves.
 
+// =============================================================================
+// CONSTANTS
+// =============================================================================
+
 // commitmentKey is the LevelDB key under which the latest sig commitment is stored.
 // This key is used by storeCommitment and LoadCommitment to persist the 32-byte
 // commitment value (c) between SignMessage and transmission to Charlie.
@@ -166,31 +171,78 @@ const commitmentKey = "sig-commitment"
 // Storage format: signatureHashPrefix + sigHash (32 bytes) -> []byte("used")
 const signatureHashPrefix = "sig-hash:"
 
-// NewSphincsManager creates a new instance of SphincsManager with KeyManager and LevelDB instance.
+// =============================================================================
+// STHINCSManager STRUCT
+// =============================================================================
+
+// STHINCSManager manages STHINCS signing operations with commitment scheme.
+// It handles the complete signing and verification flow including:
+//   - Generating SPHINCS+ signatures
+//   - Creating commitments (c = Commit(m, r))
+//   - Building Merkle trees from signatures
+//   - Storing replay prevention evidence (timestamp+nonce, signature hashes)
+//   - Verifying signatures and commitments
+//
+// The manager uses LevelDB for persistent storage of:
+//   - Timestamp+nonce pairs (session replay prevention)
+//   - Signature hashes (content-based replay prevention)
+//   - Commitments and Merkle roots (receipt storage)
+type STHINCSManager struct {
+	db         *leveldb.DB               // Persistent storage for replay prevention
+	keyManager *key.KeyManager           // Key management for serialization
+	parameters *params.STHINCSParameters // SPHINCS+ algorithm parameters
+	mu         sync.RWMutex              // Mutex for thread-safe database operations
+}
+
+// =============================================================================
+// CONSTRUCTOR
+// =============================================================================
+
+// NewSTHINCSManager creates a new instance of STHINCSManager with the provided
+// dependencies. All parameters must be non-nil and properly initialized.
+//
 // Parameters:
-//   - db: LevelDB database handle (may be nil if persistence is not required)
-//   - keyManager: manages SPHINCS+ key generation and serialization
-//   - parameters: SPHINCS+ algorithm parameters (e.g., SHAKE-256-256f or -256s)
-func NewSphincsManager(db *leveldb.DB, keyManager *key.KeyManager, parameters *params.SPHINCSParameters) *SphincsManager {
+//   - db: LevelDB database handle for persistent storage (may be nil if persistence not required)
+//   - keyManager: Manages key generation and serialization
+//   - parameters: SPHINCS+ algorithm parameters (N, K, A, D, Len, Hprime, etc.)
+//
+// Returns:
+//   - *STHINCSManager: Initialized manager instance
+//
+// Note: The function panics if keyManager or parameters are nil, as these are
+// required for cryptographic operations.
+func NewSTHINCSManager(db *leveldb.DB, keyManager *key.KeyManager, parameters *params.STHINCSParameters) *STHINCSManager {
 	if keyManager == nil || parameters == nil || parameters.Params == nil {
-		panic("KeyManager or SPHINCSParameters are not properly initialized")
+		panic("KeyManager or STHINCSParameters are not properly initialized")
 	}
-	return &SphincsManager{
+	return &STHINCSManager{
 		db:         db,
 		keyManager: keyManager,
 		parameters: parameters,
 	}
 }
 
+// =============================================================================
+// DATABASE METHODS
+// =============================================================================
+
 // ComputeSignatureHash computes the hash of signature bytes for content replay detection.
-// This is used by both Alice (when signing) and Charlie (when verifying).
-func (sm *SphincsManager) ComputeSignatureHash(sigBytes []byte) []byte {
+// This uses SpxHash (SHAKE-256) to create a 32-byte fingerprint of the signature.
+// The hash is used as a content-based identifier to detect replay attacks even
+// when timestamp and nonce are modified.
+//
+// Parameters:
+//   - sigBytes: Raw SPHINCS+ signature bytes (7-35 KB)
+//
+// Returns:
+//   - []byte: 32-byte hash of the signature
+func (sm *STHINCSManager) ComputeSignatureHash(sigBytes []byte) []byte {
 	return common.SpxHash(sigBytes)
 }
 
 // StoreTimestampNonce stores a timestamp-nonce pair in LevelDB to prevent signature reuse.
-// This implements the replay protection mechanism: once a (timestamp, nonce) pair
-// is stored, any future transaction with the same pair is rejected.
+// This implements the session-based replay protection mechanism: once a (timestamp, nonce)
+// pair is stored, any future transaction with the same pair is rejected.
 //
 // IMPORTANT: This must be called AFTER successful Spx_verify, not before.
 // If called before, an attacker could permanently block a valid transaction
@@ -199,7 +251,14 @@ func (sm *SphincsManager) ComputeSignatureHash(sigBytes []byte) []byte {
 // The key is a safe concatenation of timestamp (8 bytes) and nonce (16 bytes)
 // using a fresh allocation to avoid aliasing bugs where append() would extend
 // the backing array of timestamp into nonce's memory region.
-func (sm *SphincsManager) StoreTimestampNonce(timestamp, nonce []byte) error {
+//
+// Parameters:
+//   - timestamp: 8-byte Unix timestamp
+//   - nonce: 16-byte random nonce
+//
+// Returns:
+//   - error: nil if stored successfully, error otherwise
+func (sm *STHINCSManager) StoreTimestampNonce(timestamp, nonce []byte) error {
 	if sm.db == nil {
 		return errors.New("LevelDB is not initialized")
 	}
@@ -215,9 +274,17 @@ func (sm *SphincsManager) StoreTimestampNonce(timestamp, nonce []byte) error {
 
 // CheckTimestampNonce checks if a timestamp-nonce pair exists in LevelDB.
 // Returns true if the pair exists (indicating reuse), false otherwise.
-// This is called during Charlie's Step 3 verification before Spx_verify runs.
+// This is called during Charlie's verification before Spx_verify runs.
 // A true return means this transaction is a replay and should be rejected.
-func (sm *SphincsManager) CheckTimestampNonce(timestamp, nonce []byte) (bool, error) {
+//
+// Parameters:
+//   - timestamp: 8-byte Unix timestamp
+//   - nonce: 16-byte random nonce
+//
+// Returns:
+//   - bool: true if pair exists (replay detected), false otherwise
+//   - error: any database error encountered
+func (sm *STHINCSManager) CheckTimestampNonce(timestamp, nonce []byte) (bool, error) {
 	if sm.db == nil {
 		return false, errors.New("LevelDB is not initialized")
 	}
@@ -272,7 +339,7 @@ func (sm *SphincsManager) CheckTimestampNonce(timestamp, nonce []byte) (bool, er
 //
 // Returns:
 //   - error: nil if stored successfully, error otherwise
-func (sm *SphincsManager) StoreSignatureHash(sigBytes []byte) error {
+func (sm *STHINCSManager) StoreSignatureHash(sigBytes []byte) error {
 	if sm.db == nil {
 		return errors.New("LevelDB is not initialized")
 	}
@@ -318,7 +385,7 @@ func (sm *SphincsManager) StoreSignatureHash(sigBytes []byte) error {
 // Returns:
 //   - bool: true if signature was already used (replay detected), false otherwise
 //   - error: any database error encountered during lookup
-func (sm *SphincsManager) CheckSignatureHash(sigBytes []byte) (bool, error) {
+func (sm *STHINCSManager) CheckSignatureHash(sigBytes []byte) (bool, error) {
 	if sm.db == nil {
 		return false, errors.New("LevelDB is not initialized")
 	}
@@ -347,6 +414,76 @@ func (sm *SphincsManager) CheckSignatureHash(sigBytes []byte) (bool, error) {
 	// Some other database error occurred
 	return false, err
 }
+
+// storeCommitment persists the 32-byte commitment to LevelDB so it can be
+// retrieved during verification without requiring a Data field on HashTreeNode.
+//
+// Pedersen Step 4 equivalent: "committer makes c public."
+// In our scheme, c is stored locally so it can be transmitted to Charlie.
+// The actual publication happens when Alice includes c in the wire payload.
+//
+// Parameters:
+//   - commitment: 32-byte commitment hash (c)
+//
+// Returns:
+//   - error: nil if stored successfully, error otherwise
+func (sm *STHINCSManager) storeCommitment(commitment []byte) error {
+	if sm.db == nil {
+		return errors.New("LevelDB is not initialized")
+	}
+	return sm.db.Put([]byte(commitmentKey), commitment, nil)
+}
+
+// LoadCommitment retrieves the stored commitment from LevelDB.
+// Call this on the signer side to obtain c before transmission to the verifier.
+//
+// Pedersen Step 4 equivalent: retrieving c so it can be made public (transmitted).
+//
+// Returns:
+//   - []byte: 32-byte commitment hash (c)
+//   - error: error if commitment not found or database error
+func (sm *STHINCSManager) LoadCommitment() ([]byte, error) {
+	if sm.db == nil {
+		return nil, errors.New("LevelDB is not initialized")
+	}
+	commitment, err := sm.db.Get([]byte(commitmentKey), nil)
+	if err != nil {
+		return nil, fmt.Errorf("commitment not found: %w", err)
+	}
+	return commitment, nil
+}
+
+// =============================================================================
+// SERIALIZATION HELPERS
+// =============================================================================
+
+// serializePK extracts public key bytes by calling pk.SerializePK() directly.
+// This avoids the nil-sk panic that occurs when routing through SerializeKeyPair.
+//
+// The earlier approach of calling SerializeKeyPair(nil, pk) fails because
+// SerializeKeyPair dereferences sk unconditionally before serializing pk.
+// Using the dedicated pk.SerializePK() method is the correct approach.
+//
+// Parameters:
+//   - pk: SPHINCS+ public key object
+//
+// Returns:
+//   - []byte: Serialized public key bytes
+//   - error: error if pk is nil or serialization fails
+func (sm *STHINCSManager) serializePK(pk *sthincs.SPHINCS_PK) ([]byte, error) {
+	if pk == nil {
+		return nil, fmt.Errorf("failed to serialize public key: pk is nil")
+	}
+	pkBytes, err := pk.SerializePK()
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize public key: %w", err)
+	}
+	return pkBytes, nil
+}
+
+// =============================================================================
+// COMMITMENT FUNCTIONS
+// =============================================================================
 
 // SigCommitment produces a 32-byte binding over all session-specific inputs.
 //
@@ -431,34 +568,6 @@ func CommitmentLeaf(commitment []byte) []byte {
 	return common.SpxHash(commitment)
 }
 
-// storeCommitment persists the 32-byte commitment to LevelDB so it can be
-// retrieved during verification without requiring a Data field on HashTreeNode.
-//
-// Pedersen Step 4 equivalent: "committer makes c public."
-// In our scheme, c is stored locally so it can be transmitted to Charlie.
-// The actual publication happens when Alice includes c in the wire payload.
-func (sm *SphincsManager) storeCommitment(commitment []byte) error {
-	if sm.db == nil {
-		return errors.New("LevelDB is not initialized")
-	}
-	return sm.db.Put([]byte(commitmentKey), commitment, nil)
-}
-
-// LoadCommitment retrieves the stored commitment from LevelDB.
-// Call this on the signer side to obtain c before transmission to the verifier.
-//
-// Pedersen Step 4 equivalent: retrieving c so it can be made public (transmitted).
-func (sm *SphincsManager) LoadCommitment() ([]byte, error) {
-	if sm.db == nil {
-		return nil, errors.New("LevelDB is not initialized")
-	}
-	commitment, err := sm.db.Get([]byte(commitmentKey), nil)
-	if err != nil {
-		return nil, fmt.Errorf("commitment not found: %w", err)
-	}
-	return commitment, nil
-}
-
 // VerifyCommitmentInRoot confirms that the Merkle root was built with the correct
 // commitment in leaf[4] by comparing rebuilt vs expected root hashes.
 //
@@ -482,22 +591,9 @@ func VerifyCommitmentInRoot(rebuiltRoot *hashtree.HashTreeNode, expectedRoot *ha
 	return rebuiltHash == expectedHash
 }
 
-// serializePK extracts public key bytes by calling pk.SerializePK() directly.
-// This avoids the nil-sk panic that occurs when routing through SerializeKeyPair.
-//
-// The earlier approach of calling SerializeKeyPair(nil, pk) fails because
-// SerializeKeyPair dereferences sk unconditionally before serializing pk.
-// Using the dedicated pk.SerializePK() method is the correct approach.
-func (sm *SphincsManager) serializePK(pk *sphincs.SPHINCS_PK) ([]byte, error) {
-	if pk == nil {
-		return nil, fmt.Errorf("failed to serialize public key: pk is nil")
-	}
-	pkBytes, err := pk.SerializePK()
-	if err != nil {
-		return nil, fmt.Errorf("failed to serialize public key: %w", err)
-	}
-	return pkBytes, nil
-}
+// =============================================================================
+// MERKLE TREE HELPERS
+// =============================================================================
 
 // buildMessageWithTimestampAndNonce safely concatenates timestamp || nonce || message
 // into a new backing array, preventing append-aliasing bugs.
@@ -509,6 +605,14 @@ func (sm *SphincsManager) serializePK(pk *sphincs.SPHINCS_PK) ([]byte, error) {
 //	potentially corrupting nonce or message if they share the same memory region.
 //	This function creates a fresh allocation with the exact required capacity,
 //	guaranteeing no aliasing between input slices.
+//
+// Parameters:
+//   - timestamp: 8-byte Unix timestamp
+//   - nonce: 16-byte random nonce
+//   - message: Original message bytes
+//
+// Returns:
+//   - []byte: Concatenated timestamp || nonce || message in a fresh allocation
 func buildMessageWithTimestampAndNonce(timestamp, nonce, message []byte) []byte {
 	out := make([]byte, 0, len(timestamp)+len(nonce)+len(message))
 	out = append(out, timestamp...)
@@ -571,6 +675,31 @@ func buildSigParts(sigBytes, commitment []byte) [][]byte {
 	return parts
 }
 
+// buildHashTreeFromSignature constructs a Merkle tree from the provided signature parts
+// and returns the root node of the tree.
+//
+// This is a simple wrapper around hashtree.NewHashTree and tree.Build().
+// It creates a Merkle tree where each leaf is a byte slice from sigParts,
+// then builds all internal nodes up to the root.
+//
+// Parameters:
+//   - sigParts: a slice of byte slices, where each slice represents a leaf in the tree
+//
+// Returns:
+//   - *hashtree.HashTreeNode: The root node of the constructed Merkle tree
+//   - error: An error if tree construction fails (e.g., empty input)
+func buildHashTreeFromSignature(sigParts [][]byte) (*hashtree.HashTreeNode, error) {
+	tree := hashtree.NewHashTree(sigParts)
+	if err := tree.Build(); err != nil {
+		return nil, err
+	}
+	return tree.Root, nil
+}
+
+// =============================================================================
+// SIGN METHOD
+// =============================================================================
+
 // SignMessage signs a given message using the secret key, including a timestamp and nonce.
 //
 // This function performs all six steps of the commitment scheme:
@@ -608,14 +737,14 @@ func buildSigParts(sigBytes, commitment []byte) [][]byte {
 //   - nonce: 16-byte cryptographically random nonce (blinding factor r)
 //   - commitment: 32-byte commitment hash c = Commit(m, r)
 //   - error: any error that occurred during signing or tree construction
-func (sm *SphincsManager) SignMessage(
+func (sm *STHINCSManager) SignMessage(
 	message []byte,
-	deserializedSK *sphincs.SPHINCS_SK,
-	deserializedPK *sphincs.SPHINCS_PK,
-) (*sphincs.SPHINCS_SIG, *hashtree.HashTreeNode, []byte, []byte, []byte, error) {
+	deserializedSK *sthincs.SPHINCS_SK,
+	deserializedPK *sthincs.SPHINCS_PK,
+) (*sthincs.SPHINCS_SIG, *hashtree.HashTreeNode, []byte, []byte, []byte, error) {
 
 	if sm.parameters == nil || sm.parameters.Params == nil {
-		return nil, nil, nil, nil, nil, errors.New("SPHINCSParameters are not initialized")
+		return nil, nil, nil, nil, nil, errors.New("STHINCSParameters are not initialized")
 	}
 
 	// Generate timestamp (8 bytes, Unix epoch seconds)
@@ -640,9 +769,13 @@ func (sm *SphincsManager) SignMessage(
 
 	// Pedersen Step 1: decide m — perform the actual SPHINCS+ signing operation.
 	// m = sigBytes is the secret being committed to (7-35 KB).
-	signature := sphincs.Spx_sign(p, messageWithTimestampAndNonce, deserializedSK)
+	// FIX: Spx_sign returns 2 values (signature, error)
+	signature, err := sthincs.Spx_sign(p, messageWithTimestampAndNonce, deserializedSK)
+	if err != nil {
+		return nil, nil, nil, nil, nil, fmt.Errorf("failed to sign message: %w", err)
+	}
 	if signature == nil {
-		return nil, nil, nil, nil, nil, errors.New("failed to sign message")
+		return nil, nil, nil, nil, nil, errors.New("failed to sign message: nil signature")
 	}
 
 	// Serialize m (sigBytes). DO NOT ZERO THIS SLICE while signature is live.
@@ -699,6 +832,10 @@ func (sm *SphincsManager) SignMessage(
 	return signature, merkleRoot, timestamp, nonce, commitment, nil
 }
 
+// =============================================================================
+// VERIFY METHOD
+// =============================================================================
+
 // VerifySignature verifies a SPHINCS+ signature and confirms that the Merkle root
 // was constructed from genuine signature material via the commitment check.
 //
@@ -731,13 +868,13 @@ func (sm *SphincsManager) SignMessage(
 //   - It provides content-based deduplication that timestamp/nonce cannot
 //
 // Returns: true if all verification steps pass, false otherwise
-func (sm *SphincsManager) VerifySignature(
+func (sm *STHINCSManager) VerifySignature(
 	message, timestamp, nonce []byte,
-	sig *sphincs.SPHINCS_SIG,
-	pk *sphincs.SPHINCS_PK,
+	sig *sthincs.SPHINCS_SIG,
+	pk *sthincs.SPHINCS_PK,
 	merkleRoot *hashtree.HashTreeNode,
 	commitment []byte,
-	storeEvidence bool, // ← add this
+	storeEvidence bool,
 ) bool {
 
 	if sm.parameters == nil || sm.parameters.Params == nil {
@@ -795,7 +932,7 @@ func (sm *SphincsManager) VerifySignature(
 	//
 	// This is expensive (processes 7-35 KB of signature data), which is why
 	// we only do it AFTER the cheap signature hash check above.
-	if !sphincs.Spx_verify(sm.parameters.Params, messageWithTimestampAndNonce, sig, pk) {
+	if !sthincs.Spx_verify(sm.parameters.Params, messageWithTimestampAndNonce, sig, pk) {
 		return false
 	}
 
@@ -863,36 +1000,10 @@ func (sm *SphincsManager) VerifySignature(
 	// ALL CHECKS PASSED — now store evidence for future replay prevention.
 	// Order matters: Store ONLY AFTER all verification passes to prevent an
 	// attacker from poisoning the database with invalid signatures.
-	// STEP 9: STORE REPLAY PREVENTION EVIDENCE
-	if storeEvidence && sm.db != nil { // ← add storeEvidence check
-		if err := sm.StoreSignatureHash(sigBytes); err != nil {
-			_ = err
-		}
-		if err := sm.StoreTimestampNonce(timestamp, nonce); err != nil {
-			_ = err
-		}
+	if storeEvidence && sm.db != nil {
+		_ = sm.StoreSignatureHash(sigBytes)
+		_ = sm.StoreTimestampNonce(timestamp, nonce)
 	}
 
 	return true
-}
-
-// buildHashTreeFromSignature constructs a Merkle tree from the provided signature parts
-// and returns the root node of the tree.
-//
-// This is a simple wrapper around hashtree.NewHashTree and tree.Build().
-// It creates a Merkle tree where each leaf is a byte slice from sigParts,
-// then builds all internal nodes up to the root.
-//
-// Parameters:
-//   - sigParts: a slice of byte slices, where each slice represents a leaf in the tree
-//
-// Returns:
-//   - *hashtree.HashTreeNode: The root node of the constructed Merkle tree
-//   - error: An error if tree construction fails (e.g., empty input)
-func buildHashTreeFromSignature(sigParts [][]byte) (*hashtree.HashTreeNode, error) {
-	tree := hashtree.NewHashTree(sigParts)
-	if err := tree.Build(); err != nil {
-		return nil, err
-	}
-	return tree.Root, nil
 }

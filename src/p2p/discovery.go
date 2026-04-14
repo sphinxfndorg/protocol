@@ -409,7 +409,9 @@ func (s *Server) iterativeFindNode(targetID network.NodeID) {
 					}
 
 					// Serialize signature for storage
-					signatureBytes, err := s.sphincsMgr.SerializeSignature(signature)
+					// Serialize signature for storage
+					// SerializeSignature is a method on the signature object, not the manager
+					signatureBytes, err := signature.SerializeSignature()
 					if err != nil {
 						errorCh <- err
 						return

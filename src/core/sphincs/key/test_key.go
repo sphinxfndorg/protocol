@@ -28,7 +28,7 @@ import (
 	"log"
 
 	key "github.com/sphinxorg/protocol/src/core/sphincs/key/backend"
-	"github.com/sphinxorg/protocol/src/crypto/SPHINCSPLUS-golang/sphincs"
+	"github.com/sphinxorg/protocol/src/crypto/STHINCS/sthincs"
 )
 
 func main() {
@@ -86,14 +86,28 @@ func main() {
 
 	// Step 2: Sign a message using the secret key (sk) and parameters.
 	message := []byte("Hello, this is a message to be signed!")
-	signature := sphincs.Spx_sign(spxParams, message, deserializedSK)
-	if signature == nil {
-		log.Fatalf("Error signing message")
+
+	// FIX: Use sthincs.Spx_sign (not sphincs.Spx_sign)
+	// FIX: Spx_sign returns 2 values (signature, error)
+	signature, err := sthincs.Spx_sign(spxParams, message, deserializedSK)
+	if err != nil {
+		log.Fatalf("Error signing message: %v", err)
 	}
-	fmt.Printf("Signature size: %d bytes\n", len(signature.R)+len(signature.SIG_FORS.GetSK(0))*len(signature.SIG_FORS.Forspkauth)+len(signature.SIG_HT.GetXMSSSignature(0).WotsSignature)*len(signature.SIG_HT.XMSSSignatures))
+	if signature == nil {
+		log.Fatalf("Error signing message: nil signature")
+	}
+
+	// Calculate signature size for display
+	sigBytes, err := signature.SerializeSignature()
+	if err != nil {
+		log.Fatalf("Error serializing signature: %v", err)
+	}
+	fmt.Printf("Signature size: %d bytes\n", len(sigBytes))
 
 	// Step 3: Verify the signature using the public key (pk), parameters, message, and signature.
-	isValid := sphincs.Spx_verify(spxParams, message, signature, deserializedPK)
+	// FIX: Use sthincs.Spx_verify (not sphincs.Spx_verify)
+	// FIX: Spx_verify returns a single bool value
+	isValid := sthincs.Spx_verify(spxParams, message, signature, deserializedPK)
 	if !isValid {
 		log.Fatalf("Signature verification failed!")
 	}

@@ -29,7 +29,7 @@ import (
 	"github.com/actuallyachraf/algebra/ff"
 	"github.com/actuallyachraf/algebra/poly"
 	params "github.com/sphinxorg/protocol/src/core/sphincs/config"
-	"github.com/sphinxorg/protocol/src/crypto/SPHINCSPLUS-golang/sphincs"
+	"github.com/sphinxorg/protocol/src/crypto/STHINCS/sthincs"
 )
 
 // STARKProof represents the STARK proof for multiple SPHINCS+ signatures.
@@ -42,9 +42,9 @@ type STARKProof struct {
 
 // Signature represents a SPHINCS+ signature with its associated message and public key.
 type Signature struct {
+	Signature *sthincs.SPHINCS_SIG // FIXED: Changed from *sphincs.SPHINCS_SIG
+	PublicKey *sthincs.SPHINCS_PK  // FIXED: Changed from *sphincs.SPHINCS_PK
 	Message   []byte
-	Signature *sphincs.SPHINCS_SIG // Uses *sphincs.SPHINCS_SIG
-	PublicKey *sphincs.SPHINCS_PK
 }
 
 // SignWrapper wraps signature generation and verification functionality.
@@ -57,12 +57,12 @@ type Channel struct {
 
 // SignManager manages the aggregation of SPHINCS+ signatures into a STARK proof.
 type SignManager struct {
-	Params *params.SPHINCSParameters // SPHINCS+ parameters.
+	Params *params.STHINCSParameters // SPHINCS+ parameters.
 }
 
 // NewSignManager initializes a new SignManager with SPHINCS+ parameters.
 func NewSignManager() (*SignManager, error) {
-	spxParams, err := params.NewSPHINCSParameters()
+	spxParams, err := params.NewSTHINCSParameters()
 	if err != nil {
 		return nil, err
 	}

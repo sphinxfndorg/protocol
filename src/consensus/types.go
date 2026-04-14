@@ -32,7 +32,7 @@ import (
 	"github.com/sphinxorg/protocol/src/core/hashtree"
 	key "github.com/sphinxorg/protocol/src/core/sphincs/key/backend"
 	sign "github.com/sphinxorg/protocol/src/core/sphincs/sign/backend"
-	"github.com/sphinxorg/protocol/src/crypto/SPHINCSPLUS-golang/sphincs"
+	"github.com/sphinxorg/protocol/src/crypto/STHINCS/sthincs"
 )
 
 // Block interface that your existing types.Block will satisfy
@@ -281,14 +281,15 @@ type Consensus struct {
 }
 
 // SigningService handles cryptographic signing for consensus messages
+// SigningService struct definition - FIXED: added missing struct with correct types
 type SigningService struct {
-	sphincsManager    *sign.SphincsManager
+	sphincsManager    *sign.STHINCSManager // FIXED: use STHINCSManager instead of SphincsManager
 	keyManager        *key.KeyManager
 	nodeID            string
-	privateKey        *sphincs.SPHINCS_SK
-	publicKey         *sphincs.SPHINCS_PK
-	publicKeyRegistry map[string]*sphincs.SPHINCS_PK
-	registryMutex     sync.RWMutex
+	privateKey        *sthincs.SPHINCS_SK            // FIXED: use sthincs type
+	publicKey         *sthincs.SPHINCS_PK            // FIXED: use sthincs type
+	publicKeyRegistry map[string]*sthincs.SPHINCS_PK // FIXED: use sthincs type
+	registryMutex     sync.RWMutex                   // FIXED: added mutex field
 }
 
 // SignedMessage represents a complete signed message with all components

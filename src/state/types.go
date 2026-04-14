@@ -31,6 +31,7 @@ import (
 	"github.com/sphinxorg/protocol/src/consensus"
 	database "github.com/sphinxorg/protocol/src/core/state"
 	types "github.com/sphinxorg/protocol/src/core/transaction"
+	"github.com/sphinxorg/protocol/src/pool"
 )
 
 type OperationType int
@@ -53,6 +54,14 @@ type BlockStorage interface {
 	Close() error
 }
 
+// MempoolInterface defines methods needed for transaction replication
+// MempoolInterface defines methods needed for transaction replication
+type MempoolInterface interface {
+	BroadcastTransaction(tx *types.Transaction) error
+	HasTransaction(txID string) bool
+	GetTransaction(txID string) (*types.Transaction, pool.TransactionStatus) // ← Use pool.TransactionStatus
+}
+
 // StateMachine manages state machine replication for blockchain
 type StateMachine struct {
 	mu sync.RWMutex
@@ -60,6 +69,7 @@ type StateMachine struct {
 	storage   *Storage
 	consensus *consensus.Consensus
 	nodeID    string
+	mempool   MempoolInterface // ← ADD THIS
 
 	// Replication state
 	currentState *StateSnapshot

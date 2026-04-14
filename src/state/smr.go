@@ -1031,10 +1031,40 @@ func (sm *StateMachine) applyBlockOperation(op *Operation) error {
 }
 
 func (sm *StateMachine) applyTransactionOperation(op *Operation) error {
-	// For now, transactions are applied when included in blocks
-	// This could be extended for mempool replication
-	log.Printf("Transaction operation received: %s", op.Transaction.ID)
+	// Transactions should be applied when included in blocks, not directly
+	// This function is for mempool replication across validators
+
+	if op.Transaction == nil {
+		return fmt.Errorf("transaction operation missing transaction")
+	}
+
+	logger.Info("Applying transaction operation: txID=%s, sender=%s, receiver=%s, amount=%v",
+		op.Transaction.ID, op.Transaction.Sender, op.Transaction.Receiver, op.Transaction.Amount)
+
+	// Add to mempool if not already there (for mempool replication)
+	if sm.mempool != nil {
+		if !sm.mempool.HasTransaction(op.Transaction.ID) {
+			if err := sm.mempool.BroadcastTransaction(op.Transaction); err != nil {
+				logger.Warn("Failed to add replicated transaction to mempool: %v", err)
+				// Don't return error - transaction already validated by consensus
+			} else {
+				logger.Debug("Transaction %s added to mempool via replication", op.Transaction.ID)
+			}
+		} else {
+			logger.Debug("Transaction %s already in mempool", op.Transaction.ID)
+		}
+	} else {
+		logger.Warn("No mempool available for transaction replication")
+	}
+
 	return nil
+}
+
+// SetMempool sets the mempool for transaction replication
+func (sm *StateMachine) SetMempool(mempool MempoolInterface) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.mempool = mempool
 }
 
 func (sm *StateMachine) applyStateTransitionOperation(op *Operation) error {

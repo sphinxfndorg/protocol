@@ -21,6 +21,7 @@
 // SOFTWARE.
 
 // go/src/cli/utils/setup.go
+// go/src/cli/utils/setup.go
 package utils
 
 import (
@@ -43,7 +44,7 @@ import (
 	sign "github.com/sphinxorg/protocol/src/core/sphincs/sign/backend"
 	database "github.com/sphinxorg/protocol/src/core/state"
 	types "github.com/sphinxorg/protocol/src/core/transaction"
-	"github.com/sphinxorg/protocol/src/crypto/SPHINCSPLUS-golang/sphincs"
+	"github.com/sphinxorg/protocol/src/crypto/STHINCS/sthincs"
 	security "github.com/sphinxorg/protocol/src/handshake"
 	logger "github.com/sphinxorg/protocol/src/log"
 	"github.com/sphinxorg/protocol/src/network"
@@ -164,11 +165,11 @@ func CallConsensus(numNodes int) error {
 	}
 
 	// Create a single shared SPHINCS parameters instance
-	sharedSphincsParams, err := config.NewSPHINCSParameters()
+	sharedSphincsParams, err := config.NewSTHINCSParameters()
 	if err != nil {
-		return fmt.Errorf("failed to create shared SPHINCS parameters: %v", err)
+		return fmt.Errorf("failed to create shared STHINCS parameters: %v", err)
 	}
-	logger.Info("✅ Shared SPHINCS parameters created (all nodes will use the same instance)")
+	logger.Info("✅ Shared STHINCS parameters created (all nodes will use the same instance)")
 
 	// ========== STEP 4: NODE INFRASTRUCTURE INITIALIZATION ==========
 	// Initialize synchronization primitives and context for graceful shutdown
@@ -179,7 +180,7 @@ func CallConsensus(numNodes int) error {
 	// Arrays to hold per-node components
 	dbs := make([]*leveldb.DB, numNodes)                       // Main blockchain databases
 	stateDBs := make([]*leveldb.DB, numNodes)                  // State databases
-	sphincsMgrs := make([]*sign.SphincsManager, numNodes)      // SPHINCS managers
+	sphincsMgrs := make([]*sign.STHINCSManager, numNodes)      // FIXED: use STHINCSManager
 	blockchains := make([]*core.Blockchain, numNodes)          // Blockchain instances
 	consensusEngines := make([]*consensus.Consensus, numNodes) // Consensus engines
 	networkNodes := make([]*network.Node, numNodes)            // Network nodes
@@ -260,9 +261,8 @@ func CallConsensus(numNodes int) error {
 		logger.Info("Created network node %s with keys stored in config directory", nodeID)
 
 		// ========== STEP 5.5: SPHINCS MANAGER INITIALIZATION ==========
-		// Use shared key manager and params — NOT new instances per node.
-		// This ensures all nodes can verify each other's signatures.
-		sphincsMgrs[i] = sign.NewSphincsManager(db, sharedKeyManager, sharedSphincsParams)
+		// FIXED: Use NewSTHINCSManager and store as *sign.STHINCSManager
+		sphincsMgrs[i] = sign.NewSTHINCSManager(db, sharedKeyManager, sharedSphincsParams)
 
 		// ========== STEP 5.6: NODE MANAGER AND PEER CONNECTIONS ==========
 		// Set up the node manager for peer discovery and connection management
@@ -387,12 +387,8 @@ func CallConsensus(numNodes int) error {
 		}
 
 		// ========== STEP 5.14: SIGNING SERVICE CREATION ==========
-		// Use shared key manager and params for the signing service.
-		// This is the critical fix: every SigningService must use the same
-		// sharedKeyManager so that SerializePK() and DeserializePublicKey()
-		// operate on identical parameter sets.
-		sphincsManager := sign.NewSphincsManager(db, sharedKeyManager, sharedSphincsParams)
-		signingService := consensus.NewSigningService(sphincsManager, sharedKeyManager, nodeID)
+		// FIXED: Use STHINCSManager (sphincsMgrs[i] is already *sign.STHINCSManager)
+		signingService := consensus.NewSigningService(sphincsMgrs[i], sharedKeyManager, nodeID)
 
 		// Register self public key so the node can verify its own signatures
 		if selfPK := signingService.GetPublicKeyObject(); selfPK != nil {
@@ -476,31 +472,31 @@ func CallConsensus(numNodes int) error {
 	logger.Info("=== VALIDATOR CROSS-REGISTRATION COMPLETE ===")
 
 	// ========== STEP 7: REGISTER VM SPHINCS+ VERIFICATION FUNCTION ==========
-	// Use the SAME sharedKeyManager that was used to create all signing services.
-	// This ensures DeserializePublicKey uses identical SPHINCS+ parameters as
-	// SerializePK, preventing the "Public key is of incorrect length" error.
-	// Do NOT create a new key.NewKeyManager() here — that is what caused the bug.
+	// FIXED: Use sthincs package functions instead of sphincs
 	if sharedKeyManager == nil {
 		log.Fatal("sharedKeyManager is nil — cannot register SPHINCS verifier")
 	}
 
+	// Get parameters for deserialization
+	sthincsParams := sharedSphincsParams.Params
+
 	// Register verification functions with the SVM (Secure Virtual Machine)
 	svm.SetSphincsVerifier(
-		// Public key deserializer
+		// Public key deserializer - FIXED: use sthincs.DeserializePK
 		func(b []byte) (interface{}, error) {
-			return sharedKeyManager.DeserializePublicKey(b)
+			return sthincs.DeserializePK(sthincsParams, b)
 		},
-		// Signature deserializer
+		// Signature deserializer - FIXED: use sthincs.DeserializeSignature
 		func(b []byte) (interface{}, error) {
-			return sphincs.DeserializeSignature(sharedKeyManager.GetSPHINCSParameters().Params, b)
+			return sthincs.DeserializeSignature(sthincsParams, b)
 		},
-		// Verification function
+		// Verification function - FIXED: use sthincs.Spx_verify
 		func(msg []byte, sig interface{}, pk interface{}) bool {
-			return sphincs.Spx_verify(
-				sharedKeyManager.GetSPHINCSParameters().Params,
+			return sthincs.Spx_verify(
+				sthincsParams,
 				msg,
-				sig.(*sphincs.SPHINCS_SIG),
-				pk.(*sphincs.SPHINCS_PK),
+				sig.(*sthincs.SPHINCS_SIG),
+				pk.(*sthincs.SPHINCS_PK),
 			)
 		},
 	)
@@ -525,8 +521,8 @@ func CallConsensus(numNodes int) error {
 			roundTripOK = false
 			continue
 		}
-		// Test deserialization of the public key bytes
-		_, err = sharedKeyManager.DeserializePublicKey(pkBytes)
+		// Test deserialization of the public key bytes using sthincs
+		_, err = sthincs.DeserializePK(sthincsParams, pkBytes)
 		if err != nil {
 			logger.Error("❌ PK round-trip FAILED for %s (%d bytes): %v", id, len(pkBytes), err)
 			roundTripOK = false

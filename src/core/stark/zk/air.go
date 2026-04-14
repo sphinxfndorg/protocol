@@ -34,7 +34,9 @@ import (
 	"github.com/actuallyachraf/algebra/nt"
 	"github.com/actuallyachraf/algebra/poly"
 	"github.com/actuallyachraf/go-merkle"
-	sphincs "github.com/sphinxorg/protocol/src/crypto/SPHINCSPLUS-golang/sphincs"
+
+	// FIXED: Change from SPHINCSPLUS-golang to STHINCS
+	"github.com/sphinxorg/protocol/src/crypto/STHINCS/sthincs"
 )
 
 // PrimeField is the finite field used for STARK computations (q = 3221225473).
@@ -241,12 +243,14 @@ func (sm *SignManager) generateVerificationTrace(signatures []Signature) ([]ff.F
 }
 
 // verifySignature checks if a SPHINCS+ signature is valid for the given message and public key.
+// FIXED: Use sthincs.Spx_verify instead of sphincs.Spx_verify
 func (sm *SignManager) verifySignature(sig Signature) bool {
 	if sm.Params == nil || sm.Params.Params == nil || sig.Signature == nil || sig.PublicKey == nil || sig.Message == nil {
 		return false
 	}
 
-	return sphincs.Spx_verify(sm.Params.Params, sig.Message, sig.Signature, sig.PublicKey)
+	// FIXED: Use sthincs.Spx_verify
+	return sthincs.Spx_verify(sm.Params.Params, sig.Message, sig.Signature, sig.PublicKey)
 }
 
 // commitToSignatures creates a Merkle tree commitment for signatures, messages, and public keys.

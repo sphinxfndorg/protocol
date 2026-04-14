@@ -109,14 +109,14 @@ func StartSingleNodeInternal(nodeConfig network.NodePortConfig, dataDir string) 
 		return fmt.Errorf("failed to initialize KeyManager: %v", err)
 	}
 
-	sphincsParams, err := config.NewSPHINCSParameters()
+	sphincsParams, err := config.NewSTHINCSParameters()
 	if err != nil {
-		return fmt.Errorf("failed to initialize SPHINCSParameters: %v", err)
+		return fmt.Errorf("failed to initialize STHINCSParameters: %v", err)
 	}
 
-	sphincsMgr := sign.NewSphincsManager(db, keyManager, sphincsParams)
+	sphincsMgr := sign.NewSTHINCSManager(db, keyManager, sphincsParams)
 	if sphincsMgr == nil {
-		return fmt.Errorf("failed to initialize SphincsManager")
+		return fmt.Errorf("failed to initialize STHINCSManager")
 	}
 
 	setupConfig := NodeSetupConfig{
@@ -177,7 +177,8 @@ func RunMultipleNodesInternal() error {
 
 	configs := make([]network.NodePortConfig, 3)
 	dbs := make([]*leveldb.DB, 3)
-	sphincsMgrs := make([]*sign.SphincsManager, 3)
+	// FIXED: Change from *sign.SphincsManager to *sign.STHINCSManager
+	sphincsMgrs := make([]*sign.STHINCSManager, 3)
 
 	// Initialize LevelDB and SphincsManager for each node
 	for i := 0; i < 3; i++ {
@@ -201,14 +202,15 @@ func RunMultipleNodesInternal() error {
 			return fmt.Errorf("failed to initialize KeyManager for Node-%d: %v", i, err)
 		}
 
-		sphincsParams, err := config.NewSPHINCSParameters()
+		sphincsParams, err := config.NewSTHINCSParameters()
 		if err != nil {
-			return fmt.Errorf("failed to initialize SPHINCSParameters for Node-%d: %v", i, err)
+			return fmt.Errorf("failed to initialize STHINCSParameters for Node-%d: %v", i, err)
 		}
 
-		sphincsMgr := sign.NewSphincsManager(db, keyManager, sphincsParams)
+		// FIXED: NewSTHINCSManager returns *sign.STHINCSManager
+		sphincsMgr := sign.NewSTHINCSManager(db, keyManager, sphincsParams)
 		if sphincsMgr == nil {
-			return fmt.Errorf("failed to initialize SphincsManager for Node-%d", i)
+			return fmt.Errorf("failed to initialize STHINCSManager for Node-%d", i)
 		}
 		sphincsMgrs[i] = sphincsMgr
 
@@ -285,6 +287,7 @@ func RunMultipleNodesInternal() error {
 
 	// Set SphincsManager for each P2PServer
 	for i := 0; i < 3; i++ {
+		// FIXED: sphincsMgrs[i] is now *sign.STHINCSManager, which matches SetSphincsMgr parameter type
 		resources[i].P2PServer.SetSphincsMgr(sphincsMgrs[i])
 	}
 

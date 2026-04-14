@@ -595,7 +595,7 @@ func (s *Server) sendUDPPing(addr *net.UDPAddr, toID network.NodeID, nonce []byt
 	}
 
 	// Serialize signature
-	signatureBytes, err := s.sphincsMgr.SerializeSignature(signature)
+	signatureBytes, err := signature.SerializeSignature()
 	if err != nil {
 		log.Printf("sendUDPPing: Failed to serialize signature for %s to %s: %v",
 			s.localNode.Address, addr.String(), err)
@@ -697,7 +697,7 @@ func (s *Server) sendUDPPong(addr *net.UDPAddr, toID network.NodeID, nonce []byt
 	}
 
 	// Serialize signature
-	signatureBytes, err := s.sphincsMgr.SerializeSignature(signature)
+	signatureBytes, err := signature.SerializeSignature()
 	if err != nil {
 		log.Printf("sendUDPPong: Failed to serialize signature for %s to %s: %v",
 			s.localNode.Address, addr.String(), err)
@@ -831,7 +831,7 @@ func (s *Server) sendUDPNeighbors(addr *net.UDPAddr, targetID network.NodeID, no
 	}
 
 	// Serialize signature
-	signatureBytes, err := s.sphincsMgr.SerializeSignature(signature)
+	signatureBytes, err := signature.SerializeSignature()
 	if err != nil {
 		log.Printf("sendUDPNeighbors: Failed to serialize signature: %v", err)
 		return

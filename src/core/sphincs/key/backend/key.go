@@ -29,17 +29,12 @@ import (
 	"log"
 
 	params "github.com/sphinxorg/protocol/src/core/sphincs/config"
-	"github.com/sphinxorg/protocol/src/crypto/SPHINCSPLUS-golang/sphincs"
+	"github.com/sphinxorg/protocol/src/crypto/STHINCS/sthincs"
 )
-
-// KeyManager is responsible for managing key generation using SPHINCS+ parameters.
-type KeyManager struct {
-	Params *params.SPHINCSParameters // Holds SPHINCS+ parameters.
-}
 
 // NewKeyManager initializes a new KeyManager instance using SPHINCS+ parameters.
 func NewKeyManager() (*KeyManager, error) {
-	spxParams, err := params.NewSPHINCSParameters()
+	spxParams, err := params.NewSTHINCSParameters()
 	if err != nil {
 		log.Printf("NewKeyManager: Failed to initialize SPHINCS parameters: %v", err)
 		return nil, err
@@ -48,12 +43,12 @@ func NewKeyManager() (*KeyManager, error) {
 }
 
 // Getter method for SPHINCS parameters
-func (km *KeyManager) GetSPHINCSParameters() *params.SPHINCSParameters {
+func (km *KeyManager) GetSPHINCSParameters() *params.STHINCSParameters {
 	return km.Params
 }
 
 // GenerateKey generates a new SPHINCS+ private and public key pair.
-func (km *KeyManager) GenerateKey() (*SPHINCS_SK, *sphincs.SPHINCS_PK, error) {
+func (km *KeyManager) GenerateKey() (*SPHINCS_SK, *sthincs.SPHINCS_PK, error) {
 	// Ensure parameters are initialized.
 	if km.Params == nil || km.Params.Params == nil {
 		log.Printf("GenerateKey: Missing SPHINCS+ parameters in KeyManager")
@@ -61,7 +56,13 @@ func (km *KeyManager) GenerateKey() (*SPHINCS_SK, *sphincs.SPHINCS_PK, error) {
 	}
 
 	// Generate the SPHINCS+ key pair using the configured parameters.
-	sk, pk := sphincs.Spx_keygen(km.Params.Params)
+	// FIX: Capture all 3 return values from Spx_keygen
+	sk, pk, err := sthincs.Spx_keygen(km.Params.Params)
+	if err != nil {
+		log.Printf("GenerateKey: Key generation failed: %v", err)
+		return nil, nil, fmt.Errorf("key generation failed: %w", err)
+	}
+
 	if sk == nil || pk == nil {
 		log.Printf("GenerateKey: Key generation failed: returned nil for SK or PK")
 		return nil, nil, errors.New("key generation failed: returned nil for SK or PK")
@@ -110,7 +111,7 @@ func (sk *SPHINCS_SK) SerializeSK() ([]byte, error) {
 }
 
 // SerializeKeyPair serializes a SPHINCS private and public key pair to byte slices.
-func (km *KeyManager) SerializeKeyPair(sk *SPHINCS_SK, pk *sphincs.SPHINCS_PK) ([]byte, []byte, error) {
+func (km *KeyManager) SerializeKeyPair(sk *SPHINCS_SK, pk *sthincs.SPHINCS_PK) ([]byte, []byte, error) {
 	if sk == nil || pk == nil {
 		log.Printf("SerializeKeyPair: Private or public key is nil")
 		return nil, nil, errors.New("private or public key is nil")
@@ -135,7 +136,7 @@ func (km *KeyManager) SerializeKeyPair(sk *SPHINCS_SK, pk *sphincs.SPHINCS_PK) (
 }
 
 // DeserializeKeyPair reconstructs a SPHINCS private and public key pair from byte slices.
-func (km *KeyManager) DeserializeKeyPair(skBytes, pkBytes []byte) (*sphincs.SPHINCS_SK, *sphincs.SPHINCS_PK, error) {
+func (km *KeyManager) DeserializeKeyPair(skBytes, pkBytes []byte) (*sthincs.SPHINCS_SK, *sthincs.SPHINCS_PK, error) {
 	if km.Params == nil || km.Params.Params == nil {
 		log.Printf("DeserializeKeyPair: Missing parameters in KeyManager")
 		return nil, nil, errors.New("missing parameters in KeyManager")
@@ -145,12 +146,12 @@ func (km *KeyManager) DeserializeKeyPair(skBytes, pkBytes []byte) (*sphincs.SPHI
 		log.Printf("DeserializeKeyPair: Empty private key bytes")
 		return nil, nil, errors.New("empty private key bytes")
 	}
-	sk, err := sphincs.DeserializeSK(km.Params.Params, skBytes)
+	sk, err := sthincs.DeserializeSK(km.Params.Params, skBytes)
 	if err != nil {
 		log.Printf("DeserializeKeyPair: Failed to deserialize private key: %v", err)
 		return nil, nil, fmt.Errorf("failed to deserialize private key: %v", err)
 	}
-	pk, err := sphincs.DeserializePK(km.Params.Params, pkBytes)
+	pk, err := sthincs.DeserializePK(km.Params.Params, pkBytes)
 	if err != nil {
 		log.Printf("DeserializeKeyPair: Failed to deserialize public key: %v", err)
 		return nil, nil, fmt.Errorf("failed to deserialize public key: %v", err)
@@ -161,7 +162,7 @@ func (km *KeyManager) DeserializeKeyPair(skBytes, pkBytes []byte) (*sphincs.SPHI
 }
 
 // DeserializePublicKey deserializes only the public key from byte slices.
-func (km *KeyManager) DeserializePublicKey(pkBytes []byte) (*sphincs.SPHINCS_PK, error) {
+func (km *KeyManager) DeserializePublicKey(pkBytes []byte) (*sthincs.SPHINCS_PK, error) {
 	if km.Params == nil || km.Params.Params == nil {
 		log.Printf("DeserializePublicKey: Missing parameters in KeyManager")
 		return nil, errors.New("missing parameters in KeyManager")
@@ -171,7 +172,7 @@ func (km *KeyManager) DeserializePublicKey(pkBytes []byte) (*sphincs.SPHINCS_PK,
 		return nil, errors.New("empty public key bytes")
 	}
 	// Deserialize the public key from bytes.
-	pk, err := sphincs.DeserializePK(km.Params.Params, pkBytes)
+	pk, err := sthincs.DeserializePK(km.Params.Params, pkBytes)
 	if err != nil {
 		log.Printf("DeserializePublicKey: Failed to deserialize public key: %v", err)
 		return nil, fmt.Errorf("failed to deserialize public key: %v", err)

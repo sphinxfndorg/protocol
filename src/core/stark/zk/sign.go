@@ -29,7 +29,9 @@ import (
 
 	params "github.com/sphinxorg/protocol/src/core/sphincs/config"
 	key "github.com/sphinxorg/protocol/src/core/sphincs/key/backend"
-	sphincs "github.com/sphinxorg/protocol/src/crypto/SPHINCSPLUS-golang/sphincs"
+
+	// FIXED: Change from SPHINCSPLUS-golang to STHINCS
+	"github.com/sphinxorg/protocol/src/crypto/STHINCS/sthincs"
 )
 
 // NewSignWrapper initializes a new SignWrapper.
@@ -38,14 +40,20 @@ func NewSigner() *Signer {
 }
 
 // SignMessage signs a message using the provided SPHINCS+ parameters and secret key.
-func (sw *Signer) SignMessage(sphincsParams *params.SPHINCSParameters, message []byte, sk *key.SPHINCS_SK) (*sphincs.SPHINCS_SIG, error) {
-	sphincsSK := &sphincs.SPHINCS_SK{
+// FIXED: Changed parameter type from *params.SPHINCSParameters to *params.STHINCSParameters
+func (sw *Signer) SignMessage(sphincsParams *params.STHINCSParameters, message []byte, sk *key.SPHINCS_SK) (*sthincs.SPHINCS_SIG, error) {
+	// FIXED: Use sthincs.SPHINCS_SK
+	sphincsSK := &sthincs.SPHINCS_SK{
 		SKseed: sk.SKseed,
 		SKprf:  sk.SKprf,
 		PKseed: sk.PKseed,
 		PKroot: sk.PKroot,
 	}
-	sig := sphincs.Spx_sign(sphincsParams.Params, message, sphincsSK)
+	// FIXED: Use sthincs.Spx_sign
+	sig, err := sthincs.Spx_sign(sphincsParams.Params, message, sphincsSK)
+	if err != nil {
+		return nil, fmt.Errorf("failed to sign message: %v", err)
+	}
 	if sig == nil {
 		return nil, fmt.Errorf("failed to sign message: signature is nil")
 	}
@@ -53,13 +61,15 @@ func (sw *Signer) SignMessage(sphincsParams *params.SPHINCSParameters, message [
 }
 
 // VerifySignature verifies a SPHINCS+ signature for a given message and public key.
-func (sw *Signer) VerifySignature(sphincsParams *params.SPHINCSParameters, message []byte, sig *sphincs.SPHINCS_SIG, pk *sphincs.SPHINCS_PK) (bool, error) {
-	valid := sphincs.Spx_verify(sphincsParams.Params, message, sig, pk)
+// FIXED: Changed parameter type from *params.SPHINCSParameters to *params.STHINCSParameters
+func (sw *Signer) VerifySignature(sphincsParams *params.STHINCSParameters, message []byte, sig *sthincs.SPHINCS_SIG, pk *sthincs.SPHINCS_PK) (bool, error) {
+	// FIXED: Use sthincs.Spx_verify
+	valid := sthincs.Spx_verify(sphincsParams.Params, message, sig, pk)
 	return valid, nil
 }
 
 // SerializeSignature serializes a SPHINCS+ signature and returns its hex representation and size.
-func (sw *Signer) SerializeSignature(sig *sphincs.SPHINCS_SIG) (sigHex string, sigSize float64, err error) {
+func (sw *Signer) SerializeSignature(sig *sthincs.SPHINCS_SIG) (sigHex string, sigSize float64, err error) {
 	sigBytes, err := sig.SerializeSignature()
 	if err != nil {
 		return "", 0, fmt.Errorf("failed to serialize signature: %v", err)
@@ -68,8 +78,9 @@ func (sw *Signer) SerializeSignature(sig *sphincs.SPHINCS_SIG) (sigHex string, s
 }
 
 // DeserializeSignature deserializes a SPHINCS+ signature from bytes.
-func (sw *Signer) DeserializeSignature(sphincsParams *params.SPHINCSParameters, sigBytes []byte) (*sphincs.SPHINCS_SIG, error) {
-	sig, err := sphincs.DeserializeSignature(sphincsParams.Params, sigBytes)
+// FIXED: Changed parameter type from *params.SPHINCSParameters to *params.STHINCSParameters
+func (sw *Signer) DeserializeSignature(sphincsParams *params.STHINCSParameters, sigBytes []byte) (*sthincs.SPHINCS_SIG, error) {
+	sig, err := sthincs.DeserializeSignature(sphincsParams.Params, sigBytes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to deserialize signature: %v", err)
 	}

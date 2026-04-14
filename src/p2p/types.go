@@ -21,6 +21,7 @@
 // SOFTWARE.
 
 // go/src/p2p/types.go
+// go/src/p2p/types.go
 package p2p
 
 import (
@@ -46,10 +47,10 @@ type Server struct {
 	peerManager *PeerManager
 	mu          sync.RWMutex
 	db          *leveldb.DB
-	sphincsMgr  *sign.SphincsManager
-	stopCh      chan struct{} // Channel to signal stop
-	udpReadyCh  chan struct{} // Channel to signal UDP readiness
-	dht         network.DHT   // Add DHT field
+	sphincsMgr  *sign.STHINCSManager // Field uses STHINCSManager
+	stopCh      chan struct{}        // Channel to signal stop
+	udpReadyCh  chan struct{}        // Channel to signal UDP readiness
+	dht         network.DHT          // Add DHT field
 	consensus   *consensus.Consensus
 
 	neighborsCache     map[network.NodeID][]network.PeerInfo
@@ -69,7 +70,8 @@ func (s *Server) PeerManager() *PeerManager {
 	return s.peerManager
 }
 
-func (s *Server) SetSphincsMgr(mgr *sign.SphincsManager) {
+// FIXED: Changed parameter type from *sign.SphincsManager to *sign.STHINCSManager
+func (s *Server) SetSphincsMgr(mgr *sign.STHINCSManager) {
 	s.sphincsMgr = mgr
 }
 

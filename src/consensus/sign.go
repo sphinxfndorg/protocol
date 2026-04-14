@@ -21,6 +21,7 @@
 // SOFTWARE.
 
 // go/src/consensus/signing.go
+// go/src/consensus/signing.go
 package consensus
 
 import (
@@ -35,7 +36,7 @@ import (
 	svm "github.com/sphinxorg/protocol/src/core/svm/opcodes"
 	vmachine "github.com/sphinxorg/protocol/src/core/svm/vm"
 	types "github.com/sphinxorg/protocol/src/core/transaction"
-	"github.com/sphinxorg/protocol/src/crypto/SPHINCSPLUS-golang/sphincs"
+	"github.com/sphinxorg/protocol/src/crypto/STHINCS/sthincs"
 	logger "github.com/sphinxorg/protocol/src/log"
 )
 
@@ -67,14 +68,14 @@ import (
 // RegisterPublicKey registers a public key for another node.
 // This enables cross-node signature verification by maintaining a registry of public keys.
 // The registry is protected by a mutex for thread-safe concurrent access.
-func (s *SigningService) RegisterPublicKey(nodeID string, publicKey *sphincs.SPHINCS_PK) {
+func (s *SigningService) RegisterPublicKey(nodeID string, publicKey *sthincs.SPHINCS_PK) {
 	// Lock the mutex to prevent concurrent writes to the registry
 	s.registryMutex.Lock()
 	defer s.registryMutex.Unlock()
 
 	// Initialize the registry map if it doesn't exist yet
 	if s.publicKeyRegistry == nil {
-		s.publicKeyRegistry = make(map[string]*sphincs.SPHINCS_PK)
+		s.publicKeyRegistry = make(map[string]*sthincs.SPHINCS_PK)
 	}
 	// Store the public key associated with the node ID
 	s.publicKeyRegistry[nodeID] = publicKey
@@ -95,12 +96,14 @@ func BytesToUint256(data []byte) *uint256.Int {
 // - SPHINCS+ manager for signing operations
 // - Key manager for key generation and serialization
 // - Node identification for tracking which node this service belongs to
-func NewSigningService(sphincsManager *sign.SphincsManager, keyManager *key.KeyManager, nodeID string) *SigningService {
+// FIXED: parameter type changed to *sign.STHINCSManager
+func NewSigningService(sphincsManager *sign.STHINCSManager, keyManager *key.KeyManager, nodeID string) *SigningService {
 	// Create the service struct with provided dependencies
 	service := &SigningService{
-		sphincsManager: sphincsManager,
-		keyManager:     keyManager,
-		nodeID:         nodeID,
+		sphincsManager:    sphincsManager,
+		keyManager:        keyManager,
+		nodeID:            nodeID,
+		publicKeyRegistry: make(map[string]*sthincs.SPHINCS_PK), // FIXED: initialize map
 	}
 	// Generate or load the cryptographic keys for this node
 	service.initializeKeys()
@@ -125,7 +128,7 @@ func (s *SigningService) initializeKeys() error {
 	fmt.Printf("PKroot fingerprint: %x...\n", skWrapper.PKroot[:8])
 
 	// Store the private key components in SPHINCS+ format
-	s.privateKey = &sphincs.SPHINCS_SK{
+	s.privateKey = &sthincs.SPHINCS_SK{
 		SKseed: skWrapper.SKseed, // Secret seed for signing
 		SKprf:  skWrapper.SKprf,  // Secret PRF key
 		PKseed: skWrapper.PKseed, // Public seed (part of public key)
@@ -158,6 +161,7 @@ func (s *SigningService) SignMessage(data []byte) ([]byte, error) {
 
 	// Sign the message using the SPHINCS+ manager
 	// Returns: signature object, merkle root, timestamp, nonce, commitment, and error
+	// FIXED: use sphincsManager (not sthincssManager)
 	sig, merkleRoot, timestamp, nonce, commitment, err := s.sphincsManager.SignMessage(data, s.privateKey, s.publicKey)
 	if err != nil {
 		return nil, err
@@ -169,7 +173,8 @@ func (s *SigningService) SignMessage(data []byte) ([]byte, error) {
 	fmt.Printf("DEBUG: Generated commitment size: %d bytes\n", len(commitment))
 
 	// Serialize the signature object to raw bytes
-	sigBytes, err := s.sphincsManager.SerializeSignature(sig)
+	// FIXED: SerializeSignature is a method on the signature object, not the manager
+	sigBytes, err := sig.SerializeSignature()
 	if err != nil {
 		return nil, err
 	}
@@ -378,7 +383,7 @@ func (s *SigningService) VerifySignature(signedData []byte, nodeID string) (bool
 // getPublicKeyForNode retrieves the registered public key for a given node ID.
 // It first checks the registry for other nodes' keys, then falls back to its own key.
 // This method is thread-safe due to the read lock on the registry mutex.
-func (s *SigningService) getPublicKeyForNode(nodeID string) (*sphincs.SPHINCS_PK, error) {
+func (s *SigningService) getPublicKeyForNode(nodeID string) (*sthincs.SPHINCS_PK, error) {
 	// Acquire read lock (allows concurrent reads, blocks writes)
 	s.registryMutex.RLock()
 	defer s.registryMutex.RUnlock()
@@ -708,7 +713,7 @@ func (s *SigningService) GetPublicKey() ([]byte, error) {
 // GetPublicKeyObject returns the public key object for this node.
 // This provides direct access to the SPHINCS_PK object for operations
 // that need the structured key rather than raw bytes.
-func (s *SigningService) GetPublicKeyObject() *sphincs.SPHINCS_PK {
+func (s *SigningService) GetPublicKeyObject() *sthincs.SPHINCS_PK {
 	return s.publicKey
 }
 
@@ -831,4 +836,12 @@ func (c *Consensus) GetSigningService() *SigningService {
 	c.mu.RLock() // Acquire read lock for thread safety
 	defer c.mu.RUnlock()
 	return c.signingService
+}
+
+// min returns the smaller of two integers - helper function for string truncation
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

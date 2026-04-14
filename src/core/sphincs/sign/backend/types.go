@@ -38,6 +38,6 @@ import (
 type SphincsManager struct {
 	db         *leveldb.DB
 	keyManager *key.KeyManager
-	parameters *params.SPHINCSParameters
+	parameters *params.STHINCSParameters
 	mu         sync.RWMutex // Mutex for thread-safe database access
 }

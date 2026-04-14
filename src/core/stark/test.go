@@ -58,7 +58,7 @@ func main() {
 	// Initialize SPHINCS+ parameters
 	fmt.Println("Initializing SPHINCS+ parameters...")
 	start = time.Now()
-	sphincsParams, err := params.NewSPHINCSParameters()
+	sphincsParams, err := params.NewSTHINCSParameters()
 	if err != nil {
 		fmt.Printf("Test failed: Failed to initialize SPHINCS+ parameters: %v\n", err)
 		return

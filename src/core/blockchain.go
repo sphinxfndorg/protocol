@@ -125,6 +125,8 @@ func NewBlockchain(dataDir string, nodeID string, validators []string, networkTy
 
 	// Now that we have the genesis block, set the chain params with consistent hash
 	// Configure chain parameters based on network type (testnet, devnet, mainnet)
+	// Now that we have the genesis block, set the chain params with consistent hash
+	// Configure chain parameters based on network type (testnet, devnet, mainnet)
 	if len(blockchain.chain) > 0 {
 		// Use consistent genesis hash that's the same for all nodes
 		// chainParams is already set above; just validate against actual genesis.
@@ -137,7 +139,6 @@ func NewBlockchain(dataDir string, nodeID string, validators []string, networkTy
 			// Log warning but continue - this helps identify configuration issues
 			logger.Warn("Genesis hash mismatch: actual=%s, expected=%s",
 				actualGenesisHash, chainParams.GenesisHash)
-			// This shouldn't happen with our consistent approach
 		}
 
 		// Log successful chain parameters initialization
@@ -145,22 +146,22 @@ func NewBlockchain(dataDir string, nodeID string, validators []string, networkTy
 			chainParams.GetNetworkName(), chainParams.GenesisHash)
 
 		// Initialize mempool with configuration from chain params
-		// Create mempool with size limits and validation rules
 		mempoolConfig := GetMempoolConfigFromChainParams(chainParams)
 		blockchain.mempool = pool.NewMempool(mempoolConfig)
 
-		// Log chain parameters again for visibility (FIXED: Use chainParams.GenesisHash)
+		// ✅ CRITICAL: Set mempool on state machine for transaction replication
+		stateMachine.SetMempool(blockchain.mempool)
+
+		// Log chain parameters again for visibility
 		logger.Info("Chain parameters initialized for %s: genesis_hash=%s",
 			chainParams.GetNetworkName(), chainParams.GenesisHash)
 
 		// Verify the genesis hash is properly stored in block_index.json
-		// This ensures the index file is consistent with the actual blockchain
 		if err := blockchain.verifyGenesisHashInIndex(); err != nil {
 			logger.Warn("Warning: Genesis hash verification failed: %v", err)
 		}
 
 		// AUTO-SAVE: Save chain state with actual genesis hash
-		// Automatically persist the chain state after initialization
 		if err := blockchain.SaveBasicChainState(); err != nil {
 			logger.Warn("Warning: Failed to auto-save chain state: %v", err)
 		} else {

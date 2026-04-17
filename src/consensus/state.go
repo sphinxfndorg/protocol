@@ -196,3 +196,20 @@ func (cs *ConsensusState) ResetForNewView(view uint64) {
 	// we don't accidentally commit a different block at the same height
 	// This maintains the PBFT safety property during view changes
 }
+
+// ResetForNewProposal resets consensus state for a new proposal from a different leader
+// Called when receiving a proposal from a different leader to avoid getting stuck
+// on an old prepared block from a previous round
+func (cs *ConsensusState) ResetForNewProposal(blockHash string) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+
+	// Clear prepared block to accept the new proposal
+	if cs.preparedBlock != nil && cs.preparedBlock.GetHash() != blockHash {
+		logger.Info("🔄 Resetting preparedBlock from %s to accept new proposal %s",
+			cs.preparedBlock.GetHash()[:16], blockHash[:16])
+		cs.preparedBlock = nil
+		cs.preparedView = 0
+	}
+	// Keep phase as is, don't reset to idle
+}

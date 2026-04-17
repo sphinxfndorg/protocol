@@ -1,0 +1,128 @@
+{
+  "chain_identification": {
+    "timestamp": "2026-04-17T07:54:40+07:00",
+    "chain_parameters": {
+      "bip44_type": 1,
+      "chain_id": 73310,
+      "chain_name": "Sphinx Devnet",
+      "default_port": 32309,
+      "genesis_hash": "GENESIS_13eb808704d688f89e2111b2e0bddada818b8bc005eed4e451f270b322d769ad",
+      "genesis_time": "2026-04-17T00:54:40Z",
+      "magic_number": 1397770328,
+      "symbol": "SPX",
+      "version": "1.0.0"
+    },
+    "token_info": {
+      "ledger_name": "Sphinx Devnet"
+    },
+    "network_info": {
+      "network_name": "Sphinx Devnet",
+      "protocol": "SPX/1.0.0"
+    }
+  },
+  "nodes": [
+    {
+      "node_id": "Node-127.0.0.1:32309",
+      "node_name": "Node-127.0.0.1:32309",
+      "node_address": "127.0.0.1:32309",
+      "chain_info": {
+        "bip44_coin_type": 1,
+        "chain_id": 73310,
+        "chain_name": "Sphinx Devnet",
+        "current_height": 1,
+        "default_port": 32309,
+        "genesis_hash": "GENESIS_13eb808704d688f89e2111b2e0bddada818b8bc005eed4e451f270b322d769ad",
+        "genesis_time": "2024-11-20T02:40:00Z",
+        "latest_block": "fd4dfa7c364ca86ede5c3a576208dd0d340422701273e6c4efcb344f0024c233",
+        "ledger_name": "Sphinx Devnet",
+        "magic_number": "0x53504858",
+        "network": "Sphinx Devnet",
+        "symbol": "SPX",
+        "version": "1.0.0"
+      },
+      "block_height": 1,
+      "block_hash": "fd4dfa7c364ca86ede5c3a576208dd0d340422701273e6c4efcb344f0024c233",
+      "merkle_root": "9f70803cd2bf6c4522410965508c5f221fb12fae72799ad994aa518649c4c0c2",
+      "timestamp": "2026-04-17T07:54:31+07:00"
+    }
+  ],
+  "storage_state": {
+    "best_block_hash": "fd4dfa7c364ca86ede5c3a576208dd0d340422701273e6c4efcb344f0024c233",
+    "total_blocks": 2,
+    "blocks_dir": "data/Node-127.0.0.1:32309/blockchain/blocks",
+    "index_dir": "data/Node-127.0.0.1:32309/blockchain/index",
+    "state_dir": "data/Node-127.0.0.1:32309/blockchain/state"
+  },
+  "basic_chain_state": {
+    "best_block_hash": "fd4dfa7c364ca86ede5c3a576208dd0d340422701273e6c4efcb344f0024c233",
+    "total_blocks": 2,
+    "last_updated": "2026-04-17T07:54:40+07:00"
+  },
+  "block_size_metrics": {
+    "total_blocks": 2,
+    "average_size_bytes": 1756,
+    "min_size_bytes": 1641,
+    "max_size_bytes": 1872,
+    "total_size_bytes": 3513,
+    "size_stats": [
+      {
+        "height": 0,
+        "hash": "GENESIS_13eb808704d688f89e2111b2e0bddada818b8bc005eed4e451f270b322d769ad",
+        "size_bytes": 1641,
+        "size_mb": 0.0015649795532226562,
+        "transaction_count": 7,
+        "timestamp": 1732070400
+      },
+      {
+        "height": 1,
+        "hash": "fd4dfa7c364ca86ede5c3a576208dd0d340422701273e6c4efcb344f0024c233",
+        "size_bytes": 1872,
+        "size_mb": 0.0017852783203125,
+        "transaction_count": 7,
+        "timestamp": 1776387176
+      }
+    ],
+    "calculation_time": "2026-04-17T07:54:40+07:00",
+    "average_size_mb": 0.001674652099609375,
+    "min_size_mb": 0.0015649795532226562,
+    "max_size_mb": 0.0017852783203125,
+    "total_size_mb": 0.0033502578735351562
+  },
+  "tps_metrics": {
+    "current_tps": 1.204260444712724,
+    "average_tps": 1.4,
+    "peak_tps": 1.4,
+    "total_transactions": 14,
+    "blocks_processed": 1,
+    "last_updated": "2026-04-17T07:54:40.209772+07:00",
+    "current_window_count": 0,
+    "window_start_time": "2026-04-17T07:52:43.462104+07:00",
+    "window_duration_seconds": 5,
+    "tps_history": [
+      {
+        "timestamp": "2026-04-17T07:53:58.650526+07:00",
+        "tps": 1.4,
+        "block_height": 1
+      }
+    ],
+    "transactions_per_block": [
+      {
+        "block_height": 1,
+        "block_hash": "eeb89a24a7d8d2d52392294939cfa18e2b387a2b8a088cf6a96ed9d47f741162",
+        "tx_count": 7,
+        "block_time": "2026-04-17T07:52:56+07:00",
+        "block_size_bytes": 1872
+      }
+    ],
+    "avg_transactions_per_block": 7,
+    "max_transactions_per_block": 7,
+    "min_transactions_per_block": 7
+  },
+  "timestamp": "2026-04-17T00:54:40Z",
+  "signature_validation": {
+    "total_signatures": 0,
+    "valid_signatures": 0,
+    "invalid_signatures": 0,
+    "validation_time": "2026-04-17T00:54:40Z"
+  }
+}

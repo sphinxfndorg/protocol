@@ -24,92 +24,60 @@
 package utils
 
 import (
+	"encoding/json"
+	"fmt"
+	"net"
+	"time"
+
 	"github.com/sphinxorg/protocol/src/consensus"
+	"github.com/sphinxorg/protocol/src/crypto/STHINCS/parameters"
+	"github.com/sphinxorg/protocol/src/crypto/STHINCS/sthincs"
+	security "github.com/sphinxorg/protocol/src/handshake"
 	logger "github.com/sphinxorg/protocol/src/log"
 )
 
-// exchangePublicKeys handles the distribution and registration of public keys between nodes
-// This is a critical step for establishing trust and enabling signature verification in the consensus protocol
-// The function performs two main operations:
-// 1. Collects and validates public keys from all signing services
-// 2. Registers each node's public key with all other nodes' signing services
-func exchangePublicKeys(signingServices map[string]*consensus.SigningService, nodeIDs []string) {
-	logger.Info("=== EXCHANGING PUBLIC KEYS BETWEEN %d NODES ===", len(nodeIDs))
-
-	// First phase: Collect and validate all public keys
-	// This ensures all keys are properly formatted before distribution
-	publicKeys := make(map[string][]byte) // Store as bytes for validation and later registration
-
-	// Iterate through each node to extract its public key
-	for _, nodeID := range nodeIDs {
-		// Retrieve the signing service for this node
-		signingService := signingServices[nodeID]
-		if signingService == nil {
-			// Node doesn't have a signing service configured - log warning and skip
-			logger.Warn("No signing service for node %s", nodeID)
-			continue
-		}
-
-		// Get public key as raw bytes from the signing service
-		// The public key is used for SPHINCS+ signature verification
-		pkBytes, err := signingService.GetPublicKey()
-		if err != nil {
-			logger.Warn("Failed to get public key for %s: %v", nodeID, err)
-			continue
-		}
-
-		// Validate public key length - SPHINCS+ requires exactly 32 bytes
-		// Incorrect length will cause ALL signature verifications to fail
-		if len(pkBytes) != 32 {
-			logger.Error("❌ Public key for %s has incorrect length: expected 32, got %d",
-				nodeID, len(pkBytes))
-			logger.Error("   This will cause ALL signature verifications to fail!")
-			continue
-		}
-
-		// Public key is valid - log success and store for distribution
-		logger.Info("✅ Valid public key for %s (32 bytes)", nodeID)
-		logger.Debug("   Public key fingerprint: %x", pkBytes[:8]) // Show first 8 bytes as fingerprint
-		publicKeys[nodeID] = pkBytes
+// exchangeKeyWithPeerSync performs synchronous key exchange with a single peer
+func exchangeKeyWithPeerSync(peerAddr string, nodeID string, signingService *consensus.SigningService, sthincsParams *parameters.Parameters) error {
+	ownPKBytes, err := signingService.GetPublicKey()
+	if err != nil {
+		return fmt.Errorf("failed to get own public key: %v", err)
 	}
 
-	// Second phase: Register public keys with each node's signing service
-	// This allows each node to verify signatures from other nodes
-	for _, nodeID := range nodeIDs {
-		// Get the signing service for this node (the receiving node)
-		signingService := signingServices[nodeID]
-		if signingService == nil {
-			// Skip nodes without signing services
-			continue
-		}
+	payload := peerKeyExchangeMsg{NodeID: nodeID, PublicKey: ownPKBytes}
+	payloadBytes, _ := json.Marshal(payload)
 
-		registeredCount := 0 // Track successful registrations for logging
+	conn, err := net.DialTimeout("tcp", peerAddr, 5*time.Second)
+	if err != nil {
+		return fmt.Errorf("dial failed: %v", err)
+	}
+	defer conn.Close()
 
-		// Register every other node's public key with this node's signing service
-		for otherNodeID, pkBytes := range publicKeys {
-			// Skip self-registration - a node doesn't need to verify its own signatures
-			if nodeID == otherNodeID {
-				continue
-			}
-
-			// Deserialize the raw bytes back into a SPHINCS_PK object and register it
-			// The signing service stores this public key for future signature verification
-			err := signingService.DeserializeAndRegisterPublicKey(otherNodeID, pkBytes)
-			if err != nil {
-				logger.Warn("Failed to register %s's public key with %s: %v",
-					otherNodeID, nodeID, err)
-			} else {
-				registeredCount++
-				logger.Debug("Registered %s's public key with %s", otherNodeID, nodeID)
-			}
-		}
-
-		// Log summary of registrations for this node
-		logger.Info("Node %s registered %d public keys", nodeID, registeredCount)
+	msg := security.Message{Type: "key_exchange", Data: payloadBytes}
+	if err := json.NewEncoder(conn).Encode(&msg); err != nil {
+		return fmt.Errorf("send failed: %v", err)
 	}
 
-	// Final summary: Report success rate of key exchange
-	// This indicates how many nodes successfully participated in the key exchange
-	logger.Info("✅ Public key exchange completed: %d/%d nodes exchanged keys",
-		len(publicKeys), len(nodeIDs))
+	var reply security.Message
+	decoder := json.NewDecoder(conn)
+	if err := decoder.Decode(&reply); err != nil {
+		return fmt.Errorf("receive failed: %v", err)
+	}
+
+	if reply.Type != "key_exchange" {
+		return fmt.Errorf("unexpected reply type: %s", reply.Type)
+	}
+
+	var kx peerKeyExchangeMsg
+	if err := json.Unmarshal(reply.Data, &kx); err != nil {
+		return fmt.Errorf("unmarshal failed: %v", err)
+	}
+
+	pk, err := sthincs.DeserializePK(sthincsParams, kx.PublicKey)
+	if err != nil {
+		return fmt.Errorf("deserialize failed: %v", err)
+	}
+
+	signingService.RegisterPublicKey(kx.NodeID, pk)
+	logger.Info("✅ Key exchange complete with %s", kx.NodeID)
+	return nil
 }

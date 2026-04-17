@@ -110,8 +110,9 @@ func CallRPC(address, method string, params interface{}, nodeID NodeID, ttl uint
 	}
 
 	// Extract and deserialize the RPC Message
-	dataBytes, ok := respMsg.Data.([]byte)
-	if !ok {
+	// respMsg.Data is already json.RawMessage ([]byte), use it directly
+	dataBytes := respMsg.Data
+	if len(dataBytes) == 0 {
 		return nil, ErrInvalidMessageFormat
 	}
 

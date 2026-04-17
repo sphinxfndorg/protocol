@@ -32,7 +32,7 @@ import (
 
 func main() {
 	if err := cli.Execute(); err != nil {
-		log.Fatalf("CLI execution failed: %v", err)
+		log.Printf("CLI execution failed: %v", err)
 		os.Exit(1)
 	}
 }

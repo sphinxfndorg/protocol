@@ -133,7 +133,8 @@ func (pm *PeerManager) ConnectPeer(node *network.Node) error {
 	peer.SendPing()
 
 	// Broadcast our peer information to the network
-	pm.server.Broadcast(&security.Message{Type: "peer_info", Data: network.PeerInfo{
+	// Marshal PeerInfo to JSON first
+	peerInfo := network.PeerInfo{
 		NodeID:          pm.server.localNode.ID,
 		KademliaID:      pm.server.localNode.KademliaID,
 		Address:         pm.server.localNode.Address,
@@ -145,14 +146,23 @@ func (pm *PeerManager) ConnectPeer(node *network.Node) error {
 		Timestamp:       time.Now(),
 		ProtocolVersion: "1.0",
 		PublicKey:       pm.server.localNode.PublicKey,
-	}})
+	}
+
+	peerInfoBytes, err := json.Marshal(peerInfo)
+	if err != nil {
+		log.Printf("Failed to marshal peer info: %v", err)
+		return fmt.Errorf("failed to marshal peer info: %v", err)
+	}
+
+	pm.server.Broadcast(&security.Message{
+		Type: "peer_info",
+		Data: peerInfoBytes,
+	})
 
 	return nil
 }
 
 // performHandshake negotiates protocol version and capabilities.
-// Implements the version/verack handshake protocol to establish
-// compatibility and exchange basic information with a peer.
 func (pm *PeerManager) performHandshake(node *network.Node) error {
 	log.Printf("Starting handshake with %s (ID=%s)", node.Address, node.ID)
 
@@ -174,16 +184,25 @@ func (pm *PeerManager) performHandshake(node *network.Node) error {
 	rand.Read(nonce)
 
 	// Create version message with our information
+	versionData := map[string]interface{}{
+		"version":      "0.1.0",
+		"node_id":      pm.server.localNode.ID,
+		"chain_id":     "sphinx-mainnet",
+		"block_height": pm.server.blockchain.GetBlockCount(),
+		"nonce":        hex.EncodeToString(nonce),
+		"address":      pm.server.localNode.Address,
+	}
+
+	// Marshal version data to JSON
+	versionBytes, err := json.Marshal(versionData)
+	if err != nil {
+		log.Printf("Failed to marshal version message: %v", err)
+		return fmt.Errorf("failed to marshal version message: %v", err)
+	}
+
 	versionMsg := &security.Message{
 		Type: "version",
-		Data: map[string]interface{}{
-			"version":      "0.1.0",                              // Protocol version
-			"node_id":      pm.server.localNode.ID,               // Our node ID
-			"chain_id":     "sphinx-mainnet",                     // Blockchain identifier
-			"block_height": pm.server.blockchain.GetBlockCount(), // Current block height
-			"nonce":        hex.EncodeToString(nonce),            // Unique nonce
-			"address":      pm.server.localNode.Address,          // Our address
-		},
+		Data: versionBytes,
 	}
 
 	// Get existing TCP connection
@@ -213,13 +232,19 @@ func (pm *PeerManager) performHandshake(node *network.Node) error {
 	for {
 		select {
 		case msg := <-pm.server.messageCh:
-			// Process incoming messages during handshake
 			log.Printf("Received message in handshake for %s: Type=%s, Data=%v, ChannelLen=%d",
 				node.Address, msg.Type, msg.Data, len(pm.server.messageCh))
 
 			if msg.Type == "verack" {
+				// Unmarshal verack data
+				var peerID string
+				if err := json.Unmarshal(msg.Data, &peerID); err != nil {
+					log.Printf("Failed to unmarshal verack data: %v", err)
+					continue
+				}
+
 				// Check if verack matches expected peer
-				if peerID, ok := msg.Data.(string); ok && peerID == node.ID {
+				if peerID == node.ID {
 					log.Printf("Received valid verack from %s for node_id: %s, Address: %s",
 						node.Address, peerID, node.Address)
 
@@ -235,7 +260,7 @@ func (pm *PeerManager) performHandshake(node *network.Node) error {
 					return nil // Handshake successful
 				} else {
 					log.Printf("Invalid verack from %s: peerID=%v, expected=%s, Address: %s",
-						node.Address, msg.Data, node.ID, node.Address)
+						node.Address, peerID, node.ID, node.Address)
 				}
 			} else {
 				log.Printf("Unexpected message type in handshake for %s: %s", node.Address, msg.Type)
@@ -389,6 +414,8 @@ func (pm *PeerManager) PropagateMessage(msg *security.Message, originID string) 
 
 // SyncBlockchain synchronizes the blockchain with a peer.
 // Requests block headers from a peer to synchronize chain state.
+// SyncBlockchain synchronizes the blockchain with a peer.
+// Requests block headers from a peer to synchronize chain state.
 func (pm *PeerManager) SyncBlockchain(peerID string) error {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
@@ -399,12 +426,21 @@ func (pm *PeerManager) SyncBlockchain(peerID string) error {
 		return fmt.Errorf("peer %s not found", peerID)
 	}
 
+	// Create getheaders message data
+	headersData := map[string]interface{}{
+		"start_height": pm.server.blockchain.GetBlockCount(), // Request headers from current height
+	}
+
+	// Marshal to JSON
+	headersBytes, err := json.Marshal(headersData)
+	if err != nil {
+		return fmt.Errorf("failed to marshal getheaders data: %v", err)
+	}
+
 	// Create getheaders message
 	headersMsg := &security.Message{
 		Type: "getheaders",
-		Data: map[string]interface{}{
-			"start_height": pm.server.blockchain.GetBlockCount(), // Request headers from current height
-		},
+		Data: headersBytes,
 	}
 
 	// Send request to peer

@@ -215,10 +215,13 @@ func GetDevnetChainParams() *SphinxChainParameters {
 	params := GetSphinxChainParams()
 
 	params.ChainName = "Sphinx Devnet"
-	params.ChainID = 73310 // ← distinct from mainnet (7331)
+	params.ChainID = 73310
 	params.DefaultPort = 32309
 	params.BIP44CoinType = 1
 	params.LedgerName = "Sphinx Devnet"
+
+	// Also change genesis hash to distinguish devnet
+	params.GenesisHash = "DEVNET_" + GetGenesisHash()
 
 	params.MaxBlockSize = 8 * 1024 * 1024
 	params.BlockGasLimit = big.NewInt(50000000)

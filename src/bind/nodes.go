@@ -21,12 +21,14 @@
 // SOFTWARE.
 
 // go/src/bind/nodes.go
+// go/src/bind/nodes.go
 package bind
 
 import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"math/big"
 	"net"
 	"os"
 	"os/signal"
@@ -36,10 +38,11 @@ import (
 	"time"
 
 	"github.com/sphinxorg/protocol/src/common"
+	"github.com/sphinxorg/protocol/src/consensus"
 	"github.com/sphinxorg/protocol/src/core"
-	config "github.com/sphinxorg/protocol/src/core/sphincs/config"
-	key "github.com/sphinxorg/protocol/src/core/sphincs/key/backend"
-	sign "github.com/sphinxorg/protocol/src/core/sphincs/sign/backend"
+	config "github.com/sphinxorg/protocol/src/core/sthincs/config"
+	key "github.com/sphinxorg/protocol/src/core/sthincs/key/backend"
+	sign "github.com/sphinxorg/protocol/src/core/sthincs/sign/backend"
 	security "github.com/sphinxorg/protocol/src/handshake"
 	"github.com/sphinxorg/protocol/src/http"
 	logger "github.com/sphinxorg/protocol/src/log"
@@ -66,6 +69,9 @@ func StartLocalCluster() error {
 //
 //	mode = "validator" → Charlie single-node
 //	mode = "cluster"   → local 3-node testnet
+//
+// go/src/bind/nodes.go
+// Change the LaunchNetwork function:
 func LaunchNetwork(mode string) error {
 	switch mode {
 	case "validator":
@@ -78,7 +84,9 @@ func LaunchNetwork(mode string) error {
 			Role:      network.RoleValidator,
 			SeedNodes: []string{},
 		}
-		dataDir := common.DataDir // CHANGED: Use common test data directory
+		// CHANGE THIS LINE:
+		// dataDir := common.DataDir  // OLD - doesn't work
+		dataDir := common.GetDataDir() // NEW - use function
 		return StartValidatorNode(node, dataDir)
 	case "cluster":
 		return StartLocalCluster()
@@ -90,19 +98,18 @@ func LaunchNetwork(mode string) error {
 }
 
 // StartSingleNode starts a single node with the given configuration
+// go/src/bind/nodes.go - Add this after resources are created
+
 func StartSingleNodeInternal(nodeConfig network.NodePortConfig, dataDir string) error {
-	// since we're standardizing to use the common configuration
+	// Set the global data directory for common package
+	if dataDir != "" {
+		common.SetDataDir(dataDir)
+	}
+
 	nodeDataDir := common.GetNodeDataDir(nodeConfig.Name)
 	if err := os.MkdirAll(nodeDataDir, 0755); err != nil {
 		return fmt.Errorf("failed to create data directory %s: %v", nodeDataDir, err)
 	}
-
-	// CHANGED: Use common.GetLevelDBPath for standardized LevelDB path
-	db, err := leveldb.OpenFile(common.GetLevelDBPath(nodeConfig.Name), nil)
-	if err != nil {
-		return fmt.Errorf("failed to open LevelDB at %s: %v", nodeDataDir, err)
-	}
-	defer db.Close()
 
 	keyManager, err := key.NewKeyManager()
 	if err != nil {
@@ -114,19 +121,16 @@ func StartSingleNodeInternal(nodeConfig network.NodePortConfig, dataDir string) 
 		return fmt.Errorf("failed to initialize STHINCSParameters: %v", err)
 	}
 
-	sphincsMgr := sign.NewSTHINCSManager(db, keyManager, sphincsParams)
-	if sphincsMgr == nil {
-		return fmt.Errorf("failed to initialize STHINCSManager")
-	}
-
 	setupConfig := NodeSetupConfig{
-		Name:      nodeConfig.Name,
-		Address:   nodeConfig.TCPAddr,
-		UDPPort:   nodeConfig.UDPPort,
-		HTTPPort:  nodeConfig.HTTPPort,
-		WSPort:    nodeConfig.WSPort,
-		Role:      nodeConfig.Role,
-		SeedNodes: nodeConfig.SeedNodes,
+		Name:          nodeConfig.Name,
+		Address:       nodeConfig.TCPAddr,
+		UDPPort:       nodeConfig.UDPPort,
+		HTTPPort:      nodeConfig.HTTPPort,
+		WSPort:        nodeConfig.WSPort,
+		Role:          nodeConfig.Role,
+		SeedNodes:     nodeConfig.SeedNodes,
+		KeyManager:    keyManager,
+		SphincsParams: sphincsParams,
 	}
 
 	var wg sync.WaitGroup
@@ -138,7 +142,54 @@ func StartSingleNodeInternal(nodeConfig network.NodePortConfig, dataDir string) 
 		return fmt.Errorf("expected 1 node resource, got %d", len(resources))
 	}
 
-	resources[0].P2PServer.SetSphincsMgr(sphincsMgr)
+	// ========== START CONSENSUS ENGINE FOR VALIDATOR ==========
+	// If this is a validator node, start the consensus engine to mine blocks
+	if nodeConfig.Role == network.RoleValidator {
+		logger.Info("Starting consensus engine for validator node...")
+
+		// Get the blockchain and create consensus engine
+		blockchain := resources[0].Blockchain
+
+		// Create signing service
+		signingService := consensus.NewSigningService(nil, keyManager, nodeConfig.Name)
+
+		// Create node manager for consensus
+		nodeMgr := network.NewCallNodeManager()
+		nodeMgr.AddPeer(nodeConfig.Name)
+
+		// Get min stake amount from chain params
+		coreChainParams := core.GetSphinxChainParams()
+		minStakeAmount := coreChainParams.ConsensusConfig.MinStakeAmount
+
+		// Create consensus engine
+		consensusEngine := consensus.NewConsensus(
+			nodeConfig.Name,
+			nodeMgr,
+			blockchain,
+			signingService,
+			nil,
+			minStakeAmount,
+		)
+
+		// Add self as validator
+		stakeSPX := new(big.Int).Div(minStakeAmount, big.NewInt(1e18)).Uint64()
+		validatorSet := consensusEngine.GetValidatorSet()
+		if validatorSet != nil {
+			validatorSet.AddValidator(nodeConfig.Name, stakeSPX)
+		}
+
+		// Start consensus
+		if err := consensusEngine.Start(); err != nil {
+			logger.Errorf("Failed to start consensus: %v", err)
+		} else {
+			logger.Info("✅ Consensus engine started successfully")
+		}
+
+		// Store consensus engine in blockchain
+		blockchain.SetConsensusEngine(consensusEngine)
+		blockchain.SetConsensus(consensusEngine)
+	}
+	// ==========================================================
 
 	// Start peer discovery after setup
 	go func() {
@@ -154,6 +205,7 @@ func StartSingleNodeInternal(nodeConfig network.NodePortConfig, dataDir string) 
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	<-sigCh
 	log.Printf("Shutting down node %s...", nodeConfig.Name)
+
 	if err := Shutdown([]NodeResources{resources[0]}); err != nil {
 		log.Printf("Failed to shut down node %s: %v", nodeConfig.Name, err)
 	}

@@ -393,54 +393,69 @@ func (bc *Blockchain) StoreChainState(nodes []*storage.NodeInfo) error {
 
 	// Collect consensus signatures as FinalStateInfo if consensus engine is available
 	// Initialize variables for consensus data
+	// Collect consensus signatures as FinalStateInfo if consensus engine is available
+	// Initialize variables for consensus data
 	var finalStates []*storage.FinalStateInfo
 	var signatureValidation *storage.SignatureValidation
 
+	// ========== FIX: Initialize signatureValidation even if no signatures ==========
 	// Check if consensus engine is available
 	if bc.consensusEngine != nil {
 		// Get raw signatures from consensus engine
-		// Retrieve all consensus signatures for finality
 		rawSignatures := bc.consensusEngine.GetConsensusSignatures()
-		// Prepare slice to hold converted signatures
-		finalStates = make([]*storage.FinalStateInfo, len(rawSignatures))
 
-		validCount := 0
-		// Convert consensus signatures to storage format
-		// Iterate through each raw signature
-		for i, rawSig := range rawSignatures {
-			// Convert to storage format with additional metadata
-			finalStates[i] = &storage.FinalStateInfo{
-				BlockHash:        rawSig.BlockHash,                                      // Block being signed
-				BlockHeight:      rawSig.BlockHeight,                                    // Height of signed block
-				SignerNodeID:     rawSig.SignerNodeID,                                   // Node that created signature
-				Signature:        rawSig.Signature,                                      // Actual signature bytes
-				MessageType:      rawSig.MessageType,                                    // Type of consensus message
-				View:             rawSig.View,                                           // Consensus view number
-				Timestamp:        rawSig.Timestamp,                                      // When signature was created
-				Valid:            rawSig.Valid,                                          // Whether signature is valid
-				SignatureStatus:  "Valid",                                               // Human-readable status
-				VerificationTime: common.GetTimeService().GetCurrentTimeInfo().ISOLocal, // Verification timestamp
+		if len(rawSignatures) == 0 {
+			// No signatures yet - create empty validation object
+			signatureValidation = &storage.SignatureValidation{
+				TotalSignatures:   0,
+				ValidSignatures:   0,
+				InvalidSignatures: 0,
+				ValidationTime:    common.GetTimeService().GetCurrentTimeInfo().ISOUTC,
 			}
-			// Count valid signatures
-			if rawSig.Valid {
-				validCount++
+			finalStates = []*storage.FinalStateInfo{} // Empty slice, not nil
+			logger.Info("No consensus signatures available yet, created empty validation")
+		} else {
+			// Process signatures as before
+			finalStates = make([]*storage.FinalStateInfo, len(rawSignatures))
+			validCount := 0
+			for i, rawSig := range rawSignatures {
+				finalStates[i] = &storage.FinalStateInfo{
+					BlockHash:        rawSig.BlockHash,
+					BlockHeight:      rawSig.BlockHeight,
+					SignerNodeID:     rawSig.SignerNodeID,
+					Signature:        rawSig.Signature,
+					MessageType:      rawSig.MessageType,
+					View:             rawSig.View,
+					Timestamp:        rawSig.Timestamp,
+					Valid:            rawSig.Valid,
+					SignatureStatus:  "Valid",
+					VerificationTime: common.GetTimeService().GetCurrentTimeInfo().ISOLocal,
+				}
+				if rawSig.Valid {
+					validCount++
+				}
 			}
+			signatureValidation = &storage.SignatureValidation{
+				TotalSignatures:   len(finalStates),
+				ValidSignatures:   validCount,
+				InvalidSignatures: len(finalStates) - validCount,
+				ValidationTime:    common.GetTimeService().GetCurrentTimeInfo().ISOUTC,
+			}
+			logger.Info("Storing %d consensus signatures (%d valid) in chain state as final states",
+				len(finalStates), validCount)
 		}
-
-		// Create signature validation statistics
-		// Generate summary of signature validation results
+	} else {
+		// No consensus engine - create empty validation
 		signatureValidation = &storage.SignatureValidation{
-			TotalSignatures:   len(finalStates),                                    // Total signatures processed
-			ValidSignatures:   validCount,                                          // Number of valid signatures
-			InvalidSignatures: len(finalStates) - validCount,                       // Number of invalid signatures
-			ValidationTime:    common.GetTimeService().GetCurrentTimeInfo().ISOUTC, // Validation timestamp
+			TotalSignatures:   0,
+			ValidSignatures:   0,
+			InvalidSignatures: 0,
+			ValidationTime:    common.GetTimeService().GetCurrentTimeInfo().ISOUTC,
 		}
-
-		// Log signature collection results
-		logger.Info("Storing %d consensus signatures (%d valid) in chain state as final states",
-			len(finalStates), validCount)
+		finalStates = []*storage.FinalStateInfo{}
+		logger.Info("No consensus engine available, created empty validation")
 	}
-
+	// ========================================================================
 	// Create chain state with signature data
 	// Build complete chain state structure
 	chainState := &storage.ChainState{
@@ -485,15 +500,19 @@ func (bc *Blockchain) StoreChainState(nodes []*storage.NodeInfo) error {
 			latestBlock := bc.GetLatestBlock()
 			if latestBlock != nil {
 				if block, ok := latestBlock.(*BlockHelper); ok {
-					underlying := block.GetUnderlyingBlock()
-					txsPerBlock = []storage.BlockTXCount{
-						{
-							BlockHeight: underlying.GetHeight(),
-							BlockHash:   underlying.GetHash(),
-							TxCount:     uint64(len(underlying.Body.TxsList)),
-							BlockTime:   time.Unix(underlying.Header.Timestamp, 0),
-							BlockSize:   bc.CalculateBlockSize(underlying),
-						},
+					underlying, ok := block.GetUnderlyingBlock().(*types.Block)
+					if !ok {
+						logger.Warn("Failed to convert underlying block to *types.Block")
+					} else {
+						txsPerBlock = []storage.BlockTXCount{
+							{
+								BlockHeight: underlying.GetHeight(),
+								BlockHash:   underlying.GetHash(),
+								TxCount:     uint64(len(underlying.Body.TxsList)),
+								BlockTime:   time.Unix(underlying.Header.Timestamp, 0),
+								BlockSize:   bc.CalculateBlockSize(underlying),
+							},
+						}
 					}
 				}
 			}
@@ -1481,11 +1500,22 @@ func (bc *Blockchain) GenerateTransactionProof(tx *types.Transaction, blockHash 
 func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 	// Extract the underlying types.Block from adapter
 	var typeBlock *types.Block
+
 	switch b := block.(type) {
 	case *BlockHelper:
-		typeBlock = b.GetUnderlyingBlock() // Get underlying block
+		if underlying, ok := b.GetUnderlyingBlock().(*types.Block); ok {
+			typeBlock = underlying
+		} else {
+			return fmt.Errorf("BlockHelper contains invalid underlying block type")
+		}
+	case *types.Block:
+		typeBlock = b
 	default:
-		return fmt.Errorf("invalid block type: expected *BlockHelper, got %T", block)
+		return fmt.Errorf("invalid block type: expected *BlockHelper or *types.Block, got %T", block)
+	}
+
+	if typeBlock == nil {
+		return fmt.Errorf("failed to extract underlying block")
 	}
 
 	// Calculate actual block time (time since last block)
@@ -1517,7 +1547,6 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 	}
 
 	// Process OP_RETURN data in transactions
-	// In CommitBlock function, update the OP_RETURN processing loop:
 	for _, tx := range typeBlock.Body.TxsList {
 		if tx.HasReturnData() {
 			dataLen := len(tx.ReturnData)
@@ -1575,14 +1604,26 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 	// Re-finalize hash because StateRoot is an input to the block hash.
 	typeBlock.FinalizeHash()
 
+	// ========== FIX: Store block with delay to prevent race condition ==========
 	// Store block in storage (now with the real StateRoot).
 	if err := bc.storage.StoreBlock(typeBlock); err != nil {
 		return fmt.Errorf("failed to store block: %w", err)
 	}
 
+	// Add a small delay to ensure block is visible to other goroutines
+	// This prevents "block not found" race conditions in signature processing
+	time.Sleep(100 * time.Millisecond)
+	// =========================================================================
+
 	// Update in-memory chain
 	bc.lock.Lock()                         // Write lock for thread safety
 	bc.chain = append(bc.chain, typeBlock) // Add block to chain
+
+	// ========== CRITICAL: Update consensus engine's current height ==========
+	if bc.consensusEngine != nil {
+		bc.consensusEngine.SetCurrentHeight(typeBlock.GetHeight())
+		logger.Info("📢 Notified consensus engine of new height: %d", typeBlock.GetHeight())
+	}
 
 	// Remove committed transactions from mempool
 	txIDs := make([]string, len(typeBlock.Body.TxsList))
@@ -1910,14 +1951,33 @@ func (bc *Blockchain) Close() error {
 //   - block: Block to validate (consensus.Block interface)
 //
 // Returns: Error if validation fails
+// ValidateBlock validates a block including TxsRoot = MerkleRoot verification
+// ValidateBlock - handle raw bytes in ParentHash
+// Parameters:
+//   - block: Block to validate (consensus.Block interface)
+//
+// Returns: Error if validation fails
 func (bc *Blockchain) ValidateBlock(block consensus.Block) error {
 	// Extract underlying types.Block
 	var b *types.Block
+
 	switch blk := block.(type) {
 	case *BlockHelper:
-		b = blk.GetUnderlyingBlock() // Get underlying block
+		// Get underlying block from helper
+		if underlying, ok := blk.GetUnderlyingBlock().(*types.Block); ok {
+			b = underlying
+		} else {
+			return fmt.Errorf("BlockHelper contains invalid underlying block type")
+		}
+	case *types.Block:
+		// Direct types.Block
+		b = blk
 	default:
-		return fmt.Errorf("invalid block type")
+		return fmt.Errorf("invalid block type: %T", block)
+	}
+
+	if b == nil {
+		return fmt.Errorf("failed to extract underlying block")
 	}
 
 	// Validate ParentHash chain linkage (except for genesis block)
@@ -1997,8 +2057,15 @@ func (bc *Blockchain) ValidateBlock(block consensus.Block) error {
 		}
 	}
 
+	// Calculate the expected uncles hash for debugging
+	calculatedUnclesHash := types.CalculateUnclesHash(b.Body.Uncles, b.Header.Height)
+
 	// Log successful validation
 	logger.Info("✓ Block %d validation passed, TxsRoot = MerkleRoot verified: %x",
 		b.GetHeight(), b.Header.TxsRoot)
+	logger.Info("Validating block at height: %d", b.Header.Height)
+	logger.Info("Block UnclesHash: %x", b.Header.UnclesHash)
+	logger.Info("Calculated UnclesHash: %x", calculatedUnclesHash)
+
 	return nil
 }

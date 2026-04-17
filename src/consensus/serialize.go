@@ -30,6 +30,7 @@ import (
 	"fmt"
 
 	"github.com/sphinxorg/protocol/src/core/hashtree"
+	// This is correct
 )
 
 // Serialize the signed message to bytes

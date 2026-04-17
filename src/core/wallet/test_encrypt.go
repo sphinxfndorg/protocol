@@ -29,7 +29,7 @@ import (
 	"log"
 
 	seed "github.com/sphinxorg/protocol/src/accounts/phrase"
-	key "github.com/sphinxorg/protocol/src/core/sphincs/key/backend"
+	key "github.com/sphinxorg/protocol/src/core/sthincs/key/backend"
 	"github.com/sphinxorg/protocol/src/core/wallet/crypter"
 	config "github.com/sphinxorg/protocol/src/core/wallet/utils"
 )

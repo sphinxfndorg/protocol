@@ -27,7 +27,7 @@ import (
 	"fmt"
 	"log"
 
-	key "github.com/sphinxorg/protocol/src/core/sphincs/key/backend"
+	key "github.com/sphinxorg/protocol/src/core/sthincs/key/backend"
 	encode "github.com/sphinxorg/protocol/src/core/wallet/address/encoding"
 )
 

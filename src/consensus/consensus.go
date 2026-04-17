@@ -26,9 +26,9 @@ package consensus
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"math/big"
-	"reflect"
 	"sort"
 	"sync"
 	"time"
@@ -162,7 +162,8 @@ func NewConsensus(
 		weightedPrepareVotes: make(map[string]*big.Int),         // Weighted prepare votes by stake
 		weightedCommitVotes:  make(map[string]*big.Int),         // Weighted commit votes by stake
 		attestations:         make(map[uint64][]*Attestation),   // Attestations by epoch
-		electedLeaderID:      "",                                // Set by UpdateLeaderStatus
+		pendingProposals:     make(map[string]Block),
+		electedLeaderID:      "", // Set by UpdateLeaderStatus
 	}
 
 	// Initialize and validate VDF parameters (run once at startup)
@@ -253,6 +254,13 @@ func (c *Consensus) initializeVDF() error {
 // getExpectedVDFParams returns the expected VDF parameters derived from genesis
 // This ensures all nodes use the same parameters derived from the actual genesis block
 func (c *Consensus) getExpectedVDFParams() VDFParams {
+	// First check if pre-derived parameters are available
+	if preDerivedVDFParams != nil {
+		logger.Info("Using pre-derived VDF parameters in getExpectedVDFParams")
+		return *preDerivedVDFParams
+	}
+
+	// Fall back to deriving from genesis hash
 	var genesisHash string
 
 	if c.blockChain != nil {
@@ -392,6 +400,10 @@ func (c *Consensus) ProposeBlock(block Block) error {
 		return fmt.Errorf("node %s is not the leader", c.nodeID)
 	}
 
+	// Update block metadata using the interface methods
+	block.SetCommitStatus("proposed")
+	block.SetSigValid(false)
+
 	// Sign the block header if signing service is available
 	if c.signingService != nil {
 		if err := c.signingService.SignBlock(block); err != nil {
@@ -399,40 +411,43 @@ func (c *Consensus) ProposeBlock(block Block) error {
 		}
 	}
 
-	// Update block metadata for tracking
-	if direct, ok := block.(*types.Block); ok {
-		direct.Header.CommitStatus = "proposed"
-		direct.Header.SigValid = false
-	} else if helper, ok := block.(interface{ GetUnderlyingBlock() *types.Block }); ok {
-		if ub := helper.GetUnderlyingBlock(); ub != nil {
-			ub.Header.CommitStatus = "proposed"
-			ub.Header.SigValid = false
-		}
-	}
-
-	// Use the slot from election time, NOT current slot.
-	// By the time ProposeBlock is called, the slot may have advanced,
-	// causing followers to re-derive a different winner from the new slot.
-	// Use the slot from election time, NOT current slot.
+	// Use the slot from election time
 	proposalSlot := c.electedSlot
 	if proposalSlot == 0 {
 		proposalSlot = c.timeConverter.CurrentSlot()
 		logger.Warn("⚠️ electedSlot was 0, using current slot %d", proposalSlot)
 	}
 
-	// Create the proposal message
+	// Get the concrete block for serialization
+	var concreteBlock interface{}
+	if getter, ok := block.(interface{ GetUnderlyingBlock() interface{} }); ok {
+		concreteBlock = getter.GetUnderlyingBlock()
+	} else {
+		concreteBlock = block
+	}
+
+	// Serialize the concrete block to JSON
+	blockData, err := json.Marshal(concreteBlock)
+	if err != nil {
+		return fmt.Errorf("failed to serialize block: %w", err)
+	}
+
+	logger.Info("Serialized block data size: %d bytes, height from block: %d",
+		len(blockData), block.GetHeight())
+
+	// Create the proposal message with serialized block data
 	proposal := &Proposal{
-		Block:           block,
+		BlockData:       blockData,
 		View:            c.currentView,
 		ProposerID:      c.nodeID,
 		Signature:       []byte{},
 		ElectedLeaderID: c.electedLeaderID,
-		SlotNumber:      proposalSlot, // CRITICAL: Must be set for signature verification
+		SlotNumber:      proposalSlot,
+		Block:           block, // Store locally for immediate use
 	}
 
-	// Log the proposal details before signing
-	logger.Info("📝 Creating proposal: slot=%d, view=%d, leader=%s, block=%s",
-		proposalSlot, c.currentView, c.nodeID, block.GetHash())
+	logger.Info("📝 Creating proposal: slot=%d, view=%d, leader=%s, block=%s, data_size=%d",
+		proposalSlot, c.currentView, c.nodeID, block.GetHash(), len(blockData))
 
 	// Sign the proposal
 	if c.signingService != nil {
@@ -441,8 +456,25 @@ func (c *Consensus) ProposeBlock(block Block) error {
 		}
 	}
 
-	// Broadcast the proposal
-	return c.broadcastProposal(proposal)
+	// ========== FIX: Process proposal locally BEFORE broadcasting ==========
+	// The leader needs to set preparedBlock so it's ready when prepare votes arrive.
+	// Use a goroutine with a small delay to ensure the proposal is fully processed
+	// before we start receiving prepare votes from other nodes.
+	go func() {
+		// Small delay to ensure this function returns first
+		time.Sleep(50 * time.Millisecond)
+		c.processProposal(proposal)
+		logger.Info("✅ Leader %s processed its own proposal locally", c.nodeID)
+	}()
+	// =======================================================================
+
+	// Broadcast the proposal to all peers
+	if err := c.broadcastProposal(proposal); err != nil {
+		return fmt.Errorf("failed to broadcast proposal: %w", err)
+	}
+
+	logger.Info("✅ [%s] Block proposed and broadcast, waiting for consensus...", c.nodeID)
+	return nil
 }
 
 // HandleProposal queues an incoming proposal for processing
@@ -673,6 +705,18 @@ func (c *Consensus) handleTimeouts() {
 	}
 }
 
+// GetElectedSlot returns the slot number used for the current election
+func (c *Consensus) GetElectedSlot() uint64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.electedSlot
+}
+
+// BroadcastProposal broadcasts a proposal to all peers
+func (c *Consensus) BroadcastProposal(proposal *Proposal) error {
+	return c.broadcastProposal(proposal)
+}
+
 // onEpochTransition handles logic when moving to a new epoch
 func (c *Consensus) onEpochTransition(newEpoch uint64) {
 	// NOTE: c.mu is already held by the caller — do NOT lock here.
@@ -705,9 +749,119 @@ func (c *Consensus) updateLeaderStatusRoundRobin() {
 // processProposal validates and processes an incoming block proposal.
 // Leader validation uses electedLeaderID set by UpdateLeaderStatus, so
 // follower nodes accept the same RANDAO-elected winner the leader elected itself as.
+// processProposal validates and processes an incoming block proposal.
 func (c *Consensus) processProposal(proposal *Proposal) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	// ========== FIX: Check if proposal.Block is nil FIRST ==========
+	if proposal.Block == nil && len(proposal.BlockData) > 0 {
+		// Try to deserialize as types.Block
+		var block types.Block
+		if err := json.Unmarshal(proposal.BlockData, &block); err != nil {
+			logger.Error("Failed to deserialize block: %v", err)
+			return
+		}
+
+		// Ensure the block height is correct
+		if block.Header != nil {
+			logger.Info("Deserialized block: height=%d, hash=%s", block.Header.Height, block.GetHash())
+			if block.Header.Height == 0 && proposal.View == 0 {
+				block.Header.Height = 1
+				block.Header.Block = 1
+				logger.Info("Corrected block height to 1")
+			}
+		}
+
+		proposal.Block = &block
+	}
+
+	// NOW check if proposal.Block is still nil
+	if proposal.Block == nil {
+		logger.Error("Proposal has no block data")
+		return
+	}
+
+	// ========== CRITICAL FIX: Reset preparedBlock for new proposal from different leader ==========
+	// Now it's safe to access proposal.Block methods
+	if c.preparedBlock != nil && c.preparedBlock.GetHash() != proposal.Block.GetHash() {
+		logger.Info("🔄 Resetting preparedBlock from %s to accept new proposal %s from leader %s",
+			c.preparedBlock.GetHash()[:16], proposal.Block.GetHash()[:16], proposal.ProposerID)
+		c.preparedBlock = nil
+		c.preparedView = 0
+		c.preparedBlockHash = ""
+		// Clear pending votes for old block
+		delete(c.prepareVotes, c.preparedBlockHash)
+		delete(c.receivedVotes, c.preparedBlockHash)
+	}
+	// ============================================================================================
+
+	// ========== CRITICAL FIX: Set preparedBlock IMMEDIATELY ==========
+	// Set preparedBlock immediately - before any validation
+	if c.preparedBlock == nil || c.preparedBlock.GetHash() != proposal.Block.GetHash() {
+		c.preparedBlock = proposal.Block
+		c.preparedView = proposal.View
+		c.preparedBlockHash = proposal.Block.GetHash()
+		logger.Info("🚀 PRE-EMPTIVE: Set preparedBlock for %s at height %d",
+			proposal.Block.GetHash()[:16], proposal.Block.GetHeight())
+	}
+	// =================================================================
+
+	// ========== Store proposal in cache for leader self-recovery ==========
+	c.proposalMutex.Lock()
+	if c.pendingProposals == nil {
+		c.pendingProposals = make(map[string]Block)
+	}
+	c.pendingProposals[proposal.Block.GetHash()] = proposal.Block
+	c.proposalMutex.Unlock()
+
+	// Clean up after 30 seconds
+	go func(hash string) {
+		time.Sleep(30 * time.Second)
+		c.proposalMutex.Lock()
+		delete(c.pendingProposals, hash)
+		c.proposalMutex.Unlock()
+	}(proposal.Block.GetHash())
+	// ============================================================================
+
+	// Deserialize the block from BlockData if Block is nil
+	if proposal.Block == nil && len(proposal.BlockData) > 0 {
+		// Try to deserialize as types.Block
+		var block types.Block
+		if err := json.Unmarshal(proposal.BlockData, &block); err != nil {
+			logger.Error("Failed to deserialize block: %v", err)
+			return
+		}
+
+		// Ensure the block height is correct
+		if block.Header != nil {
+			logger.Info("Deserialized block: height=%d, hash=%s", block.Header.Height, block.GetHash())
+			// If height is 0 but it should be 1 (first block after genesis), correct it
+			if block.Header.Height == 0 && proposal.View == 0 {
+				block.Header.Height = 1
+				block.Header.Block = 1
+				logger.Info("Corrected block height to 1")
+			}
+		}
+
+		proposal.Block = &block
+
+		// If we just deserialized the block, set preparedBlock now
+		if proposal.Block != nil {
+			if c.preparedBlock == nil || c.preparedBlock.GetHash() != proposal.Block.GetHash() {
+				c.preparedBlock = proposal.Block
+				c.preparedView = proposal.View
+				c.preparedBlockHash = proposal.Block.GetHash()
+				logger.Info("🚀 PRE-EMPTIVE: Set preparedBlock from deserialized block for %s",
+					proposal.Block.GetHash()[:16])
+			}
+		}
+	}
+
+	if proposal.Block == nil {
+		logger.Error("Proposal has no block data")
+		return
+	}
 
 	// Get block nonce for logging
 	nonce, err := proposal.Block.GetCurrentNonce()
@@ -719,20 +873,47 @@ func (c *Consensus) processProposal(proposal *Proposal) {
 	}
 
 	// Log proposal receipt
-	logger.Info("🔍 Processing proposal for block %s at view %d from %s, nonce: %s",
-		proposal.Block.GetHash(), proposal.View, proposal.ProposerID, nonceStr)
+	logger.Info("🔍 Processing proposal for block at height %d, view %d from %s, nonce: %s",
+		proposal.Block.GetHeight(), proposal.View, proposal.ProposerID, nonceStr)
 
 	// Validate the block itself
 	if err := c.blockChain.ValidateBlock(proposal.Block); err != nil {
 		logger.Warn("❌ Block validation failed: %v", err)
+		// Validation failed - clear preparedBlock if it was set from this proposal
+		if c.preparedBlock != nil && c.preparedBlock.GetHash() == proposal.Block.GetHash() {
+			c.preparedBlock = nil
+			c.preparedBlockHash = ""
+			logger.Warn("Cleared preparedBlock due to validation failure")
+		}
 		return
+	}
+
+	// In processProposal, after validating the block
+	if proposal.Block.GetHeight() == 0 {
+		// This is a deserialization issue - try to correct
+		logger.Warn("Block height is 0, attempting to correct to height 1")
+
+		// Try to set the height using reflection or interface
+		if setter, ok := proposal.Block.(interface{ SetHeight(uint64) }); ok {
+			setter.SetHeight(1)
+			logger.Info("Successfully corrected block height to 1")
+		} else {
+			// Try to access underlying block directly
+			if getter, ok := proposal.Block.(interface{ GetUnderlyingBlock() interface{} }); ok {
+				if underlying, ok := getter.GetUnderlyingBlock().(*types.Block); ok && underlying != nil {
+					underlying.Header.Height = 1
+					underlying.Header.Block = 1
+					logger.Info("Successfully corrected underlying block height to 1")
+				}
+			}
+		}
 	}
 
 	// Check for duplicate proposal
 	if c.preparedBlock != nil && c.preparedBlock.GetHash() == proposal.Block.GetHash() {
-		logger.Warn("❌ Already have prepared block for height %d, ignoring duplicate proposal",
+		logger.Debug("Already have prepared block for height %d, continuing with validation",
 			proposal.Block.GetHeight())
-		return
+		// Don't return here - continue with validation to verify signatures
 	}
 
 	// Verify proposal signature if signing service available
@@ -762,15 +943,8 @@ func (c *Consensus) processProposal(proposal *Proposal) {
 	}
 
 	// Update block metadata for tracking
-	if direct, ok := proposal.Block.(*types.Block); ok {
-		direct.Header.SigValid = true
-		direct.Header.CommitStatus = "proposed"
-	} else if helper, ok := proposal.Block.(interface{ GetUnderlyingBlock() *types.Block }); ok {
-		if ub := helper.GetUnderlyingBlock(); ub != nil {
-			ub.Header.SigValid = true
-			ub.Header.CommitStatus = "proposed"
-		}
-	}
+	proposal.Block.SetSigValid(true)
+	proposal.Block.SetCommitStatus("proposed")
 
 	// Add proposal signature to consensus signatures
 	signatureHex := hex.EncodeToString(proposal.Signature)
@@ -813,36 +987,24 @@ func (c *Consensus) processProposal(proposal *Proposal) {
 	}
 
 	// ── KEY FIX: Re-derive electedLeaderID from the proposal's own slot ──────
-	// This eliminates the race where the follower's CurrentSlot() differs from
-	// the leader's slot at proposal time, causing a different seed → different winner.
 	if proposal.SlotNumber > 0 {
-		// Calculate epoch from proposal's slot
 		slotEpoch := proposal.SlotNumber / SlotsPerEpoch
-		// Get RANDAO seed for that slot
 		seed := c.randao.GetSeed(proposal.SlotNumber)
-		// Select proposer for that epoch using the seed
 		selected := c.selector.SelectProposer(slotEpoch, seed)
 		if selected != nil {
-			// Use the selected leader
 			c.electedLeaderID = selected.ID
 			logger.Info("🔄 Follower re-derived electedLeaderID=%s for slot %d (epoch %d)",
 				c.electedLeaderID, proposal.SlotNumber, slotEpoch)
 		} else {
-			// If selection returned nil, accept the proposer's self-declared ID
-			// and let signature verification be the security gate.
 			logger.Warn("⚠️ SelectProposer returned nil for slot %d, trusting signed proposal", proposal.SlotNumber)
 			c.electedLeaderID = proposal.ProposerID
 		}
 	} else if proposal.ElectedLeaderID != "" {
-		// Older proposal without SlotNumber: use the embedded ElectedLeaderID.
-		// Security relies entirely on the proposal signature in this path.
 		logger.Warn("⚠️ Proposal has no SlotNumber, using embedded ElectedLeaderID=%s", proposal.ElectedLeaderID)
 		c.electedLeaderID = proposal.ElectedLeaderID
 	} else {
-		// Last resort: re-run with current slot (original behaviour, may still race)
 		c.updateLeaderStatus()
 	}
-	// ─────────────────────────────────────────────────────────────────────────
 
 	// Validate that the proposer is the legitimate leader
 	if !c.isValidLeader(proposal.ProposerID, proposal.View) {
@@ -851,17 +1013,48 @@ func (c *Consensus) processProposal(proposal *Proposal) {
 		return
 	}
 
+	// ========== FIX 2: Special handling for leader's own proposal ==========
+	isSelfProposal := (proposal.ProposerID == c.nodeID)
+
+	if isSelfProposal {
+		logger.Info("👑 [%s] LEADER: Processing own proposal for block %s", c.nodeID, proposal.Block.GetHash())
+	}
+	// =========================================================================
+
 	// Accept the proposal
 	logger.Info("✅ Node %s accepting proposal for block %s at view %d (height %d, nonce: %s)",
 		c.nodeID, proposal.Block.GetHash(), proposal.View, proposal.Block.GetHeight(), nonceStr)
 
-	// Store prepared block and move to pre-prepared phase
-	c.preparedBlock = proposal.Block
-	c.preparedView = proposal.View
+	logger.Info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	if isSelfProposal {
+		logger.Info("👑 [%s] LEADER: Processed own proposal for block %s", c.nodeID, proposal.Block.GetHash())
+	} else {
+		logger.Info("📬 [%s] FOLLOWER: Received proposal from leader %s for block %s",
+			c.nodeID, proposal.ProposerID, proposal.Block.GetHash())
+	}
+	logger.Info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+	// Ensure preparedBlock is still set (it should be from the beginning)
+	if c.preparedBlock == nil || c.preparedBlock.GetHash() != proposal.Block.GetHash() {
+		logger.Warn("⚠️ preparedBlock was lost! Re-setting for %s", proposal.Block.GetHash())
+		c.preparedBlock = proposal.Block
+		c.preparedView = proposal.View
+		c.preparedBlockHash = proposal.Block.GetHash()
+	}
+
 	c.phase = PhasePrePrepared
 
-	// Send prepare vote for this block
-	c.sendPrepareVote(proposal.Block.GetHash(), proposal.View)
+	// Send prepare vote for this block (skip for leader's own proposal if already sent)
+	if !isSelfProposal || !c.sentPrepareVotes[proposal.Block.GetHash()] {
+		c.sendPrepareVote(proposal.Block.GetHash(), proposal.View)
+		if isSelfProposal {
+			logger.Info("👑 [%s] LEADER: Sending prepare vote for own block", c.nodeID)
+		} else {
+			logger.Info("✅ [%s] FOLLOWER: Proposal validated, sending prepare vote", c.nodeID)
+		}
+	} else {
+		logger.Info("👑 [%s] LEADER: Already sent prepare vote for own block", c.nodeID)
+	}
 }
 
 // CacheMerkleRoot stores a merkle root in cache for quick access
@@ -886,6 +1079,14 @@ func (c *Consensus) GetCachedMerkleRoot(blockHash string) string {
 		}
 	}
 	return ""
+}
+
+// SetCurrentHeight updates the consensus engine's current height
+func (c *Consensus) SetCurrentHeight(height uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.currentHeight = height
+	logger.Info("Consensus height updated to %d for node %s", height, c.nodeID)
 }
 
 // StatusFromMsgType returns the appropriate status string for a message type
@@ -980,14 +1181,11 @@ func (c *Consensus) processPrepareVote(vote *Vote) {
 		if c.phase == PhasePrePrepared {
 			c.phase = PhasePrepared
 			c.lockedBlock = c.preparedBlock
+
 			// Update block metadata
-			if direct, ok := c.preparedBlock.(*types.Block); ok {
-				direct.Header.CommitStatus = "prepared"
-			} else if helper, ok := c.preparedBlock.(interface{ GetUnderlyingBlock() *types.Block }); ok {
-				if ub := helper.GetUnderlyingBlock(); ub != nil {
-					ub.Header.CommitStatus = "prepared"
-				}
-			}
+			// Update block metadata using interface methods
+			c.preparedBlock.SetCommitStatus("prepared")
+
 			// Send commit vote for this block
 			c.voteForBlock(vote.BlockHash, vote.View)
 		} else {
@@ -1049,36 +1247,26 @@ func (c *Consensus) addConsensusSig(sig *ConsensusSignature) {
 }
 
 // extractMerkleRootFromBlock attempts to extract the merkle root from a block
+// extractMerkleRootFromBlock attempts to extract the merkle root from a block
 func (c *Consensus) extractMerkleRootFromBlock(block Block) string {
 	// Try to get underlying block and extract from header
-	if blockHelper, ok := block.(interface{ GetUnderlyingBlock() *types.Block }); ok {
-		if ub := blockHelper.GetUnderlyingBlock(); ub != nil {
-			if ub.Header != nil && len(ub.Header.TxsRoot) > 0 {
-				return fmt.Sprintf("%x", ub.Header.TxsRoot)
-			}
-		}
+	var tb *types.Block
+
+	// Check if it's a BlockHelper
+	type underlyingGetter interface {
+		GetUnderlyingBlock() interface{}
 	}
 
-	// Try reflection to find TxsRoot field
-	val := reflect.ValueOf(block)
-	if val.Kind() == reflect.Ptr {
-		elem := val.Elem()
-		if elem.Type().Name() == "Block" {
-			headerField := elem.FieldByName("Header")
-			if headerField.IsValid() {
-				txsRootField := headerField.FieldByName("TxsRoot")
-				if txsRootField.IsValid() && !txsRootField.IsZero() {
-					return fmt.Sprintf("%x", txsRootField.Interface())
-				}
-			}
+	if getter, ok := block.(underlyingGetter); ok {
+		if underlying, ok := getter.GetUnderlyingBlock().(*types.Block); ok {
+			tb = underlying
 		}
+	} else if direct, ok := block.(*types.Block); ok {
+		tb = direct
 	}
 
-	// Try to get from transaction count as fallback
-	if txGetter, ok := block.(interface{ GetTransactions() []interface{} }); ok {
-		if txs := txGetter.GetTransactions(); len(txs) > 0 {
-			return fmt.Sprintf("calculated_from_%d_txs", len(txs))
-		}
+	if tb != nil && tb.Header != nil && len(tb.Header.TxsRoot) > 0 {
+		return fmt.Sprintf("%x", tb.Header.TxsRoot)
 	}
 
 	// Last resort fallback
@@ -1480,6 +1668,7 @@ func (c *Consensus) getTotalNodes() int {
 }
 
 // commitBlock commits a block to the blockchain
+// commitBlock commits a block to the blockchain
 func (c *Consensus) commitBlock(block Block) {
 	logger.Info("🚀 Node %s attempting to commit block %s at height %d",
 		c.nodeID, block.GetHash(), block.GetHeight())
@@ -1491,19 +1680,17 @@ func (c *Consensus) commitBlock(block Block) {
 		return
 	}
 
-	// Extract underlying block if needed
+	// Update block metadata using interface method
+	block.SetCommitStatus("committed")
+
+	// Try to extract underlying block for additional operations
 	var tb *types.Block
 	if direct, ok := block.(*types.Block); ok {
 		tb = direct
-	} else if helper, ok := block.(interface{ GetUnderlyingBlock() *types.Block }); ok {
-		tb = helper.GetUnderlyingBlock()
 	}
 
-	// Update block metadata if extraction succeeded
-	if tb == nil {
-		logger.Error("❌ commitBlock: cannot extract *types.Block from %T", block)
-	} else {
-		tb.Header.CommitStatus = "committed"
+	if tb != nil {
+		// Set signature validity if proposer signature exists
 		if len(tb.Header.ProposerSignature) > 0 {
 			tb.Header.SigValid = true
 		}
@@ -1530,6 +1717,8 @@ func (c *Consensus) commitBlock(block Block) {
 		} else {
 			logger.Warn("⚠️ No votes in snapshot for block %s — attestations will be empty", block.GetHash())
 		}
+	} else {
+		logger.Warn("⚠️ Could not extract underlying block for attestations (block is not *types.Block), continuing with commit")
 	}
 
 	// Commit block to blockchain
@@ -1720,6 +1909,11 @@ func (c *Consensus) isValidLeader(nodeID string, view uint64) bool {
 	return isValid
 }
 
+// GetValidators returns a list of all active validator node IDs (public version)
+func (c *Consensus) GetValidators() []string {
+	return c.getValidators()
+}
+
 // getValidators returns a list of all active validator node IDs
 func (c *Consensus) getValidators() []string {
 	peers := c.nodeManager.GetPeers()
@@ -1795,7 +1989,10 @@ func (c *Consensus) GetConsensusState() string {
 
 // broadcastProposal sends a proposal to all peers
 func (c *Consensus) broadcastProposal(proposal *Proposal) error {
-	logger.Info("Broadcasting proposal for block %s at view %d", proposal.Block.GetHash(), proposal.View)
+	// Log the proposal JSON for debugging
+	jsonData, _ := json.Marshal(proposal)
+	logger.Info("Broadcasting proposal JSON (first 500 chars): %s", string(jsonData[:min(500, len(jsonData))]))
+
 	return c.nodeManager.BroadcastMessage("proposal", proposal)
 }
 

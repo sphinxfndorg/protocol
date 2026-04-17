@@ -27,8 +27,8 @@ import (
 	"encoding/hex"
 	"fmt"
 
-	params "github.com/sphinxorg/protocol/src/core/sphincs/config"
-	key "github.com/sphinxorg/protocol/src/core/sphincs/key/backend"
+	params "github.com/sphinxorg/protocol/src/core/sthincs/config"
+	key "github.com/sphinxorg/protocol/src/core/sthincs/key/backend"
 
 	// FIXED: Change from SPHINCSPLUS-golang to STHINCS
 	"github.com/sphinxorg/protocol/src/crypto/STHINCS/sthincs"

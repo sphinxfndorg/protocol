@@ -1,6 +1,6 @@
 // MIT License
 //
-// Copyright (c) 2024 sphinx-core
+// # Copyright (c) 2024 sphinx-core
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -24,15 +24,18 @@
 package network
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sphinxorg/protocol/src/common"
-	sphincsKey "github.com/sphinxorg/protocol/src/core/sphincs/key/backend"
+	"github.com/sphinxorg/protocol/src/consensus"
 	database "github.com/sphinxorg/protocol/src/core/state"
+	sthincs "github.com/sphinxorg/protocol/src/core/sthincs/key/backend"
 )
 
 // Add this method to NodeManager for chain recognition
@@ -60,11 +63,11 @@ func (nm *NodeManager) GenerateNodeIdentification(nodeID string) string {
 	chainInfo := nm.GetChainInfo()
 	// Format identification string with node and chain details
 	return fmt.Sprintf(
-		"Sphinx Node: %s\n"+ // Node identifier
-			"Network: %s\n"+ // Network name
-			"Chain ID: %d\n"+ // Chain identifier
-			"Protocol: %s\n"+ // Protocol version
-			"User Agent: SphinxNode/%s", // User agent string
+		"Sphinx Node: %s\n"+
+			"Network: %s\n"+
+			"Chain ID: %d\n"+
+			"Protocol: %s\n"+
+			"User Agent: SphinxNode/%s",
 		nodeID,
 		chainInfo["chain_name"],
 		chainInfo["chain_id"],
@@ -155,16 +158,16 @@ func (nm *NodeManager) CreateLocalNode(address, ip, port, udpPort string, role N
 func (nm *NodeManager) BackupNodeInfo(node *Node) error {
 	// Prepare node data structure for serialization
 	nodeData := map[string]interface{}{
-		"id":          node.ID,                            // Node identifier
-		"address":     node.Address,                       // Network address
-		"ip":          node.IP,                            // IP address
-		"port":        node.Port,                          // TCP port
-		"udp_port":    node.UDPPort,                       // UDP port
-		"kademlia_id": node.KademliaID[:],                 // Kademlia ID as bytes
-		"role":        string(node.Role),                  // Node role as string
-		"status":      string(node.Status),                // Node status as string
-		"last_seen":   node.LastSeen.Format(time.RFC3339), // Last seen timestamp
-		"public_key":  node.PublicKey,                     // Public key bytes
+		"id":          node.ID,
+		"address":     node.Address,
+		"ip":          node.IP,
+		"port":        node.Port,
+		"udp_port":    node.UDPPort,
+		"kademlia_id": node.KademliaID[:],
+		"role":        string(node.Role),
+		"status":      string(node.Status),
+		"last_seen":   node.LastSeen.Format(time.RFC3339),
+		"public_key":  node.PublicKey,
 	}
 
 	// Store in config directory (primary storage)
@@ -185,6 +188,154 @@ func (nm *NodeManager) BackupNodeInfo(node *Node) error {
 		return fmt.Errorf("failed to backup node info to database: %w", err)
 	}
 
+	return nil
+}
+
+// loadNodeKeysFromConfig loads cryptographic keys from the config directory
+func loadNodeKeysFromConfig(address string) ([]byte, []byte, error) {
+	// Check if keys exist before attempting to load
+	if !common.KeysExist(address) {
+		return nil, nil, fmt.Errorf("keys do not exist for node %s", address)
+	}
+	return common.ReadKeysFromFile(address)
+}
+
+// loadNodeKeys loads cryptographic keys from the database
+// Used for backward compatibility with database storage
+func loadNodeKeys(db *database.DB, nodeID string) ([]byte, []byte, error) {
+	// Load private key from database
+	privateKeyKey := fmt.Sprintf("node:%s:private_key", nodeID)
+	privateKey, err := db.Get(privateKeyKey)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to load private key: %w", err)
+	}
+
+	// Load public key from database
+	publicKeyKey := fmt.Sprintf("node:%s:public_key", nodeID)
+	publicKey, err := db.Get(publicKeyKey)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to load public key: %w", err)
+	}
+
+	return privateKey, publicKey, nil
+}
+
+// GetOrCreateKeys is the single entry point for all node key operations.
+// Resolution order: config file → LevelDB → generate new real SPHINCS+ keys.
+//
+// The address parameter is the node's network address (e.g. "127.0.0.1:30303")
+// which is used as the storage key via common.GetPrivateKeyPath / GetPublicKeyPath.
+func (nkm *NetworkKeyManager) GetOrCreateKeys(address string) ([]byte, []byte, error) {
+	// ── 1. Config file (fastest, survives restarts) ──────────────────────────
+	if common.KeysExist(address) {
+		privateKey, publicKey, err := common.ReadKeysFromFile(address)
+		if err == nil {
+			log.Printf("GetOrCreateKeys: Loaded keys from config for %s (sk=%d pk=%d bytes)",
+				address, len(privateKey), len(publicKey))
+			return privateKey, publicKey, nil
+		}
+		// File corrupt or unreadable — fall through to regenerate
+		log.Printf("GetOrCreateKeys: Config keys unreadable for %s (%v), regenerating", address, err)
+	}
+
+	// ── 2. LevelDB (migration path for nodes that stored keys there before) ──
+	privateKey, publicKey, err := nkm.loadKeysFromDB(address)
+	if err == nil {
+		log.Printf("GetOrCreateKeys: Loaded keys from DB for %s (sk=%d pk=%d bytes)",
+			address, len(privateKey), len(publicKey))
+		// Migrate to config file so future startups use the fast path
+		if writeErr := common.WriteKeysToFile(address, privateKey, publicKey); writeErr != nil {
+			log.Printf("GetOrCreateKeys: Warning — could not migrate DB keys to config for %s: %v",
+				address, writeErr)
+		}
+		return privateKey, publicKey, nil
+	}
+
+	// ── 3. Generate fresh real SPHINCS+ keys ─────────────────────────────────
+	log.Printf("GetOrCreateKeys: No existing keys for %s — generating real SPHINCS+ key pair", address)
+	privateKey, publicKey, err = nkm.generateSPHINCSKeys()
+	if err != nil {
+		return nil, nil, fmt.Errorf("GetOrCreateKeys: key generation failed for %s: %w", address, err)
+	}
+
+	// Persist to config file (primary, required)
+	if err := common.WriteKeysToFile(address, privateKey, publicKey); err != nil {
+		return nil, nil, fmt.Errorf("GetOrCreateKeys: failed to persist keys to config for %s: %w",
+			address, err)
+	}
+
+	// Persist to LevelDB (secondary, non-fatal)
+	if err := nkm.saveKeysToDB(address, privateKey, publicKey); err != nil {
+		log.Printf("GetOrCreateKeys: Warning — could not persist keys to DB for %s: %v", address, err)
+	}
+
+	log.Printf("GetOrCreateKeys: Generated and stored SPHINCS+ keys for %s (sk=%d pk=%d bytes)",
+		address, len(privateKey), len(publicKey))
+	return privateKey, publicKey, nil
+}
+
+// generateSPHINCSKeys generates a real SPHINCS+ key pair and serializes it.
+//
+// Internally calls key.go's GenerateKey() → SerializeKeyPair():
+//
+//	Private key  = SKseed || SKprf || PKseed || PKroot  (4×n bytes, n=16 → 64 bytes)
+//	Public key   = PKseed || PKroot                     (2×n bytes, n=16 → 32 bytes)
+//
+// The size invariant sk = 2×pk is validated before returning.
+func (nkm *NetworkKeyManager) generateSPHINCSKeys() ([]byte, []byte, error) {
+	// nkm.keyManager is already a *sthincs.KeyManager, use it directly
+	// GenerateKey uses the STHINCSParameters already embedded in nkm.keyManager
+	sk, pk, err := nkm.keyManager.GenerateKey()
+	if err != nil {
+		return nil, nil, fmt.Errorf("generateSPHINCSKeys: GenerateKey failed: %w", err)
+	}
+	if sk == nil || pk == nil {
+		return nil, nil, fmt.Errorf("generateSPHINCSKeys: GenerateKey returned nil keys")
+	}
+
+	// SerializeKeyPair produces the flat byte representations
+	skBytes, pkBytes, err := nkm.keyManager.SerializeKeyPair(sk, pk)
+	if err != nil {
+		return nil, nil, fmt.Errorf("generateSPHINCSKeys: SerializeKeyPair failed: %w", err)
+	}
+
+	// Invariant: sk must be exactly twice the length of pk
+	// sk = SKseed(n) + SKprf(n) + PKseed(n) + PKroot(n) = 4n
+	// pk = PKseed(n) + PKroot(n) = 2n
+	if len(skBytes) != 2*len(pkBytes) {
+		return nil, nil, fmt.Errorf(
+			"generateSPHINCSKeys: size invariant violated — sk=%d bytes, pk=%d bytes (expected sk=2×pk)",
+			len(skBytes), len(pkBytes),
+		)
+	}
+
+	log.Printf("generateSPHINCSKeys: sk=%d bytes, pk=%d bytes", len(skBytes), len(pkBytes))
+	return skBytes, pkBytes, nil
+}
+
+// loadKeysFromDB loads serialized SPHINCS+ keys from LevelDB.
+// Key format: "node:{address}:private_key" / "node:{address}:public_key"
+func (nkm *NetworkKeyManager) loadKeysFromDB(address string) ([]byte, []byte, error) {
+	privateKey, err := nkm.db.Get(fmt.Sprintf("node:%s:private_key", address))
+	if err != nil {
+		return nil, nil, fmt.Errorf("loadKeysFromDB: no private key in DB for %s: %w", address, err)
+	}
+	publicKey, err := nkm.db.Get(fmt.Sprintf("node:%s:public_key", address))
+	if err != nil {
+		return nil, nil, fmt.Errorf("loadKeysFromDB: no public key in DB for %s: %w", address, err)
+	}
+	return privateKey, publicKey, nil
+}
+
+// saveKeysToDB persists serialized SPHINCS+ keys to LevelDB.
+// Key format: "node:{address}:private_key" / "node:{address}:public_key"
+func (nkm *NetworkKeyManager) saveKeysToDB(address string, privateKey, publicKey []byte) error {
+	if err := nkm.db.Put(fmt.Sprintf("node:%s:private_key", address), privateKey); err != nil {
+		return fmt.Errorf("saveKeysToDB: failed to save private key for %s: %w", address, err)
+	}
+	if err := nkm.db.Put(fmt.Sprintf("node:%s:public_key", address), publicKey); err != nil {
+		return fmt.Errorf("saveKeysToDB: failed to save public key for %s: %w", address, err)
+	}
 	return nil
 }
 
@@ -230,22 +381,22 @@ func (nm *NodeManager) RestoreNodeFromDB(nodeID string) (*Node, error) {
 
 	// Reconstruct node from deserialized data
 	node = &Node{
-		ID:         nodeData["id"].(string),             // Node ID
-		Address:    nodeData["address"].(string),        // Network address
-		IP:         nodeData["ip"].(string),             // IP address
-		Port:       nodeData["port"].(string),           // TCP port
-		UDPPort:    nodeData["udp_port"].(string),       // UDP port
-		PrivateKey: privateKey,                          // Private key
-		PublicKey:  publicKey,                           // Public key
-		IsLocal:    false,                               // Restored nodes are not local
-		Role:       NodeRole(nodeData["role"].(string)), // Node role
-		Status:     NodeStatusActive,                    // Start as active
-		db:         nm.db,                               // Database reference
+		ID:         nodeData["id"].(string),
+		Address:    nodeData["address"].(string),
+		IP:         nodeData["ip"].(string),
+		Port:       nodeData["port"].(string),
+		UDPPort:    nodeData["udp_port"].(string),
+		PrivateKey: privateKey,
+		PublicKey:  publicKey,
+		IsLocal:    false,
+		Role:       NodeRole(nodeData["role"].(string)),
+		Status:     NodeStatusActive,
+		db:         nm.db,
 	}
 
 	// Restore Kademlia ID if available
 	if kademliaID, ok := nodeData["kademlia_id"].([]byte); ok {
-		copy(node.KademliaID[:], kademliaID) // Copy bytes to fixed-size array
+		copy(node.KademliaID[:], kademliaID)
 	}
 
 	// Restore last seen timestamp if available
@@ -279,22 +430,22 @@ func (nm *NodeManager) restoreNodeFromConfig(nodeID string) (*Node, error) {
 
 	// Reconstruct node from config data
 	node := &Node{
-		ID:         nodeInfo["id"].(string),             // Node ID
-		Address:    nodeInfo["address"].(string),        // Network address
-		IP:         nodeInfo["ip"].(string),             // IP address
-		Port:       nodeInfo["port"].(string),           // TCP port
-		UDPPort:    nodeInfo["udp_port"].(string),       // UDP port
-		PrivateKey: privateKey,                          // Private key
-		PublicKey:  publicKey,                           // Public key
-		IsLocal:    nodeInfo["is_local"].(bool),         // Local node flag
-		Role:       NodeRole(nodeInfo["role"].(string)), // Node role
-		Status:     NodeStatusActive,                    // Start as active
-		db:         nm.db,                               // Database reference
+		ID:         nodeInfo["id"].(string),
+		Address:    nodeInfo["address"].(string),
+		IP:         nodeInfo["ip"].(string),
+		Port:       nodeInfo["port"].(string),
+		UDPPort:    nodeInfo["udp_port"].(string),
+		PrivateKey: privateKey,
+		PublicKey:  publicKey,
+		IsLocal:    nodeInfo["is_local"].(bool),
+		Role:       NodeRole(nodeInfo["role"].(string)),
+		Status:     NodeStatusActive,
+		db:         nm.db,
 	}
 
 	// Restore Kademlia ID if available
 	if kademliaID, ok := nodeInfo["kademlia_id"].([]byte); ok {
-		copy(node.KademliaID[:], kademliaID) // Copy bytes to fixed-size array
+		copy(node.KademliaID[:], kademliaID)
 	} else {
 		// Generate from address if not stored
 		node.KademliaID = GenerateKademliaID(node.Address)
@@ -317,15 +468,15 @@ func (nm *NodeManager) restoreNodeFromConfig(nodeID string) (*Node, error) {
 // Returns: NetworkKeyManager or error if initialization fails
 func NewNetworkKeyManager(db *database.DB) (*NetworkKeyManager, error) {
 	// Initialize SPHINCS+ key manager
-	km, err := sphincsKey.NewKeyManager()
+	km, err := sthincs.NewKeyManager()
 	if err != nil {
 		return nil, err
 	}
 
 	// Return initialized network key manager
 	return &NetworkKeyManager{
-		db:         db, // Database for key storage
-		keyManager: km, // SPHINCS+ key manager
+		db:         db,
+		keyManager: km,
 	}, nil
 }
 
@@ -942,4 +1093,242 @@ func (nm *NodeManager) CompareDistance(d1, d2 NodeID) int {
 		// Continue to next byte if equal
 	}
 	return 0 // Distances are equal
+}
+
+// ========== P2PConsensusNodeManager - NO P2P IMPORT ==========
+
+// P2PConsensusNodeManager implements consensus.NodeManager using real P2P networking
+type P2PConsensusNodeManager struct {
+	localNodeID     string
+	nodeManager     *NodeManager
+	consensusEngine *consensus.Consensus
+	mu              sync.RWMutex
+	sendMessageFunc func(nodeAddress string, msgType string, data []byte) error
+	peerList        map[string]consensus.Peer
+	peerAddresses   map[string]string // Store addresses by peer ID
+}
+
+// NewP2PConsensusNodeManager creates a new P2P consensus node manager
+func NewP2PConsensusNodeManager(nodeMgr *NodeManager, localNodeID string) *P2PConsensusNodeManager {
+	return &P2PConsensusNodeManager{
+		localNodeID: localNodeID,
+		nodeManager: nodeMgr,
+	}
+}
+
+// SetSendMessageFunc sets the callback function for sending messages
+func (m *P2PConsensusNodeManager) SetSendMessageFunc(fn func(nodeAddress string, msgType string, data []byte) error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sendMessageFunc = fn
+}
+
+// SetNodeManager sets the node manager for peer discovery
+func (m *P2PConsensusNodeManager) SetNodeManager(nodeMgr *NodeManager) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.nodeManager = nodeMgr
+}
+
+// SetConsensusEngine sets the consensus engine
+func (m *P2PConsensusNodeManager) SetConsensusEngine(cons *consensus.Consensus) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.consensusEngine = cons
+}
+
+// BroadcastMessage using sendMessageFunc
+func (m *P2PConsensusNodeManager) BroadcastMessage(messageType string, data interface{}) error {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if m.sendMessageFunc == nil {
+		return fmt.Errorf("send message function not set")
+	}
+
+	if len(m.peerAddresses) == 0 {
+		log.Printf("[P2PConsensus] No peers to broadcast to")
+		return nil
+	}
+
+	log.Printf("[P2PConsensus] Broadcasting %s message to %d peers", messageType, len(m.peerAddresses))
+
+	dataBytes, err := json.Marshal(data)
+	if err != nil {
+		return fmt.Errorf("failed to marshal consensus data: %v", err)
+	}
+
+	for peerID, peerAddr := range m.peerAddresses {
+		go func(addr string, pID string) {
+			if err := m.sendMessageFunc(addr, messageType, dataBytes); err != nil {
+				log.Printf("[P2PConsensus] Failed to send %s to %s: %v", messageType, pID, err)
+			}
+		}(peerAddr, peerID)
+	}
+
+	return nil
+}
+
+// GetValidatorSet returns the validator set (needed for leader election)
+func (m *P2PConsensusNodeManager) GetValidatorSet() *consensus.ValidatorSet {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if m.consensusEngine == nil {
+		return nil
+	}
+	return m.consensusEngine.GetValidatorSet()
+}
+
+// BroadcastRANDAOState implements consensus.NodeManager
+func (m *P2PConsensusNodeManager) BroadcastRANDAOState(mix [32]byte, submissions map[uint64]map[string]*consensus.VDFSubmission) error {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if m.sendMessageFunc == nil {
+		log.Printf("[P2PConsensus] No send function set, RANDAO state not sent")
+		return nil
+	}
+
+	if len(m.peerAddresses) == 0 {
+		log.Printf("[P2PConsensus] No peers to broadcast RANDAO state to")
+		return nil
+	}
+
+	log.Printf("[P2PConsensus] Broadcasting RANDAO state to %d peers", len(m.peerAddresses))
+
+	ranDAOData := struct {
+		Mix         [32]byte                                       `json:"mix"`
+		Submissions map[uint64]map[string]*consensus.VDFSubmission `json:"submissions"`
+	}{
+		Mix:         mix,
+		Submissions: submissions,
+	}
+
+	dataBytes, err := json.Marshal(ranDAOData)
+	if err != nil {
+		return fmt.Errorf("failed to marshal RANDAO data: %v", err)
+	}
+
+	for peerID, peerAddr := range m.peerAddresses {
+		go func(addr string, pID string) {
+			if err := m.sendMessageFunc(addr, "randao_sync", dataBytes); err != nil {
+				log.Printf("[P2PConsensus] Failed to send RANDAO state to %s: %v", pID, err)
+			}
+		}(peerAddr, peerID)
+	}
+
+	return nil
+}
+
+// GetPeers returns all registered peers
+func (m *P2PConsensusNodeManager) GetPeers() map[string]consensus.Peer {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	peers := make(map[string]consensus.Peer)
+
+	// Return peers from peerList
+	for id, peer := range m.peerList {
+		peers[id] = peer
+	}
+	return peers
+}
+
+// GetNode returns a node by ID
+func (m *P2PConsensusNodeManager) GetNode(nodeID string) consensus.Node {
+	return &p2pConsensusNode{id: nodeID}
+}
+
+// HandleIncomingMessage processes a consensus message received from the network
+func (m *P2PConsensusNodeManager) HandleIncomingMessage(msgType string, data []byte, fromNode string) error {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if m.consensusEngine == nil {
+		return fmt.Errorf("consensus engine not initialized")
+	}
+
+	log.Printf("[P2PConsensus] Handling incoming %s message from %s", msgType, fromNode)
+
+	switch msgType {
+	case "proposal":
+		var proposal consensus.Proposal
+		if err := json.Unmarshal(data, &proposal); err != nil {
+			return fmt.Errorf("failed to unmarshal proposal: %v", err)
+		}
+		return m.consensusEngine.HandleProposal(&proposal)
+
+	case "prepare":
+		var vote consensus.Vote
+		if err := json.Unmarshal(data, &vote); err != nil {
+			return fmt.Errorf("failed to unmarshal prepare vote: %v", err)
+		}
+		return m.consensusEngine.HandlePrepareVote(&vote)
+
+	case "vote":
+		var vote consensus.Vote
+		if err := json.Unmarshal(data, &vote); err != nil {
+			return fmt.Errorf("failed to unmarshal commit vote: %v", err)
+		}
+		return m.consensusEngine.HandleVote(&vote)
+
+	case "timeout":
+		var timeout consensus.TimeoutMsg
+		if err := json.Unmarshal(data, &timeout); err != nil {
+			return fmt.Errorf("failed to unmarshal timeout: %v", err)
+		}
+		return m.consensusEngine.HandleTimeout(&timeout)
+
+	case "randao_sync":
+		var randaoData struct {
+			Mix         [32]byte                                       `json:"mix"`
+			Submissions map[uint64]map[string]*consensus.VDFSubmission `json:"submissions"`
+		}
+		if err := json.Unmarshal(data, &randaoData); err != nil {
+			return fmt.Errorf("failed to unmarshal RANDAO data: %v", err)
+		}
+		return m.consensusEngine.HandleRANDAOSync(randaoData.Mix, randaoData.Submissions)
+
+	default:
+		log.Printf("[P2PConsensus] Unknown message type: %s", msgType)
+		return nil
+	}
+}
+
+// p2pConsensusPeer implements consensus.Peer
+type p2pConsensusPeer struct{ id string }
+
+func (p *p2pConsensusPeer) GetNode() consensus.Node { return &p2pConsensusNode{id: p.id} }
+
+// p2pConsensusNode implements consensus.Node
+type p2pConsensusNode struct{ id string }
+
+func (n *p2pConsensusNode) GetID() string                   { return n.id }
+func (n *p2pConsensusNode) GetRole() consensus.NodeRole     { return consensus.RoleValidator }
+func (n *p2pConsensusNode) GetStatus() consensus.NodeStatus { return consensus.NodeStatusActive }
+
+// AddPeer adds a peer to the P2PConsensusNodeManager
+func (m *P2PConsensusNodeManager) AddPeer(peerID string, peerAddress string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Initialize maps if nil
+	if m.peerList == nil {
+		m.peerList = make(map[string]consensus.Peer)
+	}
+	if m.peerAddresses == nil {
+		m.peerAddresses = make(map[string]string)
+	}
+
+	// Check if already exists
+	if _, exists := m.peerList[peerID]; exists {
+		log.Printf("[P2PConsensus] Peer %s already exists, skipping", peerID)
+		return
+	}
+
+	// Add peer
+	m.peerList[peerID] = &p2pConsensusPeer{id: peerID}
+	m.peerAddresses[peerID] = peerAddress
+	log.Printf("[P2PConsensus] Added peer: %s at %s (total peers: %d)", peerID, peerAddress, len(m.peerList))
 }

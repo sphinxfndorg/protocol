@@ -26,6 +26,8 @@ package bind
 import (
 	"github.com/sphinxorg/protocol/src/consensus"
 	"github.com/sphinxorg/protocol/src/core"
+	config "github.com/sphinxorg/protocol/src/core/sthincs/config" // Add this import
+	key "github.com/sphinxorg/protocol/src/core/sthincs/key/backend"
 	security "github.com/sphinxorg/protocol/src/handshake"
 	"github.com/sphinxorg/protocol/src/http"
 	"github.com/sphinxorg/protocol/src/network"
@@ -46,13 +48,15 @@ type NodeConfig struct {
 
 // NodeSetupConfig defines the configuration for setting up a node’s servers.
 type NodeSetupConfig struct {
-	Address   string
-	Name      string
-	Role      network.NodeRole
-	HTTPPort  string
-	WSPort    string
-	UDPPort   string
-	SeedNodes []string
+	Address       string
+	Name          string
+	Role          network.NodeRole
+	HTTPPort      string
+	WSPort        string
+	UDPPort       string
+	SeedNodes     []string
+	KeyManager    *key.KeyManager
+	SphincsParams *config.STHINCSParameters // Now config is defined
 }
 
 // NodeResources holds the initialized resources for a node.

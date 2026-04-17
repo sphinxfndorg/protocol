@@ -34,8 +34,8 @@ import (
 	"github.com/holiman/uint256"
 	"github.com/sphinxorg/protocol/src/core/hashtree"
 	sigproof "github.com/sphinxorg/protocol/src/core/proof"
-	key "github.com/sphinxorg/protocol/src/core/sphincs/key/backend"
-	sign "github.com/sphinxorg/protocol/src/core/sphincs/sign/backend"
+	key "github.com/sphinxorg/protocol/src/core/sthincs/key/backend"
+	sign "github.com/sphinxorg/protocol/src/core/sthincs/sign/backend"
 	"github.com/sphinxorg/protocol/src/crypto/STHINCS/sthincs"
 
 	"github.com/syndtr/goleveldb/leveldb"

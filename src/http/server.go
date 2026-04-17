@@ -21,10 +21,13 @@
 // SOFTWARE.
 
 // go/src/http/server.go
+// go/src/http/server.go
+
 package http
 
 import (
 	"context"
+	"encoding/json" // Add this import
 	"fmt"
 	"log"
 	"net/http"
@@ -135,7 +138,18 @@ func (s *Server) handleTransaction(c *gin.Context) {
 	log.Printf("Received transaction: Sender=%s, Receiver=%s, Amount=%s, Nonce=%d",
 		tx.Sender, tx.Receiver, tx.Amount.String(), tx.Nonce)
 
-	s.messageCh <- &security.Message{Type: "transaction", Data: &tx}
+	// Marshal transaction to JSON before sending
+	txData, err := json.Marshal(&tx)
+	if err != nil {
+		log.Printf("Failed to marshal transaction: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to process transaction"})
+		return
+	}
+
+	s.messageCh <- &security.Message{
+		Type: "transaction",
+		Data: txData, // Use marshaled bytes
+	}
 
 	s.lastTxMutex.Lock()
 	s.lastTransaction = &tx

@@ -40,6 +40,9 @@ import (
 	"github.com/sphinxorg/protocol/src/consensus"
 	"github.com/sphinxorg/protocol/src/core"
 	database "github.com/sphinxorg/protocol/src/core/state"
+	params "github.com/sphinxorg/protocol/src/core/sthincs/config"
+	key "github.com/sphinxorg/protocol/src/core/sthincs/key/backend"
+	sign "github.com/sphinxorg/protocol/src/core/sthincs/sign/backend"
 	types "github.com/sphinxorg/protocol/src/core/transaction"
 	"github.com/sphinxorg/protocol/src/dht"
 	security "github.com/sphinxorg/protocol/src/handshake"
@@ -162,6 +165,21 @@ func NewServer(config network.NodePortConfig, blockchain *core.Blockchain, db *l
 	// FIX: Add the database parameter
 	nodeManager := network.NewNodeManager(bucketSize, dhtInstance, nodeDB)
 
+	// Initialize SPHINCS+ key manager (needed for sign manager)
+	keyManager, err := key.NewKeyManager()
+	if err != nil {
+		log.Fatalf("Failed to initialize SPHINCS+ key manager: %v", err)
+	}
+
+	// Initialize SPHINCS+ parameters
+	sphincsParams, err := params.NewSTHINCSParameters()
+	if err != nil {
+		log.Fatalf("Failed to initialize SPHINCS+ parameters: %v", err)
+	}
+
+	// Initialize SPHINCS+ sign manager with all three required parameters
+	sphincsMgr := sign.NewSTHINCSManager(db, keyManager, sphincsParams)
+
 	// Return fully initialized server instance
 	return &Server{
 		localNode:   localNode,                         // Local node information
@@ -169,7 +187,7 @@ func NewServer(config network.NodePortConfig, blockchain *core.Blockchain, db *l
 		seedNodes:   config.SeedNodes,                  // Bootstrap seed nodes
 		dht:         dhtInstance,                       // DHT for discovery
 		peerManager: NewPeerManager(nil, bucketSize),   // Peer connection manager
-		sphincsMgr:  nil,                               // SPHINCS+ crypto manager (initialized later)
+		sphincsMgr:  sphincsMgr,                        // SPHINCS+ crypto manager (now initialized)
 		db:          db,                                // LevelDB database
 		udpReadyCh:  make(chan struct{}, 1),            // Channel to signal UDP ready
 		messageCh:   make(chan *security.Message, 100), // Message processing channel
@@ -288,333 +306,274 @@ func (s *Server) FetchPeer(nodeID string) (*network.PeerInfo, error) {
 // handleMessages processes incoming messages.
 // This is the main message dispatcher that routes different message types
 // to their appropriate handlers
+// handleMessages processes incoming messages.
 func (s *Server) handleMessages() {
-	// Continuously process messages from the message channel
 	for msg := range s.messageCh {
 		log.Printf("Processing message from channel: Type=%s, Data=%v, ChannelLen=%d",
 			msg.Type, msg.Data, len(s.messageCh))
 
-		originID := "" // Will be set if we can determine the origin
+		originID := ""
 
-		// Route message based on type
 		switch msg.Type {
 
 		case "transaction":
-			// Handle transaction messages
-			if tx, ok := msg.Data.(*types.Transaction); ok {
-				// Assign sender/receiver roles based on transaction
-				s.assignTransactionRoles(tx)
+			// Need to unmarshal the json.RawMessage first
+			var tx types.Transaction
+			if err := json.Unmarshal(msg.Data, &tx); err != nil {
+				log.Printf("Failed to unmarshal transaction: %v", err)
+				continue
+			}
+			// Assign sender/receiver roles
+			s.assignTransactionRoles(&tx)
 
-				// Validate the transaction
-				if err := s.validateTransaction(tx); err != nil {
-					log.Printf("Transaction validation failed: %v", err)
-					continue
-				}
+			if err := s.validateTransaction(&tx); err != nil {
+				log.Printf("Transaction validation failed: %v", err)
+				continue
+			}
 
-				// Add transaction to blockchain mempool
-				if err := s.blockchain.AddTransaction(tx); err != nil {
-					log.Printf("Failed to add transaction: %v", err)
-					// Penalize the peer that sent invalid transaction
-					if originID != "" {
-						s.peerManager.UpdatePeerScore(originID, -10)
-					}
-					continue
-				}
-
-				// Propagate valid transaction to other peers
-				s.peerManager.PropagateMessage(msg, originID)
-
-				// Reward peer for valid transaction
+			if err := s.blockchain.AddTransaction(&tx); err != nil {
+				log.Printf("Failed to add transaction: %v", err)
 				if originID != "" {
-					s.peerManager.UpdatePeerScore(originID, 5)
+					s.peerManager.UpdatePeerScore(originID, -10)
 				}
-			} else {
-				log.Printf("Invalid transaction data")
+				continue
+			}
+
+			s.peerManager.PropagateMessage(msg, originID)
+
+			if originID != "" {
+				s.peerManager.UpdatePeerScore(originID, 5)
 			}
 
 		case "block":
-			// Handle block messages
-			if block, ok := msg.Data.(*types.Block); ok {
-				// Validate the block first
-				if err := block.Validate(); err != nil {
-					log.Printf("Block validation failed: %v", err)
-					if originID != "" {
-						s.peerManager.UpdatePeerScore(originID, -10)
-					}
-					continue
-				}
+			var block types.Block
+			if err := json.Unmarshal(msg.Data, &block); err != nil {
+				log.Printf("Failed to unmarshal block: %v", err)
+				continue
+			}
 
-				// Add transactions from the block to mempool
-				for _, tx := range block.Body.TxsList {
-					if err := s.blockchain.AddTransaction(tx); err != nil {
-						log.Printf("Failed to add block transaction %s: %v", tx.ID, err)
-						if originID != "" {
-							s.peerManager.UpdatePeerScore(originID, -5)
-						}
-						continue
-					}
-				}
-
-				// Commit the block using the new method
-				if err := s.blockchain.CommitBlock(block); err != nil {
-					log.Printf("Failed to commit block: %v", err)
-					if originID != "" {
-						s.peerManager.UpdatePeerScore(originID, -10)
-					}
-					continue
-				}
-
-				// Propagate valid block to other peers
-				s.peerManager.PropagateMessage(msg, originID)
-
-				// Reward peer for valid block
+			if err := block.Validate(); err != nil {
+				log.Printf("Block validation failed: %v", err)
 				if originID != "" {
-					s.peerManager.UpdatePeerScore(originID, 10)
+					s.peerManager.UpdatePeerScore(originID, -10)
 				}
-			} else {
-				log.Printf("Invalid block data")
+				continue
+			}
+
+			for _, tx := range block.Body.TxsList {
+				if err := s.blockchain.AddTransaction(tx); err != nil {
+					log.Printf("Failed to add block transaction %s: %v", tx.ID, err)
+					if originID != "" {
+						s.peerManager.UpdatePeerScore(originID, -5)
+					}
+				}
+			}
+
+			if err := s.blockchain.CommitBlock(&block); err != nil {
+				log.Printf("Failed to commit block: %v", err)
+				if originID != "" {
+					s.peerManager.UpdatePeerScore(originID, -10)
+				}
+				continue
+			}
+
+			s.peerManager.PropagateMessage(msg, originID)
+
+			if originID != "" {
+				s.peerManager.UpdatePeerScore(originID, 10)
 			}
 
 		case "proposal":
-			// Handle consensus proposals
-			if proposal, ok := msg.Data.(*consensus.Proposal); ok {
-				// Check if consensus is initialized
-				if s.consensus != nil {
-					if err := s.consensus.HandleProposal(proposal); err != nil {
-						log.Printf("Failed to handle consensus proposal: %v", err)
-					}
-				} else {
-					log.Printf("Consensus not initialized, ignoring proposal")
+			var proposal consensus.Proposal
+			if err := json.Unmarshal(msg.Data, &proposal); err != nil {
+				log.Printf("Failed to unmarshal proposal: %v", err)
+				continue
+			}
+			if s.consensus != nil {
+				if err := s.consensus.HandleProposal(&proposal); err != nil {
+					log.Printf("Failed to handle consensus proposal: %v", err)
 				}
 			}
 
 		case "vote":
-			// Handle consensus votes
-			if vote, ok := msg.Data.(*consensus.Vote); ok {
-				// Check if consensus is initialized
-				if s.consensus != nil {
-					if err := s.consensus.HandleVote(vote); err != nil {
-						log.Printf("Failed to handle consensus vote: %v", err)
-					}
-				} else {
-					log.Printf("Consensus not initialized, ignoring vote")
+			var vote consensus.Vote
+			if err := json.Unmarshal(msg.Data, &vote); err != nil {
+				log.Printf("Failed to unmarshal vote: %v", err)
+				continue
+			}
+			if s.consensus != nil {
+				if err := s.consensus.HandleVote(&vote); err != nil {
+					log.Printf("Failed to handle consensus vote: %v", err)
 				}
 			}
 
 		case "ping":
-			// Handle ping messages (keep-alive)
-			if pingData, ok := msg.Data.(network.PingData); ok {
-				if peer := s.nodeManager.GetNodeByKademliaID(pingData.FromID); peer != nil {
-					if p, ok := s.nodeManager.GetPeers()[peer.ID]; ok {
-						// Update last seen time
-						p.ReceivePong()
+			var pingData network.PingData
+			if err := json.Unmarshal(msg.Data, &pingData); err != nil {
+				log.Printf("Failed to unmarshal ping data: %v", err)
+				continue
+			}
+			if peer := s.nodeManager.GetNodeByKademliaID(pingData.FromID); peer != nil {
+				if p, ok := s.nodeManager.GetPeers()[peer.ID]; ok {
+					p.ReceivePong()
 
-						// Send pong response
-						transport.SendMessage(peer.Address, &security.Message{
-							Type: "pong",
-							Data: network.PongData{
-								FromID:    s.localNode.KademliaID,
-								ToID:      pingData.FromID,
-								Timestamp: time.Now(),
-								Nonce:     pingData.Nonce, // Echo nonce for verification
-							},
-						})
-
-						// Reward responsive peer
-						s.peerManager.UpdatePeerScore(peer.ID, 2)
+					// Marshal pong response
+					pongData := network.PongData{
+						FromID:    s.localNode.KademliaID,
+						ToID:      pingData.FromID,
+						Timestamp: time.Now(),
+						Nonce:     pingData.Nonce,
 					}
+					pongBytes, _ := json.Marshal(pongData)
+
+					transport.SendMessage(peer.Address, &security.Message{
+						Type: "pong",
+						Data: pongBytes,
+					})
+
+					s.peerManager.UpdatePeerScore(peer.ID, 2)
 				}
-			} else {
-				log.Printf("Invalid ping data")
 			}
 
 		case "pong":
-			// Handle pong responses
-			if pongData, ok := msg.Data.(network.PongData); ok {
-				if peer := s.nodeManager.GetNodeByKademliaID(pongData.FromID); peer != nil {
-					if p, ok := s.nodeManager.GetPeers()[peer.ID]; ok {
-						// Update last seen time
-						p.ReceivePong()
-
-						// Reward responsive peer
-						s.peerManager.UpdatePeerScore(peer.ID, 2)
-					}
+			var pongData network.PongData
+			if err := json.Unmarshal(msg.Data, &pongData); err != nil {
+				log.Printf("Failed to unmarshal pong data: %v", err)
+				continue
+			}
+			if peer := s.nodeManager.GetNodeByKademliaID(pongData.FromID); peer != nil {
+				if p, ok := s.nodeManager.GetPeers()[peer.ID]; ok {
+					p.ReceivePong()
+					s.peerManager.UpdatePeerScore(peer.ID, 2)
 				}
-			} else {
-				log.Printf("Invalid pong data")
 			}
 
 		case "peer_info":
-			// Handle peer information exchange
-			if peerInfo, ok := msg.Data.(network.PeerInfo); ok {
-				// Create new node from peer info
-				// FIX: Add the database parameter (use nil or the actual database instance)
-				node := network.NewNode(
-					peerInfo.Address,
-					peerInfo.IP,
-					peerInfo.Port,
-					peerInfo.UDPPort,
-					false,
-					peerInfo.Role,
-					nil,
-				)
-				node.KademliaID = peerInfo.KademliaID
-				node.UpdateStatus(peerInfo.Status)
-
-				// Add to node manager
-				s.nodeManager.AddNode(node)
-
-				// Connect if we have capacity
-				if len(s.peerManager.peers) < s.peerManager.maxPeers {
-					s.peerManager.ConnectPeer(node)
-				}
-				log.Printf("Received PeerInfo: NodeID=%s, Address=%s, Role=%s",
-					peerInfo.NodeID, peerInfo.Address, peerInfo.Role)
+			var peerInfo network.PeerInfo
+			if err := json.Unmarshal(msg.Data, &peerInfo); err != nil {
+				log.Printf("Failed to unmarshal peer info: %v", err)
+				continue
 			}
+			node := network.NewNode(
+				peerInfo.Address,
+				peerInfo.IP,
+				peerInfo.Port,
+				peerInfo.UDPPort,
+				false,
+				peerInfo.Role,
+				nil,
+			)
+			node.KademliaID = peerInfo.KademliaID
+			node.UpdateStatus(peerInfo.Status)
+
+			s.nodeManager.AddNode(node)
+
+			if len(s.peerManager.peers) < s.peerManager.maxPeers {
+				s.peerManager.ConnectPeer(node)
+			}
+			log.Printf("Received PeerInfo: NodeID=%s, Address=%s, Role=%s",
+				peerInfo.NodeID, peerInfo.Address, peerInfo.Role)
 
 		case "version":
-			// Handle version handshake messages
-			if versionData, ok := msg.Data.(map[string]interface{}); ok {
-				// Extract node ID from version message
-				peerID, ok := versionData["node_id"].(string)
-				if !ok {
-					log.Printf("Invalid node_id in version message")
-					continue
-				}
+			var versionData map[string]interface{}
+			if err := json.Unmarshal(msg.Data, &versionData); err != nil {
+				log.Printf("Failed to unmarshal version data: %v", err)
+				continue
+			}
+			peerID, ok := versionData["node_id"].(string)
+			if !ok {
+				log.Printf("Invalid node_id in version message")
+				continue
+			}
 
-				// ========== Extract public key ==========
-				var publicKeyBytes []byte
-				if pkStr, ok := versionData["public_key"].(string); ok {
-					var decodeErr error
-					publicKeyBytes, decodeErr = hex.DecodeString(pkStr)
-					if decodeErr != nil {
-						log.Printf("Failed to decode public key for %s: %v", peerID, decodeErr)
-					} else {
-						log.Printf("Received public key for %s (len=%d)", peerID, len(publicKeyBytes))
-					}
-				} else {
-					log.Printf("No public_key in version message from %s", peerID)
-				}
-				// ============================================
+			var publicKeyBytes []byte
+			if pkStr, ok := versionData["public_key"].(string); ok {
+				publicKeyBytes, _ = hex.DecodeString(pkStr)
+			}
 
-				// Get or create node
-				node := s.nodeManager.GetNode(peerID)
-				if node == nil {
-					// Create temporary node entry
-					node = &network.Node{
-						ID:         peerID,
-						Address:    "",
-						Status:     network.NodeStatusActive,
-						LastSeen:   time.Now(),
-						KademliaID: network.GenerateKademliaID(peerID),
-						PublicKey:  publicKeyBytes,
-					}
-					s.nodeManager.AddNode(node)
-					log.Printf("Created temporary node for version message: ID=%s", peerID)
-				} else if len(publicKeyBytes) > 0 {
-					// Update public key if provided
-					node.PublicKey = publicKeyBytes
-					log.Printf("Updated public key for node %s", peerID)
+			node := s.nodeManager.GetNode(peerID)
+			if node == nil {
+				node = &network.Node{
+					ID:         peerID,
+					Address:    "",
+					Status:     network.NodeStatusActive,
+					LastSeen:   time.Now(),
+					KademliaID: network.GenerateKademliaID(peerID),
+					PublicKey:  publicKeyBytes,
 				}
+				s.nodeManager.AddNode(node)
+			} else if len(publicKeyBytes) > 0 {
+				node.PublicKey = publicKeyBytes
+			}
 
-				// ========== Register public key with consensus ==========
-				if s.consensus != nil && len(publicKeyBytes) > 0 {
-					signingService := s.consensus.GetSigningService()
-					if signingService != nil {
-						// Use the new deserialize and register method
-						if err := signingService.DeserializeAndRegisterPublicKey(peerID, publicKeyBytes); err != nil {
-							log.Printf("Failed to deserialize and register public key for %s: %v", peerID, err)
-						} else {
-							log.Printf("✅ Registered public key for %s with consensus", peerID)
-						}
-					} else {
-						log.Printf("Signing service not available for consensus, cannot register public key for %s", peerID)
-					}
-				} else if s.consensus == nil {
-					log.Printf("Consensus not initialized yet, cannot register public key for %s", peerID)
+			if s.consensus != nil && len(publicKeyBytes) > 0 {
+				signingService := s.consensus.GetSigningService()
+				if signingService != nil {
+					signingService.DeserializeAndRegisterPublicKey(peerID, publicKeyBytes)
 				}
-				// ============================================================
+			}
 
-				// Prepare verack response
-				verackMsg := &security.Message{
-					Type: "verack",
-					Data: s.localNode.ID,
+			verackMsg := &security.Message{
+				Type: "verack",
+				Data: []byte(s.localNode.ID),
+			}
+
+			sourceAddr := node.Address
+			if sourceAddr == "" {
+				if addr, ok := versionData["address"].(string); ok && addr != "" {
+					sourceAddr = addr
 				}
+			}
 
-				// Determine source address for response
-				sourceAddr := node.Address
-				if sourceAddr == "" {
-					if addr, ok := versionData["address"].(string); ok && addr != "" {
-						sourceAddr = addr
-					} else {
-						log.Printf("No valid source address for verack to %s", peerID)
-						continue
-					}
-				}
-
-				// Send verack response
-				if sendErr := transport.SendMessage(sourceAddr, verackMsg); sendErr != nil {
-					log.Printf("Failed to send verack to %s at %s: %v", peerID, sourceAddr, sendErr)
-					s.peerManager.UpdatePeerScore(peerID, -10)
-					continue
-				}
-				log.Printf("Sent verack to %s at %s", peerID, sourceAddr)
-
-				// Reward successful handshake
+			if sourceAddr != "" {
+				transport.SendMessage(sourceAddr, verackMsg)
 				s.peerManager.UpdatePeerScore(peerID, 5)
+			}
 
-				// Update node address if provided
-				if addr, ok := versionData["address"].(string); ok && addr != "" && node.Address == "" {
-					node.Address = addr
-					if updateErr := s.nodeManager.UpdateNode(node); updateErr != nil {
-						log.Printf("Failed to update node %s address to %s: %v", peerID, addr, updateErr)
-					} else {
-						log.Printf("Updated node %s address to %s", peerID, addr)
-					}
-				}
-			} else {
-				log.Printf("Invalid version message data: %v", msg.Data)
+			if addr, ok := versionData["address"].(string); ok && addr != "" && node.Address == "" {
+				node.Address = addr
+				s.nodeManager.UpdateNode(node)
 			}
 
 		case "getheaders":
-			// Handle block headers request
-			if data, ok := msg.Data.(map[string]interface{}); ok {
-				startHeight, ok := data["start_height"].(float64)
-				if !ok {
-					log.Printf("Invalid start_height in getheaders")
-					continue
-				}
+			var data map[string]interface{}
+			if err := json.Unmarshal(msg.Data, &data); err != nil {
+				log.Printf("Failed to unmarshal getheaders data: %v", err)
+				continue
+			}
+			startHeight, ok := data["start_height"].(float64)
+			if !ok {
+				continue
+			}
 
-				// Get blocks from blockchain
-				blocks := s.blockchain.GetBlocks()
-				var headers []*types.BlockHeader // Slice of block header pointers
-				for _, block := range blocks {
-					if block.Header.Block >= uint64(startHeight) {
-						headers = append(headers, block.Header) // Add header
-					}
+			blocks := s.blockchain.GetBlocks()
+			var headers []*types.BlockHeader
+			for _, block := range blocks {
+				if block.Header.Block >= uint64(startHeight) {
+					headers = append(headers, block.Header)
 				}
+			}
 
-				// Send headers back to requesting peer
-				if peer, ok := s.nodeManager.GetPeers()[originID]; ok && originID != "" {
-					transport.SendMessage(peer.Node.Address, &security.Message{
-						Type: "headers",
-						Data: headers,
-					})
-				}
+			headersBytes, _ := json.Marshal(headers)
+			if peer, ok := s.nodeManager.GetPeers()[originID]; ok && originID != "" {
+				transport.SendMessage(peer.Node.Address, &security.Message{
+					Type: "headers",
+					Data: headersBytes,
+				})
 			}
 
 		case "headers":
-			// Handle received block headers
-			if headers, ok := msg.Data.([]types.BlockHeader); ok {
-				log.Printf("Received %d headers from peer %s", len(headers), originID)
-				// Reward peer for providing headers
-				if originID != "" {
-					s.peerManager.UpdatePeerScore(originID, 10)
-				}
+			var headers []types.BlockHeader
+			if err := json.Unmarshal(msg.Data, &headers); err != nil {
+				log.Printf("Failed to unmarshal headers: %v", err)
+				continue
+			}
+			log.Printf("Received %d headers from peer %s", len(headers), originID)
+			if originID != "" {
+				s.peerManager.UpdatePeerScore(originID, 10)
 			}
 
 		default:
-			// Unknown message type
 			log.Printf("Unknown message type: %s", msg.Type)
 			if originID != "" {
 				s.peerManager.UpdatePeerScore(originID, -5)
@@ -689,10 +648,16 @@ func (s *Server) validateTransaction(tx *types.Transaction) error {
 	// Get peer connection
 	peer := s.nodeManager.GetPeers()[validatorNode.ID]
 
+	// Marshal transaction to JSON
+	txData, err := json.Marshal(tx)
+	if err != nil {
+		return fmt.Errorf("failed to marshal transaction: %v", err)
+	}
+
 	// Send transaction to validator
 	if err := transport.SendMessage(peer.Node.Address, &security.Message{
 		Type: "transaction",
-		Data: tx,
+		Data: txData, // Use marshaled bytes
 	}); err != nil {
 		return fmt.Errorf("failed to send transaction to validator %s: %v", validatorNode.ID, err)
 	}
@@ -703,6 +668,12 @@ func (s *Server) validateTransaction(tx *types.Transaction) error {
 
 // Broadcast sends a message to all peers.
 // Simple wrapper around peer manager's propagation function
+// Broadcast sends a message to all peers.
 func (s *Server) Broadcast(msg *security.Message) {
-	s.peerManager.PropagateMessage(msg, s.localNode.ID)
+	// Make a copy and ensure Data is marshaled properly
+	msgCopy := &security.Message{
+		Type: msg.Type,
+		Data: msg.Data, // Already should be json.RawMessage
+	}
+	s.peerManager.PropagateMessage(msgCopy, s.localNode.ID)
 }

@@ -1,63 +1,71 @@
-# Complete Network Local Development Setup
+# ============================================
+# LOCAL DEVELOPMENT CLUSTER (3 nodes on one machine)
+# ============================================
 
-# 1. CLEANUP & DATA MANAGEMENT
-# -----------------------------
-# Remove existing blockchain data (choose one):
+# Terminal Window 1 - Node 0 (Genesis Node)
+cd ~/desktop/protocol
+rm -rf ./data/node0
+go run ./src/cli/main.go node \
+    --node-index=0 \
+    --nodes=3 \
+    --role=validator \
+    --tcp-addr=127.0.0.1:32307 \
+    --udp-port=32308 \
+    --http-port=127.0.0.1:8545 \
+    --datadir=./data/node0 \
+    --pbft \
+    --mode=development
 
-# Option A: Remove only node data (keep other data)
-```bash
-rm -rf data/Node-*
+# Terminal Window 2 - Node 1
+cd ~/desktop/protocol
+rm -rf ./data/node1
+go run ./src/cli/main.go node \
+    --node-index=1 \
+    --nodes=3 \
+    --role=validator \
+    --tcp-addr=127.0.0.1:32308 \
+    --udp-port=32309 \
+    --http-port=127.0.0.1:8546 \
+    --datadir=./data/node1 \
+    --pbft \
+    --mode=development
+
+# Terminal Window 3 - Node 2
+cd ~/desktop/protocol
+rm -rf ./data/node2
+go run ./src/cli/main.go node \
+    --node-index=2 \
+    --nodes=3 \
+    --role=validator \
+    --tcp-addr=127.0.0.1:32309 \
+    --udp-port=32310 \
+    --http-port=127.0.0.1:8547 \
+    --datadir=./data/node2 \
+    --pbft \
+    --mode=development
+
+
+# ============================================
+# Make and Run Launch Script
+# ============================================
+
+
+```
+# Navigate to CLI directory
+cd ~/desktop/protocol/src/cli
 ```
 
-# Option B: Complete reset (remove all data)
-```bash
-rm -rf data/
+```
+# Make the script executable
+chmod +x launch.sh
 ```
 
-
-# 2. RUN LOCAL TEST NETWORK
-# -------------------------
-```bash
-cd src/cli && go run main.go -test-nodes=3
+```
+# Run the cluster (3 nodes)
+./launch.sh cluster
 ```
 
-
-# 3. RUN TEST SUITES
-# ------------------
-
-# A. Genesis + Block Building tests (argon2 slow - needs 300s)
-```bash
-go test ./src/core/... -v -timeout 300s \
-  -run "TestBuildBlock|TestAllocationToTx|TestBuildAlloc|TestMerkle|TestValidateGenesisState|TestVerifyGenesisBlockHash|TestApplyGenesis|TestGenesisState|TestGenesisStateFromChainParams|TestNewGenesisValidatorStake|TestDefaultGenesisState"
 ```
-
-# B. Allocation tests only (fast - 30s is fine)
-```bash
-go test ./src/core/... -v -timeout 30s \
-  -run "TestAllocation|TestDefaultGenesis|TestSummarise|TestDeterministic|TestUint64|TestNewGenesisAllocation|TestDomainConstructors"
-```
-
-# C. Full test suite (everything)
-```bash
-go test ./src/core/... -v -timeout 300s \
-  -run "TestBuildBlock|TestAllocationToTx|TestBuildAlloc|TestMerkle|TestValidateGenesisState|TestVerifyGenesisBlockHash|TestApplyGenesis|TestGenesisState|TestGenesisStateFromChainParams|TestNewGenesisValidatorStake|TestDefaultGenesisState|TestAllocation|TestDefaultGenesis|TestSummarise|TestDeterministic|TestUint64|TestNewGenesisAllocation|TestDomainConstructors"
-```
-
-
-# 4. GENERATE PERMANENT NODE DATA WITH LOGS
-# -----------------------------------------
-```bash
-rm -rf data/ && go run ./src/cli/main.go -test-nodes 3 2>&1 | tee /tmp/out.txt
-```
-
-
-# 5. QUICK REFERENCE - ALL COMMANDS IN ORDER
-# -----------------------------------------
-# Complete workflow from clean slate to full test run:
-```bash
-rm -rf data/
-cd src/cli
-go run main.go -test-nodes=3
-cd ../..
-go test ./src/core/... -v -timeout 300s -run "TestBuildBlock|TestAllocationToTx|TestBuildAlloc|TestMerkle|TestValidateGenesisState|TestVerifyGenesisBlockHash|TestApplyGenesis|TestGenesisState|TestGenesisStateFromChainParams|TestNewGenesisValidatorStake|TestDefaultGenesisState|TestAllocation|TestDefaultGenesis|TestSummarise|TestDeterministic|TestUint64|TestNewGenesisAllocation|TestDomainConstructors"
+# Or run single node mode
+./launch.sh single
 ```

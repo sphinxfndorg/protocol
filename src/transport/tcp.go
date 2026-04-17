@@ -21,12 +21,14 @@
 // SOFTWARE.
 
 // go/src/transport/tcp.go
+
 package transport
 
 import (
 	"bufio"
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -41,33 +43,6 @@ import (
 )
 
 // maxMessageSize is the maximum allowed TCP message size in bytes.
-//
-// Breakdown of the largest legitimate wire payload:
-//
-//	sigBytes (SHAKE-256-256s)    7,856 B   SPHINCS+ signature
-//	pkBytes                         32 B   public key
-//	merkleRootHash                  32 B   receipt hash
-//	commitment                      32 B   tx fingerprint
-//	timestamp                        8 B   Unix timestamp
-//	nonce                           16 B   random nonce
-//	proof                           32 B   light-client proof
-//	message                     ~1,024 B   transaction payload (typical)
-//	encryption overhead          ~1,024 B   SecureMessage wrapping
-//	─────────────────────────────────────
-//	Total realistic maximum      ~10,056 B   (~10 KB)
-//
-// We set the limit to 64 KB to give ample headroom for:
-//   - Larger transaction messages
-//   - Encryption/framing overhead from SecureMessage
-//   - Future protocol extensions
-//   - SHAKE-256-256f sigBytes (35,664 B) if the faster parameter set is used
-//
-// 64 KB is still strict enough to reject malformed or malicious oversized
-// frames before allocating memory for them.
-//
-// PRODUCTION NOTE: If you switch back to SHAKE-256-256f parameters
-// (sigBytes = 35,664 B), raise this constant to at least 128*1024 (128 KB).
-// The current value of 64 KB is sized for SHAKE-256-256s (sigBytes = 7,856 B).
 const maxMessageSize = 64 * 1024 // 64 KB
 
 // Global server instance for connection management.
@@ -111,7 +86,6 @@ func (s *TCPServer) Start() error {
 				log.Printf("TCP accept error on %s: %v", s.address, err)
 				continue
 			}
-			// Use the server's address as the key (e.g., 127.0.0.1:30307)
 			log.Printf("Accepted new connection on %s from %s", s.address, conn.RemoteAddr().String())
 			go s.handleConnection(conn, s.address)
 		}
@@ -164,14 +138,8 @@ func (s *TCPServer) handleConnection(conn net.Conn, nodeAddr string) {
 		}
 		length := binary.BigEndian.Uint32(lengthBuf)
 
-		// Reject frames that exceed the maximum allowed size.
-		// This prevents memory exhaustion from malformed or malicious frames
-		// while still accommodating the full SPHINCS+ wire payload (~8 KB with
-		// SHAKE-256-256s params, ~36 KB with SHAKE-256-256f params).
-		// See maxMessageSize for the size breakdown.
 		if length > maxMessageSize {
-			log.Printf("TCP message too large on %s: %d bytes (limit: %d bytes = %d KB)",
-				nodeAddr, length, maxMessageSize, maxMessageSize/1024)
+			log.Printf("TCP message too large on %s: %d bytes (limit: %d bytes)", nodeAddr, length, maxMessageSize)
 			return
 		}
 
@@ -197,10 +165,10 @@ func (s *TCPServer) handleConnection(conn net.Conn, nodeAddr string) {
 
 		// Handle version message and send verack response
 		if msg.Type == "version" {
-			// Validate version message
-			versionData, ok := msg.Data.(map[string]interface{})
-			if !ok {
-				log.Printf("Invalid version message data on %s: %v", nodeAddr, msg.Data)
+			// Unmarshal version data from json.RawMessage
+			var versionData map[string]interface{}
+			if err := json.Unmarshal(msg.Data, &versionData); err != nil {
+				log.Printf("Invalid version message data on %s: %v", nodeAddr, err)
 				continue
 			}
 			peerID, ok := versionData["node_id"].(string)
@@ -209,10 +177,11 @@ func (s *TCPServer) handleConnection(conn net.Conn, nodeAddr string) {
 				continue
 			}
 
-			// Send verack response
+			// Send verack response - marshal peerID to JSON bytes
+			peerIDBytes, _ := json.Marshal(peerID)
 			verackMsg := &security.Message{
 				Type: "verack",
-				Data: peerID, // Echo back the node_id
+				Data: peerIDBytes,
 			}
 			encryptedVerack, err := security.SecureMessage(verackMsg, enc)
 			if err != nil {
@@ -241,12 +210,13 @@ func (s *TCPServer) handleConnection(conn net.Conn, nodeAddr string) {
 		}
 
 		if msg.Type == "jsonrpc" {
-			resp, err := s.rpcServer.HandleRequest([]byte(msg.Data.(string)))
+			// msg.Data is json.RawMessage ([]byte), use it directly
+			resp, err := s.rpcServer.HandleRequest(msg.Data)
 			if err != nil {
 				log.Printf("RPC handle error on %s: %v", nodeAddr, err)
 				continue
 			}
-			encryptedResp, err := security.SecureMessage(&security.Message{Type: "jsonrpc", Data: string(resp)}, enc)
+			encryptedResp, err := security.SecureMessage(&security.Message{Type: "jsonrpc", Data: resp}, enc)
 			if err != nil {
 				log.Printf("TCP encode response error on %s: %v", nodeAddr, err)
 				continue
@@ -343,11 +313,8 @@ func ConnectTCP(address string, messageCh chan *security.Message) (net.Conn, err
 					}
 					length := binary.BigEndian.Uint32(lengthBuf)
 
-					// Same size limit as the server side — reject oversized frames.
-					// See maxMessageSize for the full breakdown.
 					if length > maxMessageSize {
-						log.Printf("TCP response too large on %s: %d bytes (limit: %d bytes = %d KB)",
-							address, length, maxMessageSize, maxMessageSize/1024)
+						log.Printf("TCP response too large on %s: %d bytes (limit: %d bytes)", address, length, maxMessageSize)
 						return
 					}
 

@@ -21,6 +21,7 @@
 // SOFTWARE.
 
 // go/src/rpc/server.go
+
 package rpc
 
 import (
@@ -53,9 +54,10 @@ func (s *Server) handleMessages() {
 	for msg := range s.messageCh {
 		log.Printf("rpc.Server: Received message on messageCh: Type=%s, Data=%v, ChannelLen=%d", msg.Type, msg.Data, len(s.messageCh))
 		if msg.Type == "rpc" {
-			dataBytes, ok := msg.Data.([]byte)
-			if !ok {
-				log.Printf("rpc.Server: Invalid RPC data format: %v", msg.Data)
+			// msg.Data is already json.RawMessage ([]byte), use it directly
+			dataBytes := msg.Data
+			if len(dataBytes) == 0 {
+				log.Printf("rpc.Server: Empty RPC data")
 				continue
 			}
 			// Decode the RPC message to get the From field
@@ -90,7 +92,7 @@ func (s *Server) sendResponse(address string, respData []byte) error {
 	if err != nil {
 		return err
 	}
-	defer conn.Close() // defer is safe here as it runs after the function returns
+	defer conn.Close()
 	secMsg := &security.Message{Type: "rpc", Data: respData}
 	encodedData, err := secMsg.Encode()
 	if err != nil {
@@ -108,9 +110,10 @@ func (s *Server) HandleRequest(data []byte) ([]byte, error) {
 	// Try decoding as security.Message
 	secMsg, err := security.DecodeMessage(data)
 	if err == nil && secMsg.Type == "rpc" {
-		dataBytes, ok := secMsg.Data.([]byte)
-		if !ok {
-			log.Printf("rpc.Server: Invalid RPC data format in security.Message: %v", secMsg.Data)
+		// secMsg.Data is already json.RawMessage ([]byte), use it directly
+		dataBytes := secMsg.Data
+		if len(dataBytes) == 0 {
+			log.Printf("rpc.Server: Empty RPC data in security.Message")
 			return s.handler.errorResponse(nil, ErrCodeInvalidRequest, "Invalid RPC data format")
 		}
 		var msg Message

@@ -86,7 +86,8 @@ func (a *BlockHelper) GetCurrentNonce() (uint64, error) {
 }
 
 // GetUnderlyingBlock returns the underlying types.Block
-func (a *BlockHelper) GetUnderlyingBlock() *types.Block {
+// GetUnderlyingBlock returns the underlying types.Block as interface{}
+func (a *BlockHelper) GetUnderlyingBlock() interface{} {
 	return a.block
 }
 
@@ -236,4 +237,34 @@ func (bc *Blockchain) VerifyStateConsistency(otherState *storage.StateSnapshot) 
 func (bc *Blockchain) GetCurrentState() *storage.StateSnapshot {
 	// Get current state from state machine
 	return bc.stateMachine.GetCurrentState()
+}
+
+// GetParentHash returns the parent block hash
+func (a *BlockHelper) GetParentHash() string {
+	return a.block.GetParentHash()
+}
+
+// GetCommitStatus returns the commit status
+func (a *BlockHelper) GetCommitStatus() string {
+	return a.block.GetCommitStatus()
+}
+
+// SetCommitStatus sets the commit status
+func (a *BlockHelper) SetCommitStatus(status string) {
+	a.block.SetCommitStatus(status)
+}
+
+// GetSigValid returns whether signature is valid
+func (a *BlockHelper) GetSigValid() bool {
+	return a.block.GetSigValid()
+}
+
+// SetSigValid sets the signature validity flag
+func (a *BlockHelper) SetSigValid(valid bool) {
+	a.block.SetSigValid(valid)
+}
+
+// GetTxsRoot returns the transaction root
+func (a *BlockHelper) GetTxsRoot() []byte {
+	return a.block.GetTxsRoot()
 }

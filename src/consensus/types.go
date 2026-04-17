@@ -30,20 +30,31 @@ import (
 	"time"
 
 	"github.com/sphinxorg/protocol/src/core/hashtree"
-	key "github.com/sphinxorg/protocol/src/core/sphincs/key/backend"
-	sign "github.com/sphinxorg/protocol/src/core/sphincs/sign/backend"
+	key "github.com/sphinxorg/protocol/src/core/sthincs/key/backend"
+	sign "github.com/sphinxorg/protocol/src/core/sthincs/sign/backend"
 	"github.com/sphinxorg/protocol/src/crypto/STHINCS/sthincs"
 )
 
 // Block interface that your existing types.Block will satisfy
+// go/src/consensus/types.go - Add these methods to the Block interface
+
 type Block interface {
 	GetHeight() uint64
 	GetHash() string
 	GetPrevHash() string
+	GetParentHash() string
 	GetTimestamp() int64
 	Validate() error
 	GetDifficulty() *big.Int
 	GetCurrentNonce() (uint64, error)
+	GetUnderlyingBlock() interface{}
+
+	// Add these methods for metadata updates
+	SetCommitStatus(status string)
+	SetSigValid(valid bool)
+	GetCommitStatus() string
+	GetSigValid() bool
+	GetTxsRoot() []byte // Add this method
 }
 
 // MerkleRootExtractor is a separate interface for blocks that can provide merkle roots
@@ -59,12 +70,15 @@ type BlockWithBody interface {
 
 // Proposal represents a block proposal from a leader
 type Proposal struct {
-	Block           Block  `json:"block"`
+	BlockData       []byte `json:"block_data"`
 	View            uint64 `json:"view"`
 	ProposerID      string `json:"proposer_id"`
 	Signature       []byte `json:"signature"`
 	ElectedLeaderID string `json:"elected_leader_id"`
 	SlotNumber      uint64 `json:"slot_number"`
+
+	// Transient field - not serialized, used locally
+	Block Block `json:"-"`
 }
 
 // Vote represents a vote from a validator
@@ -276,6 +290,11 @@ type Consensus struct {
 
 	// Attestations per epoch
 	attestations map[uint64][]*Attestation
+
+	pendingProposals map[string]Block // Cache of proposals by block hash for leader self-recovery
+	proposalMutex    sync.RWMutex     // Mutex for proposal cache
+
+	preparedBlockHash string // Track the hash of preparedBlock for cleanup
 
 	electedSlot uint64 // slot number used when electedLeaderID was set
 }

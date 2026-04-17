@@ -152,8 +152,12 @@ func (bc *Blockchain) GetMiningInfo() map[string]interface{} {
 
 		// Use adapter to access body for transaction count
 		if adapter, ok := latest.(*BlockHelper); ok {
-			block := adapter.GetUnderlyingBlock()
-			info["current_block_tx"] = len(block.Body.TxsList) // Transactions in current block
+			// Type assert the interface{} to *types.Block
+			if block, ok := adapter.GetUnderlyingBlock().(*types.Block); ok {
+				info["current_block_tx"] = len(block.Body.TxsList) // Transactions in current block
+			} else {
+				info["current_block_tx"] = 0
+			}
 		} else {
 			info["current_block_tx"] = 0
 		}

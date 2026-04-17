@@ -146,10 +146,10 @@ func (c *conn) ReceiveMessageLoop(stopc chan struct{}) error {
 			continue // Not a valid RPC message, skip
 		}
 
-		// Extract the data bytes from the security message
-		dataBytes, ok := secMsg.Data.([]byte)
-		if !ok {
-			continue // Data is not in expected format, skip
+		// Use directly:
+		dataBytes := secMsg.Data // secMsg.Data is already json.RawMessage ([]byte)
+		if len(dataBytes) == 0 {
+			continue
 		}
 
 		// Unmarshal the RPC message from the data bytes

@@ -412,52 +412,6 @@ func (b *Block) GetHash() string {
 	return hexHash
 }
 
-// SetHash sets the block hash
-// Parameters:
-//   - hash: Hash string to set
-func (b *Block) SetHash(hash string) {
-	// Check if header exists
-	if b.Header == nil {
-		return
-	}
-	// Store hash as byte slice
-	b.Header.Hash = []byte(hash)
-}
-
-// isHexString checks if a string is hex-encoded
-// Parameters:
-//   - s: String to check
-//
-// Returns: true if string is valid hex
-func isHexString(s string) bool {
-	// Hex strings must have even length (each byte = 2 chars)
-	if len(s)%2 != 0 {
-		return false
-	}
-	// Check each character is a valid hex digit
-	for _, c := range s {
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
-			return false
-		}
-	}
-	return true
-}
-
-// IsGenesisHash checks if this block has a genesis hash format
-// Returns: true if block is genesis
-func (b *Block) IsGenesisHash() bool {
-	hash := b.GetHash()
-	// Check for "GENESIS_" prefix
-	return len(hash) > 8 && hash[:8] == "GENESIS_"
-}
-
-// CalculateTxsRoot calculates the Merkle root of all transactions in the block
-// Returns: Merkle root as byte slice
-func (b *Block) CalculateTxsRoot() []byte {
-	// Delegate to CalculateMerkleRoot function
-	return CalculateMerkleRoot(b.Body.TxsList)
-}
-
 // FinalizeHash ensures all roots are properly set before finalizing the block hash
 func (b *Block) FinalizeHash() {
 	// Check if header exists
@@ -556,12 +510,6 @@ func (b *Block) AddUncle(uncle *BlockHeader) {
 	}
 }
 
-// GetUncles returns the list of uncle blocks
-// Returns: Slice of uncle block headers
-func (b *Block) GetUncles() []*BlockHeader {
-	return b.Body.Uncles
-}
-
 // ValidateTxsRoot validates that TxsRoot matches the calculated Merkle root
 // Returns: Error if validation fails
 func (b *Block) ValidateTxsRoot() error {
@@ -617,38 +565,6 @@ func NewTxs(to, from string, fee float64, storage string, nonce uint64, gasLimit
 	return nil
 }
 
-// GetDifficulty returns the block difficulty
-// Returns: Difficulty as big.Int
-func (b *Block) GetDifficulty() *big.Int {
-	// Check if header exists and has difficulty
-	if b.Header != nil {
-		return b.Header.Difficulty
-	}
-	// Default difficulty of 1 for genesis
-	return big.NewInt(1)
-}
-
-// Validate performs basic block validation
-// Returns: Error if validation fails
-func (b *Block) Validate() error {
-	// Delegate to SanityCheck
-	return b.SanityCheck()
-}
-
-// GetFormattedTimestamps returns both local and UTC formatted timestamps
-// Returns: Local time string and UTC time string
-func (b *Block) GetFormattedTimestamps() (localTime, utcTime string) {
-	// Use common time service for consistent formatting
-	return common.FormatTimestamp(b.Header.Timestamp)
-}
-
-// GetTimeInfo returns comprehensive time information
-// Returns: TimeInfo struct with various time formats
-func (b *Block) GetTimeInfo() *common.TimeInfo {
-	// Get detailed time information from central time service
-	return common.GetTimeService().GetTimeInfo(b.Header.Timestamp)
-}
-
 // MarshalJSON custom marshaling for BlockHeader
 // Provides custom JSON encoding with hex-encoded fields
 func (h *BlockHeader) MarshalJSON() ([]byte, error) {
@@ -664,6 +580,7 @@ func (h *BlockHeader) MarshalJSON() ([]byte, error) {
 		Nonce             string `json:"nonce"` // Correctly handles string nonce
 		ProposerSignature string `json:"proposer_signature"`
 		ProposerID        string `json:"proposer_id"`
+		SigDataHash       string `json:"sig_data_hash"` // Add this line
 		*Alias
 	}{
 		// Convert byte fields to hex strings for JSON compatibility
@@ -677,13 +594,20 @@ func (h *BlockHeader) MarshalJSON() ([]byte, error) {
 		Nonce:             h.Nonce,                                 // Nonce as string
 		ProposerSignature: hex.EncodeToString(h.ProposerSignature), // Hex-encoded signature
 		ProposerID:        h.ProposerID,                            // Proposer ID as string
+		SigDataHash:       hex.EncodeToString(h.SigDataHash),       // Add this line
 		Alias:             (*Alias)(h),                             // Embed original fields
 	})
 }
 
 // UnmarshalJSON custom unmarshaling for BlockHeader
 // Handles hex-encoded fields during JSON parsing
+// UnmarshalJSON custom unmarshaling for BlockHeader
 func (h *BlockHeader) UnmarshalJSON(data []byte) error {
+	// Ensure h is not nil
+	if h == nil {
+		return fmt.Errorf("block header is nil")
+	}
+
 	type Alias BlockHeader
 	aux := &struct {
 		Hash              string `json:"hash"`
@@ -694,8 +618,9 @@ func (h *BlockHeader) UnmarshalJSON(data []byte) error {
 		ExtraData         string `json:"extra_data"`
 		Miner             string `json:"miner"`
 		Nonce             string `json:"nonce"`
-		ProposerSignature string `json:"proposer_signature"` // string, not []byte
+		ProposerSignature string `json:"proposer_signature"`
 		ProposerID        string `json:"proposer_id"`
+		SigDataHash       string `json:"sig_data_hash"` // Add this line
 		*Alias
 	}{
 		Alias: (*Alias)(h), // Initialize with existing header
@@ -707,39 +632,102 @@ func (h *BlockHeader) UnmarshalJSON(data []byte) error {
 	}
 
 	var err error
-	// Convert hex strings back to byte slices
-	h.Hash = []byte(aux.Hash) // Hash as bytes
-	h.TxsRoot, err = hex.DecodeString(aux.TxsRoot)
-	if err != nil {
-		return fmt.Errorf("failed to decode txs_root: %w", err)
-	}
-	h.StateRoot, err = hex.DecodeString(aux.StateRoot)
-	if err != nil {
-		return fmt.Errorf("failed to decode state_root: %w", err)
-	}
-	h.ParentHash, err = hex.DecodeString(aux.ParentHash)
-	if err != nil {
-		return fmt.Errorf("failed to decode parent_hash: %w", err)
-	}
-	h.UnclesHash, err = hex.DecodeString(aux.UnclesHash)
-	if err != nil {
-		return fmt.Errorf("failed to decode uncles_hash: %w", err)
-	}
-	h.ExtraData = []byte(aux.ExtraData) // Extra data as bytes
-	h.Miner, err = hex.DecodeString(aux.Miner)
-	if err != nil {
-		return fmt.Errorf("failed to decode miner: %w", err)
-	}
-	h.Nonce = aux.Nonce // Nonce as string
 
-	// ProposerSignature may be empty for legacy/genesis blocks
+	// Add after other hex decodes:
+	if aux.SigDataHash != "" {
+		h.SigDataHash, err = hex.DecodeString(aux.SigDataHash)
+		if err != nil {
+			return fmt.Errorf("failed to decode sig_data_hash: %w", err)
+		}
+	} else {
+		h.SigDataHash = []byte{}
+	}
+
+	// Handle Hash - can be empty
+	if aux.Hash != "" {
+		h.Hash = []byte(aux.Hash)
+	} else {
+		h.Hash = []byte{}
+	}
+
+	// Handle TxsRoot - if empty, use empty hash
+	if aux.TxsRoot != "" {
+		h.TxsRoot, err = hex.DecodeString(aux.TxsRoot)
+		if err != nil {
+			return fmt.Errorf("failed to decode txs_root: %w", err)
+		}
+	} else {
+		h.TxsRoot = common.SpxHash([]byte{})
+	}
+
+	// Handle StateRoot - if empty, use empty hash
+	if aux.StateRoot != "" {
+		h.StateRoot, err = hex.DecodeString(aux.StateRoot)
+		if err != nil {
+			return fmt.Errorf("failed to decode state_root: %w", err)
+		}
+	} else {
+		h.StateRoot = common.SpxHash([]byte{})
+	}
+
+	// Handle ParentHash - if empty, use empty hash
+	if aux.ParentHash != "" {
+		h.ParentHash, err = hex.DecodeString(aux.ParentHash)
+		if err != nil {
+			return fmt.Errorf("failed to decode parent_hash: %w", err)
+		}
+	} else {
+		h.ParentHash = make([]byte, 32)
+	}
+
+	// Handle UnclesHash - if empty, use empty uncles hash
+	if aux.UnclesHash != "" {
+		h.UnclesHash, err = hex.DecodeString(aux.UnclesHash)
+		if err != nil {
+			return fmt.Errorf("failed to decode uncles_hash: %w", err)
+		}
+	} else {
+		h.UnclesHash = common.SpxHash([]byte("empty_uncles_list"))
+	}
+
+	// Handle ExtraData
+	if aux.ExtraData != "" {
+		h.ExtraData = []byte(aux.ExtraData)
+	} else {
+		h.ExtraData = []byte{}
+	}
+
+	// Handle Miner - if empty, use zero address
+	if aux.Miner != "" {
+		h.Miner, err = hex.DecodeString(aux.Miner)
+		if err != nil {
+			return fmt.Errorf("failed to decode miner: %w", err)
+		}
+	} else {
+		h.Miner = make([]byte, 20)
+	}
+
+	// Handle Nonce
+	if aux.Nonce != "" {
+		h.Nonce = aux.Nonce
+	} else {
+		h.Nonce = common.FormatNonce(2)
+	}
+
+	// Handle ProposerSignature - may be empty for genesis blocks
 	if aux.ProposerSignature != "" {
 		h.ProposerSignature, err = hex.DecodeString(aux.ProposerSignature)
 		if err != nil {
 			return fmt.Errorf("failed to decode proposer_signature: %w", err)
 		}
+	} else {
+		h.ProposerSignature = []byte{}
 	}
+
+	// Handle ProposerID
 	h.ProposerID = aux.ProposerID
+
+	logger.Debug("Unmarshaled BlockHeader: Height=%d, Block=%d", h.Height, h.Block)
 
 	return nil
 }
@@ -761,6 +749,8 @@ func (b *Block) MarshalJSON() ([]byte, error) {
 
 // UnmarshalJSON for Block
 // Custom JSON unmarshaling for Block type
+// UnmarshalJSON for Block
+// UnmarshalJSON for Block
 func (b *Block) UnmarshalJSON(data []byte) error {
 	type Alias Block
 	aux := &struct {
@@ -768,7 +758,7 @@ func (b *Block) UnmarshalJSON(data []byte) error {
 		Body   *BlockBody   `json:"body"`
 		*Alias
 	}{
-		Alias: (*Alias)(b), // Initialize with existing block
+		Alias: (*Alias)(b),
 	}
 
 	// Parse JSON
@@ -776,9 +766,58 @@ func (b *Block) UnmarshalJSON(data []byte) error {
 		return err
 	}
 
-	// Set parsed values
-	b.Header = aux.Header
-	b.Body = *aux.Body
+	// Set parsed values with nil checks
+	if aux.Header != nil {
+		// First, store the original height if it exists
+		originalHeight := uint64(0)
+		if b.Header != nil {
+			originalHeight = b.Header.Height
+		}
+
+		b.Header = aux.Header
+
+		// If the parsed header has height 0 but original had height > 0, restore it
+		// This can happen if the JSON doesn't include the height field properly
+		if b.Header.Height == 0 && originalHeight > 0 {
+			b.Header.Height = originalHeight
+			b.Header.Block = originalHeight
+		}
+
+		// Also check if the header has a valid height from the Block field
+		// The Block field in the JSON might contain the height
+		if b.Header.Height == 0 && b.Header.Block > 0 {
+			b.Header.Height = b.Header.Block
+		}
+	} else {
+		// Initialize with empty header
+		b.Header = &BlockHeader{
+			Version:    1,
+			Height:     0,
+			Timestamp:  common.GetCurrentTimestamp(),
+			ParentHash: make([]byte, 32),
+			Hash:       []byte{},
+			Difficulty: big.NewInt(1),
+			Nonce:      common.FormatNonce(2),
+			TxsRoot:    common.SpxHash([]byte{}),
+			StateRoot:  common.SpxHash([]byte{}),
+			GasLimit:   big.NewInt(0),
+			GasUsed:    big.NewInt(0),
+			UnclesHash: common.SpxHash([]byte("empty_uncles_list")),
+			ExtraData:  []byte{},
+			Miner:      make([]byte, 20),
+		}
+	}
+
+	if aux.Body != nil {
+		b.Body = *aux.Body
+	} else {
+		b.Body = BlockBody{
+			TxsList:    []*Transaction{},
+			Uncles:     []*BlockHeader{},
+			UnclesHash: common.SpxHash([]byte("empty_uncles_list")),
+		}
+	}
+
 	return nil
 }
 
@@ -799,6 +838,7 @@ func (b *BlockBody) MarshalJSON() ([]byte, error) {
 
 // UnmarshalJSON for BlockBody
 // Custom JSON unmarshaling for BlockBody
+// UnmarshalJSON for BlockBody
 func (b *BlockBody) UnmarshalJSON(data []byte) error {
 	type Alias BlockBody
 	aux := &struct {
@@ -814,13 +854,22 @@ func (b *BlockBody) UnmarshalJSON(data []byte) error {
 		return err
 	}
 
-	// Set parsed values
-	b.Uncles = aux.Uncles
+	// Set parsed values with nil checks
+	if aux.Uncles != nil {
+		b.Uncles = aux.Uncles
+	} else {
+		b.Uncles = []*BlockHeader{}
+	}
+
 	var err error
 	// Decode hex-encoded uncles hash
-	b.UnclesHash, err = hex.DecodeString(aux.UnclesHash)
-	if err != nil {
-		return err
+	if aux.UnclesHash != "" {
+		b.UnclesHash, err = hex.DecodeString(aux.UnclesHash)
+		if err != nil {
+			return err
+		}
+	} else {
+		b.UnclesHash = common.SpxHash([]byte("empty_uncles_list"))
 	}
 
 	return nil

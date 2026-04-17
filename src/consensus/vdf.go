@@ -88,23 +88,47 @@ func InitVDFFromGenesis(provider func() (string, error)) {
 	genesisHashProvider = provider
 }
 
+// Global variable to hold pre-derived VDF parameters
+var (
+	preDerivedVDFParams     *VDFParams
+	preDerivedVDFParamsOnce sync.Once
+)
+
+// SetCanonicalVDFParameters sets pre-derived VDF parameters from the caller
+// (typically setup.go after deriving from genesis block once).
+// This should be called BEFORE NewConsensus.
+func SetCanonicalVDFParameters(params *VDFParams) error {
+	if params == nil {
+		return fmt.Errorf("VDF parameters cannot be nil")
+	}
+	if params.Discriminant == nil || params.Discriminant.BitLen() == 0 {
+		return fmt.Errorf("invalid discriminant in VDF parameters")
+	}
+	if params.T == 0 {
+		return fmt.Errorf("invalid T value in VDF parameters")
+	}
+
+	preDerivedVDFParamsOnce.Do(func() {
+		preDerivedVDFParams = params
+		logger.Info("✅ Pre-derived VDF parameters set: D=%d bits, T=%d",
+			params.Discriminant.BitLen(), params.T)
+	})
+	return nil
+}
+
 // LoadCanonicalVDFParams returns the network-wide VDF parameters that every
-// node must use. On first call it derives the discriminant from the genesis
-// block hash using a deterministic, reproducible algorithm. Subsequent calls
-// return the cached result with no recomputation.
-//
-// The derivation is:
-//  1. Call genesisHashProvider() to get the genesis block hash string
-//  2. SHAKE-256(genesisHash) → 128 bytes (1024 bits of pseudo-randomness)
-//  3. Force the last two bits to "11" so the candidate is ≡ 3 mod 4
-//  4. Increment by 4 (preserving the mod 4 property) until ProbablyPrime passes
-//  5. D = -p (discriminant must be negative for imaginary quadratic fields)
-//
-// Returns an error if:
-//   - InitVDFFromGenesis was never called
-//   - The genesis hash provider returns an error
-//   - The derived discriminant fails sanity checks
+// node must use. If pre-derived parameters were set via SetCanonicalVDFParameters,
+// they are returned immediately. Otherwise, parameters are derived from the
+// genesis block hash on first call.
 func LoadCanonicalVDFParams() (VDFParams, error) {
+	// First, check if pre-derived parameters are available
+	if preDerivedVDFParams != nil {
+		logger.Info("Using pre-derived VDF parameters (D=%d bits, T=%d)",
+			preDerivedVDFParams.Discriminant.BitLen(), preDerivedVDFParams.T)
+		return *preDerivedVDFParams, nil
+	}
+
+	// Fall back to deriving from genesis hash
 	vdfParamsOnce.Do(func() {
 		vdfParamsCached, vdfParamsErr = deriveVDFParams()
 	})
@@ -224,4 +248,14 @@ func deriveVDFParams() (VDFParams, error) {
 		T:            canonicalT,
 		Lambda:       uint(canonicalLambda),
 	}, nil
+}
+
+// GetRawGenesisHash returns the raw genesis hash without any prefix.
+// This is used to ensure consistent VDF parameter derivation.
+func GetRawGenesisHash(displayHash string) string {
+	// Remove "GENESIS_" prefix if present
+	if len(displayHash) > 8 && displayHash[:8] == "GENESIS_" {
+		return displayHash[8:]
+	}
+	return displayHash
 }

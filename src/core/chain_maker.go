@@ -222,6 +222,16 @@ func (bc *Blockchain) ApplyCheckpointBlocks(blocks []*types.Block) error {
 // GetCurrentPhase returns the operational phase for this node based on
 // chain params and vault state.
 func (bc *Blockchain) GetCurrentPhase() ChainPhase {
+	// Force devnet for development based on ChainID
+	if bc.chainParams != nil && bc.chainParams.ChainID == 73310 {
+		return PhaseDevnet
+	}
+
+	// Also check if ChainName indicates devnet
+	if bc.chainParams != nil && bc.chainParams.ChainName == "Sphinx Devnet" {
+		return PhaseDevnet
+	}
+
 	switch {
 	case bc.chainParams.IsDevnet():
 		return PhaseDevnet

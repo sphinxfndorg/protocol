@@ -1,0 +1,30 @@
+{
+  "current_tps": 1.204260444712724,
+  "average_tps": 1.4,
+  "peak_tps": 1.4,
+  "total_transactions": 14,
+  "blocks_processed": 1,
+  "last_updated": "2026-04-17T07:54:40.209772+07:00",
+  "current_window_count": 0,
+  "window_start_time": "2026-04-17T07:52:43.462104+07:00",
+  "window_duration_seconds": 5,
+  "tps_history": [
+    {
+      "timestamp": "2026-04-17T07:53:58.650526+07:00",
+      "tps": 1.4,
+      "block_height": 1
+    }
+  ],
+  "transactions_per_block": [
+    {
+      "block_height": 1,
+      "block_hash": "eeb89a24a7d8d2d52392294939cfa18e2b387a2b8a088cf6a96ed9d47f741162",
+      "tx_count": 7,
+      "block_time": "2026-04-17T07:52:56+07:00",
+      "block_size_bytes": 1872
+    }
+  ],
+  "avg_transactions_per_block": 7,
+  "max_transactions_per_block": 7,
+  "min_transactions_per_block": 7
+}

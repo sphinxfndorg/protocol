@@ -21,7 +21,6 @@
 // SOFTWARE.
 
 // go/src/consensus/signing.go
-// go/src/consensus/signing.go
 package consensus
 
 import (
@@ -31,8 +30,8 @@ import (
 	"fmt"
 
 	"github.com/holiman/uint256"
-	key "github.com/sphinxorg/protocol/src/core/sphincs/key/backend"
-	sign "github.com/sphinxorg/protocol/src/core/sphincs/sign/backend"
+	key "github.com/sphinxorg/protocol/src/core/sthincs/key/backend"
+	sign "github.com/sphinxorg/protocol/src/core/sthincs/sign/backend"
 	svm "github.com/sphinxorg/protocol/src/core/svm/opcodes"
 	vmachine "github.com/sphinxorg/protocol/src/core/svm/vm"
 	types "github.com/sphinxorg/protocol/src/core/transaction"
@@ -446,8 +445,9 @@ func (s *SigningService) GenerateMessageHash(messageType string, data []byte) []
 // by other nodes in the consensus protocol.
 // SignProposal signs a block proposal.
 // SignProposal signs a block proposal using VM for hashing
+// SignProposal signs a block proposal using VM for hashing
 func (s *SigningService) SignProposal(proposal *Proposal) error {
-	// Get the hash using VM execution
+	// Get the hash using VM execution - use BlockData for signing
 	dataHash, err := s.serializeProposalForSigning(proposal)
 	if err != nil {
 		return fmt.Errorf("failed to hash proposal: %w", err)
@@ -720,28 +720,34 @@ func (s *SigningService) GetPublicKeyObject() *sthincs.SPHINCS_PK {
 // SignBlock signs the block header hash.
 // This creates a proposer signature for the entire block,
 // which is stored in the block header for verification by other nodes.
+// SignBlock signs the block header hash.
 func (s *SigningService) SignBlock(block Block) error {
-	// Try to unwrap the block to get the underlying types.Block
-	tb, ok := block.(*types.Block)
-	if !ok {
-		type underlyingBlockGetter interface {
-			GetUnderlyingBlock() *types.Block
-		}
-		if getter, ok2 := block.(underlyingBlockGetter); ok2 {
-			tb = getter.GetUnderlyingBlock()
-		}
+	// Try to get the underlying types.Block
+	var tb *types.Block
+
+	// Check if it's a BlockHelper by looking for GetUnderlyingBlock method
+	type underlyingGetter interface {
+		GetUnderlyingBlock() interface{}
 	}
+
+	if getter, ok := block.(underlyingGetter); ok {
+		if underlying, ok := getter.GetUnderlyingBlock().(*types.Block); ok {
+			tb = underlying
+		}
+	} else if direct, ok := block.(*types.Block); ok {
+		tb = direct
+	}
+
 	if tb == nil {
-		return fmt.Errorf("SignBlock: cannot unwrap *types.Block from interface")
+		return fmt.Errorf("SignBlock: cannot get *types.Block from %T", block)
 	}
 
 	// Ensure the block hash is finalized before signing
 	if tb.Header == nil || len(tb.Header.SigDataHash) == 0 {
-		// Finalize the hash if not already done (this sets SigDataHash to raw hash)
 		tb.FinalizeHash()
 	}
 
-	// CORRECT: Sign the RAW block hash (32 bytes), not the hex string
+	// Sign the RAW block hash (32 bytes)
 	rawHash := tb.Header.SigDataHash
 	if len(rawHash) == 0 {
 		return fmt.Errorf("block hash not finalized")
@@ -749,16 +755,11 @@ func (s *SigningService) SignBlock(block Block) error {
 
 	logger.Info("🔐 Signing raw block hash: %x", rawHash)
 
-	signedData, err := s.SignMessage(rawHash) // ← Sign raw bytes!
+	signedData, err := s.SignMessage(rawHash)
 	if err != nil {
 		return fmt.Errorf("failed to sign block: %w", err)
 	}
 
-	// CORRECT: SigDataHash already contains raw hash from FinalizeHash
-	// No need to set it again (it's already the raw hash)
-	// tb.Header.SigDataHash is already set correctly in FinalizeHash
-
-	// Attach the signature and proposer ID
 	tb.Header.ProposerSignature = signedData
 	tb.Header.ProposerID = s.nodeID
 	return nil
@@ -767,29 +768,34 @@ func (s *SigningService) SignBlock(block Block) error {
 // VerifyBlockSignature verifies the proposer's signature on a block using VM.
 // This validates that the block was actually proposed and signed by the claimed proposer.
 // VerifyBlockSignature verifies the proposer's signature on a block using VM.
+// VerifyBlockSignature verifies the proposer's signature on a block using VM.
 func (s *SigningService) VerifyBlockSignature(block Block) (bool, error) {
-	// Unwrap the block to access the underlying types.Block
-	tb, ok := block.(*types.Block)
-	if !ok {
-		type underlyingBlockGetter interface {
-			GetUnderlyingBlock() *types.Block
-		}
-		if getter, ok2 := block.(underlyingBlockGetter); ok2 {
-			tb = getter.GetUnderlyingBlock()
-		}
+	// Try to get the underlying types.Block
+	var tb *types.Block
+
+	// Check if it's a BlockHelper by looking for GetUnderlyingBlock method
+	type underlyingGetter interface {
+		GetUnderlyingBlock() interface{}
 	}
-	// Validate block structure
+
+	if getter, ok := block.(underlyingGetter); ok {
+		if underlying, ok := getter.GetUnderlyingBlock().(*types.Block); ok {
+			tb = underlying
+		}
+	} else if direct, ok := block.(*types.Block); ok {
+		tb = direct
+	}
+
 	if tb == nil {
-		return false, fmt.Errorf("VerifyBlockSignature: cannot unwrap *types.Block from interface")
+		return false, fmt.Errorf("VerifyBlockSignature: cannot get *types.Block from %T", block)
 	}
+
 	if tb.Header == nil {
 		return false, fmt.Errorf("block header is nil")
 	}
-	// Check that a signature exists
 	if len(tb.Header.ProposerSignature) == 0 {
 		return false, fmt.Errorf("block has no proposer signature")
 	}
-	// Check that proposer ID is present
 	if tb.Header.ProposerID == "" {
 		return false, fmt.Errorf("block has no proposer ID")
 	}
@@ -800,8 +806,7 @@ func (s *SigningService) VerifyBlockSignature(block Block) (bool, error) {
 		return false, fmt.Errorf("failed to deserialize block signature: %w", err)
 	}
 
-	// FIX: Compare with RAW hash (SigDataHash), not hex string (Hash)
-	// The signature signs the raw 32-byte hash, not the hex string
+	// Compare with RAW hash (SigDataHash)
 	rawHash := tb.Header.SigDataHash
 	if len(rawHash) == 0 {
 		return false, fmt.Errorf("block has no raw hash (SigDataHash)")
@@ -820,7 +825,6 @@ func (s *SigningService) VerifyBlockSignature(block Block) (bool, error) {
 		return false, err
 	}
 
-	// Log success with signature hash for traceability
 	if valid {
 		sigHashHex := hex.EncodeToString(signedMsg.SignatureHash)
 		logger.Info("✅ Valid block signature from %s (signature hash: %s...)",
@@ -836,12 +840,4 @@ func (c *Consensus) GetSigningService() *SigningService {
 	c.mu.RLock() // Acquire read lock for thread safety
 	defer c.mu.RUnlock()
 	return c.signingService
-}
-
-// min returns the smaller of two integers - helper function for string truncation
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

@@ -31,7 +31,7 @@ import (
 
 	"github.com/sphinxorg/protocol/src/consensus"
 	"github.com/sphinxorg/protocol/src/core"
-	sign "github.com/sphinxorg/protocol/src/core/sphincs/sign/backend"
+	sign "github.com/sphinxorg/protocol/src/core/sthincs/sign/backend"
 	security "github.com/sphinxorg/protocol/src/handshake"
 	"github.com/sphinxorg/protocol/src/network"
 	"github.com/syndtr/goleveldb/leveldb"

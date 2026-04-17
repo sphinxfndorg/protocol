@@ -28,7 +28,7 @@ import (
 
 	"github.com/actuallyachraf/algebra/ff"
 	"github.com/actuallyachraf/algebra/poly"
-	params "github.com/sphinxorg/protocol/src/core/sphincs/config"
+	params "github.com/sphinxorg/protocol/src/core/sthincs/config"
 	"github.com/sphinxorg/protocol/src/crypto/STHINCS/sthincs"
 )
 

@@ -24,6 +24,7 @@
 package transport
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
@@ -117,12 +118,21 @@ func SendPeerInfo(address string, peerInfo *network.PeerInfo) error {
 		return err // Return error if handshake fails
 	}
 
-	msg := &security.Message{Type: "peer_info", Data: *peerInfo} // Create a new peer_info message
-	data, err := security.SecureMessage(msg, ek)                 // Encrypt and encode the message using the handshake key
+	// Marshal peerInfo to JSON first
+	peerInfoBytes, err := json.Marshal(peerInfo)
+	if err != nil {
+		return fmt.Errorf("failed to marshal peer info: %v", err)
+	}
+
+	msg := &security.Message{
+		Type: "peer_info",
+		Data: peerInfoBytes, // Use marshaled bytes
+	}
+
+	data, err := security.SecureMessage(msg, ek) // Encrypt and encode the message using the handshake key
 	if err != nil {
 		return fmt.Errorf("failed to encode PeerInfo message: %v", err) // Return error if encryption fails
 	}
-
 	if _, err := conn.Write(append(data, '\n')); err != nil {
 		return fmt.Errorf("failed to write PeerInfo to %s: %v", address, err) // Return error if write fails
 	}

@@ -128,6 +128,8 @@ func (bc *Blockchain) applyTransactions(block *types.Block, stateDB *StateDB) er
 
 // mintBlockReward issues BaseBlockReward to the block proposer, respecting
 // the hard 5 billion SPX supply cap.
+// mintBlockReward issues BaseBlockReward to the block proposer, respecting
+// the hard 5 billion SPX supply cap.
 func (bc *Blockchain) mintBlockReward(block *types.Block, stateDB *StateDB) {
 	if bc.chainParams == nil {
 		return
@@ -160,10 +162,11 @@ func (bc *Blockchain) mintBlockReward(block *types.Block, stateDB *StateDB) {
 	// No new coins should be minted here.
 	if block.GetHeight() == 1 {
 		logger.Info("mintBlockReward: skipping reward for distribution block 1")
+		logger.Info("🔒 PHASE 2 STARTING — Next blocks (2+) will use VDF+Stake PBFT")
 		return
 	}
 
-	// Normal block reward.
+	// Normal block reward (Blocks 2+)
 	reward := new(big.Int).Set(bc.chainParams.BaseBlockReward)
 	if reward.Sign() <= 0 {
 		return
@@ -186,7 +189,7 @@ func (bc *Blockchain) mintBlockReward(block *types.Block, stateDB *StateDB) {
 		new(big.Float).SetInt(reward),
 		new(big.Float).SetInt(big.NewInt(1e18)),
 	)
-	logger.Info("✅ mintBlockReward: %.6f SPX → %s (block %d)",
+	logger.Info("✅ mintBlockReward: %.6f SPX → %s (block %d) [PHASE 2]",
 		rewardSPX, proposerID, block.GetHeight())
 }
 
@@ -239,5 +242,50 @@ func (bc *Blockchain) ExecuteGenesisBlock() error {
 	}
 
 	logger.Info("✅ ExecuteGenesisBlock: vault %s funded", GenesisVaultAddress)
+	return nil
+}
+
+// UpdateValidatorStakesFromState updates the consensus validator set with
+// stakes from the blockchain state after distribution is complete.
+// This should be called after Block 1 to enable Phase 2 consensus.
+func (bc *Blockchain) UpdateValidatorStakesFromState(validatorIDs []string, validatorSet interface{}) error {
+	if validatorSet == nil {
+		return fmt.Errorf("validatorSet is nil")
+	}
+
+	stateDB, err := bc.newStateDB()
+	if err != nil {
+		return fmt.Errorf("failed to open stateDB: %w", err)
+	}
+
+	// Get the UpdateStake method via reflection or interface
+	type stakeUpdater interface {
+		UpdateStake(id string, stakeSPX uint64) error
+	}
+
+	updater, ok := validatorSet.(stakeUpdater)
+	if !ok {
+		return fmt.Errorf("validatorSet does not support UpdateStake")
+	}
+
+	for _, vid := range validatorIDs {
+		// Get stake from blockchain state
+		// You'll need to map node ID to address - for now use a mapping
+		address := vid // In production, you need proper address mapping
+
+		balanceNSPX := stateDB.GetBalance(address)
+		if balanceNSPX == nil || balanceNSPX.Sign() == 0 {
+			logger.Warn("Validator %s has zero balance, using minimum stake", vid)
+			continue
+		}
+
+		stakeSPX := new(big.Int).Div(balanceNSPX, big.NewInt(1e18))
+		if err := updater.UpdateStake(vid, uint64(stakeSPX.Int64())); err != nil {
+			logger.Warn("Failed to update stake for %s: %v", vid, err)
+		} else {
+			logger.Info("✅ Updated validator %s stake to %d SPX", vid, stakeSPX)
+		}
+	}
+
 	return nil
 }

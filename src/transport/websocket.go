@@ -21,6 +21,8 @@
 // SOFTWARE.
 
 // go/src/transport/websocket.go
+// go/src/transport/websocket.go
+
 package transport
 
 import (
@@ -117,12 +119,14 @@ func (s *WebSocketServer) handleWebSocket(w http.ResponseWriter, r *http.Request
 		s.messageCh <- msg
 
 		if msg.Type == "jsonrpc" {
-			resp, err := s.rpcServer.HandleRequest([]byte(msg.Data.(string)))
+			// msg.Data is json.RawMessage ([]byte), use it directly
+			resp, err := s.rpcServer.HandleRequest(msg.Data)
 			if err != nil {
 				log.Printf("RPC handle error: %v", err)
 				continue
 			}
-			encryptedResp, err := security.SecureMessage(&security.Message{Type: "jsonrpc", Data: string(resp)}, enc)
+			// resp is already []byte, use it directly
+			encryptedResp, err := security.SecureMessage(&security.Message{Type: "jsonrpc", Data: resp}, enc)
 			if err != nil {
 				log.Printf("WebSocket encode error: %v", err)
 				continue
@@ -195,8 +199,12 @@ func ConnectWebSocket(address string, messageCh chan *security.Message) error {
 				log.Printf("WebSocket handshake failed for %s on attempt %d: %v", wsAddress, attempt, err)
 				continue
 			}
-			msg := &security.Message{Type: "block", Data: struct{}{}}
-			data, err := security.SecureMessage(msg, enc)
+			// Create a simple ping message as bytes
+			pingMsg := &security.Message{
+				Type: "ping",
+				Data: []byte("ping"),
+			}
+			data, err := security.SecureMessage(pingMsg, enc)
 			if err != nil {
 				log.Printf("WebSocket encode error for %s on attempt %d: %v", wsAddress, attempt, err)
 				continue

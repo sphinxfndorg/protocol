@@ -33,7 +33,7 @@ import (
 
 	sips3 "github.com/sphinxorg/protocol/src/accounts/mnemonic"
 	"github.com/sphinxorg/protocol/src/common"
-	key "github.com/sphinxorg/protocol/src/core/sphincs/key/backend"
+	key "github.com/sphinxorg/protocol/src/core/sthincs/key/backend"
 	auth "github.com/sphinxorg/protocol/src/core/wallet/auth"
 	utils "github.com/sphinxorg/protocol/src/core/wallet/utils"
 	"golang.org/x/crypto/argon2"

@@ -21,37 +21,36 @@
 // SOFTWARE.
 
 // go/src/handshake/types.go
+// go/src/handshake/types.go
+
 package security
 
 import (
 	"crypto/cipher"
+	"encoding/json"
 
 	"github.com/prometheus/client_golang/prometheus"
 )
 
 // Message represents a secure P2P or RPC message.
-// It consists of a message type and associated data payload.
 type Message struct {
-	Type string      `json:"type"` // Type of the message, such as "transaction", "block", "jsonrpc", etc.
-	Data interface{} `json:"data"` // Generic data payload associated with the message
+	Type string          `json:"type"`
+	Data json.RawMessage `json:"data"` // This is correct - stays as json.RawMessage
 }
 
-// Handshake manages TLS or secure channel handshakes,
-// and tracks metrics related to the handshake process.
+// Handshake manages TLS or secure channel handshakes.
 type Handshake struct {
-	Metrics *HandshakeMetrics // Pointer to a structure that holds handshake-related metrics
+	Metrics *HandshakeMetrics
 }
 
-// HandshakeMetrics encapsulates Prometheus metrics
-// for tracking handshake latency and error statistics.
+// HandshakeMetrics encapsulates Prometheus metrics.
 type HandshakeMetrics struct {
-	Latency *prometheus.HistogramVec // HistogramVec to record handshake latency across different labels
-	Errors  *prometheus.CounterVec   // CounterVec to count different types of handshake errors
+	Latency *prometheus.HistogramVec
+	Errors  *prometheus.CounterVec
 }
 
 // EncryptionKey holds the shared cryptographic material for secure communication.
-// It wraps both the derived AES-GCM cipher and the original shared secret bytes.
 type EncryptionKey struct {
-	SharedSecret []byte      // The raw shared secret used to derive the AES key (usually from key exchange like X25519 or Kyber768)
-	AESGCM       cipher.AEAD // AES-GCM instance used to perform authenticated encryption and decryption
+	SharedSecret []byte
+	AESGCM       cipher.AEAD
 }

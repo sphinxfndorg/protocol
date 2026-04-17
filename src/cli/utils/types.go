@@ -91,3 +91,10 @@ type NodeChainInfoJSON struct {
 	// Timestamp when this node information was captured
 	Timestamp string `json:"timestamp"`
 }
+
+// peerKeyExchangeMsg is the payload sent over the wire during the
+// post-connect public-key handshake.
+type peerKeyExchangeMsg struct {
+	NodeID    string `json:"node_id"`
+	PublicKey []byte `json:"public_key"`
+}

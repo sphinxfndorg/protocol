@@ -21,6 +21,7 @@
 // SOFTWARE.
 
 // go/src/common/config.go
+// go/src/common/config.go
 package common
 
 import (
@@ -29,16 +30,38 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
-const (
-	// DataDir is the unified data directory for all node data
-	DataDir = "data"
+var (
+	// dataDir is the root directory for all node data
+	// Can be changed via SetDataDir()
+	dataDir     = "data"
+	dataDirLock sync.RWMutex
 )
+
+// SetDataDir sets the global data directory
+func SetDataDir(dir string) {
+	dataDirLock.Lock()
+	defer dataDirLock.Unlock()
+	if dir != "" {
+		dataDir = dir
+	}
+}
+
+// GetDataDir returns the current data directory
+func GetDataDir() string {
+	dataDirLock.RLock()
+	defer dataDirLock.RUnlock()
+	return dataDir
+}
 
 // WriteJSONToFile writes data to JSON file in output directory
+// go/src/common/config.go
+// Change this function:
 func WriteJSONToFile(data interface{}, filename string) error {
-	outputDir := filepath.Join(DataDir, "output")
+	// Change DataDir to GetDataDir()
+	outputDir := filepath.Join(GetDataDir(), "output")
 	if err := os.MkdirAll(outputDir, 0755); err != nil {
 		return fmt.Errorf("failed to create output directory: %w", err)
 	}
@@ -61,7 +84,13 @@ func WriteJSONToFile(data interface{}, filename string) error {
 }
 
 // GetNodeIdentifier returns a unique node identifier from address
+// GetNodeIdentifier returns a unique node identifier from address or node name
 func GetNodeIdentifier(address string) string {
+	// If address is already a node name (starts with "Node-"), return as-is
+	if strings.HasPrefix(address, "Node-") {
+		return address
+	}
+	// Otherwise, treat as network address
 	return fmt.Sprintf("Node-%s", address)
 }
 
@@ -75,9 +104,10 @@ func GetNodePortFromAddress(address string) string {
 }
 
 // GetNodeDataDir returns the root data directory for a node
+// GetNodeDataDir returns the root data directory for a node
 func GetNodeDataDir(address string) string {
 	nodeIdentifier := GetNodeIdentifier(address)
-	return filepath.Join(DataDir, nodeIdentifier)
+	return filepath.Join(GetDataDir(), nodeIdentifier) // ← FIXED: Use GetDataDir()
 }
 
 // GetLevelDBPath returns the path for the main LevelDB database file

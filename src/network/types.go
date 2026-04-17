@@ -31,6 +31,7 @@ import (
 
 	"github.com/holiman/uint256"
 	database "github.com/sphinxorg/protocol/src/core/state"
+	sthincs "github.com/sphinxorg/protocol/src/core/sthincs/key/backend"
 )
 
 // NodeStatus represents the operational state of a node in the network.
@@ -107,7 +108,7 @@ type Node struct {
 // NetworkKeyManager manages cryptographic keys for nodes
 type NetworkKeyManager struct {
 	db         *database.DB
-	keyManager interface{} // Using interface{} since sphincsKey might not be available
+	keyManager *sthincs.KeyManager // Changed from interface{} to concrete type
 }
 
 // Peer represents a directly connected node in the network.
@@ -138,15 +139,16 @@ type PeerInfo struct {
 // NodePortConfig defines port assignments for a node.
 // NodePortConfig defines the port configuration for a node.
 type NodePortConfig struct {
-	ID        string   `json:"id"` // Aligns with Node.ID
-	Name      string   `json:"name"`
-	TCPAddr   string   `json:"tcp_addr"`
-	UDPPort   string   `json:"udp_port"`
-	HTTPPort  string   `json:"http_port"`
-	WSPort    string   `json:"ws_port"`
-	Role      NodeRole `json:"role"`
-	SeedNodes []string `json:"seed_nodes"`
-	DHTSecret uint16   // New field
+	ID             string   `json:"id"` // Aligns with Node.ID
+	Name           string   `json:"name"`
+	TCPAddr        string   `json:"tcp_addr"`
+	UDPPort        string   `json:"udp_port"`
+	HTTPPort       string   `json:"http_port"`
+	WSPort         string   `json:"ws_port"`
+	Role           NodeRole `json:"role"`
+	SeedNodes      []string `json:"seed_nodes"`
+	DHTSecret      uint16   // New field
+	BootstrapNodes []string // For DHT discovery in production
 }
 
 // DiscoveryMessage represents a UDP discovery message.

@@ -88,3 +88,8 @@ func isAlphanumeric(s string) bool {
 func isAlphanumericChar(c rune) bool {
 	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 }
+
+// GetUnderlyingBlock returns the underlying block for interface unwrapping
+func (b *Block) GetUnderlyingBlock() interface{} {
+	return b
+}

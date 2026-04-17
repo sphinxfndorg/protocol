@@ -572,7 +572,19 @@ func (h *JSONRPCHandler) sendRawTransaction(params interface{}) (interface{}, er
 	if err := h.server.blockchain.AddTransaction(&tx); err != nil {
 		return nil, err
 	}
-	h.server.messageCh <- &security.Message{Type: "transaction", Data: &tx} // Broadcast via network
+
+	// Marshal transaction to JSON before broadcasting
+	txData, err := json.Marshal(&tx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal transaction: %v", err)
+	}
+
+	// Broadcast via network
+	h.server.messageCh <- &security.Message{
+		Type: "transaction",
+		Data: txData, // Use marshaled bytes
+	}
+
 	return map[string]string{"txid": tx.ID}, nil
 }
 

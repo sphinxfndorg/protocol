@@ -1,8 +1,0 @@
-=============== Apr 15, 2026 (WIB) ===============
-01:08:18.568655 log@legend F·NumFile S·FileSize N·Entry C·BadEntry B·BadBlock Ke·KeyError D·DroppedEntry L·Level Q·SeqNum T·TimeElapsed
-01:08:18.598224 db@open opening
-01:08:18.598951 version@stat F·[] S·0B[] Sc·[]
-01:08:18.622828 db@janitor F·2 G·0
-01:08:18.622963 db@open done T·24.690032ms
-01:08:34.188688 db@close closing
-01:08:34.188932 db@close done T·241.23µs

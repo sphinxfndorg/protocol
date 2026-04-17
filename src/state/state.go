@@ -1807,7 +1807,7 @@ func (s *Storage) loadBlockFromDisk(hash string) (*types.Block, error) {
 			Height            uint64 `json:"height"`
 			Timestamp         string `json:"timestamp"`
 			Difficulty        string `json:"difficulty"`
-			Nonce             uint64 `json:"nonce"`
+			Nonce             string `json:"nonce"` // ← Changed from uint64 to string
 			GasLimit          string `json:"gas_limit"`
 			GasUsed           string `json:"gas_used"`
 			ProposerSignature string `json:"proposer_signature"`
@@ -1848,7 +1848,23 @@ func (s *Storage) loadBlockFromDisk(hash string) (*types.Block, error) {
 		timestamp = time.Now().Unix()
 	}
 
-	// ✅ DECLARE block HERE first
+	// Parse nonce BEFORE creating the block header
+	var nonceValue uint64
+	if tempBlock.Header.Nonce != "" {
+		// Parse the hex string to uint64
+		parsedNonce, err := strconv.ParseUint(tempBlock.Header.Nonce, 16, 64)
+		if err != nil {
+			// If parsing fails, default to 0
+			logger.Warn("Failed to parse nonce '%s', using 0: %v", tempBlock.Header.Nonce, err)
+			nonceValue = 0
+		} else {
+			nonceValue = parsedNonce
+		}
+	} else {
+		nonceValue = 0
+	}
+
+	// DECLARE block HERE first
 	var block types.Block
 	block.Header = &types.BlockHeader{
 		Version:    tempBlock.Header.Version,
@@ -1862,6 +1878,7 @@ func (s *Storage) loadBlockFromDisk(hash string) (*types.Block, error) {
 		UnclesHash: s.decodeHexField(tempBlock.Header.UnclesHash),
 		ExtraData:  []byte(tempBlock.Header.ExtraData),
 		Miner:      s.decodeHexField(tempBlock.Header.Miner),
+		Nonce:      common.FormatNonce(nonceValue), // ← Use parsed nonceValue (not nonceUint)
 	}
 
 	// New PoS fields — safe here because block.Header now exists
@@ -1898,8 +1915,6 @@ func (s *Storage) loadBlockFromDisk(hash string) (*types.Block, error) {
 		gasUsed = big.NewInt(0)
 	}
 	block.Header.GasUsed = gasUsed
-
-	block.Header.Nonce = common.FormatNonce(tempBlock.Header.Nonce)
 
 	// Transactions
 	block.Body.TxsList = make([]*types.Transaction, len(tempBlock.Body.TxsList))

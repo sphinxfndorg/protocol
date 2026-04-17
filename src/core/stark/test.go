@@ -29,9 +29,9 @@ import (
 	"sync"
 	"time"
 
-	params "github.com/sphinxorg/protocol/src/core/sphincs/config"
-	key "github.com/sphinxorg/protocol/src/core/sphincs/key/backend"
 	sign "github.com/sphinxorg/protocol/src/core/stark/zk"
+	params "github.com/sphinxorg/protocol/src/core/sthincs/config"
+	key "github.com/sphinxorg/protocol/src/core/sthincs/key/backend"
 )
 
 // min returns the minimum of two integers.

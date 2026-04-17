@@ -29,7 +29,7 @@ import (
 	"sync"
 	"time"
 
-	sign "github.com/sphinxorg/protocol/src/core/sphincs/sign/backend" // ADD THIS
+	sign "github.com/sphinxorg/protocol/src/core/sthincs/sign/backend" // ADD THIS
 	types "github.com/sphinxorg/protocol/src/core/transaction"
 )
 

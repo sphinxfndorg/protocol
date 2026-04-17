@@ -236,3 +236,42 @@ func (c *Consensus) FinaliseEpochAndSlash(epoch uint64) {
 		vs.SlashValidator(id, "missed VDF submission", SlashBps)
 	}
 }
+
+// UpdateStake updates a validator's stake amount (in SPX)
+// This is useful for updating stakes after distribution transactions are processed
+func (vs *ValidatorSet) UpdateStake(id string, stakeSPX uint64) error {
+	vs.mu.Lock()
+	defer vs.mu.Unlock()
+
+	// Check if validator exists
+	v, exists := vs.validators[id]
+	if !exists {
+		return fmt.Errorf("validator %s not found", id)
+	}
+
+	// Calculate stake in nSPX
+	stakeNSPX := new(big.Int).Mul(
+		big.NewInt(int64(stakeSPX)),
+		big.NewInt(denom.SPX),
+	)
+
+	// Validate minimum stake
+	if stakeNSPX.Cmp(vs.minStakeAmount) < 0 {
+		minStakeSPX := vs.GetMinStakeSPX()
+		return fmt.Errorf("stake %d SPX below minimum %d SPX", stakeSPX, minStakeSPX)
+	}
+
+	// Update total stake (remove old, add new)
+	oldStake := v.StakeAmount
+	vs.totalStake.Sub(vs.totalStake, oldStake)
+
+	// Update validator's stake
+	v.StakeAmount = stakeNSPX
+	vs.totalStake.Add(vs.totalStake, stakeNSPX)
+
+	oldSPX := new(big.Int).Div(oldStake, big.NewInt(denom.SPX))
+	logger.Info("✅ Validator %s stake updated from %d SPX to %d SPX",
+		id, oldSPX.Uint64(), stakeSPX)
+
+	return nil
+}

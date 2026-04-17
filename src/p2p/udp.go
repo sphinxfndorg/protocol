@@ -36,7 +36,7 @@ import (
 
 	"github.com/sphinxorg/protocol/src/core/hashtree"
 	sigproof "github.com/sphinxorg/protocol/src/core/proof"
-	key "github.com/sphinxorg/protocol/src/core/sphincs/key/backend"
+	key "github.com/sphinxorg/protocol/src/core/sthincs/key/backend"
 	"github.com/sphinxorg/protocol/src/network"
 	"golang.org/x/sys/unix"
 )

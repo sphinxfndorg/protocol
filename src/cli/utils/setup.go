@@ -219,14 +219,15 @@ func runBlockProductionLoop(
 
 		timeout := time.After(30 * time.Second)
 		ticker := time.NewTicker(1 * time.Second)
-		defer ticker.Stop()
 
 		committed := false
 		for !committed {
 			select {
 			case <-ctx.Done():
+				ticker.Stop()
 				return
 			case <-timeout:
+				ticker.Stop()
 				logger.Warn("[%s] Timeout waiting for block commitment", nodeID)
 				committed = true
 			case <-ticker.C:
@@ -234,6 +235,19 @@ func runBlockProductionLoop(
 				if latest != nil && latest.GetHeight() > currentHeight {
 					currentHeight = latest.GetHeight()
 					cons.SetCurrentHeight(currentHeight)
+
+					// ========== ADD TPS VERIFICATION HERE ==========
+					if bc.GetTPSMonitor() != nil {
+						stats := bc.GetTPSMonitor().GetStats()
+						logger.Info("📊 [%s] TPS STATS after block %d: blocks_processed=%v, total_txs=%v, avg_txs_per_block=%.2f",
+							nodeID, currentHeight,
+							stats["blocks_processed"],
+							stats["total_transactions"],
+							stats["avg_transactions_per_block"])
+					} else {
+						logger.Error("❌ [%s] TPSMonitor is NIL!", nodeID)
+					}
+					// ===============================================
 
 					// ========== Update validator stakes after Block 1 ==========
 					if currentHeight >= 1 {
@@ -263,6 +277,7 @@ func runBlockProductionLoop(
 
 					logger.Info("[%s] 🎉 Block committed! Height now: %d", nodeID, currentHeight)
 					committed = true
+					ticker.Stop()
 				}
 			}
 		}
@@ -277,7 +292,7 @@ func runBlockProductionLoop(
 				phase = "mainnet/testnet"
 			}
 			logger.Info("[%s] ✅ Checkpoint saved at height %d (phase: %s, network: %s)",
-				nodeID, currentHeight, phase, networkType) // ← Added networkType here
+				nodeID, currentHeight, phase, networkType)
 		}
 		// =====================================
 

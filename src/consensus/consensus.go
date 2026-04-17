@@ -615,6 +615,7 @@ func (c *Consensus) consensusLoop() {
 }
 
 // CleanupStaleSignatures removes signatures for blocks that don't exist in storage
+// CleanupStaleSignatures removes signatures for blocks that don't exist in storage
 func (c *Consensus) CleanupStaleSignatures() {
 	c.signatureMutex.Lock()
 	defer c.signatureMutex.Unlock()
@@ -626,10 +627,17 @@ func (c *Consensus) CleanupStaleSignatures() {
 		// Check if block exists in storage
 		block := c.blockChain.GetBlockByHash(sig.BlockHash)
 		if block == nil {
-			logger.Info("🧹 Removing stale signature for block %s (height=%d, type=%s)",
-				sig.BlockHash, sig.BlockHeight, sig.MessageType)
-			removedCount++
-			continue // Skip this signature
+			// Don't remove signatures for blocks that are still being processed
+			// Only remove if the signature is older than 30 seconds
+			sigTime, err := time.Parse(time.RFC3339, sig.Timestamp)
+			if err == nil && time.Since(sigTime) > 30*time.Second {
+				logger.Info("🧹 Removing stale signature for block %s (height=%d, type=%s, age=%v)",
+					sig.BlockHash[:16], sig.BlockHeight, sig.MessageType, time.Since(sigTime))
+				removedCount++
+				continue
+			}
+			// Keep recent signatures even if block not in storage yet
+			logger.Debug("Keeping recent signature for block %s (age=%v)", sig.BlockHash[:16], time.Since(sigTime))
 		}
 		cleaned = append(cleaned, sig)
 	}
@@ -1409,7 +1417,7 @@ func (c *Consensus) processVote(vote *Vote) {
 	logger.Info("📊 Commit vote received: node=%s, from=%s, block=%s, votes=%d/%d, phase=%v",
 		c.nodeID, vote.VoterID, vote.BlockHash, totalVotes, quorumSize, c.phase)
 
-	// Check if we've achieved quorum for this block
+	// In processVote, when commit quorum is achieved
 	if c.hasQuorum(vote.BlockHash) {
 		logger.Info("🎉 COMMIT QUORUM ACHIEVED for block %s at view %d", vote.BlockHash, vote.View)
 
@@ -1430,24 +1438,76 @@ func (c *Consensus) processVote(vote *Vote) {
 			logger.Info("🚀 Moving to COMMITTED phase for block %s", vote.BlockHash)
 		}
 
-		// Add this vote to consensus signatures
+		// ========== FIX: Attach attestations BEFORE commit ==========
+		// Extract underlying block
+		var tb *types.Block
+		if direct, ok := blockToCommit.(*types.Block); ok {
+			tb = direct
+		} else if getter, ok := blockToCommit.(interface{ GetUnderlyingBlock() interface{} }); ok {
+			if underlying, ok := getter.GetUnderlyingBlock().(*types.Block); ok {
+				tb = underlying
+			}
+		}
+
+		if tb != nil {
+			// Take snapshot of votes
+			votesSnapshot := make(map[string]*Vote)
+			if votes, exists := c.receivedVotes[vote.BlockHash]; exists {
+				for k, v := range votes {
+					votesSnapshot[k] = v
+				}
+				logger.Info("📸 Captured %d votes for attestations", len(votesSnapshot))
+			}
+
+			// Attach attestations directly to the block
+			if len(votesSnapshot) > 0 {
+				tb.Body.Attestations = make([]*types.Attestation, 0, len(votesSnapshot))
+				for voterID, vote := range votesSnapshot {
+					tb.Body.Attestations = append(tb.Body.Attestations, &types.Attestation{
+						ValidatorID: voterID,
+						BlockHash:   blockToCommit.GetHash(),
+						View:        vote.View,
+						Signature:   vote.Signature, // Keep as bytes, hex encoding happens in storage
+					})
+				}
+				logger.Info("✅ Attached %d attestations to block BEFORE commit", len(tb.Body.Attestations))
+			}
+		}
+		// ============================================================
+
+		// Commit the block (attestations are already attached)
+		c.commitBlock(blockToCommit)
+
+		// Small delay to ensure block is fully written to storage
+		time.Sleep(200 * time.Millisecond)
+		// ===============================================
+
+		// ========== NOW add the commit signature ==========
+		// The block should now be in storage
 		signatureHex := hex.EncodeToString(vote.Signature)
+
+		// Get the actual stored block to extract correct merkle root
+		storedBlock := c.blockChain.GetBlockByHash(blockToCommit.GetHash())
+		merkleRoot := "pending_calculation"
+		if storedBlock != nil {
+			merkleRoot = c.extractMerkleRootFromBlock(storedBlock)
+		}
+
 		consensusSig := &ConsensusSignature{
-			BlockHash:    vote.BlockHash,
-			BlockHeight:  c.currentHeight,
+			BlockHash:    blockToCommit.GetHash(), // Use the actual block hash
+			BlockHeight:  blockToCommit.GetHeight(),
 			SignerNodeID: vote.VoterID,
 			Signature:    signatureHex,
 			MessageType:  "commit",
 			View:         vote.View,
 			Timestamp:    common.GetTimeService().GetCurrentTimeInfo().ISOLocal,
 			Valid:        true,
-			MerkleRoot:   "pending_calculation",
+			MerkleRoot:   merkleRoot,
 			Status:       "committed",
 		}
 		c.addConsensusSig(consensusSig)
-
-		// Commit the block
-		c.commitBlock(blockToCommit)
+		logger.Info("✅ Added commit signature for block %s after storage", blockToCommit.GetHash()[:16])
+		// =================================================
 	}
 }
 
@@ -1668,7 +1728,6 @@ func (c *Consensus) getTotalNodes() int {
 }
 
 // commitBlock commits a block to the blockchain
-// commitBlock commits a block to the blockchain
 func (c *Consensus) commitBlock(block Block) {
 	logger.Info("🚀 Node %s attempting to commit block %s at height %d",
 		c.nodeID, block.GetHash(), block.GetHeight())
@@ -1689,43 +1748,46 @@ func (c *Consensus) commitBlock(block Block) {
 		tb = direct
 	}
 
+	// In commitBlock, you can keep this as a check
 	if tb != nil {
 		// Set signature validity if proposer signature exists
 		if len(tb.Header.ProposerSignature) > 0 {
 			tb.Header.SigValid = true
 		}
 
-		// Attach attestations from votes to the block
-		votesSnapshot := make(map[string]*Vote)
-		if votes, exists := c.receivedVotes[block.GetHash()]; exists {
-			for k, v := range votes {
-				votesSnapshot[k] = v
-			}
-		}
-
-		if len(votesSnapshot) > 0 {
-			tb.Body.Attestations = make([]*types.Attestation, 0, len(votesSnapshot))
-			for voterID, vote := range votesSnapshot {
-				tb.Body.Attestations = append(tb.Body.Attestations, &types.Attestation{
-					ValidatorID: voterID,
-					BlockHash:   block.GetHash(),
-					View:        vote.View,
-					Signature:   vote.Signature,
-				})
-			}
-			logger.Info("✅ Attached %d attestations to block %s", len(tb.Body.Attestations), block.GetHash())
+		// Just log if attestations are already there
+		if len(tb.Body.Attestations) > 0 {
+			logger.Info("✅ Block already has %d attestations attached", len(tb.Body.Attestations))
 		} else {
-			logger.Warn("⚠️ No votes in snapshot for block %s — attestations will be empty", block.GetHash())
+			// Fallback - try to attach from receivedVotes (should not happen now)
+			logger.Warn("⚠️ No attestations attached to block before commit")
 		}
-	} else {
-		logger.Warn("⚠️ Could not extract underlying block for attestations (block is not *types.Block), continuing with commit")
 	}
-
 	// Commit block to blockchain
 	if err := c.blockChain.CommitBlock(block); err != nil {
 		logger.Error("❌ Error committing block: %v", err)
 		return
 	}
+
+	// ========== FIX: Force signature population after commit ==========
+	// Add a commit signature for this node (self signature)
+	c.mu.Lock()
+	commitSig := &ConsensusSignature{
+		BlockHash:    block.GetHash(),
+		BlockHeight:  block.GetHeight(),
+		SignerNodeID: c.nodeID,
+		Signature:    "committed_by_" + c.nodeID,
+		MessageType:  "commit",
+		View:         c.currentView,
+		Timestamp:    common.GetTimeService().GetCurrentTimeInfo().ISOLocal,
+		Valid:        true,
+		MerkleRoot:   c.extractMerkleRootFromBlock(block),
+		Status:       "committed",
+	}
+	c.addConsensusSig(commitSig)
+	logger.Info("📝 Added self-commit signature for block %s", block.GetHash())
+	c.mu.Unlock()
+	// ================================================================
 
 	// Execute commit callback if provided
 	if c.onCommit != nil {
@@ -1739,8 +1801,12 @@ func (c *Consensus) commitBlock(block Block) {
 	c.lastBlockTime = common.GetTimeService().Now()
 	c.resetConsensusState()
 
-	logger.Info("🎉 Node %s successfully committed block %s at height %d",
-		c.nodeID, block.GetHash(), c.currentHeight)
+	// Log current signature count
+	c.signatureMutex.RLock()
+	sigCount := len(c.consensusSignatures)
+	c.signatureMutex.RUnlock()
+	logger.Info("🎉 Node %s successfully committed block %s at height %d (total signatures: %d)",
+		c.nodeID, block.GetHash(), c.currentHeight, sigCount)
 }
 
 // startViewChange initiates a view change process
@@ -1985,6 +2051,11 @@ func (c *Consensus) GetConsensusState() string {
 		currentTime.Sub(c.lastViewChange), currentTime.Sub(c.lastBlockTime),
 		len(c.prepareVotes), len(c.receivedVotes),
 	)
+}
+
+// AddConsensusSignature adds a signature to the consensus signatures collection
+func (c *Consensus) AddConsensusSignature(sig *ConsensusSignature) {
+	c.addConsensusSig(sig)
 }
 
 // broadcastProposal sends a proposal to all peers

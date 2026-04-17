@@ -195,10 +195,14 @@ func (tm *TPSMonitor) GetStats() map[string]interface{} {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
 
-	elapsed := time.Since(tm.windowStartTime)
+	// Force read of atomic values
+	blocksProc := atomic.LoadUint64(&tm.blocksProcessed)
+	totalTx := atomic.LoadUint64(&tm.totalTransactions)
 	windowCount := atomic.LoadUint64(&tm.currentWindowCount)
 
-	// Calculate current TPS one more time for accurate reading
+	elapsed := time.Since(tm.windowStartTime)
+
+	// Calculate current TPS
 	var currentTPS float64
 	if elapsed > 100*time.Millisecond && windowCount > 0 {
 		currentTPS = float64(windowCount) / elapsed.Seconds()
@@ -212,28 +216,38 @@ func (tm *TPSMonitor) GetStats() map[string]interface{} {
 		currentTPS = maxReasonableTPS
 	}
 
+	// Calculate average TPS
+	var avgTPS float64
+	if blocksProc > 0 {
+		// Average TPS = total transactions / total time (estimate using block count)
+		avgTPS = float64(totalTx) / float64(blocksProc*5) // 5 seconds per block
+	}
+
+	// Calculate average transactions per block - USE THE METHOD HERE
+	avgTxsPerBlock := tm.calculateAverageTxsPerBlock()
+
+	logger.Info("TPS Debug: blocks_processed=%d, total_txs=%d, avg_txs_per_block=%.2f",
+		blocksProc, totalTx, avgTxsPerBlock)
+
 	// Ensure peak TPS is also capped
 	peakTPS := tm.peakTPS
 	if peakTPS > maxReasonableTPS {
 		peakTPS = maxReasonableTPS
 	}
 
-	logger.Info("TPS Debug: current=%.2f, peak=%.2f, window_txs=%d, elapsed=%.1fs, total_txs=%d",
-		currentTPS, peakTPS, windowCount, elapsed.Seconds(),
-		atomic.LoadUint64(&tm.totalTransactions))
-
 	return map[string]interface{}{
-		"current_tps":          currentTPS,
-		"average_tps":          tm.averageTPS,
-		"peak_tps":             peakTPS,
-		"total_transactions":   atomic.LoadUint64(&tm.totalTransactions),
-		"blocks_processed":     atomic.LoadUint64(&tm.blocksProcessed),
-		"current_window_count": windowCount,
-		"window_duration_sec":  tm.windowDuration.Seconds(),
-		"window_elapsed_sec":   elapsed.Seconds(),
-		"window_start_time":    tm.windowStartTime.Format(time.RFC3339),
-		"history_size":         len(tm.tpsHistory),
-		"avg_txs_per_block":    tm.calculateAverageTxsPerBlock(),
+		"current_tps":                currentTPS,
+		"average_tps":                avgTPS,
+		"peak_tps":                   peakTPS,
+		"total_transactions":         totalTx,
+		"blocks_processed":           blocksProc,
+		"current_window_count":       windowCount,
+		"window_duration_sec":        tm.windowDuration.Seconds(),
+		"window_elapsed_sec":         elapsed.Seconds(),
+		"window_start_time":          tm.windowStartTime.Format(time.RFC3339),
+		"history_size":               len(tm.tpsHistory),
+		"avg_transactions_per_block": avgTxsPerBlock,
+		"txs_per_block_count":        len(tm.txsPerBlock),
 	}
 }
 

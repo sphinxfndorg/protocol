@@ -129,6 +129,11 @@ func (bc *Blockchain) HasPendingTx(hash string) bool {
 	return bc.mempool.HasTransaction(hash)
 }
 
+// GetTPSMonitor returns the TPS monitor for debugging and metrics
+func (bc *Blockchain) GetTPSMonitor() *types.TPSMonitor {
+	return bc.tpsMonitor
+}
+
 // SetConsensusEngine sets the consensus engine
 func (bc *Blockchain) SetConsensusEngine(engine *consensus.Consensus) {
 	bc.consensusEngine = engine

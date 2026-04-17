@@ -3,8 +3,8 @@
   "genesis_hash": "GENESIS_13eb808704d688f89e2111b2e0bddada818b8bc005eed4e451f270b322d769ad",
   "tip_height": 0,
   "tip_hash": "GENESIS_13eb808704d688f89e2111b2e0bddada818b8bc005eed4e451f270b322d769ad",
-  "vault_balance": "100000000000000000000000000",
+  "vault_balance": "0",
   "total_supply": "100000000000000000000000000",
-  "timestamp": "2026-04-17T00:53:57Z",
+  "timestamp": "2026-04-17T02:37:47Z",
   "distributed_n_spx": "100000000000000000000000000"
 }

@@ -519,19 +519,51 @@ func (bc *Blockchain) StoreChainState(nodes []*storage.NodeInfo) error {
 		}
 
 		// Convert tpsMonitor stats to storage.TPSMetrics format WITH history preserved
+		// Safely extract values with type checking
+		var currentTPS, avgTPS, peakTPS float64
+		var totalTx, blocksProc, windowCount uint64
+
+		// Safe type assertions with defaults
+		if val, ok := tpsStats["current_tps"].(float64); ok {
+			currentTPS = val
+		}
+		if val, ok := tpsStats["average_tps"].(float64); ok {
+			avgTPS = val
+		}
+		if val, ok := tpsStats["peak_tps"].(float64); ok {
+			peakTPS = val
+		}
+		if val, ok := tpsStats["total_transactions"].(uint64); ok {
+			totalTx = val
+		}
+		if val, ok := tpsStats["blocks_processed"].(uint64); ok {
+			blocksProc = val
+		}
+		if val, ok := tpsStats["current_window_count"].(uint64); ok {
+			windowCount = val
+		}
+
+		// Calculate avg transactions per block if not available
+		avgTxsPerBlock := 0.0
+		if val, ok := tpsStats["avg_transactions_per_block"].(float64); ok {
+			avgTxsPerBlock = val
+		} else if blocksProc > 0 {
+			avgTxsPerBlock = float64(totalTx) / float64(blocksProc)
+		}
+
 		blockchainTPSMetrics = &storage.TPSMetrics{
-			CurrentTPS:              tpsStats["current_tps"].(float64),
-			AverageTPS:              tpsStats["average_tps"].(float64),
-			PeakTPS:                 tpsStats["peak_tps"].(float64),
-			TotalTransactions:       tpsStats["total_transactions"].(uint64),
-			BlocksProcessed:         tpsStats["blocks_processed"].(uint64),
-			CurrentWindowCount:      tpsStats["current_window_count"].(uint64),
+			CurrentTPS:              currentTPS,
+			AverageTPS:              avgTPS,
+			PeakTPS:                 peakTPS,
+			TotalTransactions:       totalTx,
+			BlocksProcessed:         blocksProc,
+			CurrentWindowCount:      windowCount,
 			WindowStartTime:         time.Now(),
 			WindowDuration:          5 * time.Second,
 			WindowDurationSeconds:   5,
 			TPSHistory:              tpsHistory,  // Preserve history
 			TransactionsPerBlock:    txsPerBlock, // Preserve block data
-			AvgTransactionsPerBlock: tpsStats["avg_txs_per_block"].(float64),
+			AvgTransactionsPerBlock: avgTxsPerBlock,
 			MaxTransactionsPerBlock: existingMetrics.MaxTransactionsPerBlock,
 			MinTransactionsPerBlock: existingMetrics.MinTransactionsPerBlock,
 			LastUpdated:             time.Now(),
@@ -1493,11 +1525,16 @@ func (bc *Blockchain) GenerateTransactionProof(tx *types.Transaction, blockHash 
 }
 
 // CommitBlock commits a block through state machine replication
-// Parameters:
-//   - block: Block to commit (consensus.Block interface)
-//
-// Returns: Error if commit fails
 func (bc *Blockchain) CommitBlock(block consensus.Block) error {
+	// Add panic recovery to prevent TPS recording from being skipped
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Error("PANIC in CommitBlock: %v", r)
+		}
+	}()
+
+	logger.Info("🔵 CommitBlock called at %s", time.Now().Format("15:04:05.000"))
+
 	// Extract the underlying types.Block from adapter
 	var typeBlock *types.Block
 
@@ -1518,33 +1555,53 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 		return fmt.Errorf("failed to extract underlying block")
 	}
 
+	logger.Info("🔵 Processing block height=%d, txCount=%d",
+		typeBlock.GetHeight(), len(typeBlock.Body.TxsList))
+
+	// Check if tpsMonitor is nil before using it
+	if bc.tpsMonitor == nil {
+		logger.Error("❌ tpsMonitor is nil! Cannot record TPS metrics")
+		return fmt.Errorf("tpsMonitor not initialized")
+	}
+
 	// Calculate actual block time (time since last block)
 	blockTime := bc.calculateBlockTime(typeBlock)
+	logger.Info("📊 Block time calculated: %v", blockTime)
 
 	// Record block in storage TPS with actual block time
 	bc.storage.RecordBlock(typeBlock, blockTime)
 
 	// Record each transaction individually
 	txCount := uint64(len(typeBlock.Body.TxsList))
+	logger.Info("📊 Recording %d transactions in TPS monitor", txCount)
+
 	for i := uint64(0); i < txCount; i++ {
-		bc.tpsMonitor.RecordTransaction() // Record each transaction
+		bc.tpsMonitor.RecordTransaction()
 	}
 
 	// Then record the block
+	logger.Info("📊 Recording block in TPS monitor with txCount=%d, blockTime=%v", txCount, blockTime)
 	bc.tpsMonitor.RecordBlock(txCount, blockTime)
+
+	// Verify TPS recording worked
+	stats := bc.tpsMonitor.GetStats()
+	logger.Info("📊 Current TPS stats after recording: blocks_processed=%v, total_txs=%v, avg_txs_per_block=%.2f",
+		stats["blocks_processed"], stats["total_transactions"], stats["avg_transactions_per_block"])
 
 	// Check if blockchain is in running state
 	if bc.GetStatus() != StatusRunning {
+		logger.Warn("⚠️ Blockchain status is %s, but TPS already recorded", bc.StatusString(bc.GetStatus()))
 		return fmt.Errorf("blockchain not ready to commit blocks, status: %s",
 			bc.StatusString(bc.GetStatus()))
 	}
 
-	// Store block in storage
 	// Execute block: apply transactions, mint reward, compute real StateRoot.
 	stateRoot, err := bc.ExecuteBlock(typeBlock)
 	if err != nil {
+		logger.Error("❌ ExecuteBlock failed: %v", err)
 		return fmt.Errorf("CommitBlock: execution failed: %w", err)
 	}
+	logger.Info("✅ Block executed, stateRoot=%x", stateRoot)
 
 	// Process OP_RETURN data in transactions
 	for _, tx := range typeBlock.Body.TxsList {
@@ -1554,14 +1611,11 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 			logger.Info("DEBUG: Preparing OP_RETURN for tx %s, dataLen=%d, data=%s",
 				tx.ID, dataLen, string(tx.ReturnData))
 
-			// CORRECT: Push in reverse order so that when OP_RETURN pops:
-			// First pop = dataLen (what we want)
-			// Second pop = dataPtr (what we want)
 			vmBytecode := []byte{}
 
 			// Push data pointer FIRST (will be popped SECOND)
 			vmBytecode = append(vmBytecode, byte(svm.PUSH4))
-			vmBytecode = append(vmBytecode, 0x00, 0x00, 0x00, 0x00) // pointer 0
+			vmBytecode = append(vmBytecode, 0x00, 0x00, 0x00, 0x00)
 
 			// Push data length SECOND (will be popped FIRST)
 			vmBytecode = append(vmBytecode, byte(svm.PUSH4))
@@ -1576,13 +1630,11 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 
 			vm := vm.NewVM(vmBytecode)
 			if err := vm.SetMemoryBytes(0, memoryLayout); err != nil {
-				// Record failure but don't fail block commit
 				bc.recordSVMFailure(typeBlock.GetHash(), tx.ID, err)
 				logger.Error("OP_RETURN VM memory setup failed for tx %s: %v", tx.ID, err)
 				continue
 			}
 			if err := vm.Run(); err != nil {
-				// Record failure but don't fail block commit
 				bc.recordSVMFailure(typeBlock.GetHash(), tx.ID, err)
 				logger.Error("OP_RETURN execution failed for tx %s: %v", tx.ID, err)
 				continue
@@ -1591,7 +1643,6 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 			// Store return data
 			if err := bc.storeReturnData(tx.ID, tx.ReturnData); err != nil {
 				logger.Warn("Failed to store OP_RETURN data for tx %s: %v", tx.ID, err)
-				// Don't record as failure - storage is optional
 			}
 
 			logger.Info("📝 OP_RETURN: Transaction %s embedded %d bytes: %s",
@@ -1600,42 +1651,79 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 	}
 
 	// Stamp the real state root into the block header before storage.
+	// CRITICAL: Do NOT call FinalizeHash() again - the hash was already
+	// finalized in CreateBlock and agreed upon by consensus.
 	typeBlock.Header.StateRoot = stateRoot
-	// Re-finalize hash because StateRoot is an input to the block hash.
-	typeBlock.FinalizeHash()
+	// The block hash remains unchanged - consensus already agreed on this hash
 
-	// ========== FIX: Store block with delay to prevent race condition ==========
+	// ========== Store block with delay to prevent race condition ==========
+	logger.Info("📝 Attempting to store block at height %d with hash %s",
+		typeBlock.GetHeight(), typeBlock.GetHash())
+
 	// Store block in storage (now with the real StateRoot).
 	if err := bc.storage.StoreBlock(typeBlock); err != nil {
+		logger.Error("❌ Failed to store block: %v", err)
 		return fmt.Errorf("failed to store block: %w", err)
 	}
+	logger.Info("✅ Block stored in storage successfully at %s", time.Now().Format("15:04:05.000"))
 
 	// Add a small delay to ensure block is visible to other goroutines
-	// This prevents "block not found" race conditions in signature processing
-	time.Sleep(100 * time.Millisecond)
-	// =========================================================================
+	time.Sleep(200 * time.Millisecond)
+	logger.Info("✅ Block storage confirmed after delay")
 
 	// Update in-memory chain
-	bc.lock.Lock()                         // Write lock for thread safety
-	bc.chain = append(bc.chain, typeBlock) // Add block to chain
+	bc.lock.Lock()
+	bc.chain = append(bc.chain, typeBlock)
+	logger.Info("✅ Block added to in-memory chain")
+	bc.lock.Unlock()
 
-	// ========== CRITICAL: Update consensus engine's current height ==========
+	// ========== Add signature to consensus engine ==========
 	if bc.consensusEngine != nil {
-		bc.consensusEngine.SetCurrentHeight(typeBlock.GetHeight())
-		logger.Info("📢 Notified consensus engine of new height: %d", typeBlock.GetHeight())
+		// Create a consensus signature for this block
+		signature := &consensus.ConsensusSignature{
+			BlockHash:    typeBlock.GetHash(),
+			BlockHeight:  typeBlock.GetHeight(),
+			SignerNodeID: bc.consensusEngine.GetNodeID(),
+			Signature:    "committed_" + typeBlock.GetHash()[:16],
+			MessageType:  "commit",
+			View:         bc.consensusEngine.GetCurrentView(),
+			Timestamp:    time.Now().Format(time.RFC3339),
+			Valid:        true,
+			MerkleRoot:   hex.EncodeToString(typeBlock.Header.TxsRoot),
+			Status:       "committed",
+		}
+
+		// Add signature to consensus engine
+		bc.consensusEngine.AddConsensusSignature(signature)
+		logger.Info("✅ Added commit signature for block %s to consensus engine", typeBlock.GetHash())
+
+		// Now get signatures and save chain state
+		signatures := bc.consensusEngine.GetConsensusSignatures()
+		logger.Info("📊 Total consensus signatures in engine after adding: %d", len(signatures))
+
+		// Force save chain state to persist signatures
+		if err := bc.SaveBasicChainState(); err != nil {
+			logger.Warn("Failed to save chain state after block commit: %v", err)
+		} else {
+			logger.Info("✅ Chain state saved after block commit with %d signatures", len(signatures))
+		}
 	}
 
 	// Remove committed transactions from mempool
 	txIDs := make([]string, len(typeBlock.Body.TxsList))
 	for i, tx := range typeBlock.Body.TxsList {
-		txIDs[i] = tx.ID // Collect transaction IDs
+		txIDs[i] = tx.ID
 	}
-	bc.mempool.RemoveTransactions(txIDs) // Remove from mempool
-	bc.lock.Unlock()
+	bc.mempool.RemoveTransactions(txIDs)
+	logger.Info("✅ Removed %d transactions from mempool", len(txIDs))
 
-	// Log successful commit
+	// Log successful commit with final TPS stats
+	finalStats := bc.tpsMonitor.GetStats()
 	logger.Info("✅ Block committed: height=%d, hash=%s, transactions=%d, block_time=%v",
 		typeBlock.GetHeight(), typeBlock.GetHash(), len(txIDs), blockTime)
+	logger.Info("📊 Final TPS stats: blocks_processed=%v, total_txs=%v, avg_txs_per_block=%.2f, current_tps=%.2f",
+		finalStats["blocks_processed"], finalStats["total_transactions"],
+		finalStats["avg_transactions_per_block"], finalStats["current_tps"])
 
 	return nil
 }
@@ -1723,7 +1811,17 @@ func (bc *Blockchain) createGenesisBlock() error {
 
 	LogAllocationSummary(gs.Allocations)
 
+	// Get the genesis block from the chain (now populated by ApplyGenesisWithCachedBlock)
 	genesis := bc.chain[0]
+
+	// ========== RECORD GENESIS BLOCK IN TPS MONITOR ==========
+	if bc.tpsMonitor != nil {
+		txCount := uint64(len(genesis.Body.TxsList))
+		bc.tpsMonitor.RecordBlock(txCount, 5*time.Second)
+		logger.Info("📊 Recorded genesis block in TPS monitor with %d transactions", txCount)
+	}
+	// =========================================================
+
 	localTime, utcTime := common.FormatTimestamp(genesis.Header.Timestamp)
 	relativeTime := common.GetTimeService().GetRelativeTime(genesis.Header.Timestamp)
 

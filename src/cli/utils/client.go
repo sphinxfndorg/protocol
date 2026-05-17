@@ -1,24 +1,5 @@
-// MIT License
-//
-// Copyright (c) 2024 sphinx-core
-//
-// Permission is hereby granted, free of charge, to any person obtaining a copy
-// of this software and associated documentation files (the "Software"), to deal
-// in the Software without restriction, including without limitation the rights
-// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-// copies of the Software, and to permit persons to whom the Software is
-// furnished to do so, subject to the following conditions:
-//
-// The above copyright notice and this permission notice shall be included in all
-// copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-// SOFTWARE.
+// Copyright (c) 2024-present Sphinx Core Dev
+// MIT License https://opensource.org/license/mit
 
 // go/src/cli/utils/client.go
 package utils
@@ -36,66 +17,6 @@ import (
 
 	logger "github.com/sphinxorg/protocol/src/log"
 )
-
-// JSONRPCRequest represents a standard JSON-RPC 2.0 request
-type JSONRPCRequest struct {
-	JSONRPC string        `json:"jsonrpc"`
-	Method  string        `json:"method"`
-	Params  []interface{} `json:"params"`
-	ID      int           `json:"id"`
-}
-
-// JSONRPCResponse represents a standard JSON-RPC 2.0 response
-type JSONRPCResponse struct {
-	JSONRPC string          `json:"jsonrpc"`
-	Result  json.RawMessage `json:"result"`
-	Error   *JSONRPCError   `json:"error"`
-	ID      int             `json:"id"`
-}
-
-// JSONRPCError represents a JSON-RPC error
-type JSONRPCError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
-}
-
-// SendTxOptions contains parameters for sending a transaction
-type SendTxOptions struct {
-	RPCURL   string
-	From     string
-	To       string
-	Amount   string
-	GasLimit string
-	GasPrice string
-	Nonce    uint64
-	KeyFile  string
-	Wait     bool
-}
-
-// GetBalanceOptions contains parameters for getting a balance
-type GetBalanceOptions struct {
-	RPCURL  string
-	Address string
-}
-
-// WatchTxOptions contains parameters for watching a transaction
-type WatchTxOptions struct {
-	RPCURL      string
-	TxID        string
-	TimeoutSecs int
-}
-
-// TransactionReceipt represents the receipt of a transaction
-type TransactionReceipt struct {
-	TransactionHash   string `json:"transactionHash"`
-	TransactionIndex  string `json:"transactionIndex"`
-	BlockHash         string `json:"blockHash"`
-	BlockNumber       string `json:"blockNumber"`
-	CumulativeGasUsed string `json:"cumulativeGasUsed"`
-	GasUsed           string `json:"gasUsed"`
-	ContractAddress   string `json:"contractAddress"`
-	Status            string `json:"status"`
-}
 
 // SendTransaction sends a transaction via JSON-RPC
 func SendTransaction(opts SendTxOptions) error {

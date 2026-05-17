@@ -1,3 +1,6 @@
+// Copyright (c) 2024-present Sphinx Core Dev
+// MIT License https://opensource.org/license/mit
+
 package vm
 
 import svm "github.com/sphinxorg/protocol/src/core/svm/opcodes"

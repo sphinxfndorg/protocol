@@ -1,3 +1,6 @@
+# Copyright (c) 2024-present Sphinx Core Dev
+# MIT License https://opensource.org/license/mit
+
 #!/bin/bash
 
 # Sphinx Protocol Launcher

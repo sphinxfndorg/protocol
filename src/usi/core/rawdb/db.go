@@ -64,7 +64,7 @@ func NewRawDataWithBackup(backupConfig BackupConfig) (*RawData, error) {
 	}
 	log.Printf("[DEBUG] NewRawDataWithBackup: home directory: %s", homeDir)
 
-	dbPath := filepath.Join(homeDir, ".ecp", "rawdata")
+	dbPath := filepath.Join(homeDir, ".usi", "rawdata")
 	log.Printf("[DEBUG] NewRawDataWithBackup: database path: %s", dbPath)
 
 	if err := os.MkdirAll(dbPath, 0700); err != nil {
@@ -108,25 +108,25 @@ func NewRawDataWithBackup(backupConfig BackupConfig) (*RawData, error) {
 	}, nil
 }
 
-// StoreECPMeta stores complete .ecpmeta data for a file
-func (r *RawData) StoreECPMeta(filePath string, meta *types.Meta) error {
-	log.Printf("[INFO] StoreECPMeta: storing metadata for file: %s", filePath)
+// StoreUSIMeta stores complete .usimeta data for a file
+func (r *RawData) StoreUSIMeta(filePath string, meta *types.Meta) error {
+	log.Printf("[INFO] StoreUSIMeta: storing metadata for file: %s", filePath)
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	log.Printf("[DEBUG] StoreECPMeta: acquired write lock")
+	log.Printf("[DEBUG] StoreUSIMeta: acquired write lock")
 
 	absPath, err := filepath.Abs(filePath)
 	if err != nil {
-		log.Printf("[ERROR] StoreECPMeta: failed to get absolute path: %v", err)
+		log.Printf("[ERROR] StoreUSIMeta: failed to get absolute path: %v", err)
 		return fmt.Errorf("failed to get absolute path: %w", err)
 	}
-	log.Printf("[DEBUG] StoreECPMeta: absolute path: %s", absPath)
+	log.Printf("[DEBUG] StoreUSIMeta: absolute path: %s", absPath)
 
 	// Create backup before update if enabled
 	if r.backupEnabled && r.backupConfig.BackupOnUpdate {
 		if err := r.createBackupBeforeUpdate(absPath); err != nil {
-			log.Printf("[WARN] StoreECPMeta: failed to create backup for %s: %v", absPath, err)
+			log.Printf("[WARN] StoreUSIMeta: failed to create backup for %s: %v", absPath, err)
 			// Continue anyway - backup failure shouldn't stop the update
 		}
 	}
@@ -138,53 +138,53 @@ func (r *RawData) StoreECPMeta(filePath string, meta *types.Meta) error {
 		StoredAt: time.Now(),
 		FilePath: absPath,
 	}
-	log.Printf("[DEBUG] StoreECPMeta: stored timestamp: %v", stored.StoredAt)
+	log.Printf("[DEBUG] StoreUSIMeta: stored timestamp: %v", stored.StoredAt)
 
 	if err == nil {
 		stored.FileSize = fileInfo.Size()
 		stored.FileModTime = fileInfo.ModTime().Unix()
-		log.Printf("[DEBUG] StoreECPMeta: file size: %d bytes, mod time: %d", stored.FileSize, stored.FileModTime)
+		log.Printf("[DEBUG] StoreUSIMeta: file size: %d bytes, mod time: %d", stored.FileSize, stored.FileModTime)
 	} else {
-		log.Printf("[WARN] StoreECPMeta: could not stat file: %v", err)
+		log.Printf("[WARN] StoreUSIMeta: could not stat file: %v", err)
 	}
 
 	// Store by file path (primary key)
 	pathKey := []byte("path:" + absPath)
-	log.Printf("[DEBUG] StoreECPMeta: storing primary key: %s", pathKey)
+	log.Printf("[DEBUG] StoreUSIMeta: storing primary key: %s", pathKey)
 
 	data, err := json.Marshal(stored)
 	if err != nil {
-		log.Printf("[ERROR] StoreECPMeta: failed to marshal metadata: %v", err)
+		log.Printf("[ERROR] StoreUSIMeta: failed to marshal metadata: %v", err)
 		return fmt.Errorf("failed to marshal metadata: %w", err)
 	}
-	log.Printf("[DEBUG] StoreECPMeta: marshaled data size: %d bytes", len(data))
+	log.Printf("[DEBUG] StoreUSIMeta: marshaled data size: %d bytes", len(data))
 
 	if err := r.db.Put(pathKey, data, nil); err != nil {
-		log.Printf("[ERROR] StoreECPMeta: failed to store by path: %v", err)
+		log.Printf("[ERROR] StoreUSIMeta: failed to store by path: %v", err)
 		return fmt.Errorf("failed to store by path: %w", err)
 	}
-	log.Printf("[DEBUG] StoreECPMeta: stored by path successfully")
+	log.Printf("[DEBUG] StoreUSIMeta: stored by path successfully")
 
 	// Store by file hash for quick lookup (secondary index)
 	if meta.FileHash != "" {
 		hashKey := []byte("hash:" + meta.FileHash)
-		log.Printf("[DEBUG] StoreECPMeta: storing hash index: %.16s...", hashKey)
+		log.Printf("[DEBUG] StoreUSIMeta: storing hash index: %.16s...", hashKey)
 		if err := r.db.Put(hashKey, []byte(absPath), nil); err != nil {
-			log.Printf("[ERROR] StoreECPMeta: failed to store hash index: %v", err)
+			log.Printf("[ERROR] StoreUSIMeta: failed to store hash index: %v", err)
 			return fmt.Errorf("failed to store hash index: %w", err)
 		}
-		log.Printf("[DEBUG] StoreECPMeta: stored hash index successfully")
+		log.Printf("[DEBUG] StoreUSIMeta: stored hash index successfully")
 	}
 
 	// Store by final document hash
 	if meta.FinalDocumentHash != "" && meta.FinalDocumentHash != meta.FileHash {
 		finalHashKey := []byte("finalhash:" + meta.FinalDocumentHash)
-		log.Printf("[DEBUG] StoreECPMeta: storing final hash index: %.16s...", finalHashKey)
+		log.Printf("[DEBUG] StoreUSIMeta: storing final hash index: %.16s...", finalHashKey)
 		if err := r.db.Put(finalHashKey, []byte(absPath), nil); err != nil {
-			log.Printf("[ERROR] StoreECPMeta: failed to store final hash index: %v", err)
+			log.Printf("[ERROR] StoreUSIMeta: failed to store final hash index: %v", err)
 			return fmt.Errorf("failed to store final hash index: %w", err)
 		}
-		log.Printf("[DEBUG] StoreECPMeta: stored final hash index successfully")
+		log.Printf("[DEBUG] StoreUSIMeta: stored final hash index successfully")
 	}
 
 	// Store by signature prefix
@@ -194,118 +194,118 @@ func (r *RawData) StoreECPMeta(filePath string, meta *types.Meta) error {
 			sigPrefix = sigPrefix[:16]
 		}
 		sigKey := []byte("sig:" + sigPrefix)
-		log.Printf("[DEBUG] StoreECPMeta: storing signature index: %.16s...", sigKey)
+		log.Printf("[DEBUG] StoreUSIMeta: storing signature index: %.16s...", sigKey)
 		if err := r.db.Put(sigKey, []byte(absPath), nil); err != nil {
-			log.Printf("[WARN] StoreECPMeta: failed to store signature index: %v", err)
+			log.Printf("[WARN] StoreUSIMeta: failed to store signature index: %v", err)
 			// Non-critical, continue
 		} else {
-			log.Printf("[DEBUG] StoreECPMeta: stored signature index successfully")
+			log.Printf("[DEBUG] StoreUSIMeta: stored signature index successfully")
 		}
 	}
 
-	log.Printf("[SUCCESS] StoreECPMeta: metadata stored successfully for %s", filepath.Base(filePath))
+	log.Printf("[SUCCESS] StoreUSIMeta: metadata stored successfully for %s", filepath.Base(filePath))
 	return nil
 }
 
-// LoadECPMeta retrieves complete .ecpmeta data for a file
-func (r *RawData) LoadECPMeta(filePath string) (*types.Meta, error) {
-	log.Printf("[INFO] LoadECPMeta: loading metadata for file: %s", filePath)
+// LoadUSIMeta retrieves complete .usimeta data for a file
+func (r *RawData) LoadUSIMeta(filePath string) (*types.Meta, error) {
+	log.Printf("[INFO] LoadUSIMeta: loading metadata for file: %s", filePath)
 
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	log.Printf("[DEBUG] LoadECPMeta: acquired read lock")
+	log.Printf("[DEBUG] LoadUSIMeta: acquired read lock")
 
 	absPath, err := filepath.Abs(filePath)
 	if err != nil {
-		log.Printf("[ERROR] LoadECPMeta: failed to get absolute path: %v", err)
+		log.Printf("[ERROR] LoadUSIMeta: failed to get absolute path: %v", err)
 		return nil, fmt.Errorf("failed to get absolute path: %w", err)
 	}
-	log.Printf("[DEBUG] LoadECPMeta: absolute path: %s", absPath)
+	log.Printf("[DEBUG] LoadUSIMeta: absolute path: %s", absPath)
 
 	pathKey := []byte("path:" + absPath)
-	log.Printf("[DEBUG] LoadECPMeta: looking up key: %s", pathKey)
+	log.Printf("[DEBUG] LoadUSIMeta: looking up key: %s", pathKey)
 
 	data, err := r.db.Get(pathKey, nil)
 	if err != nil {
 		if err == leveldb.ErrNotFound {
-			log.Printf("[INFO] LoadECPMeta: metadata not found for %s", filepath.Base(filePath))
+			log.Printf("[INFO] LoadUSIMeta: metadata not found for %s", filepath.Base(filePath))
 			return nil, nil
 		}
-		log.Printf("[ERROR] LoadECPMeta: failed to load metadata: %v", err)
+		log.Printf("[ERROR] LoadUSIMeta: failed to load metadata: %v", err)
 		return nil, fmt.Errorf("failed to load metadata: %w", err)
 	}
-	log.Printf("[DEBUG] LoadECPMeta: retrieved data size: %d bytes", len(data))
+	log.Printf("[DEBUG] LoadUSIMeta: retrieved data size: %d bytes", len(data))
 
 	var stored StoredMeta
 	if err := json.Unmarshal(data, &stored); err != nil {
-		log.Printf("[ERROR] LoadECPMeta: failed to unmarshal metadata: %v", err)
+		log.Printf("[ERROR] LoadUSIMeta: failed to unmarshal metadata: %v", err)
 		return nil, fmt.Errorf("failed to unmarshal metadata: %w", err)
 	}
 
-	log.Printf("[SUCCESS] LoadECPMeta: metadata loaded successfully for %s (stored at: %v)", filepath.Base(filePath), stored.StoredAt)
+	log.Printf("[SUCCESS] LoadUSIMeta: metadata loaded successfully for %s (stored at: %v)", filepath.Base(filePath), stored.StoredAt)
 	return stored.Meta, nil
 }
 
-// DeleteECPMeta removes .ecpmeta data for a file
-func (r *RawData) DeleteECPMeta(filePath string) error {
-	log.Printf("[INFO] DeleteECPMeta: deleting metadata for file: %s", filePath)
+// DeleteUSIMeta removes .usimeta data for a file
+func (r *RawData) DeleteUSIMeta(filePath string) error {
+	log.Printf("[INFO] DeleteUSIMeta: deleting metadata for file: %s", filePath)
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	log.Printf("[DEBUG] DeleteECPMeta: acquired write lock")
+	log.Printf("[DEBUG] DeleteUSIMeta: acquired write lock")
 
 	absPath, err := filepath.Abs(filePath)
 	if err != nil {
-		log.Printf("[ERROR] DeleteECPMeta: failed to get absolute path: %v", err)
+		log.Printf("[ERROR] DeleteUSIMeta: failed to get absolute path: %v", err)
 		return fmt.Errorf("failed to get absolute path: %w", err)
 	}
-	log.Printf("[DEBUG] DeleteECPMeta: absolute path: %s", absPath)
+	log.Printf("[DEBUG] DeleteUSIMeta: absolute path: %s", absPath)
 
 	// Create backup before delete if enabled
 	if r.backupEnabled && r.backupConfig.BackupOnDelete {
 		if err := r.createBackupBeforeDelete(absPath); err != nil {
-			log.Printf("[WARN] DeleteECPMeta: failed to create backup before delete for %s: %v", absPath, err)
+			log.Printf("[WARN] DeleteUSIMeta: failed to create backup before delete for %s: %v", absPath, err)
 		}
 	}
 
 	// Read existing record directly (no lock re-entry).
 	pathKey := []byte("path:" + absPath)
-	log.Printf("[DEBUG] DeleteECPMeta: reading existing record for key: %s", pathKey)
+	log.Printf("[DEBUG] DeleteUSIMeta: reading existing record for key: %s", pathKey)
 
 	data, err := r.db.Get(pathKey, nil)
 	if err != nil && err != leveldb.ErrNotFound {
-		log.Printf("[ERROR] DeleteECPMeta: failed to read before delete: %v", err)
+		log.Printf("[ERROR] DeleteUSIMeta: failed to read before delete: %v", err)
 		return fmt.Errorf("failed to read before delete: %w", err)
 	}
 
 	if err := r.db.Delete(pathKey, nil); err != nil {
-		log.Printf("[ERROR] DeleteECPMeta: failed to delete path key: %v", err)
+		log.Printf("[ERROR] DeleteUSIMeta: failed to delete path key: %v", err)
 		return fmt.Errorf("failed to delete path key: %w", err)
 	}
-	log.Printf("[DEBUG] DeleteECPMeta: deleted path key successfully")
+	log.Printf("[DEBUG] DeleteUSIMeta: deleted path key successfully")
 
 	if data != nil {
 		var stored StoredMeta
 		if json.Unmarshal(data, &stored) == nil && stored.Meta != nil {
-			log.Printf("[DEBUG] DeleteECPMeta: cleaning up secondary indexes")
+			log.Printf("[DEBUG] DeleteUSIMeta: cleaning up secondary indexes")
 
 			if stored.FileHash != "" {
 				hashKey := []byte("hash:" + stored.FileHash)
-				log.Printf("[DEBUG] DeleteECPMeta: deleting hash index: %.16s...", hashKey)
+				log.Printf("[DEBUG] DeleteUSIMeta: deleting hash index: %.16s...", hashKey)
 				if err := r.db.Delete(hashKey, nil); err != nil {
-					log.Printf("[WARN] DeleteECPMeta: failed to delete hash index: %v", err)
+					log.Printf("[WARN] DeleteUSIMeta: failed to delete hash index: %v", err)
 				} else {
-					log.Printf("[DEBUG] DeleteECPMeta: deleted hash index")
+					log.Printf("[DEBUG] DeleteUSIMeta: deleted hash index")
 				}
 			}
 
 			if stored.FinalDocumentHash != "" && stored.FinalDocumentHash != stored.FileHash {
 				finalHashKey := []byte("finalhash:" + stored.FinalDocumentHash)
-				log.Printf("[DEBUG] DeleteECPMeta: deleting final hash index: %.16s...", finalHashKey)
+				log.Printf("[DEBUG] DeleteUSIMeta: deleting final hash index: %.16s...", finalHashKey)
 				if err := r.db.Delete(finalHashKey, nil); err != nil {
-					log.Printf("[WARN] DeleteECPMeta: failed to delete final hash index: %v", err)
+					log.Printf("[WARN] DeleteUSIMeta: failed to delete final hash index: %v", err)
 				} else {
-					log.Printf("[DEBUG] DeleteECPMeta: deleted final hash index")
+					log.Printf("[DEBUG] DeleteUSIMeta: deleted final hash index")
 				}
 			}
 
@@ -315,33 +315,33 @@ func (r *RawData) DeleteECPMeta(filePath string) error {
 					sigPrefix = sigPrefix[:16]
 				}
 				sigKey := []byte("sig:" + sigPrefix)
-				log.Printf("[DEBUG] DeleteECPMeta: deleting signature index: %.16s...", sigKey)
+				log.Printf("[DEBUG] DeleteUSIMeta: deleting signature index: %.16s...", sigKey)
 				if err := r.db.Delete(sigKey, nil); err != nil {
-					log.Printf("[WARN] DeleteECPMeta: failed to delete signature index: %v", err)
+					log.Printf("[WARN] DeleteUSIMeta: failed to delete signature index: %v", err)
 				} else {
-					log.Printf("[DEBUG] DeleteECPMeta: deleted signature index")
+					log.Printf("[DEBUG] DeleteUSIMeta: deleted signature index")
 				}
 			}
 		} else {
-			log.Printf("[WARN] DeleteECPMeta: could not unmarshal data for secondary index cleanup")
+			log.Printf("[WARN] DeleteUSIMeta: could not unmarshal data for secondary index cleanup")
 		}
 	}
 
-	log.Printf("[SUCCESS] DeleteECPMeta: metadata deleted successfully for %s", filepath.Base(filePath))
+	log.Printf("[SUCCESS] DeleteUSIMeta: metadata deleted successfully for %s", filepath.Base(filePath))
 	return nil
 }
 
-// HasECPMeta checks if a file has .ecpmeta data stored
-func (r *RawData) HasECPMeta(filePath string) (bool, error) {
-	log.Printf("[DEBUG] HasECPMeta: checking existence for: %s", filePath)
+// HasUSIMeta checks if a file has .usimeta data stored
+func (r *RawData) HasUSIMeta(filePath string) (bool, error) {
+	log.Printf("[DEBUG] HasUSIMeta: checking existence for: %s", filePath)
 
-	meta, err := r.LoadECPMeta(filePath)
+	meta, err := r.LoadUSIMeta(filePath)
 	if err != nil {
-		log.Printf("[ERROR] HasECPMeta: error loading metadata: %v", err)
+		log.Printf("[ERROR] HasUSIMeta: error loading metadata: %v", err)
 		return false, err
 	}
 	exists := meta != nil
-	log.Printf("[DEBUG] HasECPMeta: exists = %v", exists)
+	log.Printf("[DEBUG] HasUSIMeta: exists = %v", exists)
 	return exists, nil
 }
 

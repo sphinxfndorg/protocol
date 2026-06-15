@@ -63,8 +63,7 @@ func GenerateKeyPairWithOrg(passphrase string, orgCode OrgCode) (*KeyPair, error
 }
 
 // GetPublicKeyFingerprint generates a SHAKE256-based address using the
-// organisation code stored in the KeyPair.  Falls back to legacy SPIF format
-// if no org code is set (e.g. old vaults loaded from disk).
+// organisation code stored in the KeyPair.
 func GetPublicKeyFingerprint(kp *KeyPair) string {
 	log.Println("Generating public key address")
 
@@ -76,10 +75,12 @@ func GetPublicKeyFingerprint(kp *KeyPair) string {
 		return formatted
 	}
 
-	// Legacy path — existing keys without an org code.
-	log.Println("No org code set; using legacy SPIF format")
-	fingerprint := SHAKE256Hash(kp.PublicKey)
-	return FormatECPFingerprint(fingerprint)
+	// Default to SPIF if no org code is set
+	log.Println("No org code set; using SPIF format")
+	code := OrgCode("SPIF")
+	raw := SHAKE256HashWithOrg(kp.PublicKey, code)
+	formatted := FormatOrgAddress(raw, code)
+	return formatted
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

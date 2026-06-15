@@ -1,0 +1,81 @@
+@import url('https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Hanken Grotesk", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", monospace;
+
+  /* Sovereign Shield / Obsidian Depth Theme Colors */
+  --color-surface-lowest: #010f1f;
+  --color-surface-low: #0d1c2d;
+  --color-surface: #051424;
+  --color-surface-container: #122131;
+  --color-surface-container-high: #1c2b3c;
+  --color-surface-container-highest: #273647;
+  
+  --color-primary: #4ade9e;
+  --color-on-primary: #003823;
+  --color-on-background: #d4e4fa;
+  --color-on-surface: #d4e4fa;
+  --color-on-surface-variant: #bbcabf;
+  --color-outline: #86948a;
+  --color-outline-variant: #3c4a41;
+  
+  /* Semantic feedback */
+  --color-info: #60a5fa;
+  --color-warn: #ffb347;
+  --color-danger: #ff6b6b;
+  --color-accent: #4ade9e;
+}
+
+@layer base {
+  body {
+    background-color: var(--color-surface-lowest);
+    color: var(--color-on-background);
+    font-family: var(--font-sans);
+  }
+
+  /* Custom high-tech scrollbar */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: #010f1f;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #273647;
+    border-radius: 3px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #4ade9e;
+  }
+}
+
+/* Glassmorphism styling */
+.glass-panel {
+  background: rgba(13, 28, 45, 0.82);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.emerald-glow {
+  box-shadow: 0 0 35px -5px rgba(74, 222, 158, 0.25);
+}
+
+.scan-line {
+  height: 2px;
+  background: linear-gradient(90deg, transparent, #4ade9e, transparent);
+  width: 100%;
+  position: absolute;
+  top: -2px;
+  animation: scan 5s linear infinite;
+}
+
+@keyframes scan {
+  0% { top: 0%; opacity: 0; }
+  10% { opacity: 1; }
+  90% { opacity: 1; }
+  100% { top: 100%; opacity: 0; }
+}

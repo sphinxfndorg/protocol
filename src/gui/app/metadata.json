@@ -1,0 +1,6 @@
+{
+  "name": "USI Software",
+  "description": "Universal Sovereign Identity - Identity defense system for secure local file vault encryption and SPHINCS+ digital signatures.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

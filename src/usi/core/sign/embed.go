@@ -36,7 +36,7 @@ import (
 )
 
 // magicMarker is appended to binary/text files that use the footer embed method.
-var magicMarker = []byte("ECPMETA")
+var magicMarker = []byte("USIMETA")
 
 // orgBundleResolver defines the interface for looking up organization bundles
 type orgBundleResolver interface {
@@ -77,7 +77,7 @@ func buildSecureMetadataBlock(meta *Meta, fingerprint string) string {
 	}
 
 	return fmt.Sprintf(
-		"ECP-SUMMARY\n"+
+		"USI-SUMMARY\n"+
 			"Fingerprint: %s\n"+
 			"Signature: %s\n"+
 			"Signature Status: VALID [OK]\n"+
@@ -105,7 +105,7 @@ func buildCryptographicMetadataBlock(meta *Meta, fingerprint, finalHash string) 
 	defer secureZeroBytes(metaJSON)
 
 	cryptoDetails := fmt.Sprintf(
-		"ECP CRYPTOGRAPHIC SIGNATURE VERIFICATION\n\n"+
+		"USI CRYPTOGRAPHIC SIGNATURE VERIFICATION\n\n"+
 			"Fingerprint: %s\n"+
 			"Signature Status: VALID\n"+
 			"Timestamp: %s\n"+
@@ -122,13 +122,13 @@ func buildCryptographicMetadataBlock(meta *Meta, fingerprint, finalHash string) 
 
 	return map[string]string{
 		"Title":        "Cryptographically Signed Document - E2E Cipher Protocol",
-		"Author":       "ECP Secure Vault",
+		"Author":       "USI Secure Vault",
 		"Subject":      cryptoDetails,
-		"Keywords":     "Integrity Protection; Cryptographic Signature; ECP",
-		"Creator":      "ECP v0.002 Secure",
+		"Keywords":     "Integrity Protection; Cryptographic Signature; USI",
+		"Creator":      "USI v0.002 Secure",
 		"Producer":     "E2E Cipher Protocol",
 		"Fingerprint":  fingerprint,
-		"ECPSignature": string(metaJSON),
+		"USISignature": string(metaJSON),
 		"SigningTime":  time.Now().Format(time.RFC3339),
 	}
 }
@@ -154,7 +154,7 @@ func EmbedSignature(filePath string, meta *Meta, fingerprint, passphrase string)
 		meta.Timestamp = time.Now().Unix()
 	}
 	if meta.Signer == "" {
-		meta.Signer = "ECP Secure Vault"
+		meta.Signer = "USI Secure Vault"
 	}
 	if meta.DocumentTitle == "" {
 		meta.DocumentTitle = "Cryptographically Signed Document"
@@ -183,15 +183,15 @@ func EmbedSignature(filePath string, meta *Meta, fingerprint, passphrase string)
 			if err := embedMOVQuickTimeMetadata(filePath, meta, fingerprint); err != nil {
 				log.Printf("Warning: QuickTime metadata embedding failed: %v", err)
 			}
-			embedErr = createECPMetaFile(filePath, meta, passphrase, true)
+			embedErr = createUSIMetaFile(filePath, meta, passphrase, true)
 		}
 		// For all other binary/text files embedErr stays nil here;
-		// createECPMetaFile with skipFooter=false is called in the fallback below.
+		// createUSIMetaFile with skipFooter=false is called in the fallback below.
 	}
 
 	if embedErr != nil {
 		log.Printf("Warning: format-specific embed failed: %v — falling back to footer", embedErr)
-		if err := createECPMetaFile(filePath, meta, passphrase, false); err != nil {
+		if err := createUSIMetaFile(filePath, meta, passphrase, false); err != nil {
 			return fmt.Errorf("embed fallback failed: %w", err)
 		}
 	}
@@ -279,9 +279,9 @@ func VerifyUniversal(filePath, passphrase string) (bool, *Meta, error) {
 	// ── 3. RawData database (local cache written at signing time) ────────────
 	db, dbErr := rawdata.GetDB()
 	if dbErr == nil {
-		cachedMeta, loadErr := db.LoadECPMeta(filePath)
+		cachedMeta, loadErr := db.LoadUSIMeta(filePath)
 		if loadErr == nil && cachedMeta != nil {
-			log.Printf("Found ECP meta in RawData database (cached)")
+			log.Printf("Found USI meta in RawData database (cached)")
 
 			// Log the hash comparison so failures are visible
 			fileData, readErr := os.ReadFile(filePath)
@@ -301,24 +301,24 @@ func VerifyUniversal(filePath, passphrase string) (bool, *Meta, error) {
 		}
 	}
 
-	// ── 4. Legacy .ecpmeta sidecar ───────────────────────────────────────────
-	ecpMetaPath := filePath + ".ecpmeta"
-	if _, statErr := os.Stat(ecpMetaPath); statErr == nil {
-		log.Printf("Found .ecpmeta sidecar (legacy)")
-		ok, sidecarMeta, err := verifyECPMetaWithDetails(filePath, ecpMetaPath)
+	// ── 4. Legacy .usimeta sidecar ───────────────────────────────────────────
+	usiMetaPath := filePath + ".usimeta"
+	if _, statErr := os.Stat(usiMetaPath); statErr == nil {
+		log.Printf("Found .usimeta sidecar (legacy)")
+		ok, sidecarMeta, err := verifyUSIMetaWithDetails(filePath, usiMetaPath)
 		if err != nil {
-			log.Printf(".ecpmeta verification failed: %v", err)
+			log.Printf(".usimeta verification failed: %v", err)
 			return false, sidecarMeta, err
 		}
 		if ok {
-			log.Printf(".ecpmeta verification SUCCESS")
+			log.Printf(".usimeta verification SUCCESS")
 			return true, sidecarMeta, nil
 		}
 		return false, sidecarMeta, fmt.Errorf("signature invalid")
 	}
 
 	log.Printf("No valid signature found for: %s", filePath)
-	return false, nil, errors.New("no valid ECP signature found")
+	return false, nil, errors.New("no valid USI signature found")
 }
 
 // storeVerifiedMeta caches a successfully verified Meta in the RawData DB.
@@ -327,7 +327,7 @@ func storeVerifiedMeta(filePath string, meta *Meta) {
 	if err != nil {
 		return
 	}
-	if err := db.StoreECPMeta(filePath, meta); err != nil {
+	if err := db.StoreUSIMeta(filePath, meta); err != nil {
 		log.Printf("Warning: failed to cache verified meta: %v", err)
 	}
 }
@@ -556,13 +556,13 @@ func verifyCryptoSignature(meta *Meta, msgBytes []byte) (bool, error) {
 // SIGNING — creates metadata and stores/embeds it
 // ─────────────────────────────────────────────────────────────────────────────
 
-// createECPMetaFile hashes the (already-finalised) file, signs it, stores the
+// createUSIMetaFile hashes the (already-finalised) file, signs it, stores the
 // metadata in the RawData DB, and optionally appends a binary footer.
 //
 //   - skipFooterEmbedding = true  → PDF, PNG, JPEG, Office (native metadata channels)
 //   - skipFooterEmbedding = false → binary/text files (footer method)
-func createECPMetaFile(filePath string, inputMeta *Meta, passphrase string, skipFooterEmbedding bool) error {
-	log.Printf("Creating ECP signature for: %s", filePath)
+func createUSIMetaFile(filePath string, inputMeta *Meta, passphrase string, skipFooterEmbedding bool) error {
+	log.Printf("Creating USI signature for: %s", filePath)
 
 	documentData, err := os.ReadFile(filePath)
 	if err != nil {
@@ -579,7 +579,7 @@ func createECPMetaFile(filePath string, inputMeta *Meta, passphrase string, skip
 	}
 
 	// Fix 1: Ensure public key and org code are always embedded in Meta
-	// In createECPMetaFile, after Sign():
+	// In createUSIMetaFile, after Sign():
 	meta := &Meta{
 		Signature:          hex.EncodeToString(sig.Signature),
 		PublicKey:          hex.EncodeToString(sig.PublicKey),
@@ -601,7 +601,7 @@ func createECPMetaFile(filePath string, inputMeta *Meta, passphrase string, skip
 	if err != nil {
 		log.Printf("Warning: RawData database unavailable: %v", err)
 	} else {
-		if err := db.StoreECPMeta(filePath, meta); err != nil {
+		if err := db.StoreUSIMeta(filePath, meta); err != nil {
 			return fmt.Errorf("failed to store metadata in RawData: %w", err)
 		}
 		log.Printf("Metadata stored in RawData database for: %s", filePath)
@@ -725,7 +725,7 @@ func embedPNGMetadata(filePath string, meta *Meta, fingerprint, passphrase strin
 	if err := os.WriteFile(filePath, out, 0644); err != nil {
 		return err
 	}
-	if err := createECPMetaFile(filePath, meta, passphrase, true); err != nil {
+	if err := createUSIMetaFile(filePath, meta, passphrase, true); err != nil {
 		return err
 	}
 	log.Printf("PNG metadata embedded successfully: %s", filePath)
@@ -746,7 +746,7 @@ func extractPNGSignature(filePath string) (*Meta, error) {
 		chunkType := string(data[pos+4 : pos+8])
 		if chunkType == "iTXt" {
 			chunkData := data[pos+8 : pos+8+int(length)]
-			if bytes.Contains(chunkData, []byte("ECP-Signature")) {
+			if bytes.Contains(chunkData, []byte("USI-Signature")) {
 				jsonStart := bytes.Index(chunkData, []byte("{"))
 				if jsonStart >= 0 {
 					var meta Meta
@@ -795,7 +795,7 @@ func embedJPEGMetadata(filePath string, meta *Meta, fingerprint, passphrase stri
 	if err := os.WriteFile(filePath, out, 0644); err != nil {
 		return err
 	}
-	if err := createECPMetaFile(filePath, meta, passphrase, true); err != nil {
+	if err := createUSIMetaFile(filePath, meta, passphrase, true); err != nil {
 		return err
 	}
 	log.Printf("JPEG metadata embedded successfully: %s", filePath)
@@ -810,8 +810,8 @@ func extractJPEGSignature(filePath string) (*Meta, error) {
 	if len(data) < 2 || data[0] != 0xFF || data[1] != 0xD8 {
 		return nil, nil
 	}
-	if bytes.Contains(data, []byte("ECPSignature")) {
-		start := bytes.Index(data, []byte(`"ECPSignature":"`))
+	if bytes.Contains(data, []byte("USISignature")) {
+		start := bytes.Index(data, []byte(`"USISignature":"`))
 		if start >= 0 {
 			start += 16
 			end := bytes.Index(data[start:], []byte(`"`))
@@ -859,7 +859,7 @@ func embedPDFMetadata(filePath string, meta *Meta, fingerprint, passphrase strin
 	if err := os.WriteFile(filePath, signedData, 0644); err != nil {
 		return fmt.Errorf("writing signed document: %w", err)
 	}
-	if err := createECPMetaFile(filePath, meta, passphrase, true); err != nil {
+	if err := createUSIMetaFile(filePath, meta, passphrase, true); err != nil {
 		return err
 	}
 	log.Printf("PDF metadata embedded successfully: %s", filePath)
@@ -898,9 +898,9 @@ func extractPDFSignature(filePath string) (*Meta, error) {
 	}
 
 	markers := [][]byte{
-		[]byte("/ECPSignature("),
-		[]byte(`"ECPSignature":"`),
-		[]byte("<ecp:Signature>"),
+		[]byte("/USISignature("),
+		[]byte(`"USISignature":"`),
+		[]byte("<usi:Signature>"),
 	}
 
 	for _, marker := range markers {
@@ -916,7 +916,7 @@ func extractPDFSignature(filePath string) (*Meta, error) {
 		case '"':
 			end = bytes.Index(data[start:], []byte(`"`))
 		default:
-			end = bytes.Index(data[start:], []byte("</ecp:Signature>"))
+			end = bytes.Index(data[start:], []byte("</usi:Signature>"))
 		}
 		if end < 0 {
 			continue
@@ -958,7 +958,7 @@ func embedOfficeMetadata(filePath string, meta *Meta, fingerprint, passphrase st
 	if err := os.Rename(tempPath, filePath); err != nil {
 		return err
 	}
-	if err := createECPMetaFile(filePath, meta, passphrase, true); err != nil {
+	if err := createUSIMetaFile(filePath, meta, passphrase, true); err != nil {
 		return err
 	}
 	log.Printf("Office metadata embedded successfully: %s", filePath)
@@ -1037,7 +1037,7 @@ func extractOfficeSignature(filePath string) (*Meta, error) {
 		if err != nil {
 			continue
 		}
-		if !bytes.Contains(content, []byte("ECPSignature")) {
+		if !bytes.Contains(content, []byte("USISignature")) {
 			continue
 		}
 		start := bytes.Index(content, []byte("<vt:lpwstr>"))
@@ -1074,7 +1074,7 @@ func buildPDFStyleXMPPacket(meta *Meta, fingerprint string) string {
 
 	secureBlock := buildSecureMetadataBlock(meta, fingerprint)
 	cryptoDetails := fmt.Sprintf(
-		"ECP CRYPTOGRAPHIC SIGNATURE VERIFICATION\n\n"+
+		"USI CRYPTOGRAPHIC SIGNATURE VERIFICATION\n\n"+
 			"Fingerprint: %s\n"+
 			"Signature Status: VALID\n"+
 			"Timestamp: %s\n"+
@@ -1094,7 +1094,7 @@ func buildPDFStyleXMPPacket(meta *Meta, fingerprint string) string {
 
 	signer := meta.Signer
 	if signer == "" {
-		signer = "ECP Secure Vault"
+		signer = "USI Secure Vault"
 	}
 	docTitle := meta.DocumentTitle
 	if docTitle == "" {
@@ -1109,47 +1109,47 @@ func buildPDFStyleXMPPacket(meta *Meta, fingerprint string) string {
         xmlns:xmp="http://ns.adobe.com/xap/1.0/"
         xmlns:xmpRights="http://ns.adobe.com/xap/1.0/rights/"
         xmlns:pdf="http://ns.adobe.com/pdf/1.3/"
-        xmlns:ecp="http://ecprotocol.io/ns/1.0/">
+        xmlns:usi="http://usprotocol.io/ns/1.0/">
       <dc:title><rdf:Alt><rdf:li xml:lang="x-default">%s</rdf:li></rdf:Alt></dc:title>
       <dc:description><rdf:Alt><rdf:li xml:lang="x-default">%s</rdf:li></rdf:Alt></dc:description>
       <dc:creator><rdf:Seq><rdf:li>%s</rdf:li></rdf:Seq></dc:creator>
       <dc:subject>
         <rdf:Bag>
-          <rdf:li>ECP-SIGNED</rdf:li>
+          <rdf:li>USI-SIGNED</rdf:li>
           <rdf:li>Cryptographic Signature</rdf:li>
           <rdf:li>E2E Cipher Protocol</rdf:li>
           <rdf:li>Integrity Protected</rdf:li>
           <rdf:li>%s</rdf:li>
         </rdf:Bag>
       </dc:subject>
-      <pdf:Keywords>ECP Cryptographically Signed; Integrity Protected</pdf:Keywords>
+      <pdf:Keywords>USI Cryptographically Signed; Integrity Protected</pdf:Keywords>
       <xmp:CreateDate>%s</xmp:CreateDate>
       <xmp:ModifyDate>%s</xmp:ModifyDate>
       <xmp:MetadataDate>%s</xmp:MetadataDate>
       <xmp:CreatorTool>E2E Cipher Protocol v0.002</xmp:CreatorTool>
-      <xmp:Label>ECP-SIGNED</xmp:Label>
+      <xmp:Label>USI-SIGNED</xmp:Label>
       <xmpRights:Marked>True</xmpRights:Marked>
-      <xmpRights:UsageTerms><rdf:Alt><rdf:li xml:lang="x-default">Cryptographically signed. Verify with ECP before use.</rdf:li></rdf:Alt></xmpRights:UsageTerms>
-      <ecp:SecureMetadata>%s</ecp:SecureMetadata>
-      <ecp:CryptographicMetadata>%s</ecp:CryptographicMetadata>
-      <ecp:SignatureStatus>VALID</ecp:SignatureStatus>
-      <ecp:Protocol>E2E Cipher Protocol</ecp:Protocol>
-      <ecp:Version>ECP v0.002 Secure</ecp:Version>
-      <ecp:Algorithm>SHAKE-256 + post-quantum signature</ecp:Algorithm>
-      <ecp:Fingerprint>%s</ecp:Fingerprint>
-      <ecp:FingerprintFormatted>%s</ecp:FingerprintFormatted>
-      <ecp:SignedAt>%s</ecp:SignedAt>
-      <ecp:SignatureTimestamp>%s</ecp:SignatureTimestamp>
-      <ecp:Nonce>%s</ecp:Nonce>
-      <ecp:NoncePrefix>%s</ecp:NoncePrefix>
-      <ecp:FileHash_SHAKE256>%s</ecp:FileHash_SHAKE256>
-      <ecp:FileHash_Formatted>%s</ecp:FileHash_Formatted>
-      <ecp:FinalDocumentHash>%s</ecp:FinalDocumentHash>
-      <ecp:FinalDocumentHash_Formatted>%s</ecp:FinalDocumentHash_Formatted>
-      <ecp:PublicKey_A>%s</ecp:PublicKey_A>
-      <ecp:PublicKey_B>%s</ecp:PublicKey_B>
-      <ecp:Signature_A>%s</ecp:Signature_A>
-      <ecp:Signature_B>%s</ecp:Signature_B>
+      <xmpRights:UsageTerms><rdf:Alt><rdf:li xml:lang="x-default">Cryptographically signed. Verify with USI before use.</rdf:li></rdf:Alt></xmpRights:UsageTerms>
+      <usi:SecureMetadata>%s</usi:SecureMetadata>
+      <usi:CryptographicMetadata>%s</usi:CryptographicMetadata>
+      <usi:SignatureStatus>VALID</usi:SignatureStatus>
+      <usi:Protocol>E2E Cipher Protocol</usi:Protocol>
+      <usi:Version>USI v0.002 Secure</usi:Version>
+      <usi:Algorithm>SHAKE-256 + post-quantum signature</usi:Algorithm>
+      <usi:Fingerprint>%s</usi:Fingerprint>
+      <usi:FingerprintFormatted>%s</usi:FingerprintFormatted>
+      <usi:SignedAt>%s</usi:SignedAt>
+      <usi:SignatureTimestamp>%s</usi:SignatureTimestamp>
+      <usi:Nonce>%s</usi:Nonce>
+      <usi:NoncePrefix>%s</usi:NoncePrefix>
+      <usi:FileHash_SHAKE256>%s</usi:FileHash_SHAKE256>
+      <usi:FileHash_Formatted>%s</usi:FileHash_Formatted>
+      <usi:FinalDocumentHash>%s</usi:FinalDocumentHash>
+      <usi:FinalDocumentHash_Formatted>%s</usi:FinalDocumentHash_Formatted>
+      <usi:PublicKey_A>%s</usi:PublicKey_A>
+      <usi:PublicKey_B>%s</usi:PublicKey_B>
+      <usi:Signature_A>%s</usi:Signature_A>
+      <usi:Signature_B>%s</usi:Signature_B>
     </rdf:Description>
   </rdf:RDF>
 </x:xmpmeta>
@@ -1209,7 +1209,7 @@ func buildOfficeCustomPropsPDFStyle(meta *Meta, fingerprint string) []byte {
 
 	secureBlock := buildSecureMetadataBlock(meta, fingerprint)
 	cryptoBlock := fmt.Sprintf(
-		"ECP CRYPTOGRAPHIC SIGNATURE VERIFICATION\n\n"+
+		"USI CRYPTOGRAPHIC SIGNATURE VERIFICATION\n\n"+
 			"Fingerprint: %s\n"+
 			"Signature Status: VALID\n"+
 			"Timestamp: %s\n"+
@@ -1230,25 +1230,25 @@ func buildOfficeCustomPropsPDFStyle(meta *Meta, fingerprint string) []byte {
 		val  string
 	}
 	props := []prop{
-		{2, "ECP_SignatureStatus", "VALID"},
-		{3, "ECP_Protocol", "E2E Cipher Protocol v0.002"},
-		{4, "ECP_Algorithm", "SHAKE-256 + post-quantum signature"},
-		{5, "ECP_Version", "ECP v0.002 Secure"},
-		{6, "ECP_Fingerprint", formatFingerprintLegacy(fingerprint)},
-		{7, "ECP_SignedAt", ts},
-		{8, "ECP_SignatureTimestamp", sigTs},
-		{9, "ECP_Nonce", nonce},
-		{10, "ECP_NoncePrefix", getNoncePrefix(nonce)},
-		{11, "ECP_SecureMetadata", secureBlock},
-		{12, "ECP_CryptographicMetadata", cryptoBlock},
-		{13, "ECP_FileHash_SHAKE256", meta.FileHash},
-		{14, "ECP_FinalDocumentHash", meta.FinalDocumentHash},
-		{15, "ECP_PublicKey_A", pubKeyA},
-		{16, "ECP_PublicKey_B", pubKeyB},
-		{17, "ECP_Signature_A", sigA},
-		{18, "ECP_Signature_B", sigB},
-		{19, "ECP_Signer", meta.Signer},
-		{20, "ECP_DocumentTitle", meta.DocumentTitle},
+		{2, "USI_SignatureStatus", "VALID"},
+		{3, "USI_Protocol", "E2E Cipher Protocol v0.002"},
+		{4, "USI_Algorithm", "SHAKE-256 + post-quantum signature"},
+		{5, "USI_Version", "USI v0.002 Secure"},
+		{6, "USI_Fingerprint", formatFingerprintLegacy(fingerprint)},
+		{7, "USI_SignedAt", ts},
+		{8, "USI_SignatureTimestamp", sigTs},
+		{9, "USI_Nonce", nonce},
+		{10, "USI_NoncePrefix", getNoncePrefix(nonce)},
+		{11, "USI_SecureMetadata", secureBlock},
+		{12, "USI_CryptographicMetadata", cryptoBlock},
+		{13, "USI_FileHash_SHAKE256", meta.FileHash},
+		{14, "USI_FinalDocumentHash", meta.FinalDocumentHash},
+		{15, "USI_PublicKey_A", pubKeyA},
+		{16, "USI_PublicKey_B", pubKeyB},
+		{17, "USI_Signature_A", sigA},
+		{18, "USI_Signature_B", sigB},
+		{19, "USI_Signer", meta.Signer},
+		{20, "USI_DocumentTitle", meta.DocumentTitle},
 	}
 
 	var sb strings.Builder
@@ -1361,7 +1361,7 @@ func injectCustomPropsRel(relsXML []byte) []byte {
 		log.Printf("Warning: suspicious content in relsXML, skipping injection")
 		return relsXML
 	}
-	rel := `<Relationship Id="rId_ecp_custom" Type="` + relType + `" Target="docProps/custom.xml"/>`
+	rel := `<Relationship Id="rId_usi_custom" Type="` + relType + `" Target="docProps/custom.xml"/>`
 	return bytes.Replace(relsXML,
 		[]byte("</Relationships>"),
 		append([]byte("\n  "+rel+"\n"), []byte("</Relationships>")...),
@@ -1415,7 +1415,7 @@ func setRichXattrs(filePath string, meta *Meta, fingerprint string) error {
 	}
 
 	description := fmt.Sprintf(
-		"ECP CRYPTOGRAPHIC SIGNATURE VERIFICATION\n\n"+
+		"USI CRYPTOGRAPHIC SIGNATURE VERIFICATION\n\n"+
 			"Fingerprint: %s\n"+
 			"Signature Status: VALID\n"+
 			"Timestamp: %s\n"+
@@ -1432,7 +1432,7 @@ func setRichXattrs(filePath string, meta *Meta, fingerprint string) error {
 
 	signer := meta.Signer
 	if signer == "" {
-		signer = "ECP Secure Vault"
+		signer = "USI Secure Vault"
 	}
 	docTitle := meta.DocumentTitle
 	if docTitle == "" {
@@ -1443,31 +1443,31 @@ func setRichXattrs(filePath string, meta *Meta, fingerprint string) error {
 		"kMDItemTitle":                      docTitle,
 		"kMDItemAuthors":                    []string{signer},
 		"kMDItemDescription":                description,
-		"kMDItemKeywords":                   []string{"Integrity Protection", "Cryptographic Signature", "ECP"},
-		"kMDItemComment":                    fmt.Sprintf("ECP VALID | Signed: %s | FP: %s", ts, formatFingerprintLegacy(fingerprint)),
-		"kMDItemCreator":                    "ECP v0.002 Secure",
+		"kMDItemKeywords":                   []string{"Integrity Protection", "Cryptographic Signature", "USI"},
+		"kMDItemComment":                    fmt.Sprintf("USI VALID | Signed: %s | FP: %s", ts, formatFingerprintLegacy(fingerprint)),
+		"kMDItemCreator":                    "USI v0.002 Secure",
 		"kMDItemEncodingApplicationVersion": "E2E Cipher Protocol",
-		"kMDItemVersion":                    "ECP v0.002",
+		"kMDItemVersion":                    "USI v0.002",
 	}); err != nil {
 		log.Printf("Warning: bplist xattr write failed: %v", err)
 	}
 
 	plainAttrs := map[string]string{
-		"io.ecprotocol.status":          "VALID",
-		"io.ecprotocol.protocol":        "E2E Cipher Protocol v0.002",
-		"io.ecprotocol.algorithm":       "SHAKE-256 + post-quantum signature",
-		"io.ecprotocol.fingerprint":     fingerprint,
-		"io.ecprotocol.fingerprint_fmt": formatFingerprintLegacy(fingerprint),
-		"io.ecprotocol.signed_at":       ts,
-		"io.ecprotocol.signature_ts":    sigTs,
-		"io.ecprotocol.filehash":        meta.FileHash,
-		"io.ecprotocol.finaldochash":    meta.FinalDocumentHash,
-		"io.ecprotocol.publickey":       meta.PublicKey,
-		"io.ecprotocol.signature":       meta.Signature,
-		"io.ecprotocol.nonce":           nonce,
-		"io.ecprotocol.version":         "ECP v0.002 Secure",
-		"io.ecprotocol.signer":          meta.Signer,
-		"io.ecprotocol.document_title":  meta.DocumentTitle,
+		"io.usprotocol.status":          "VALID",
+		"io.usprotocol.protocol":        "E2E Cipher Protocol v0.002",
+		"io.usprotocol.algorithm":       "SHAKE-256 + post-quantum signature",
+		"io.usprotocol.fingerprint":     fingerprint,
+		"io.usprotocol.fingerprint_fmt": formatFingerprintLegacy(fingerprint),
+		"io.usprotocol.signed_at":       ts,
+		"io.usprotocol.signature_ts":    sigTs,
+		"io.usprotocol.filehash":        meta.FileHash,
+		"io.usprotocol.finaldochash":    meta.FinalDocumentHash,
+		"io.usprotocol.publickey":       meta.PublicKey,
+		"io.usprotocol.signature":       meta.Signature,
+		"io.usprotocol.nonce":           nonce,
+		"io.usprotocol.version":         "USI v0.002 Secure",
+		"io.usprotocol.signer":          meta.Signer,
+		"io.usprotocol.document_title":  meta.DocumentTitle,
 	}
 	for key, value := range plainAttrs {
 		safeKey := sanitizeXattrValue(key)
@@ -1495,7 +1495,7 @@ func setRichXattrs(filePath string, meta *Meta, fingerprint string) error {
 	// Finder comment via AppleScript
 	if !strings.HasPrefix(absPath, filepath.Clean("/Users/")) &&
 		!strings.HasPrefix(absPath, filepath.Clean("/System/Volumes/Data/Users/")) {
-		if !strings.Contains(absPath, ".ecp") {
+		if !strings.Contains(absPath, ".usi") {
 			log.Printf("Skipping AppleScript Finder comment for path outside /Users: %s", absPath)
 			goto skipAppleScript
 		}
@@ -1533,7 +1533,7 @@ func extractXattrSignature(filePath string) (*Meta, error) {
 		return nil, nil
 	}
 
-	output, err := exec.Command("xattr", "-p", "io.ecprotocol.signature", filePath).Output()
+	output, err := exec.Command("xattr", "-p", "io.usprotocol.signature", filePath).Output()
 	if err != nil {
 		return nil, nil
 	}
@@ -1627,7 +1627,7 @@ f = sys.argv[1]
 	}
 
 	// Use the venv python that has xattr installed, or fall back to system python
-	pythonPath := "/Users/kusuma/ecp-venv/bin/python3"
+	pythonPath := "/Users/kusuma/usi-venv/bin/python3"
 	if _, err := os.Stat(pythonPath); os.IsNotExist(err) {
 		pythonPath = "python3"
 	}
@@ -1656,7 +1656,7 @@ func EmbedSidecar(filePath string, meta *Meta, passphrase string) error {
 }
 
 func EmbedPDF(filePath string, meta *Meta, passphrase string) error {
-	return EmbedSignature(filePath, meta, "ECP Secure File Vault", passphrase)
+	return EmbedSignature(filePath, meta, "USI Secure File Vault", passphrase)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1668,7 +1668,7 @@ func createSignaturePage(filePath string, meta *Meta, fingerprint string) error 
 	pdf.AddPage()
 
 	pdf.SetFont("Arial", "B", 16)
-	pdf.Cell(0, 10, "ECP CRYPTOGRAPHIC SIGNATURE")
+	pdf.Cell(0, 10, "USI CRYPTOGRAPHIC SIGNATURE")
 	pdf.Ln(12)
 
 	pdf.SetFont("Arial", "I", 10)
@@ -1685,7 +1685,7 @@ func createSignaturePage(filePath string, meta *Meta, fingerprint string) error 
 	pdf.SetY(-20)
 	pdf.SetFont("Arial", "I", 8)
 	pdf.CellFormat(0, 10,
-		fmt.Sprintf("ECP Integrity Protected - Signed at %s",
+		fmt.Sprintf("USI Integrity Protected - Signed at %s",
 			time.Unix(meta.Timestamp, 0).Format("2006-01-02 15:04:05")),
 		"", 0, "C", false, 0, "")
 
@@ -1741,7 +1741,7 @@ func cleanPDFMetadata(info map[string]string) map[string]string {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func extractMetadataFromPDF(filePath string) (*Meta, error) {
-	sidecarPath := filePath + ".ecpmeta"
+	sidecarPath := filePath + ".usimeta"
 	if info, err := os.Stat(sidecarPath); err == nil {
 		if info.Mode().Perm()&0022 != 0 {
 			log.Printf("Skipping world-writable sidecar: %s", sidecarPath)
@@ -1764,7 +1764,7 @@ func extractMetadataFromPDF(filePath string) (*Meta, error) {
 	if err == nil && meta != nil {
 		return meta, nil
 	}
-	return nil, fmt.Errorf("ECP signature metadata not found in PDF")
+	return nil, fmt.Errorf("USI signature metadata not found in PDF")
 }
 
 func extractMetadataByBinaryScan(filePath string) (*Meta, error) {
@@ -1795,10 +1795,10 @@ func extractMetadataByBinaryScan(filePath string) (*Meta, error) {
 	}
 	defer secureZeroBytes(buf)
 
-	marker := []byte(`"ECPSignature":`)
+	marker := []byte(`"USISignature":`)
 	idx := bytes.Index(buf, marker)
 	if idx == -1 {
-		return nil, errors.New("ECPSignature marker not found")
+		return nil, errors.New("USISignature marker not found")
 	}
 
 	start := idx
@@ -1824,14 +1824,14 @@ func extractMetadataByBinaryScan(filePath string) (*Meta, error) {
 	if err := json.Unmarshal(jsonData, &outer); err != nil {
 		return nil, fmt.Errorf("parsing outer JSON: %w", err)
 	}
-	ecpRaw, ok := outer["ECPSignature"]
+	usiRaw, ok := outer["USISignature"]
 	if !ok {
-		return nil, errors.New("ECPSignature key not present")
+		return nil, errors.New("USISignature key not present")
 	}
 
 	// Try double-encoded (string wrapping a JSON object)
 	var nested string
-	if err := json.Unmarshal(ecpRaw, &nested); err == nil {
+	if err := json.Unmarshal(usiRaw, &nested); err == nil {
 		var meta Meta
 		if err := json.Unmarshal([]byte(nested), &meta); err != nil {
 			return nil, fmt.Errorf("parsing nested Meta: %w", err)
@@ -1840,14 +1840,14 @@ func extractMetadataByBinaryScan(filePath string) (*Meta, error) {
 	}
 
 	var meta Meta
-	if err := json.Unmarshal(ecpRaw, &meta); err != nil {
-		return nil, fmt.Errorf("parsing ECPSignature as Meta: %w", err)
+	if err := json.Unmarshal(usiRaw, &meta); err != nil {
+		return nil, fmt.Errorf("parsing USISignature as Meta: %w", err)
 	}
 	return &meta, nil
 }
 
-// verifyECPMetaWithDetails verifies a .ecpmeta sidecar without requiring a passphrase.
-func verifyECPMetaWithDetails(filePath, metaPath string) (bool, *Meta, error) {
+// verifyUSIMetaWithDetails verifies a .usimeta sidecar without requiring a passphrase.
+func verifyUSIMetaWithDetails(filePath, metaPath string) (bool, *Meta, error) {
 	fileData, err := os.ReadFile(filePath)
 	if err != nil {
 		return false, nil, fmt.Errorf("cannot read file: %w", err)
@@ -1910,7 +1910,7 @@ func verifyECPMetaWithDetails(filePath, metaPath string) (bool, *Meta, error) {
 func embedMOVQuickTimeMetadata(filePath string, meta *Meta, fingerprint string) error {
 	log.Printf("Embedding QuickTime metadata for: %s", filePath)
 	ts := time.Unix(meta.Timestamp, 0).Format("2006-01-02 15:04:05")
-	comment := fmt.Sprintf("ECP VALID | Signed: %s | FP: %s | Hash: %.16s",
+	comment := fmt.Sprintf("USI VALID | Signed: %s | FP: %s | Hash: %.16s",
 		ts, formatFingerprintLegacy(fingerprint), meta.FileHash)
 
 	udtaData := make([]byte, 0)
@@ -1918,7 +1918,7 @@ func embedMOVQuickTimeMetadata(filePath string, meta *Meta, fingerprint string) 
 	udtaData = append(udtaData, buildQuickTimeAtom("©ART", []byte(meta.Signer))...)
 	udtaData = append(udtaData, buildQuickTimeAtom("©cmt", []byte(comment))...)
 	udtaData = append(udtaData, buildQuickTimeAtom("©day", []byte(ts))...)
-	descText := fmt.Sprintf("ECP Signed Document - Status: VALID - Fingerprint: %s", fingerprint[:20])
+	descText := fmt.Sprintf("USI Signed Document - Status: VALID - Fingerprint: %s", fingerprint[:20])
 	udtaData = append(udtaData, buildQuickTimeAtom("©des", []byte(descText))...)
 
 	f, err := os.OpenFile(filePath, os.O_APPEND|os.O_WRONLY, 0644)
@@ -2172,7 +2172,7 @@ func secureRemove(path string) {
 	allowedPrefixes := []string{
 		filepath.Clean("/Users/"),
 		filepath.Clean("/System/Volumes/Data/Users/"),
-		filepath.Clean("/tmp/ecp"),
+		filepath.Clean("/tmp/usi"),
 	}
 	isAllowed := false
 	for _, prefix := range allowedPrefixes {
@@ -2181,7 +2181,7 @@ func secureRemove(path string) {
 			break
 		}
 	}
-	if !isAllowed && !strings.Contains(absPath, ".ecp") {
+	if !isAllowed && !strings.Contains(absPath, ".usi") {
 		log.Printf("secureRemove: rejecting path outside allowed directories: %s", absPath)
 		return
 	}

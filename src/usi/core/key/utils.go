@@ -21,7 +21,7 @@ import (
 // Legacy constants — kept for backward compatibility
 // ─────────────────────────────────────────────────────────────────────────────
 
-// SPIFPrefix is the legacy 4-byte prefix used by pre-org-address vaults.
+// SPIFPrefix is the 4-byte prefix used by addresses.
 // New code should use OrgPrefix(code) instead.
 var SPIFPrefix = []byte("SPIF")
 
@@ -117,7 +117,7 @@ func verifyChecksum(data []byte) bool {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SHAKE-256 raw helper (used by both legacy SHAKE256Hash and new org functions)
+// SHAKE-256 raw helper (used by both SHAKE256Hash and new org functions)
 // ─────────────────────────────────────────────────────────────────────────────
 
 // shake256Raw returns a 32-byte SHAKE-256 hash of data with no prefix or checksum.
@@ -132,47 +132,37 @@ func shake256Raw(data []byte) []byte {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Legacy SHAKE256Hash — kept for backward compatibility with existing vaults
-// ─────────────────────────────────────────────────────────────────────────────
-
-// SHAKE256Hash generates a 32-byte SHAKE256 hash with the legacy SPIF prefix
+// SHAKE256Hash — generates a 32-byte SHAKE256 hash with the SPIF prefix
 // and a 4-byte checksum.
-//
-// Deprecated: use SHAKE256HashWithOrg for new registrations.
 func SHAKE256Hash(data []byte) []byte {
-	log.Printf("[INFO] SHAKE256Hash: computing SHAKE256 hash (legacy SPIF format)")
+	log.Printf("[INFO] SHAKE256Hash: computing SHAKE256 hash (SPIF format)")
 	log.Printf("[DEBUG] SHAKE256Hash: input data size: %d bytes", len(data))
 
 	out := shake256Raw(data)
 	withPrefix := append(SPIFPrefix, out...)
 	result := addChecksum(withPrefix)
 
-	log.Printf("[SUCCESS] SHAKE256Hash: legacy SPIF fingerprint generated, size: %d bytes", len(result))
+	log.Printf("[SUCCESS] SHAKE256Hash: SPIF fingerprint generated, size: %d bytes", len(result))
 	log.Printf("[DEBUG] SHAKE256Hash: result (first 8 bytes): %x", result[:8])
 	return result
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Legacy FormatECPFingerprint — kept for backward compatibility
-// ─────────────────────────────────────────────────────────────────────────────
-
-// FormatECPFingerprint formats a byte slice (with SPIF prefix + checksum) into
+// FormatFingerprint — formats a byte slice (with SPIF prefix + checksum) into
 // the human-readable "SPIF XXXX XXXX …" form.
-//
-// Deprecated: use FormatOrgAddress for new addresses.
-func FormatECPFingerprint(data []byte) string {
-	log.Printf("[INFO] FormatECPFingerprint: formatting ECP fingerprint (legacy SPIF format)")
-	log.Printf("[DEBUG] FormatECPFingerprint: input data size: %d bytes", len(data))
+func FormatFingerprint(data []byte) string {
+	log.Printf("[INFO] FormatFingerprint: formatting fingerprint (SPIF format)")
+	log.Printf("[DEBUG] FormatFingerprint: input data size: %d bytes", len(data))
 
 	hasPrefix := len(data) >= 4 && string(data[:4]) == "SPIF"
-	log.Printf("[DEBUG] FormatECPFingerprint: has SPIF prefix: %v", hasPrefix)
+	log.Printf("[DEBUG] FormatFingerprint: has SPIF prefix: %v", hasPrefix)
 
 	if hasPrefix {
 		body := data[4:]
 		var hashData []byte
 		if len(body) > ChecksumLength {
 			hashData = body[:len(body)-ChecksumLength]
-			log.Printf("[DEBUG] FormatECPFingerprint: stripped prefix and checksum, hash size: %d bytes", len(hashData))
+			log.Printf("[DEBUG] FormatFingerprint: stripped prefix and checksum, hash size: %d bytes", len(hashData))
 		} else {
 			hashData = body
 		}
@@ -187,7 +177,7 @@ func FormatECPFingerprint(data []byte) string {
 			groups = append(groups, hexHash[i:end])
 		}
 		result := "SPIF " + strings.Join(groups, " ")
-		log.Printf("[SUCCESS] FormatECPFingerprint: formatted: %s", result[:min(50, len(result))]+"...")
+		log.Printf("[SUCCESS] FormatFingerprint: formatted: %s", result[:min(50, len(result))]+"...")
 		return result
 	}
 
@@ -201,7 +191,7 @@ func FormatECPFingerprint(data []byte) string {
 		groups = append(groups, hexStr[i:end])
 	}
 	result := strings.Join(groups, " ")
-	log.Printf("[SUCCESS] FormatECPFingerprint: formatted (no prefix): %s", result[:min(50, len(result))]+"...")
+	log.Printf("[SUCCESS] FormatFingerprint: formatted (no prefix): %s", result[:min(50, len(result))]+"...")
 	return result
 }
 
@@ -237,7 +227,7 @@ func ReadFile(path string) ([]byte, error) {
 	if len(data) >= 4 {
 		prefix := string(data[:4])
 		if prefix == "SPIF" {
-			log.Printf("[INFO] ReadFile: file contains legacy SPIF prefix")
+			log.Printf("[INFO] ReadFile: file contains SPIF prefix")
 		} else if IsValidOrgCode(strings.TrimSpace(prefix)) {
 			log.Printf("[INFO] ReadFile: file contains org prefix: %q", strings.TrimSpace(prefix))
 		} else {
@@ -254,9 +244,7 @@ func ReadFile(path string) ([]byte, error) {
 // RandomBytes
 // ─────────────────────────────────────────────────────────────────────────────
 
-// RandomBytes generates n random bytes with the legacy SPIF prefix.
-//
-// Deprecated: prefer building org-addressed random bytes via OrgPrefix + rand.
+// RandomBytes generates n random bytes with the SPIF prefix.
 func RandomBytes(n int) ([]byte, error) {
 	log.Printf("[INFO] RandomBytes: generating random bytes, size: %d bytes", n)
 
@@ -292,7 +280,7 @@ func ParseFingerprints(input string) []string {
 	return result
 }
 
-// IsValidFingerprintFormat validates either legacy SPIF or new org-prefix addresses.
+// IsValidFingerprintFormat validates either SPIF or org-prefix addresses.
 func IsValidFingerprintFormat(fp string) bool {
 	log.Printf("[DEBUG] IsValidFingerprintFormat: validating: %s", fp[:min(40, len(fp))])
 
@@ -300,13 +288,13 @@ func IsValidFingerprintFormat(fp string) bool {
 	clean = strings.ReplaceAll(clean, "-", "")
 	clean = strings.ToUpper(clean)
 
-	// Try new org-prefix format first.
+	// Try org-prefix format first.
 	if IsValidOrgAddressFormat(fp) {
 		log.Printf("[SUCCESS] IsValidFingerprintFormat: valid org-prefix address")
 		return true
 	}
 
-	// Fall back to legacy SPIF.
+	// Fall back to SPIF.
 	clean = strings.TrimPrefix(clean, "SPIF")
 	if len(clean) < 64 || len(clean) > 72 {
 		log.Printf("[WARN] IsValidFingerprintFormat: invalid length: %d (expected 64-72)", len(clean))
@@ -325,14 +313,14 @@ func IsValidFingerprintFormat(fp string) bool {
 	}
 	if len(b) == 36 {
 		result := verifyChecksum(b)
-		log.Printf("[DEBUG] IsValidFingerprintFormat: legacy SPIF with checksum, valid: %v", result)
+		log.Printf("[DEBUG] IsValidFingerprintFormat: SPIF with checksum, valid: %v", result)
 		return result
 	}
-	log.Printf("[SUCCESS] IsValidFingerprintFormat: valid legacy SPIF fingerprint")
+	log.Printf("[SUCCESS] IsValidFingerprintFormat: valid SPIF fingerprint")
 	return len(b) == 32
 }
 
-// FormatFingerprintForDisplay formats any address (legacy or org-based) nicely.
+// FormatFingerprintForDisplay formats any address (org-based) nicely.
 func FormatFingerprintForDisplay(fp string) string {
 	log.Printf("[INFO] FormatFingerprintForDisplay: formatting: %s", fp[:min(40, len(fp))])
 
@@ -360,7 +348,7 @@ func FormatFingerprintForDisplay(fp string) string {
 		return result
 	}
 
-	// Legacy SPIF fallback.
+	// SPIF fallback.
 	clean = strings.TrimPrefix(clean, "SPIF")
 	var result strings.Builder
 	for i := 0; i < len(clean) && i < 64; i += 4 {
@@ -374,7 +362,7 @@ func FormatFingerprintForDisplay(fp string) string {
 		result.WriteString(clean[i:end])
 	}
 	finalResult := "SPIF " + result.String()
-	log.Printf("[SUCCESS] FormatFingerprintForDisplay: formatted legacy SPIF: %s", finalResult[:min(50, len(finalResult))])
+	log.Printf("[SUCCESS] FormatFingerprintForDisplay: formatted SPIF: %s", finalResult[:min(50, len(finalResult))])
 	return finalResult
 }
 
@@ -388,13 +376,13 @@ func extractOrgCodePublic(s string) (code, rest string) {
 func VerifyFingerprintChecksum(addr string) bool {
 	log.Printf("[INFO] VerifyFingerprintChecksum: verifying checksum for: %s", addr[:min(40, len(addr))])
 
-	// Try new org format first.
+	// Try org format first.
 	if VerifyOrgAddressChecksum(addr) {
 		log.Printf("[SUCCESS] VerifyFingerprintChecksum: org-prefix checksum verified")
 		return true
 	}
 
-	// Legacy SPIF.
+	// SPIF format.
 	clean := strings.ReplaceAll(addr, " ", "")
 	clean = strings.ReplaceAll(clean, "-", "")
 	clean = strings.ToUpper(clean)
@@ -407,7 +395,7 @@ func VerifyFingerprintChecksum(addr string) bool {
 	}
 	if len(b) == 36 {
 		result := verifyChecksum(b)
-		log.Printf("[DEBUG] VerifyFingerprintChecksum: legacy SPIF checksum verified: %v", result)
+		log.Printf("[DEBUG] VerifyFingerprintChecksum: SPIF checksum verified: %v", result)
 		return result
 	}
 	log.Printf("[SUCCESS] VerifyFingerprintChecksum: valid without checksum (32 bytes)")
@@ -415,10 +403,10 @@ func VerifyFingerprintChecksum(addr string) bool {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SPIF prefix helpers (legacy — retained for vault.go compatibility)
+// SPIF prefix helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-// ExtractDataWithoutPrefix removes the SPIF prefix (legacy).
+// ExtractDataWithoutPrefix removes the SPIF prefix.
 func ExtractDataWithoutPrefix(data []byte) ([]byte, error) {
 	log.Printf("[DEBUG] ExtractDataWithoutPrefix: checking for SPIF prefix in %d bytes", len(data))
 	if len(data) < 4 || string(data[:4]) != "SPIF" {
@@ -430,7 +418,7 @@ func ExtractDataWithoutPrefix(data []byte) ([]byte, error) {
 	return result, nil
 }
 
-// AddSPIFPrefix adds the SPIF prefix if not already present (legacy).
+// AddSPIFPrefix adds the SPIF prefix if not already present.
 func AddSPIFPrefix(data []byte) []byte {
 	if len(data) >= 4 && string(data[:4]) == "SPIF" {
 		log.Printf("[DEBUG] AddSPIFPrefix: SPIF prefix already present")
@@ -441,7 +429,7 @@ func AddSPIFPrefix(data []byte) []byte {
 	return result
 }
 
-// HasSPIFPrefix reports whether data starts with "SPIF" (legacy).
+// HasSPIFPrefix reports whether data starts with "SPIF".
 func HasSPIFPrefix(data []byte) bool {
 	has := len(data) >= 4 && string(data[:4]) == "SPIF"
 	log.Printf("[DEBUG] HasSPIFPrefix: %v", has)
@@ -450,7 +438,7 @@ func HasSPIFPrefix(data []byte) bool {
 
 // ComputeFingerprint returns hex(SHA3-256(pubKeyBytes)).
 // This is the canonical fingerprint used by the key server — distinct from
-// the SHAKE256/org-address fingerprint used for human-readable ECP addresses.
+// the SHAKE256/org-address fingerprint used for human-readable addresses.
 // The key server needs a plain SHA3-256 hash, not the org-prefixed SHAKE256 format.
 func ComputeFingerprint(pubKeyBytes []byte) (string, error) {
 	log.Printf("[INFO] ComputeFingerprint: computing fingerprint from %d bytes", len(pubKeyBytes))
@@ -484,13 +472,13 @@ func GetPublicKeyFingerprintFromBytes(pubKeyBytes []byte, orgCode OrgCode) strin
 // GetPublicKeyFingerprintFromBytesLegacy is for backward compatibility
 // when org code is unknown (falls back to SPIF format)
 func GetPublicKeyFingerprintFromBytesLegacy(pubKeyBytes []byte) string {
-	log.Printf("[INFO] GetPublicKeyFingerprintFromBytesLegacy: generating legacy SPIF fingerprint")
+	log.Printf("[INFO] GetPublicKeyFingerprintFromBytesLegacy: generating SPIF fingerprint")
 	log.Printf("[DEBUG] GetPublicKeyFingerprintFromBytesLegacy: public key size: %d bytes", len(pubKeyBytes))
 
-	// Legacy path — SPIF format
+	// SPIF format
 	fingerprint := SHAKE256Hash(pubKeyBytes)
-	result := FormatECPFingerprint(fingerprint)
+	result := FormatFingerprint(fingerprint)
 
-	log.Printf("[SUCCESS] GetPublicKeyFingerprintFromBytesLegacy: generated legacy fingerprint: %s", result[:min(50, len(result))])
+	log.Printf("[SUCCESS] GetPublicKeyFingerprintFromBytesLegacy: generated SPIF fingerprint: %s", result[:min(50, len(result))])
 	return result
 }

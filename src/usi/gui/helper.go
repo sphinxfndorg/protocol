@@ -39,7 +39,7 @@ var (
 	keyStore     pubkeydir.Store
 	keyStoreOnce sync.Once
 	// Check env var, default to true if not set
-	useRemoteServer = os.Getenv("ECP_NO_SERVER") != "true" // Default to ON unless explicitly disabled
+	useRemoteServer = os.Getenv("USI_NO_SERVER") != "true" // Default to ON unless explicitly disabled
 	serverURL       = "http://localhost:8080"
 )
 
@@ -183,7 +183,7 @@ func getVaultSenderInfo(vaultPath string) (senderFP string, senderOrg string, er
 	// Skip magic number if present
 	magicBuf := make([]byte, 10)
 	if _, readErr := f.Read(magicBuf); readErr == nil {
-		if string(magicBuf) != "ECP_VAULT\x00" {
+		if string(magicBuf) != "USI_VAULT\x00" {
 			f.Seek(0, io.SeekStart)
 		}
 	} else {

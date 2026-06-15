@@ -18,7 +18,7 @@ import (
 )
 
 // IsAlreadySigned returns true (and the existing fingerprint) when the file
-// already contains an ECP signature.
+// already contains a USI signature.
 func IsAlreadySigned(filePath string) (bool, string, error) {
 	log.Printf("[INFO] IsAlreadySigned: checking if file is already signed: %s", filePath)
 
@@ -76,12 +76,12 @@ func pdfAlreadySigned(filePath string) (bool, string, error) {
 	}
 	log.Printf("[INFO] pdfAlreadySigned: PDF properties extracted, found %d properties", len(props))
 
-	if raw, ok := props["ECPSignature"]; ok && raw != "" {
-		log.Printf("[INFO] pdfAlreadySigned: ECPSignature property found, length: %d bytes", len(raw))
+	if raw, ok := props["USISignature"]; ok && raw != "" {
+		log.Printf("[INFO] pdfAlreadySigned: USISignature property found, length: %d bytes", len(raw))
 		var m Meta
 		if err := json.Unmarshal([]byte(raw), &m); err != nil {
-			log.Printf("[ERROR] pdfAlreadySigned: corrupt ECPSignature property: %v", err)
-			return false, "", errors.New("corrupt ECPSignature property")
+			log.Printf("[ERROR] pdfAlreadySigned: corrupt USISignature property: %v", err)
+			return false, "", errors.New("corrupt USISignature property")
 		}
 		fpPreview := m.PublicKey
 		if len(fpPreview) > 12 {
@@ -91,13 +91,13 @@ func pdfAlreadySigned(filePath string) (bool, string, error) {
 		return true, fpPreview, nil
 	}
 
-	log.Printf("[INFO] pdfAlreadySigned: no ECPSignature property found")
+	log.Printf("[INFO] pdfAlreadySigned: no USISignature property found")
 	return false, "", nil
 }
 
 // ---------- non-PDF (side-car) ---------------------------------
 func sidecarAlreadySigned(filePath string) (bool, string, error) {
-	side := filePath + ".ecpmeta"
+	side := filePath + ".usimeta"
 	log.Printf("[INFO] sidecarAlreadySigned: checking for sidecar file: %s", side)
 
 	data, err := os.ReadFile(side)
@@ -113,8 +113,8 @@ func sidecarAlreadySigned(filePath string) (bool, string, error) {
 
 	var m Meta
 	if err := json.Unmarshal(data, &m); err != nil {
-		log.Printf("[ERROR] sidecarAlreadySigned: corrupt .ecpmeta file: %v", err)
-		return false, "", errors.New("corrupt .ecpmeta file")
+		log.Printf("[ERROR] sidecarAlreadySigned: corrupt .usimeta file: %v", err)
+		return false, "", errors.New("corrupt .usimeta file")
 	}
 
 	fpPreview := m.PublicKey

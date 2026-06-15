@@ -1,0 +1,22 @@
+{
+  "timestamp": 1781549424,
+  "type": "initial",
+  "db_path": "keys/kem/kem_db",
+  "entries": [
+    {
+      "key": "a2VtX3B1YmxpYw==",
+      "value": "IAAPpmrnKyJm8IjDMueDAI6rJpg7DDRCiyppoQw9PscYWjBZRSf8ZKCryfCmP9sSLC2QNRAEm+v5MHvaLtg7Pd58BnqsHIfiKlsYtu5lNMw6THRVmRyWuPz1BykQo1bycj/7i5IqxAxjMgVLFZWyBSB7eeXkYWiwG8kYTp/LcBEWbEklqPMjPO4kXKy7LblczxccGRCbOkPkq+gSIKrURBVgqY98mJaGpj30meDsNt5wPz4SdbOHLFsMHNrSxI1cZ2N5mP/reSEcAOhbNTgLCNAwlC/FZuSsrTgMVU0YEexpSY6FQlUypfPEQJXQmncmlIPQlk8SFJr3ZSp2u8h6Wqg6d1W2wqiBJ/dUylGssbrGsUiDs+f1fxcQtTZ3ETQDO4W1QfQMEPfCsrQCUxziborVUiPaTHAMkWQVp2MhdqbJrtHQTJBFJDLoQ3+Uwq3Wku96dsN7aAECctMKPeZGQfpCj64WU5Zby2HrTGxioEFcgx52M7STcwm4t8ZoYW3aYShGySRRmP36HPv5SV+LFUoMphrZl//JCBBjnQP0Z4XMLwyhX3R0fRUWxF9nXr8KaEe1qdZbzN3primGAVUgFZEWR8tyX1jRn3InURCskGIbNN/VrdeXxlMmVdGjtPc5oB1UgiFrQ7rmQwK1y8i7HiKDwrWGFF87XjSrvxy4pOQ2aXNabZBqG5dYMOCWV6JrFGWDVqnDj+LnFqo8B/ULM1SzV9jqnobLSvJljYATtkMHLFw7vlaURZtCJvRacW67J3ZmAypniYiWUozEY73SOxYoNQq5Vkm1qJZRkC5DV89hXwzHq3TMOpp1xiZ0oobDbGcnn1QYSg5AMzacYAoJDxDoirl3Who5f6LyEVCLmkmGdS7Fh7TnKkaFHg4wbOoIrJVHjvWHtwlXJDzHz1Ksw+abeej3o7CVSfM5PnzJa8O0EARDS7ygjoogNyAiiW74d08hMbBYqGfayYZCO6imoJblXilqivL3KoA3x/PAbvb5i71UeXu7pYGEHsNnnuagiqJCiFaVNdO3zFT2u5DAuHQHEnF5Fusrt9vjn3EGRZ3YiAbMllGplByaQ+tFFsR5Gyc1Db9jMBasuUe2cpBYhQ6kyOsHs67QShNgtCKZKti6HaVDK9C2lwy8qYqWjZA2yMGDJR5qAKQSMXaEdiG5jvtoIWfRwB8XpCVjvm4YxlqSfvuDKkx6NG4pqGc7CScIqKvwr1q5s3ongxGFx4WFPfumkpmMMRkpEIxGrlGMq73cU79ppxaHBDk3K0EJSHVUpaDUHHXmmt5IwE7lmfU4UOo6P514O5ooAJCaPn/jR39IMavQJxwprf/TawXEHB3EvM0AKkCwGJ3rv8dIFdyXgDZaKKPClhDqsxqID13RJP1ylpChSDT8DSBkmylzJvZiHmQ4wj80NoO8VMN3Xd1EW5Y4K40kFiVsAvXcecAblt0MQNcEI/pGUDiTBYFGLRsMJQrzZ0Qnb6FFMSRYYLgrTHIKZEA2OmDUnuEcGAz1pzISq2ilyb96HFbguechmBBMmBCGDBMDGbkFtyLUSXB0Yqmis/WnwNhyiSbJuZl0nHbjvqBlParSue5ABXln0HNX0ZTCIuP/Ph2MlI3qNIfyYlpM",
+      "timestamp": 1781549424,
+      "operation": "initial_backup",
+      "key_string": "kem_public"
+    },
+    {
+      "key": "a2VtX3NhbHQ=",
+      "value": "gaNMH9OeoKMJC818nL+28rDZ5sydaRNt5uHVnt+TkPE=",
+      "timestamp": 1781549424,
+      "operation": "initial_backup",
+      "key_string": "kem_salt"
+    }
+  ],
+  "total_keys": 2
+}

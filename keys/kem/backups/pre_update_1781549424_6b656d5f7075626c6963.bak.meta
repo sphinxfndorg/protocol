@@ -1,0 +1,8 @@
+{
+  "backup_file": "keys/kem/backups/pre_update_1781549424_6b656d5f7075626c6963.bak",
+  "timestamp": 1781549424,
+  "operation": "pre_update",
+  "key": "kem_public",
+  "db_size": 1268,
+  "total_backups": 6
+}

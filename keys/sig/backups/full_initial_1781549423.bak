@@ -1,0 +1,15 @@
+{
+  "timestamp": 1781549423,
+  "type": "initial",
+  "db_path": "keys/sig/sphincs_db",
+  "entries": [
+    {
+      "key": "a2V5cGFpcg==",
+      "value": "eyJwayI6IkhiQjh5N0llOUtvcllYZHlIOGQ3L3NheDhuRzFwWVpwbStPd01WYXFSQWM9Iiwic2FsdCI6IlhSdFlHWjBYODBDVlFIZXBXOEo2WnVmUFEvb2R3ditZd1pUd1NvY1RBbWs9Iiwib3JnX2NvZGUiOiJTUElGIn0=",
+      "timestamp": 1781549423,
+      "operation": "initial_backup",
+      "key_string": "keypair"
+    }
+  ],
+  "total_keys": 1
+}

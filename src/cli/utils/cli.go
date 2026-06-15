@@ -1,7 +1,7 @@
 // Copyright (c) 2024-present Sphinx Core Dev
 // MIT License https://opensource.org/license/mit
 
-// go/src/cli/utils/cli.gos
+// go/src/cli/utils/cli.go
 package utils
 
 import (

@@ -33,7 +33,7 @@ func ValidateAndNormalizeRecipients(recipientFingerprints []string) ([]string, e
 	for i, fp := range recipientFingerprints {
 		log.Printf("[DEBUG] ValidateAndNormalizeRecipients: validating recipient %d: %.16s...", i+1, fp)
 
-		normalizedFP, err := keys.NormalizeFingerprint(fp)
+		normalizedFP, err := keys.NormalizeOrgAddress(fp)
 		if err != nil {
 			log.Printf("[ERROR] ValidateAndNormalizeRecipients: invalid fingerprint %d: %v", i+1, err)
 			return nil, fmt.Errorf("recipient %d: %w", i+1, err)
@@ -57,7 +57,7 @@ func ValidateAndNormalizeRecipients(recipientFingerprints []string) ([]string, e
 func ResolveRecipient(store pubkeydir.Store, fingerprint string) (*HybridPublicKey, error) {
 	log.Printf("[INFO] ResolveRecipient: resolving recipient: %.16s...", fingerprint)
 
-	normalizedFP, err := keys.NormalizeFingerprint(fingerprint)
+	normalizedFP, err := keys.NormalizeOrgAddress(fingerprint)
 	if err != nil {
 		log.Printf("[ERROR] ResolveRecipient: invalid fingerprint format: %v", err)
 		return nil, fmt.Errorf("invalid fingerprint format: %w", err)
@@ -142,7 +142,7 @@ func scanBundleByAddressFP(store pubkeydir.Store, targetNormalized string) (pubk
 
 		// Derive the address fingerprint from the SignaturePublicKey using the bundle's org code
 		addressFP := keys.GetPublicKeyFingerprintFromBytes(b.SignaturePublicKey, orgCode)
-		normalizedAddress, err := keys.NormalizeFingerprint(addressFP)
+		normalizedAddress, err := keys.NormalizeOrgAddress(addressFP)
 		if err != nil {
 			log.Printf("[DEBUG] scanBundleByAddressFP: bundle %d: failed to normalize address: %v", i, err)
 			continue
@@ -174,7 +174,7 @@ func ResolveMultipleRecipients(store pubkeydir.Store, fingerprints []string) ([]
 	for i, fp := range fingerprints {
 		log.Printf("[DEBUG] ResolveMultipleRecipients: resolving recipient %d: %.16s...", i+1, fp)
 
-		normalizedFP, err := keys.NormalizeFingerprint(fp)
+		normalizedFP, err := keys.NormalizeOrgAddress(fp)
 		if err != nil {
 			log.Printf("[ERROR] ResolveMultipleRecipients: invalid fingerprint %d: %v", i+1, err)
 			return nil, fmt.Errorf("invalid fingerprint %s: %w", fp, err)
@@ -337,7 +337,7 @@ func performEncryptionWithRecipients(
 
 	// STEP 1: Build tar archive
 	log.Printf("[DEBUG] performEncryptionWithRecipients: step 1 - building tar archive")
-	tmpTar, err := os.CreateTemp("", "ecp-tar-*.tar.gz")
+	tmpTar, err := os.CreateTemp("", "usi-tar-*.tar.gz")
 	if err != nil {
 		log.Printf("[ERROR] performEncryptionWithRecipients: failed to create temp tar: %v", err)
 		return err
@@ -448,7 +448,7 @@ func performEncryptionWithRecipients(
 		log.Printf("[INFO] performEncryptionWithRecipients: existing vault backed up to %s", backupPath)
 	}
 
-	tmpVault, err := os.CreateTemp("", "ecp-vault-*.vault")
+	tmpVault, err := os.CreateTemp("", "usi-vault-*.vault")
 	if err != nil {
 		log.Printf("[ERROR] performEncryptionWithRecipients: failed to create temp vault: %v", err)
 		if backupPath != "" {
@@ -466,7 +466,7 @@ func performEncryptionWithRecipients(
 	}()
 
 	// Write magic number
-	magicNumber := []byte("ECP_VAULT\x00")
+	magicNumber := []byte("USI_VAULT\x00")
 	if _, err := tmpVault.Write(magicNumber); err != nil {
 		log.Printf("[ERROR] performEncryptionWithRecipients: failed to write magic number: %v", err)
 		return err
@@ -577,7 +577,7 @@ func GetVaultRecipients(vaultPath string) ([]string, error) {
 
 	fingerprints := make([]string, 0, len(m.Recipients))
 	for i, r := range m.Recipients {
-		rawHash, err := keys.NormalizeFingerprint(r.Fingerprint)
+		rawHash, err := keys.NormalizeOrgAddress(r.Fingerprint)
 		if err != nil {
 			log.Printf("[DEBUG] GetVaultRecipients: recipient %d: using raw fingerprint: %.16s...", i+1, r.Fingerprint)
 			fingerprints = append(fingerprints, r.Fingerprint)
@@ -600,7 +600,7 @@ func GetCurrentUserFingerprint(passphrase string) (string, error) {
 		log.Printf("[ERROR] GetCurrentUserFingerprint: failed to load keypair: %v", err)
 		return "", fmt.Errorf("failed to load keypair: %w", err)
 	}
-	raw, err := keys.NormalizeFingerprint(keys.GetPublicKeyFingerprint(kp))
+	raw, err := keys.NormalizeOrgAddress(keys.GetPublicKeyFingerprint(kp))
 	if err != nil {
 		log.Printf("[ERROR] GetCurrentUserFingerprint: failed to normalize fingerprint: %v", err)
 		return "", fmt.Errorf("failed to normalize fingerprint: %w", err)
@@ -634,13 +634,13 @@ func IsUserRecipient(vaultPath, passphrase string) (bool, string, error) {
 	for i, r := range recipients {
 		if r == userFP {
 			log.Printf("[SUCCESS] IsUserRecipient: user is recipient %d: %.16s...", i+1, r)
-			return true, keys.FormatFingerprintForDisplay(userFP), nil
+			return true, keys.FormatOrgAddressForDisplay(userFP), nil
 		}
 		log.Printf("[DEBUG] IsUserRecipient: recipient %d: %.16s... (user: %.16s...)", i+1, r, userFP)
 	}
 
 	log.Printf("[INFO] IsUserRecipient: user is NOT a recipient (user: %.16s...)", userFP)
-	return false, keys.FormatFingerprintForDisplay(userFP), nil
+	return false, keys.FormatOrgAddressForDisplay(userFP), nil
 }
 
 // DecryptVaultWithRecipientCheck is the GUI-facing decryption wrapper

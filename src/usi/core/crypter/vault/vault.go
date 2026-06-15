@@ -36,7 +36,7 @@ const (
 	nonceSize    = 12
 	keySize      = 32
 	vaultExt     = ".vault"
-	manifestFile = ".ecp.manifest"
+	manifestFile = ".usi.manifest"
 
 	// manifest capped at 512 KB — real manifests are rarely over 100 KB.
 	maxManifestSize = 512 * 1024 // 512 KB
@@ -60,7 +60,7 @@ func isUserAuthorizedForVault(vaultPath, passphrase string) bool {
 	}
 
 	userFingerprint := keys.GetPublicKeyFingerprint(kp)
-	normalizedUserFP, err := keys.NormalizeFingerprint(userFingerprint)
+	normalizedUserFP, err := keys.NormalizeOrgAddress(userFingerprint)
 	if err != nil {
 		log.Printf("[ERROR] isUserAuthorizedForVault: failed to normalize fingerprint: %v", err)
 		time.Sleep(100 * time.Millisecond)
@@ -76,10 +76,10 @@ func isUserAuthorizedForVault(vaultPath, passphrase string) bool {
 	}
 	defer f.Close()
 
-	// Skip magic number if present (10 bytes: "ECP_VAULT\x00")
+	// Skip magic number if present (10 bytes: "USI_VAULT\x00")
 	magicNumber := make([]byte, 10)
 	if n, err := f.Read(magicNumber); err == nil && n == 10 {
-		if string(magicNumber) != "ECP_VAULT\x00" {
+		if string(magicNumber) != "USI_VAULT\x00" {
 			// Not a magic number, seek back to beginning
 			f.Seek(0, io.SeekStart)
 			log.Printf("[DEBUG] isUserAuthorizedForVault: no magic number found")
@@ -197,7 +197,7 @@ func isAuthorizedSender(fingerprint string) bool {
 		return false
 	}
 
-	normalized, err := keys.NormalizeFingerprint(fingerprint)
+	normalized, err := keys.NormalizeOrgAddress(fingerprint)
 	if err != nil {
 		log.Printf("[ERROR] isAuthorizedSender: invalid fingerprint format: %v", err)
 		return false
@@ -258,7 +258,7 @@ func AddTrustedSender(fingerprint, label string, expiresAt time.Time) error {
 		return errors.New("label must not be empty")
 	}
 
-	normalized, err := keys.NormalizeFingerprint(fingerprint)
+	normalized, err := keys.NormalizeOrgAddress(fingerprint)
 	if err != nil {
 		log.Printf("[ERROR] AddTrustedSender: invalid fingerprint: %v", err)
 		return fmt.Errorf("invalid fingerprint: %w", err)
@@ -299,7 +299,7 @@ func AddTrustedSender(fingerprint, label string, expiresAt time.Time) error {
 func RemoveTrustedSender(fingerprint string) error {
 	log.Printf("[INFO] RemoveTrustedSender: removing trusted sender: %.16s...", fingerprint)
 
-	normalized, err := keys.NormalizeFingerprint(fingerprint)
+	normalized, err := keys.NormalizeOrgAddress(fingerprint)
 	if err != nil {
 		log.Printf("[ERROR] RemoveTrustedSender: invalid fingerprint: %v", err)
 		return fmt.Errorf("invalid fingerprint: %w", err)
@@ -425,7 +425,7 @@ func unwrapSessionKey(entry *RecipientEntry, passphrase string) ([]byte, error) 
 
 	// Step 2: re-derive fingerprint from the loaded public key.
 	rawFP := keys.GetPublicKeyFingerprint(kp) // hex string
-	normalizedFP, err := keys.NormalizeFingerprint(rawFP)
+	normalizedFP, err := keys.NormalizeOrgAddress(rawFP)
 	if err != nil {
 		log.Printf("[ERROR] unwrapSessionKey: bad fingerprint: %v", err)
 		return nil, fmt.Errorf("unwrapSessionKey: bad fingerprint: %w", err)
@@ -526,7 +526,7 @@ func EncryptFolder(folderPath, passphrase string, recipientFingerprints ...strin
 	kp, _, err := keys.LoadKeyFromDisk(passphrase)
 	if err == nil {
 		userFingerprint := keys.GetPublicKeyFingerprint(kp)
-		normalizedFP, normErr := keys.NormalizeFingerprint(userFingerprint)
+		normalizedFP, normErr := keys.NormalizeOrgAddress(userFingerprint)
 		if normErr != nil {
 			log.Printf("[WARN] EncryptFolder: failed to normalize fingerprint: %v", normErr)
 			normalizedFP = strings.ReplaceAll(userFingerprint, " ", "")
@@ -539,7 +539,7 @@ func EncryptFolder(folderPath, passphrase string, recipientFingerprints ...strin
 
 	// Add additional recipients from parameter
 	for i, fp := range recipientFingerprints {
-		normalizedFP, err := keys.NormalizeFingerprint(fp)
+		normalizedFP, err := keys.NormalizeOrgAddress(fp)
 		if err != nil {
 			log.Printf("[ERROR] EncryptFolder: invalid fingerprint %d: %v", i+1, err)
 			return fmt.Errorf("invalid fingerprint %s: %w", fp, err)
@@ -560,7 +560,7 @@ func EncryptFolder(folderPath, passphrase string, recipientFingerprints ...strin
 	log.Printf("[INFO] EncryptFolder: total recipients: %d", len(m.Recipients))
 
 	// Create plaintext tar archive
-	tmpTar, err := os.CreateTemp("", "ecp-tar-*.tar.gz")
+	tmpTar, err := os.CreateTemp("", "usi-tar-*.tar.gz")
 	if err != nil {
 		log.Printf("[ERROR] EncryptFolder: failed to create temp tar: %v", err)
 		return err
@@ -701,7 +701,7 @@ func EncryptFolder(folderPath, passphrase string, recipientFingerprints ...strin
 		log.Printf("[INFO] EncryptFolder: existing vault backed up to %s", backupPath)
 	}
 
-	tmpVault, err := os.CreateTemp("", "ecp-vault-*.vault")
+	tmpVault, err := os.CreateTemp("", "usi-vault-*.vault")
 	if err != nil {
 		log.Printf("[ERROR] EncryptFolder: failed to create temp vault: %v", err)
 		if backupPath != "" {
@@ -711,7 +711,7 @@ func EncryptFolder(folderPath, passphrase string, recipientFingerprints ...strin
 	}
 
 	// Write magic number
-	magicNumber := []byte("ECP_VAULT\x00")
+	magicNumber := []byte("USI_VAULT\x00")
 	if _, err := tmpVault.Write(magicNumber); err != nil {
 		log.Printf("[ERROR] EncryptFolder: failed to write magic number: %v", err)
 		return err
@@ -809,7 +809,7 @@ func EncryptFolder(folderPath, passphrase string, recipientFingerprints ...strin
 func encryptToFile(srcPath string, key []byte) (string, []byte, error) {
 	log.Printf("[DEBUG] encryptToFile: encrypting file: %s", srcPath)
 
-	tmp, err := os.CreateTemp("", "ecp-enc-*.bin")
+	tmp, err := os.CreateTemp("", "usi-enc-*.bin")
 	if err != nil {
 		log.Printf("[ERROR] encryptToFile: failed to create temp file: %v", err)
 		return "", nil, err
@@ -877,10 +877,10 @@ func DecryptVault(vaultPath, passphrase string) error {
 	}
 	defer f.Close()
 
-	// Verify magic number (10 bytes: "ECP_VAULT\x00")
+	// Verify magic number (10 bytes: "USI_VAULT\x00")
 	// Note: magicSize is kept for potential future use but not currently needed
 	magicBuf := make([]byte, 10)
-	if _, err := f.Read(magicBuf); err == nil && string(magicBuf) == "ECP_VAULT\x00" {
+	if _, err := f.Read(magicBuf); err == nil && string(magicBuf) == "USI_VAULT\x00" {
 		log.Printf("[INFO] DecryptVault: magic number verified")
 		// magicSize = 10 - kept for future use if needed
 	} else {
@@ -1141,7 +1141,7 @@ func DecryptVault(vaultPath, passphrase string) error {
 		log.Printf("[SUCCESS] DecryptVault: payload checksum verified")
 	}
 
-	tmpEnc, err := os.CreateTemp("", "ecp-enc-*.bin")
+	tmpEnc, err := os.CreateTemp("", "usi-enc-*.bin")
 	if err != nil {
 		log.Printf("[ERROR] DecryptVault: failed to create temp file: %v", err)
 		return errors.New("failed to create temp file")
@@ -1157,7 +1157,7 @@ func DecryptVault(vaultPath, passphrase string) error {
 	}
 	tmpEnc.Close()
 
-	tmpTar, err := os.CreateTemp("", "ecp-dec-*.tar.gz")
+	tmpTar, err := os.CreateTemp("", "usi-dec-*.tar.gz")
 	if err != nil {
 		log.Printf("[ERROR] DecryptVault: failed to create temp tar file: %v", err)
 		return errors.New("failed to create temp file")

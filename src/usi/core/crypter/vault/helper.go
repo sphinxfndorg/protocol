@@ -59,7 +59,7 @@ func PerformEncryption(folder, passphrase string, w fyne.Window, recipientFinger
 		log.Printf("[SUCCESS] PerformEncryption: encryption completed successfully for folder: %s", folder)
 		fyne.Do(func() {
 			dialog.ShowInformation("Locked", fmt.Sprintf(
-				"Folder is now a locked file:\n%s.vault\n\nDouble-click will show \"cannot open\".\nUse ECP → Select Vault File → Decrypt to restore.", filepath.Base(folder)), w)
+				"Folder is now a locked file:\n%s.vault\n\nDouble-click will show \"cannot open\".\nUse USI → Select Vault File → Decrypt to restore.", filepath.Base(folder)), w)
 		})
 	}
 }

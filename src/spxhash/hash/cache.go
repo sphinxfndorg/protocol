@@ -19,31 +19,46 @@ func NewLRUCache(capacity int) *LRUCache {
 }
 
 // Get retrieves the cached value for key.
-// Returns (value, true) on a hit and (nil, false) on a miss.
+// Returns a defensive copy of the value and true on a hit, nil and false on a miss.
+//
+// FIX G: The original implementation returned the cached slice directly.
+// A caller that modified the returned slice would silently corrupt the cached
+// value, causing subsequent hits to return wrong data. Get now returns a copy
+// so the caller owns the bytes it receives.
 func (l *LRUCache) Get(key uint64) ([]byte, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	if node, found := l.cache[key]; found {
 		l.moveToFront(node)
-		return node.value, true
+		// FIX G: return a copy, not a reference into the cache's own storage.
+		result := make([]byte, len(node.value))
+		copy(result, node.value)
+		return result, true
 	}
 	return nil, false
 }
 
 // Put inserts or updates a key-value pair in the cache.
-// If the cache is at capacity the least-recently-used entry is evicted first.
+// A defensive copy of value is stored so the caller retains ownership of its slice.
+//
+// FIX G: Store a copy of value so that later mutations by the caller do not
+// corrupt the cached entry.
 func (l *LRUCache) Put(key uint64, value []byte) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
+	// FIX G: take a copy before storing.
+	stored := make([]byte, len(value))
+	copy(stored, value)
+
 	if node, found := l.cache[key]; found {
-		node.value = value
+		node.value = stored
 		l.moveToFront(node)
 		return
 	}
 
-	node := &Node{key: key, value: value}
+	node := &Node{key: key, value: stored}
 	l.cache[key] = node
 
 	if l.head == nil {

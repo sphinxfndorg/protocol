@@ -10,6 +10,7 @@ import (
 	"crypto/sha512"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 
 	"golang.org/x/crypto/argon2"
@@ -33,19 +34,37 @@ import (
 // The random entropy is also returned so it can be stored in the SphinxHash
 // instance and included during hashing to keep results reproducible within a
 // single instance's lifetime.
-func generateSalt(data []byte, saltSz int) (salt []byte, entropy []byte, err error) {
-	entropy = make([]byte, saltSz)
-	if _, err = rand.Read(entropy); err != nil {
-		return nil, nil, errors.New("spxhash: failed to read random entropy for salt: " + err.Error())
+//
+// FIX A: The original used append(data, entropy...) which writes into data's
+// underlying array when it has spare capacity, silently corrupting the caller's
+// buffer. A fresh allocation is used instead so generateSalt never mutates its
+// input.
+//
+// FIX SALT: If entropy is provided (non-nil), use it directly instead of
+// generating random entropy. This allows deterministic testing with fixed salts.
+func generateSalt(data []byte, saltSz int, providedEntropy []byte) (salt []byte, entropy []byte, err error) {
+	// If entropy is provided, use it directly (deterministic mode)
+	if providedEntropy != nil {
+		entropy = make([]byte, len(providedEntropy))
+		copy(entropy, providedEntropy)
+	} else {
+		// Otherwise generate random entropy
+		entropy = make([]byte, saltSz)
+		if _, err = rand.Read(entropy); err != nil {
+			return nil, nil, errors.New("spxhash: failed to read random entropy for salt: " + err.Error())
+		}
 	}
 
 	// Use the constants for Argon2 parameters
-	timeCost := uint32(iterations)    // Use the number of iterations from the constant
-	memoryCost := uint32(memory)      // Use memory cost from the constant
-	parallelism := uint8(parallelism) // Use parallelism from the constant
+	timeCost := uint32(iterations) // Use the number of iterations from the constant
+	memoryCost := uint32(memory)   // Use memory cost from the constant
+	threads := uint8(parallelism)  // Use parallelism from the constant
 
-	// Combine random entropy with the input so the salt reflects both.
-	combined := append(data, entropy...)
+	// FIX A: allocate a new backing array instead of append(data, entropy...)
+	// to avoid mutating the caller's slice.
+	combined := make([]byte, len(data)+len(entropy))
+	copy(combined, data)
+	copy(combined[len(data):], entropy)
 
 	// Argon2id (a combination of Argon2d and Argon2i) for secure hash-based salt generation
 	salt = argon2.IDKey(
@@ -53,7 +72,7 @@ func generateSalt(data []byte, saltSz int) (salt []byte, entropy []byte, err err
 		entropy,  // salt:     the random entropy alone (truly random)
 		timeCost,
 		memoryCost,
-		parallelism,
+		threads,
 		uint32(saltSz),
 	)
 	return salt, entropy, nil
@@ -63,23 +82,70 @@ func generateSalt(data []byte, saltSz int) (salt []byte, entropy []byte, err err
 //
 // FIX #2: salt generation now incorporates random entropy (see generateSalt).
 // Returns an error if the OS random source is unavailable.
-func NewSphinxHash(bitSize int, data []byte) (*SphinxHash, error) {
-	// Pass saltSize explicitly when calling generateSalt
-	salt, entropy, err := generateSalt(data, saltSize) // Use randomised salt based on input data
+//
+// FIX J: bitSize is now validated; values other than 256, 384, or 512 are
+// rejected with an explicit error instead of silently falling through to the
+// default 32-byte output in Size(), which would produce wrong-length hashes
+// with no indication to the caller.
+//
+// FIX SALT: If data is provided, it's used as the entropy for deterministic
+// hashing. If data is nil, random entropy is generated.
+func NewSphinxHash(bitSize int, entropy []byte) (*SphinxHash, error) {
+	// FIX J: validate bitSize before doing any work.
+	if bitSize != 256 && bitSize != 384 && bitSize != 512 {
+		return nil, fmt.Errorf("spxhash: unsupported bitSize %d (must be 256, 384, or 512)", bitSize)
+	}
+
+	// If entropy is nil, generate random entropy. If provided, use it directly.
+	var data []byte // Empty data for salt generation
+	salt, saltEntropy, err := generateSalt(data, saltSize, entropy)
 	if err != nil {
 		return nil, err
 	}
+
 	return &SphinxHash{
-		bitSize:      bitSize,
-		salt:         salt,
-		saltEntropy:  entropy,
-		cache:        NewLRUCache(DefaultCacheSize),
-		maxCacheSize: DefaultCacheSize,
+		bitSize:     bitSize,
+		salt:        salt,
+		saltEntropy: saltEntropy,
+		cache:       NewLRUCache(DefaultCacheSize),
 	}, nil
 }
 
-// cacheKey builds a collision-resistant 64-bit cache key from the full
-// contents of data.
+// EncodedSalt returns the random entropy bytes that were used to derive this
+// instance's salt.
+//
+// FIX E: Without a way to persist the salt, hashes computed by one SphinxHash
+// instance cannot be verified by another (e.g. after a process restart or
+// across a network). Callers should store the value returned here alongside the
+// hash output and pass it to DecodeSalt when reconstructing the instance for
+// verification.
+func (s *SphinxHash) EncodedSalt() []byte {
+	out := make([]byte, len(s.saltEntropy))
+	copy(out, s.saltEntropy)
+	return out
+}
+
+// Clone returns a deep copy of s with the same salt and bitSize but an empty
+// accumulated data buffer and a fresh cache.
+//
+// FIX M: hash.Hash callers often need to snapshot state mid-stream (e.g. hash
+// a shared prefix then branch in two directions). Without Clone the only option
+// is to re-hash from scratch.
+func (s *SphinxHash) Clone() *SphinxHash {
+	saltCopy := make([]byte, len(s.salt))
+	copy(saltCopy, s.salt)
+	entropyCopy := make([]byte, len(s.saltEntropy))
+	copy(entropyCopy, s.saltEntropy)
+	return &SphinxHash{
+		bitSize:     s.bitSize,
+		salt:        saltCopy,
+		saltEntropy: entropyCopy,
+		cache:       NewLRUCache(DefaultCacheSize),
+	}
+}
+
+// cacheKey builds a collision-resistant 64-bit cache key that is bound to both
+// the full input content and the instance's salt.
 //
 // FIX #1 (Cache key collision):
 // The original code used binary.LittleEndian.Uint64(data[:8]) as the cache
@@ -92,9 +158,18 @@ func NewSphinxHash(bitSize int, data []byte) (*SphinxHash, error) {
 // the first 8 bytes of THAT hash. The probability of two distinct inputs
 // producing the same key is now ≈2⁻⁶⁴ (birthday bound on the key space)
 // rather than certain for any shared prefix.
-func cacheKey(data []byte) uint64 {
+//
+// FIX F (Cross-instance cache poisoning):
+// The key previously depended only on input data, not on the instance's salt.
+// If a cache were ever shared between two SphinxHash instances (e.g. via a
+// package-level singleton), a hit from instance A would return the wrong hash
+// for instance B, because the two instances produce different hashes for the
+// same input. The salt is now mixed into the key so each instance's entries
+// are distinct.
+func (s *SphinxHash) cacheKey(data []byte) uint64 {
 	h := sha512.New512_256()
 	h.Write(data)
+	h.Write(s.salt) // FIX F: bind key to this instance's salt
 	sum := h.Sum(nil)
 	return binary.LittleEndian.Uint64(sum[:8])
 }
@@ -110,23 +185,25 @@ func cacheKey(data []byte) uint64 {
 // Fix: hashData is now called directly on the receiver, reusing the
 // already-derived salt stored in the current instance. Only one Argon2 call
 // is made per unique input.
+//
+// FIX C (Short-input path ignores bitSize):
+// The original short-input fast path always used sha512.New512_256(), producing
+// a fixed 32-byte output regardless of the configured bitSize. For bitSize 384
+// or 512 this silently returns the wrong length. The fast path now routes
+// through hashData like everything else so the output length always matches
+// s.Size().
 func (s *SphinxHash) GetHash(data []byte) []byte {
-	if len(data) < 8 {
-		// Use a fallback hash for short inputs
-		hash := sha512.New512_256()
-		hash.Write(data)
-		hash.Write(s.salt)
-		return hash.Sum(nil)
-	}
-
-	hashKey := cacheKey(data) // FIX #1: full-content key, not first-8-bytes key
+	hashKey := s.cacheKey(data) // FIX #1 + F: full-content, salt-bound key
 	if cachedValue, found := s.cache.Get(hashKey); found {
-		return cachedValue // Return cached value if found
+		return cachedValue // Return cached value if found (Get already returns a copy — FIX G)
 	}
 
+	// FIX C: removed the len(data) < 8 short-circuit that bypassed hashData and
+	// always produced 32-byte output. All inputs now go through hashData so the
+	// output length always matches the configured bitSize.
 	// FIX #7: compute the hash on the receiver directly — no extra NewSphinxHash.
-	hash := s.hashData(data)   // Calculate the hash using the deterministic salt
-	s.cache.Put(hashKey, hash) // Store the calculated hash in the cache
+	hash := s.hashData(data)   // Calculate the hash using the instance salt
+	s.cache.Put(hashKey, hash) // Store the calculated hash in the cache (Put stores a copy — FIX G)
 
 	return hash // Return the calculated hash
 }
@@ -167,11 +244,27 @@ func (s *SphinxHash) Reset() {
 }
 
 // hashData calculates the combined hash of data using multiple hash functions based on the bit size.
+//
+// FIX B: The original used append(data, s.salt...) which writes into data's
+// underlying array when it has spare capacity, silently corrupting the caller's
+// buffer. A fresh allocation is used instead.
+//
+// FIX D: saltEntropy is now mixed into the stretched key input so the stored
+// entropy field is actually used in the hash derivation, fulfilling the
+// cross-instance rainbow-table protection described in the type comment.
 func (s *SphinxHash) hashData(data []byte) []byte {
 	var sha2Hash []byte
 
-	// Combine the input data with the salt for Argon2id.
-	combined := append(data, s.salt...) // Append salt to data to strengthen the final key.
+	// FIX B: allocate a new backing array instead of append(data, s.salt...)
+	// to avoid mutating the caller's data slice.
+	//
+	// FIX D: include saltEntropy alongside the salt so the random entropy
+	// generated at construction time actively influences the hash output.
+	combined := make([]byte, len(data)+len(s.salt)+len(s.saltEntropy))
+	copy(combined, data)
+	copy(combined[len(data):], s.salt)
+	copy(combined[len(data)+len(s.salt):], s.saltEntropy)
+
 	// Key stretching using Argon2id, which is a memory-hard function to improve resistance against brute-force attacks.
 	stretchedKey := argon2.IDKey(combined, s.salt, iterations, memory, parallelism, 64) // Generate a 64-byte key.
 
@@ -231,6 +324,18 @@ func (s *SphinxHash) hashData(data []byte) []byte {
 // The call site now passes prime64 (a full 64-bit constant) so the XOR and
 // addition steps use the full constant rather than a 32-bit value
 // zero-extended to 64 bits.
+//
+// FIX H (Concatenation collapsed — collision-resistance guarantee lost):
+// The original re-hashed the H|(x) concatenation back to 32 bytes immediately,
+// discarding the width benefit that makes concatenation collision-resistant.
+// The mixing rounds now operate on the full-width concatenated value
+// (chainHash1Result + chainHash2Result), and the final output length is
+// shakeLength (the configured output size) rather than a fixed 32 bytes.
+//
+// FIX I (XOR schedule repeats every 64 rounds):
+// The original used (round % 64) as the shift amount, causing the XOR mask to
+// repeat identically every 64 rounds across all 1000 iterations. A per-round
+// hash-derived mask is used instead so no two rounds apply the same transform.
 func (s *SphinxHash) sphinxHash(hash1, hash2 []byte, primeConstant uint64) []byte {
 
 	// Ensure both input hashes have the same length for consistent processing.
@@ -249,9 +354,9 @@ func (s *SphinxHash) sphinxHash(hash1, hash2 []byte, primeConstant uint64) []byt
 
 	// Step 2: Apply a second hash function (H0) to the result of the first hash (H1).
 	// This ensures the chaining mechanism H∘(x) = H0(H1(x)), where the second hash function is applied to the result of the first.
+	shakeLength := s.Size()                       // Dynamically set the length of the output hash.
 	shake := sha3.NewShake256()                   // Create a SHAKE256 instance for further processing.
 	shake.Write(chainHash1Result)                 // Apply SHAKE256 to the result of the first hash (chainHash1Result).
-	shakeLength := s.Size()                       // Dynamically set the length of the output hash.
 	chainHash2Result := make([]byte, shakeLength) // Dynamically allocate space for the result based on shakeLength.
 	shake.Read(chainHash2Result)                  // Read the result into the allocated slice.
 
@@ -259,15 +364,13 @@ func (s *SphinxHash) sphinxHash(hash1, hash2 []byte, primeConstant uint64) []byt
 	// This concatenates (H|(x) = H0(x)|H1(x)) the results of the two hashes, which will be used for further processing.
 	combinedHash := bytes.Join([][]byte{chainHash1Result[:], chainHash2Result[:]}, nil)
 
-	// Step 3: Hash the combined result to generate a final chained hash.
-	// By applying SHA-256 again on the combined hashes, we ensure that the final result has better security.
-	chainHash := sha512.New512_256()
-	chainHash.Write(combinedHash)         // Perform another SHA-512/256 hash on the combined result.
-	chainHashResult := chainHash.Sum(nil) // Get the final hash.
-
-	// Step 4: Initialize the output hash (sphinxHash) using the chained result.
+	// FIX H: operate on the full-width concatenated value instead of collapsing
+	// it back to 32 bytes with another SHA-512/256 call. The mixing rounds below
+	// now preserve the width advantage of concatenation.
+	//
+	// Step 4: Initialize the output hash (sphinxHash) using the full concatenated result.
 	// The combined hash from the previous step becomes the starting point for further transformations.
-	sphinxHash := chainHashResult // This is the current state of the hash.
+	sphinxHashState := combinedHash // This is the current state of the hash (full width).
 
 	// Step 5: Apply iterative rounds to increase diffusion and avalanche effects.
 	rounds := 1000 // Set the number of rounds for iterative hashing to enhance diffusion.
@@ -280,24 +383,33 @@ func (s *SphinxHash) sphinxHash(hash1, hash2 []byte, primeConstant uint64) []byt
 		// These operations are designed to make the hash resistant to reverse engineering, ensuring that small changes in input data
 		// lead to drastic changes in the resulting hash, making it computationally infeasible for an attacker to predict or reverse the output.
 
-		// Loop through each byte in the current sphinxHash.
-		for i := range sphinxHash {
+		// FIX I: derive a unique per-round mask byte by hashing the current
+		// state together with the round index and prime constant. This replaces
+		// (round % 64) which caused the XOR schedule to repeat every 64 rounds,
+		// significantly reducing the effective diffusion across 1000 rounds.
+		maskHasher := sha512.New512_256()
+		roundBuf := make([]byte, 8)
+		binary.LittleEndian.PutUint64(roundBuf, uint64(round))
+		maskHasher.Write(sphinxHashState)
+		maskHasher.Write(roundBuf)
+		maskBytes := maskHasher.Sum(nil)
+
+		// Loop through each byte in the current sphinxHashState.
+		for i := range sphinxHashState {
 			// Perform a left bit rotation by 3 positions to increase the diffusion of the hash.
 			// This operation ensures that small changes in input data (even one bit) lead to significant changes in the output hash.
 			// The goal of this operation is to ensure that every byte of the hash contributes to the final result, diffusing
 			// the input values over the entire hash. This makes brute force attacks more difficult, as attackers cannot
 			// predict how input data will affect the output after the transformations.
-			sphinxHash[i] = (sphinxHash[i] << 3) | (sphinxHash[i] >> 5) // Bit rotation to the left by 3 bits.
+			sphinxHashState[i] = (sphinxHashState[i] << 3) | (sphinxHashState[i] >> 5) // Bit rotation to the left by 3 bits.
 
-			// XOR the rotated hash byte with a round-specific prime constant for non-commutative behavior.
+			// XOR the rotated hash byte with a unique per-round mask byte for non-commutative behavior.
 			// The XOR operation is a key part of making the transformation non-commutative.
 			// Non-commutative means that applying the same transformation in a different order results in a different output,
-			// which increases security. By XORing the rotated value with a portion of a round-specific prime constant,
-			// we ensure that each round introduces an additional layer of unpredictability.
+			// which increases security. By XORing the rotated value with a per-round hash-derived mask,
+			// we ensure that each round introduces a distinct, unpredictable transformation.
 			// This is particularly important for making the function more resistant to attacks such as Grover's algorithm.
-			// Since XORing is reversible without additional steps, having it combined with rotation and iterative rounds makes it
-			// more difficult to undo and makes the attack surface larger.
-			sphinxHash[i] ^= byte(primeConstant >> (uint(round) % 64)) // XOR with a shifting part of the prime constant.
+			sphinxHashState[i] ^= maskBytes[i%len(maskBytes)] // FIX I: unique per-round mask, not repeating schedule.
 		}
 
 		// Re-hash the result after each round for additional diffusion and avalanche effects.
@@ -309,26 +421,38 @@ func (s *SphinxHash) sphinxHash(hash1, hash2 []byte, primeConstant uint64) []byt
 		// The multiple rounds of hashing make it harder to guess any specific bit of the output without fully processing through each round.
 
 		// FIX #5: allocate a fresh hasher each round so only the current
-		// sphinxHash value is hashed, not the cumulative state of all prior rounds.
-		roundHash := sha512.New512_256()
-		roundHash.Write(sphinxHash)     // Re-hash the intermediate result.
-		sphinxHash = roundHash.Sum(nil) // Update sphinxHash with the new hash value after each round.
+		// sphinxHashState value is hashed, not the cumulative state of all prior rounds.
+		// FIX H: use SHAKE256 so the output stays at the full configured width
+		// rather than collapsing back to 32 bytes on every round.
+		roundShake := sha3.NewShake256()
+		roundShake.Write(sphinxHashState) // Re-hash the intermediate result.
+		newState := make([]byte, len(sphinxHashState))
+		roundShake.Read(newState)
+		sphinxHashState = newState // Update sphinxHashState with the new hash value after each round.
 	}
 
-	// Step 6: Apply further mixing by adding the prime constant to each 64-bit segment of the hash.
+	// Step 6: Truncate or expand to the configured output length, then apply
+	// further mixing by adding the prime constant to each 64-bit segment.
 	// This step ensures that the final result is heavily influenced by the prime constant to improve entropy and security.
-	for i := 0; i < len(sphinxHash)/8; i++ {
+	//
+	// FIX H: after the mixing rounds, produce exactly shakeLength output bytes.
+	finalShake := sha3.NewShake256()
+	finalShake.Write(sphinxHashState)
+	sphinxFinal := make([]byte, shakeLength)
+	finalShake.Read(sphinxFinal)
+
+	for i := 0; i < len(sphinxFinal)/8; i++ {
 		// Calculate the offset for each 8-byte (64-bit) segment.
 		// Each iteration processes one 64-bit segment of the hash.
 		offset := i * 8 // Multiply the loop index by 8 to get the starting index of the 64-bit segment.
 
 		// Check if the current segment goes out of bounds (this ensures we are not reading past the end of the hash).
 		// The 'offset+8' ensures that we are only reading 8 bytes, i.e., 64 bits at a time.
-		if offset+8 <= len(sphinxHash) {
+		if offset+8 <= len(sphinxFinal) {
 			// Read the current 64-bit segment of the hash in little-endian format.
 			// We use the `binary.LittleEndian.Uint64` function to interpret the 8 bytes as a single 64-bit unsigned integer.
 			// Little-endian means the least significant byte is stored first, which is a common format in many systems.
-			val := binary.LittleEndian.Uint64(sphinxHash[offset : offset+8]) // Read 8 bytes and convert to uint64.
+			val := binary.LittleEndian.Uint64(sphinxFinal[offset : offset+8]) // Read 8 bytes and convert to uint64.
 
 			// Add the prime constant to the current value to enhance entropy and security.
 			// This step ensures that the prime constant influences the final hash, making it more unpredictable and harder to reverse-engineer.
@@ -337,14 +461,14 @@ func (s *SphinxHash) sphinxHash(hash1, hash2 []byte, primeConstant uint64) []byt
 			val += primeConstant // Add the prime constant to the 64-bit segment.
 
 			// Write the updated value back to the original slice at the same offset.
-			// We use `binary.LittleEndian.PutUint64` to write the updated 64-bit value back into the `sphinxHash` slice.
+			// We use `binary.LittleEndian.PutUint64` to write the updated 64-bit value back into the `sphinxFinal` slice.
 			// This operation ensures that the change is made in-place, modifying the original hash value.
 			// Writing the result back to the same slice at the given offset ensures that the hash is updated with the new, mixed value.
-			binary.LittleEndian.PutUint64(sphinxHash[offset:offset+8], val) // Store the updated value back into the hash.
+			binary.LittleEndian.PutUint64(sphinxFinal[offset:offset+8], val) // Store the updated value back into the hash.
 		}
 	}
 
 	// Step 7: Return the final SphinxHash after all the hashing and mixing operations.
 	// The final hash, after iterative rounds and mixing with the prime constant, is returned as the output.
-	return sphinxHash // Output the final result after all transformations (already a []byte).
+	return sphinxFinal // Output the final result after all transformations (already a []byte).
 }

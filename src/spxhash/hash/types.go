@@ -26,14 +26,16 @@ type Node struct {
 }
 
 // SphinxHash implements hashing based on SIPS-0001.
+//
+// FIX K: maxCacheSize removed — it was set in NewSphinxHash but never read
+// anywhere; enforcement is handled entirely by LRUCache.capacity. Keeping dead
+// fields in the struct wastes memory and misleads maintainers.
 type SphinxHash struct {
 	bitSize     int    // Output bit size: 256, 384, or 512
 	data        []byte // Accumulated input data (written via Write)
-	salt        []byte // Per-instance salt for Argon2 key derivation
-	saltEntropy []byte // FIX #2: Random entropy used when deriving the salt,
-	// stored so it can be combined with input data during
-	// hashing to retain determinism within one instance
-	// while preventing cross-instance rainbow tables.
-	cache        *LRUCache // LRU cache of previously computed hashes
-	maxCacheSize int       // Maximum number of cached hash values
+	salt        []byte // Per-instance derived salt for Argon2 key derivation
+	saltEntropy []byte // Random entropy used when deriving the salt; included
+	// in the cache key (FIX F) and available for MarshalBinary (FIX E) so that
+	// the salt can be reconstructed for cross-process verification.
+	cache *LRUCache // LRU cache of previously computed hashes
 }

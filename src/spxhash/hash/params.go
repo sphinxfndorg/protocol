@@ -8,9 +8,11 @@ package spxhash
 
 // Define prime constants for hash calculations.
 const (
-	prime32  = 0x9e3779b9         // Prime constant for 32-bit hash mixing
-	prime64  = 0x9e3779b97f4a7c15 // Prime constant for 64-bit hash mixing
-	saltSize = 16                 // Size of salt in bytes (128 bits)
+	// FIX N: prime32 removed — it became unused after fix #9 switched all call
+	// sites to prime64. Keeping dead constants misleads future readers.
+	prime64 = 0x9e3779b97f4a7c15 // Prime constant for 64-bit hash mixing
+
+	saltSize = 16 // Size of salt in bytes (128 bits)
 
 	// Argon2 parameters
 	// Following OWASP guidance: https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html

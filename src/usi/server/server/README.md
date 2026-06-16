@@ -1,4 +1,4 @@
-# ECP Public Key Directory
+# USI Public Key Directory
 
 This package stores and serves public registrar/user bundles:
 

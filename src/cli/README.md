@@ -57,15 +57,15 @@ cd ~/desktop/protocol/src/cli
 
 ```
 # Make the script executable
-chmod +x launch.sh
+chmod +x run.sh
 ```
 
 ```
 # Run the cluster (3 nodes)
-./launch.sh cluster
+./run.sh cluster
 ```
 
 ```
 # Or run single node mode
-./launch.sh single
+./run.sh single
 ```

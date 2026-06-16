@@ -1092,8 +1092,10 @@ type P2PConsensusNodeManager struct {
 // NewP2PConsensusNodeManager creates a new P2P consensus node manager
 func NewP2PConsensusNodeManager(nodeMgr *NodeManager, localNodeID string) *P2PConsensusNodeManager {
 	return &P2PConsensusNodeManager{
-		localNodeID: localNodeID,
-		nodeManager: nodeMgr,
+		localNodeID:   localNodeID,
+		nodeManager:   nodeMgr,
+		peerList:      make(map[string]consensus.Peer),
+		peerAddresses: make(map[string]string),
 	}
 }
 

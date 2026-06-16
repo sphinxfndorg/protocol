@@ -307,6 +307,11 @@ func (s *Server) handleMessages() {
 			// Assign sender/receiver roles
 			s.assignTransactionRoles(&tx)
 
+			if !tx.IsSystemTransaction() && !tx.HasFullAuthBundle() {
+				log.Printf("Transaction rejected: missing full SPHINCS auth bundle")
+				continue
+			}
+
 			if err := s.validateTransaction(&tx); err != nil {
 				log.Printf("Transaction validation failed: %v", err)
 				continue
@@ -612,6 +617,13 @@ func (s *Server) assignTransactionRoles(tx *types.Transaction) {
 // validateTransaction sends a transaction to a validator node.
 // Selects a validator and forwards the transaction for validation
 func (s *Server) validateTransaction(tx *types.Transaction) error {
+	if tx == nil {
+		return errors.New("nil transaction")
+	}
+	if !tx.IsSystemTransaction() && !tx.HasFullAuthBundle() {
+		return errors.New("missing full SPHINCS transaction auth bundle")
+	}
+
 	// Select a validator node from available nodes
 	validatorNode := s.nodeManager.SelectValidator()
 	if validatorNode == nil {

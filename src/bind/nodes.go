@@ -321,6 +321,7 @@ func RunMultipleNodesInternal() error {
 	for i := 0; i < 3; i++ {
 		// FIXED: sphincsMgrs[i] is now *sign.STHINCSManager, which matches SetSphincsMgr parameter type
 		resources[i].P2PServer.SetSphincsMgr(sphincsMgrs[i])
+		resources[i].Blockchain.SetSTHINCSManager(sphincsMgrs[i])
 	}
 
 	// Update seed nodes with actual UDP ports BEFORE calling DiscoverPeers

@@ -41,7 +41,7 @@ func SendTransaction(opts SendTxOptions) error {
 		logger.Debugf("Using nonce: %d", nonce)
 	}
 
-	// Prepare transaction parameters - FIXED: Use correct method name
+	// Prepare transaction parameters
 	params := map[string]interface{}{
 		"from":     opts.From,
 		"to":       opts.To,
@@ -51,9 +51,9 @@ func SendTransaction(opts SendTxOptions) error {
 		"nonce":    "0x" + strconv.FormatUint(nonce, 16),
 	}
 
-	// Make JSON-RPC call - FIXED: Use eth_sendTransaction (standard)
+	// Make JSON-RPC call - Using spx_sendTransaction
 	var result string
-	err := callRPC(opts.RPCURL, "eth_sendTransaction", []interface{}{params}, &result)
+	err := callRPC(opts.RPCURL, "spx_sendTransaction", []interface{}{params}, &result)
 	if err != nil {
 		return fmt.Errorf("RPC call failed: %v", err)
 	}
@@ -78,8 +78,8 @@ func GetBalance(opts GetBalanceOptions) error {
 	logger.Infof("Querying balance for address: %s", opts.Address)
 
 	var balanceHex string
-	// FIXED: Use standard eth_getBalance method
-	err := callRPC(opts.RPCURL, "eth_getBalance", []interface{}{opts.Address, "latest"}, &balanceHex)
+	// Using spx_getBalance
+	err := callRPC(opts.RPCURL, "spx_getBalance", []interface{}{opts.Address, "latest"}, &balanceHex)
 	if err != nil {
 		return fmt.Errorf("failed to get balance: %v", err)
 	}
@@ -120,8 +120,8 @@ func WatchTransaction(opts WatchTxOptions) error {
 			return fmt.Errorf("timeout waiting for transaction %s after %d seconds", opts.TxID, opts.TimeoutSecs)
 		case <-ticker.C:
 			var receipt TransactionReceipt
-			// FIXED: Use eth_getTransactionReceipt (standard)
-			err := callRPC(opts.RPCURL, "eth_getTransactionReceipt", []interface{}{opts.TxID}, &receipt)
+			// Using spx_getTransactionReceipt
+			err := callRPC(opts.RPCURL, "spx_getTransactionReceipt", []interface{}{opts.TxID}, &receipt)
 			if err != nil {
 				logger.Debugf("Transaction not yet confirmed: %v", err)
 				continue
@@ -129,7 +129,7 @@ func WatchTransaction(opts WatchTxOptions) error {
 
 			// Check if we got a valid receipt
 			if receipt.TransactionHash != "" {
-				// FIXED: Parse status as hex string
+				// Parse status as hex string
 				var status int64
 				if receipt.Status != "" {
 					status, err = strconv.ParseInt(strings.TrimPrefix(receipt.Status, "0x"), 16, 64)
@@ -152,8 +152,8 @@ func WatchTransaction(opts WatchTxOptions) error {
 // getNonce retrieves the next nonce for an address
 func getNonce(rpcURL, address string) (uint64, error) {
 	var nonceHex string
-	// FIXED: Use eth_getTransactionCount (standard)
-	err := callRPC(rpcURL, "eth_getTransactionCount", []interface{}{address, "pending"}, &nonceHex)
+	// Using spx_getTransactionCount
+	err := callRPC(rpcURL, "spx_getTransactionCount", []interface{}{address, "pending"}, &nonceHex)
 	if err != nil {
 		return 0, err
 	}

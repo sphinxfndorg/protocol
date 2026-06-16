@@ -13,6 +13,7 @@ import (
 	"github.com/sphinxorg/protocol/src/common"
 	"github.com/sphinxorg/protocol/src/consensus"
 	database "github.com/sphinxorg/protocol/src/core/state"
+	sign "github.com/sphinxorg/protocol/src/core/sthincs/sign/backend"
 	types "github.com/sphinxorg/protocol/src/core/transaction"
 	logger "github.com/sphinxorg/protocol/src/log"
 	"github.com/sphinxorg/protocol/src/policy"
@@ -128,6 +129,15 @@ func (bc *Blockchain) GetStorage() *storage.Storage {
 // GetMempool returns the mempool instance
 func (bc *Blockchain) GetMempool() *pool.Mempool {
 	return bc.mempool
+}
+
+// SetSTHINCSManager connects the chain mempool to the node's SPHINCS verifier.
+// Call this during node startup after the per-node STHINCSManager is created.
+func (bc *Blockchain) SetSTHINCSManager(manager *sign.STHINCSManager) {
+	bc.sphincsManager = manager
+	if bc.mempool != nil {
+		bc.mempool.SetSTHINCSManager(manager)
+	}
 }
 
 // GetChainParams returns the Sphinx blockchain parameters for external recognition

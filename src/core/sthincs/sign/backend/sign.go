@@ -5,14 +5,17 @@
 package sign
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"sync"
 
+	"github.com/holiman/uint256"
 	"github.com/sphinxorg/protocol/src/common"
 	"github.com/sphinxorg/protocol/src/core/hashtree"
+	sigproof "github.com/sphinxorg/protocol/src/core/proof"
 	params "github.com/sphinxorg/protocol/src/core/sthincs/config"
 	key "github.com/sphinxorg/protocol/src/core/sthincs/key/backend"
 	"github.com/sphinxorg/protocol/src/crypto/STHINCS/sthincs"
@@ -549,6 +552,164 @@ func CommitmentLeaf(commitment []byte) []byte {
 	return common.SpxHash(commitment)
 }
 
+// BuildProofMessage returns the canonical message committed into a lightweight
+// SPHINCS receipt proof: timestamp || nonce || transaction message.
+func BuildProofMessage(timestamp, nonce, message []byte) []byte {
+	return buildMessageWithTimestampAndNonce(timestamp, nonce, message)
+}
+
+// GenerateReceiptProof creates the public consistency proof stored with a
+// SPHINCS-backed transaction receipt.
+func GenerateReceiptProof(message, timestamp, nonce, merkleRootHash, commitment, pkBytes []byte) ([]byte, error) {
+	proofMsg := BuildProofMessage(timestamp, nonce, message)
+	return sigproof.GenerateSigProof(
+		[][]byte{proofMsg},
+		[][]byte{merkleRootHash, CommitmentLeaf(commitment)},
+		pkBytes,
+	)
+}
+
+// VerifyTransactionAuth validates the complete SPHINCS transaction
+// authentication bundle used by the blockchain layer.
+//
+// This is the reusable version of the checks demonstrated in test_sign.go:
+// signature hash, content replay lookup, proof consistency, SPHINCS verify,
+// commitment re-derivation, and Merkle receipt root verification.
+func (sm *STHINCSManager) VerifyTransactionAuth(
+	message, timestamp, nonce []byte,
+	sigBytes, pkBytes, signatureHash []byte,
+	merkleRootHash, commitment, proof []byte,
+	storeEvidence bool,
+) error {
+	return sm.verifyTransactionAuth(message, timestamp, nonce, sigBytes, pkBytes, signatureHash, merkleRootHash, commitment, proof, true, storeEvidence)
+}
+
+// VerifyTransactionAuthStateless validates the cryptographic transaction auth
+// bundle without consulting or mutating replay evidence. It is intended for
+// canonical-chain replay-index rebuilds after sync or fork choice.
+func (sm *STHINCSManager) VerifyTransactionAuthStateless(
+	message, timestamp, nonce []byte,
+	sigBytes, pkBytes, signatureHash []byte,
+	merkleRootHash, commitment, proof []byte,
+) error {
+	return sm.verifyTransactionAuth(message, timestamp, nonce, sigBytes, pkBytes, signatureHash, merkleRootHash, commitment, proof, false, false)
+}
+
+func (sm *STHINCSManager) verifyTransactionAuth(
+	message, timestamp, nonce []byte,
+	sigBytes, pkBytes, signatureHash []byte,
+	merkleRootHash, commitment, proof []byte,
+	checkReplay, storeEvidence bool,
+) error {
+	if sm.parameters == nil || sm.parameters.Params == nil {
+		return errors.New("STHINCSParameters are not initialized")
+	}
+	if len(timestamp) != 8 {
+		return fmt.Errorf("invalid timestamp length: expected 8, got %d", len(timestamp))
+	}
+	if len(nonce) != 16 {
+		return fmt.Errorf("invalid nonce length: expected 16, got %d", len(nonce))
+	}
+	if len(sigBytes) == 0 {
+		return errors.New("missing signature")
+	}
+	if len(pkBytes) == 0 {
+		return errors.New("missing public key")
+	}
+	if len(signatureHash) != 32 {
+		return fmt.Errorf("invalid signature hash length: expected 32, got %d", len(signatureHash))
+	}
+	if len(merkleRootHash) != 32 {
+		return fmt.Errorf("invalid merkle root hash length: expected 32, got %d", len(merkleRootHash))
+	}
+	if len(commitment) != 32 {
+		return fmt.Errorf("invalid commitment length: expected 32, got %d", len(commitment))
+	}
+	if len(proof) != 32 {
+		return fmt.Errorf("invalid proof length: expected 32, got %d", len(proof))
+	}
+
+	recomputedSignatureHash := common.SpxHash(sigBytes)
+	if !bytes.Equal(recomputedSignatureHash, signatureHash) {
+		return errors.New("signature hash mismatch")
+	}
+
+	if checkReplay {
+		isSigReplay, err := sm.CheckSignatureHash(sigBytes)
+		if err != nil {
+			return fmt.Errorf("signature hash replay check failed: %w", err)
+		}
+		if isSigReplay {
+			return errors.New("signature hash replay detected")
+		}
+	}
+
+	regeneratedProof, err := GenerateReceiptProof(message, timestamp, nonce, merkleRootHash, commitment, pkBytes)
+	if err != nil {
+		return fmt.Errorf("proof regeneration failed: %w", err)
+	}
+	if !sigproof.VerifySigProof(proof, regeneratedProof) {
+		return errors.New("proof mismatch")
+	}
+
+	deserializedSig, err := sthincs.DeserializeSignature(sm.parameters.Params, sigBytes)
+	if err != nil {
+		return fmt.Errorf("signature deserialization failed: %w", err)
+	}
+
+	deserializedPK, err := sm.keyManager.DeserializePublicKey(pkBytes)
+	if err != nil {
+		return fmt.Errorf("public key deserialization failed: %w", err)
+	}
+
+	merkleRootNode := &hashtree.HashTreeNode{
+		Hash: uint256.NewInt(0).SetBytes(merkleRootHash),
+	}
+
+	if checkReplay {
+		if !sm.VerifySignature(message, timestamp, nonce, deserializedSig, deserializedPK, merkleRootNode, commitment, storeEvidence) {
+			return errors.New("SPHINCS signature, commitment, or receipt root verification failed")
+		}
+		return nil
+	}
+
+	if !sm.verifySignatureCore(message, timestamp, nonce, deserializedSig, deserializedPK, merkleRootNode, commitment) {
+		return errors.New("SPHINCS signature, commitment, or receipt root verification failed")
+	}
+
+	return nil
+}
+
+// StoreTransactionReceipt records the compact transaction receipt that remains
+// after the transient signature bytes have been verified and discarded.
+func (sm *STHINCSManager) StoreTransactionReceipt(commitment, merkleRootHash, proof []byte) error {
+	if sm.db == nil {
+		return errors.New("LevelDB is not initialized")
+	}
+	if len(commitment) != 32 {
+		return fmt.Errorf("invalid commitment length: expected 32, got %d", len(commitment))
+	}
+	if len(merkleRootHash) != 32 {
+		return fmt.Errorf("invalid merkle root hash length: expected 32, got %d", len(merkleRootHash))
+	}
+	if len(proof) != 32 {
+		return fmt.Errorf("invalid proof length: expected 32, got %d", len(proof))
+	}
+
+	if err := sm.db.Put(commitment, merkleRootHash, nil); err != nil {
+		return fmt.Errorf("failed to store transaction receipt: %w", err)
+	}
+
+	proofKey := make([]byte, 0, len("proof:")+len(commitment))
+	proofKey = append(proofKey, []byte("proof:")...)
+	proofKey = append(proofKey, commitment...)
+	if err := sm.db.Put(proofKey, proof, nil); err != nil {
+		return fmt.Errorf("failed to store transaction proof: %w", err)
+	}
+
+	return nil
+}
+
 // VerifyCommitmentInRoot confirms that the Merkle root was built with the correct
 // commitment in leaf[4] by comparing rebuilt vs expected root hashes.
 //
@@ -816,6 +977,42 @@ func (sm *STHINCSManager) SignMessage(
 // =============================================================================
 // VERIFY METHOD
 // =============================================================================
+
+func (sm *STHINCSManager) verifySignatureCore(
+	message, timestamp, nonce []byte,
+	sig *sthincs.SPHINCS_SIG,
+	pk *sthincs.SPHINCS_PK,
+	merkleRoot *hashtree.HashTreeNode,
+	commitment []byte,
+) bool {
+	sigBytes, err := sig.SerializeSignature()
+	if err != nil {
+		return false
+	}
+
+	messageWithTimestampAndNonce := buildMessageWithTimestampAndNonce(timestamp, nonce, message)
+	if !sthincs.Spx_verify(sm.parameters.Params, messageWithTimestampAndNonce, sig, pk) {
+		return false
+	}
+
+	pkBytes, err := sm.serializePK(pk)
+	if err != nil {
+		return false
+	}
+
+	expectedCommitment := SigCommitment(sigBytes, pkBytes, timestamp, nonce, message)
+	if hex.EncodeToString(commitment) != hex.EncodeToString(expectedCommitment) {
+		return false
+	}
+
+	sigParts := buildSigParts(sigBytes, commitment)
+	rebuiltRoot, err := buildHashTreeFromSignature(sigParts)
+	if err != nil {
+		return false
+	}
+
+	return VerifyCommitmentInRoot(rebuiltRoot, merkleRoot)
+}
 
 // VerifySignature verifies a SPHINCS+ signature and confirms that the Merkle root
 // was constructed from genuine signature material via the commitment check.

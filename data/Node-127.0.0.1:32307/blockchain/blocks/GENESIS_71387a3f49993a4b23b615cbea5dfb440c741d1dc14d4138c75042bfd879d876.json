@@ -1,0 +1,105 @@
+{
+  "header": {
+    "hash": "GENESIS_71387a3f49993a4b23b615cbea5dfb440c741d1dc14d4138c75042bfd879d876",
+    "txs_root": "2fbe9b8f41ec4aa54df3656e8d303aae3512520341e1b321309dedd536a4b2bf",
+    "state_root": "c9d5be0d5d76d6a44eccaf2e7baf7da9f3d56dd8971420a3b8bca33b4369c913",
+    "parent_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "uncles_hash": "3916d45c66e84c612c8a4a403702ec44cc575fc2383dbe4e861dd29ef892bee3",
+    "extra_data": "The Times 20/Nov/2024 Sphinx Genesis. Privacy, sovereignty, human dignity. No surveillance.",
+    "miner": "0000000000000000000000000000000000000000",
+    "version": 1,
+    "nblock": 0,
+    "height": 0,
+    "timestamp": "2024-11-20T02:40:00Z",
+    "difficulty": "17179869184",
+    "nonce": "0000000000000001",
+    "gas_limit": "5000",
+    "gas_used": "0",
+    "proposer_signature": "",
+    "proposer_id": "0000000000000000000000000000000000000001",
+    "commit_status": "committed",
+    "signature_valid": false
+  },
+  "body": {
+    "txs_list": [
+      {
+        "amount": "10000000000000000000000000",
+        "gas_limit": "0",
+        "gas_price": "0",
+        "id": "cab6f91ba278a2871e6f26a4ba2e8babd124b7697a856ae9aad1377ebf664513",
+        "nonce": 0,
+        "receiver": "1000000000000000000000000000000000000001",
+        "sender": "genesis",
+        "signature": "",
+        "timestamp": "2024-11-20T02:40:00Z"
+      },
+      {
+        "amount": "7000000000000000000000000",
+        "gas_limit": "0",
+        "gas_price": "0",
+        "id": "66b55abf78e464234a96ca7b4a9142e5a0093ea532729163248915156fb5e895",
+        "nonce": 1,
+        "receiver": "2000000000000000000000000000000000000001",
+        "sender": "genesis",
+        "signature": "",
+        "timestamp": "2024-11-20T02:40:00Z"
+      },
+      {
+        "amount": "30000000000000000000000000",
+        "gas_limit": "0",
+        "gas_price": "0",
+        "id": "d7cc8386c08b1bbf7e8650f5b3c3807f0d7ec0482ccead332d67ade76f27ac05",
+        "nonce": 2,
+        "receiver": "3000000000000000000000000000000000000001",
+        "sender": "genesis",
+        "signature": "",
+        "timestamp": "2024-11-20T02:40:00Z"
+      },
+      {
+        "amount": "20000000000000000000000000",
+        "gas_limit": "0",
+        "gas_price": "0",
+        "id": "acbfbef23e69765853aa275dd63e022496985c832c0563dff413c869b66b8d09",
+        "nonce": 3,
+        "receiver": "4000000000000000000000000000000000000001",
+        "sender": "genesis",
+        "signature": "",
+        "timestamp": "2024-11-20T02:40:00Z"
+      },
+      {
+        "amount": "20000000000000000000000000",
+        "gas_limit": "0",
+        "gas_price": "0",
+        "id": "4450eafd2b0aa1402237d806d58701225cb6010e8c7ba262a2f380cd03c4483a",
+        "nonce": 4,
+        "receiver": "5000000000000000000000000000000000000001",
+        "sender": "genesis",
+        "signature": "",
+        "timestamp": "2024-11-20T02:40:00Z"
+      },
+      {
+        "amount": "8000000000000000000000000",
+        "gas_limit": "0",
+        "gas_price": "0",
+        "id": "c37a40e4b794c5b4b3c62c185642fa6a7e53dd6a52fbfa006a9f90e2855f9334",
+        "nonce": 5,
+        "receiver": "6000000000000000000000000000000000000001",
+        "sender": "genesis",
+        "signature": "",
+        "timestamp": "2024-11-20T02:40:00Z"
+      },
+      {
+        "amount": "5000000000000000000000000",
+        "gas_limit": "0",
+        "gas_price": "0",
+        "id": "7b70ead559b7ddf66b5d0d314d94a6329574c4eee21ff3a1ddfecd99f413b029",
+        "nonce": 6,
+        "receiver": "7000000000000000000000000000000000000001",
+        "sender": "genesis",
+        "signature": "",
+        "timestamp": "2024-11-20T02:40:00Z"
+      }
+    ],
+    "uncles_hash": "3916d45c66e84c612c8a4a403702ec44cc575fc2383dbe4e861dd29ef892bee3"
+  }
+}

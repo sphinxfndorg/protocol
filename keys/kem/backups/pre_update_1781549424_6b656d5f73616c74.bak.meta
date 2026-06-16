@@ -1,8 +1,0 @@
-{
-  "backup_file": "keys/kem/backups/pre_update_1781549424_6b656d5f73616c74.bak",
-  "timestamp": 1781549424,
-  "operation": "pre_update",
-  "key": "kem_salt",
-  "db_size": 1268,
-  "total_backups": 7
-}

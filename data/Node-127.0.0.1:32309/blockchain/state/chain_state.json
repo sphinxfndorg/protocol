@@ -1,13 +1,13 @@
 {
   "chain_identification": {
-    "timestamp": "2026-06-17T04:45:34+07:00",
+    "timestamp": "2026-06-17T04:47:04+07:00",
     "chain_parameters": {
       "bip44_type": 1,
       "chain_id": 73310,
       "chain_name": "Sphinx Devnet",
       "default_port": 32309,
       "genesis_hash": "GENESIS_71387a3f49993a4b23b615cbea5dfb440c741d1dc14d4138c75042bfd879d876",
-      "genesis_time": "2026-06-16T21:45:34Z",
+      "genesis_time": "2026-06-16T21:47:04Z",
       "magic_number": 1397770328,
       "symbol": "SPX",
       "version": "1.0.0"
@@ -43,7 +43,7 @@
       "block_height": 1,
       "block_hash": "1a0c776ee4de2e3d63e672e123ee8b89f6c605939e65174892e3756e4da1197d",
       "merkle_root": "d2df8255afc87ad113d31c79369ac99172e463b2bd19002648fb5fc1f67950e7",
-      "timestamp": "2026-06-17T04:45:32+07:00"
+      "timestamp": "2026-06-17T04:47:02+07:00"
     }
   ],
   "storage_state": {
@@ -56,7 +56,7 @@
   "basic_chain_state": {
     "best_block_hash": "1a0c776ee4de2e3d63e672e123ee8b89f6c605939e65174892e3756e4da1197d",
     "total_blocks": 2,
-    "last_updated": "2026-06-17T04:45:34+07:00"
+    "last_updated": "2026-06-17T04:47:04+07:00"
   },
   "block_size_metrics": {
     "total_blocks": 2,
@@ -82,7 +82,7 @@
         "timestamp": 1781646094
       }
     ],
-    "calculation_time": "2026-06-17T04:45:34+07:00",
+    "calculation_time": "2026-06-17T04:47:04+07:00",
     "average_size_mb": 0.001674652099609375,
     "min_size_mb": 0.0015649795532226562,
     "max_size_mb": 0.0017852783203125,
@@ -94,7 +94,7 @@
     "peak_tps": 1.4,
     "total_transactions": 14,
     "blocks_processed": 2,
-    "last_updated": "2026-06-17T04:45:34.875824+07:00",
+    "last_updated": "2026-06-17T04:47:04.744891+07:00",
     "current_window_count": 0,
     "window_start_time": "2026-06-17T04:41:29.134037+07:00",
     "window_duration_seconds": 5,
@@ -118,12 +118,12 @@
     "max_transactions_per_block": 7,
     "min_transactions_per_block": 7
   },
-  "timestamp": "2026-06-16T21:45:34Z",
+  "timestamp": "2026-06-16T21:47:04Z",
   "signature_validation": {
     "total_signatures": 2,
     "valid_signatures": 2,
     "invalid_signatures": 0,
-    "validation_time": "2026-06-16T21:45:34Z"
+    "validation_time": "2026-06-16T21:47:04Z"
   },
   "final_states": [
     {
@@ -137,7 +137,7 @@
       "view": 0,
       "valid": true,
       "signature_status": "Valid",
-      "verification_time": "2026-06-17T04:45:34+07:00",
+      "verification_time": "2026-06-17T04:47:04+07:00",
       "timestamp": "2026-06-17T04:41:44+07:00"
     },
     {
@@ -151,7 +151,7 @@
       "view": 0,
       "valid": true,
       "signature_status": "Valid",
-      "verification_time": "2026-06-17T04:45:34+07:00",
+      "verification_time": "2026-06-17T04:47:04+07:00",
       "timestamp": "2026-06-17T04:41:45+07:00"
     }
   ]

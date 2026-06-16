@@ -621,8 +621,11 @@ func main() {
 	// Verify that the proof is valid and matches the commitment and merkle root
 	tProofVerify := time.Now()
 	// Regenerate the proof using the received data
-	proofData := append(receivedTimestamp, append(receivedNonce, receivedMessage...)...)
-	proofLeavesVerify := [][]byte{receivedMerkleRootHash, receivedCommitment}
+	proofData := make([]byte, 0, len(receivedTimestamp)+len(receivedNonce)+len(receivedMessage))
+	proofData = append(proofData, receivedTimestamp...)
+	proofData = append(proofData, receivedNonce...)
+	proofData = append(proofData, receivedMessage...)
+	proofLeavesVerify := [][]byte{receivedMerkleRootHash, sign.CommitmentLeaf(receivedCommitment)}
 	regeneratedProof, err := sigproof.GenerateSigProof(
 		[][]byte{proofData},
 		proofLeavesVerify,

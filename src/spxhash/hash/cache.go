@@ -6,85 +6,117 @@ package spxhash
 
 // SIPS-0001 https://github.com/sphinx-core/sips/wiki/SIPS-0001
 
-// NewLRUCache initializes a new LRU cache.
+// NewLRUCache initializes a new LRU cache with the given capacity.
+// Capacity must be >= 1; a capacity of 0 would evict every entry immediately.
 func NewLRUCache(capacity int) *LRUCache {
+	if capacity < 1 {
+		capacity = 1
+	}
 	return &LRUCache{
-		capacity: capacity,               // Set the cache capacity
-		cache:    make(map[uint64]*Node), // Initialize the cache map
+		capacity: capacity,
+		cache:    make(map[uint64]*Node),
 	}
 }
 
-// Get retrieves a value from the cache.
+// Get retrieves the cached value for key.
+// Returns (value, true) on a hit and (nil, false) on a miss.
 func (l *LRUCache) Get(key uint64) ([]byte, bool) {
-	l.mu.Lock()         // Lock the cache for concurrent access
-	defer l.mu.Unlock() // Ensure the lock is released after the function completes
+	l.mu.Lock()
+	defer l.mu.Unlock()
 
 	if node, found := l.cache[key]; found {
-		l.moveToFront(node) // Move accessed node to the front (most recently used)
+		l.moveToFront(node)
 		return node.value, true
 	}
-	return nil, false // Return nil if key is not found
+	return nil, false
 }
 
-// Put inserts a value into the cache.
+// Put inserts or updates a key-value pair in the cache.
+// If the cache is at capacity the least-recently-used entry is evicted first.
 func (l *LRUCache) Put(key uint64, value []byte) {
-	l.mu.Lock()         // Lock the cache for concurrent access
-	defer l.mu.Unlock() // Ensure the lock is released after the function completes
+	l.mu.Lock()
+	defer l.mu.Unlock()
 
 	if node, found := l.cache[key]; found {
-		node.value = value  // Update the value if the key already exists
-		l.moveToFront(node) // Move the updated node to the front
+		node.value = value
+		l.moveToFront(node)
 		return
 	}
 
-	// Create a new node if the key is not found
 	node := &Node{key: key, value: value}
-	l.cache[key] = node // Add new node to the cache
+	l.cache[key] = node
 
-	// If the cache is empty, set head and tail to the new node
 	if l.head == nil {
+		// Cache is empty: this node is both head and tail.
 		l.head = node
 		l.tail = node
 	} else {
-		node.next = l.head // Insert new node at the front of the linked list
+		// Prepend to the front of the list.
+		node.next = l.head
 		l.head.prev = node
 		l.head = node
 	}
 
-	// Evict the least recently used item if cache exceeds capacity
 	if len(l.cache) > l.capacity {
-		l.evict() // Call eviction method to remove the least recently used item
+		l.evict()
 	}
 }
 
-// evict removes the least recently used item from the cache.
+// evict removes the least-recently-used (tail) node from the cache.
+//
+// FIX #6: The original implementation did not update l.head when the cache
+// held exactly one node (head == tail). After eviction l.tail was set to nil
+// but l.head still pointed to the freed node, corrupting the list on the next
+// Put call. The fix resets both l.head and l.tail to nil when the last node
+// is removed.
 func (l *LRUCache) evict() {
 	if l.tail == nil {
-		return // Do nothing if the cache is empty
+		return // Cache is already empty; nothing to do.
 	}
-	delete(l.cache, l.tail.key) // Remove the least recently used key from the cache
-	l.tail = l.tail.prev        // Move the tail pointer to the previous node
-	if l.tail != nil {
-		l.tail.next = nil // Set the next pointer of the new tail to nil
+
+	delete(l.cache, l.tail.key)
+
+	if l.head == l.tail {
+		// FIX #6: Only one node existed. Reset both sentinels so the list is
+		// left in a clean empty state rather than leaving l.head dangling.
+		l.head = nil
+		l.tail = nil
+		return
 	}
+
+	// General case: unlink the tail and move the sentinel back one step.
+	l.tail = l.tail.prev
+	l.tail.next = nil
 }
 
-// moveToFront moves a node to the front of the linked list.
+// moveToFront moves node to the head of the list (marks it most-recently used).
+// The caller must hold l.mu.
 func (l *LRUCache) moveToFront(node *Node) {
 	if node == l.head {
-		return // No need to move if the node is already at the front
+		return // Already at the front.
 	}
+
+	// Unlink node from its current position.
 	if node.prev != nil {
-		node.prev.next = node.next // Bypass the node in the linked list
+		node.prev.next = node.next
 	}
 	if node.next != nil {
-		node.next.prev = node.prev // Bypass the node in the linked list
+		node.next.prev = node.prev
 	}
+
+	// If node was the tail, promote its predecessor.
 	if node == l.tail {
-		l.tail = node.prev // Update the tail if the node being moved is the tail
+		l.tail = node.prev
+		if l.tail != nil {
+			l.tail.next = nil
+		}
 	}
+
+	// Splice node in at the front.
 	node.prev = nil
-	node.next = l.head // Move the node to the front
-	l.head.prev = node
+	node.next = l.head
+	if l.head != nil {
+		l.head.prev = node
+	}
 	l.head = node
 }

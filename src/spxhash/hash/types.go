@@ -6,28 +6,34 @@ package spxhash
 
 import "sync"
 
-// LRUCache is a struct for the LRU cache implementation.
+// SIPS-0001 https://github.com/sphinx-core/sips/wiki/SIPS-0001
+
+// LRUCache is a thread-safe LRU cache backed by a doubly-linked list and a map.
 type LRUCache struct {
-	capacity int              // Maximum capacity of the cache
-	mu       sync.Mutex       // Mutex for concurrent access
-	cache    map[uint64]*Node // Maps keys to their corresponding nodes in the cache
-	head     *Node            // Pointer to the most recently used node
-	tail     *Node            // Pointer to the least recently used node
+	capacity int              // Maximum number of entries the cache can hold
+	mu       sync.Mutex       // Mutex guarding all cache operations
+	cache    map[uint64]*Node // Maps cache keys to linked-list nodes
+	head     *Node            // Most-recently-used node
+	tail     *Node            // Least-recently-used node
 }
 
-// Node is a doubly linked list node for the LRU cache.
+// Node is a doubly-linked list node used internally by LRUCache.
 type Node struct {
-	key   uint64 // Unique key for the node
-	value []byte // Value associated with the key
-	prev  *Node  // Pointer to the previous node in the list
-	next  *Node  // Pointer to the next node in the list
+	key   uint64 // Cache key
+	value []byte // Cached hash value
+	prev  *Node  // Previous (more-recently-used) node
+	next  *Node  // Next (less-recently-used) node
 }
 
-// SphinxHash implements hashing based on SIP-0001 draft.
+// SphinxHash implements hashing based on SIPS-0001.
 type SphinxHash struct {
-	bitSize      int       // Specifies the bit size of the hash (128, 256, 384, 512)
-	data         []byte    // Holds the input data to be hashed
-	salt         []byte    // Salt for hashing
-	cache        *LRUCache // Cache to store previously computed hashes
-	maxCacheSize int       // Maximum cache size
+	bitSize     int    // Output bit size: 256, 384, or 512
+	data        []byte // Accumulated input data (written via Write)
+	salt        []byte // Per-instance salt for Argon2 key derivation
+	saltEntropy []byte // FIX #2: Random entropy used when deriving the salt,
+	// stored so it can be combined with input data during
+	// hashing to retain determinism within one instance
+	// while preventing cross-instance rainbow tables.
+	cache        *LRUCache // LRU cache of previously computed hashes
+	maxCacheSize int       // Maximum number of cached hash values
 }

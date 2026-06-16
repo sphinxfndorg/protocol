@@ -438,6 +438,12 @@ func (bc *Blockchain) StoreChainState(nodes []*storage.NodeInfo) error {
 	}
 	// ========================================================================
 	// Create chain state with signature data
+	// Add this before creating chainState
+	if nodes == nil {
+		nodes = make([]*storage.NodeInfo, 0)
+	}
+
+	// Create chain state with signature data
 	// Build complete chain state structure
 	chainState := &storage.ChainState{
 		Nodes:               nodes,                                               // Network node information

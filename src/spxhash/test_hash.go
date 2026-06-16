@@ -24,7 +24,10 @@ func main() {
 		fmt.Printf("\nMessage %d: %s\n", i+1, data)
 
 		// Create a new SphinxHash instance for each message
-		sphinx := spxhash.NewSphinxHash(256, []byte{})
+		sphinx, err := spxhash.NewSphinxHash(256, []byte{})
+		if err != nil {
+			log.Fatalf("Error creating SphinxHash for message %d: %v", i+1, err)
+		}
 
 		// Write data to the SphinxHash instance
 		n, err := sphinx.Write(data)

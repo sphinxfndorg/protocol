@@ -22,7 +22,10 @@ func SpxHash(data []byte) []byte {
 	params := spxParams
 
 	// Create a new SphinxHash instance with the configured bit size
-	sphinxHash := spxhash.NewSphinxHash(params.BitSize, data)
+	sphinxHash, err := spxhash.NewSphinxHash(params.BitSize, data)
+	if err != nil {
+		return nil
+	}
 
 	// Return the final hash for the data
 	return sphinxHash.GetHash(data)

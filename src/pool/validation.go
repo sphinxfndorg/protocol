@@ -53,7 +53,7 @@ func (mp *Mempool) verifyTransactionSignature(tx *types.Transaction) error {
 	// Genesis vault transactions are TRUSTED protocol transactions
 	// They don't have SPHINCS+ signatures - skip all cryptographic verification
 	// The genesis vault address is a special system address used for initial coin distribution
-	if tx.Sender == "0000000000000000000000000000000000000001" {
+	if tx.IsSystemTransaction() {
 		logger.Debug("Genesis vault transaction %s is trusted, skipping signature verification", tx.ID)
 		return nil
 	}
@@ -83,18 +83,42 @@ func (mp *Mempool) verifyTransactionSignature(tx *types.Transaction) error {
 	// Get the public key (already set in tx.PublicKey for non-genesis)
 	pkBytes := tx.PublicKey
 
-	// Build the message that was signed
-	// Format: timestamp(8) || nonce(16) || txID
-	// This ensures each transaction has a unique signed message
-	fullMsg := make([]byte, 0, 8+16+len(tx.ID))
-
 	// Convert timestamp to 8 bytes and append
 	tsBytes := uint64ToBytesPool(uint64(tx.Timestamp))
-	fullMsg = append(fullMsg, tsBytes...)
 
 	// Convert nonce to 16 bytes (first 8 bytes contain the actual nonce value)
 	nonceBytes := make([]byte, 16)
 	binary.BigEndian.PutUint64(nonceBytes[0:8], tx.Nonce)
+
+	if !tx.HasFullAuthBundle() {
+		return fmt.Errorf("missing full SPHINCS transaction auth bundle")
+	}
+	if mp.sphincsManager == nil {
+		return fmt.Errorf("missing STHINCS manager for full transaction authentication")
+	}
+	if err := mp.sphincsManager.VerifyTransactionAuth(
+		[]byte(tx.ID),
+		tsBytes,
+		nonceBytes,
+		tx.Signature,
+		pkBytes,
+		tx.SignatureHash,
+		tx.MerkleRootHash,
+		tx.Commitment,
+		tx.Proof,
+		false, // mempool validation must not mutate canonical replay evidence
+	); err != nil {
+		return fmt.Errorf("full SPHINCS transaction authentication failed: %w", err)
+	}
+
+	logger.Debug("Full SPHINCS transaction authentication verified successfully: %s", tx.ID)
+	return nil
+
+	// Build the message that was signed
+	// Format: timestamp(8) || nonce(16) || txID
+	// This ensures each transaction has a unique signed message
+	fullMsg := make([]byte, 0, 8+16+len(tx.ID))
+	fullMsg = append(fullMsg, tsBytes...)
 	fullMsg = append(fullMsg, nonceBytes...)
 
 	// Append transaction ID as the final part of the message
@@ -487,11 +511,9 @@ func (mp *Mempool) validateTransaction(pooledTx *PooledTransaction) {
 // performValidation executes all validation checks for a transaction
 // Returns an error if any validation check fails
 func (mp *Mempool) performValidation(tx *types.Transaction) error {
-	const genesisVaultAddress = "0000000000000000000000000000000000000001"
-
 	// Genesis vault transactions are TRUSTED protocol transactions
 	// They don't have SPHINCS+ signatures because they're system-level distributions
-	if tx.Sender == genesisVaultAddress {
+	if tx.IsSystemTransaction() {
 		logger.Debug("Genesis vault transaction %s is trusted, skipping cryptographic verification", tx.ID)
 
 		// Still do basic sanity checks for safety

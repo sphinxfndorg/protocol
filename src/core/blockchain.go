@@ -1576,6 +1576,10 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 			bc.StatusString(bc.GetStatus()))
 	}
 
+	if err := bc.validateBlockTransactionAuth(typeBlock, false); err != nil {
+		return fmt.Errorf("CommitBlock: transaction authentication failed: %w", err)
+	}
+
 	// Execute block: apply transactions, mint reward, compute real StateRoot.
 	stateRoot, err := bc.ExecuteBlock(typeBlock)
 	if err != nil {
@@ -1647,6 +1651,11 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 		return fmt.Errorf("failed to store block: %w", err)
 	}
 	logger.Info("✅ Block stored in storage successfully at %s", time.Now().Format("15:04:05.000"))
+
+	if err := bc.validateBlockTransactionAuth(typeBlock, true); err != nil {
+		return fmt.Errorf("CommitBlock: failed to store canonical transaction evidence: %w", err)
+	}
+	logger.Info("✅ Canonical transaction replay and receipt evidence stored")
 
 	// Add a small delay to ensure block is visible to other goroutines
 	time.Sleep(200 * time.Millisecond)

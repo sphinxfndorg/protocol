@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sphinxorg/protocol/src/consensus"
+	sign "github.com/sphinxorg/protocol/src/core/sthincs/sign/backend"
 	types "github.com/sphinxorg/protocol/src/core/transaction"
 	"github.com/sphinxorg/protocol/src/pool"
 	storage "github.com/sphinxorg/protocol/src/state"
@@ -120,6 +121,7 @@ type Blockchain struct {
 	status          BlockchainStatus
 	syncMode        SyncMode
 	consensusEngine *consensus.Consensus
+	sphincsManager  *sign.STHINCSManager
 	chainParams     *SphinxChainParameters
 
 	merkleRootCache map[string]string

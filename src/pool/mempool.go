@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/sphinxorg/protocol/src/common"
+	sign "github.com/sphinxorg/protocol/src/core/sthincs/sign/backend"
 	types "github.com/sphinxorg/protocol/src/core/transaction"
 	logger "github.com/sphinxorg/protocol/src/log"
 )
@@ -51,6 +52,14 @@ func NewMempool(config *MempoolConfig) *Mempool {
 	mp.startWorkers()
 
 	return mp
+}
+
+// SetSTHINCSManager configures the verifier used for full SPHINCS transaction
+// authentication checks: signature hash, proof, commitment, and receipt root.
+func (mp *Mempool) SetSTHINCSManager(manager *sign.STHINCSManager) {
+	mp.lock.Lock()
+	defer mp.lock.Unlock()
+	mp.sphincsManager = manager
 }
 
 // AddPublicKeyToRegistry registers a public key for a sender address
@@ -521,6 +530,21 @@ func (mp *Mempool) CalculateTransactionSize(tx *types.Transaction) uint64 {
 
 	if tx.Signature != nil {
 		size += uint64(len(tx.Signature))
+	}
+	if tx.SignatureHash != nil {
+		size += uint64(len(tx.SignatureHash))
+	}
+	if tx.PublicKey != nil {
+		size += uint64(len(tx.PublicKey))
+	}
+	if tx.MerkleRootHash != nil {
+		size += uint64(len(tx.MerkleRootHash))
+	}
+	if tx.Commitment != nil {
+		size += uint64(len(tx.Commitment))
+	}
+	if tx.Proof != nil {
+		size += uint64(len(tx.Proof))
 	}
 
 	// CRITICAL: Include OP_RETURN data size - this data occupies real block space

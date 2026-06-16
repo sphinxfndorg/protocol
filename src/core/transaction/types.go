@@ -74,9 +74,32 @@ type Transaction struct {
 	Signature  []byte   `json:"signature"`
 	ReturnData []byte   `json:"return_data,omitempty"` // OP_RETURN data (memos, proofs, metadata)
 	// Optional data
-	Data          []byte `json:"data,omitempty"`
-	SignatureHash []byte `json:"signature_hash"` // ADD THIS - 32-byte hash of signature for replay detection
-	PublicKey     []byte `json:"public_key"`     // Serialized SPHINCS+ public key (NOT sender address string)
+	Data           []byte `json:"data,omitempty"`
+	SignatureHash  []byte `json:"signature_hash"`             // ADD THIS - 32-byte hash of signature for replay detection
+	PublicKey      []byte `json:"public_key"`                 // Serialized SPHINCS+ public key (NOT sender address string)
+	MerkleRootHash []byte `json:"merkle_root_hash,omitempty"` // SPHINCS+ receipt root derived from signature leaves
+	Commitment     []byte `json:"commitment,omitempty"`       // Binding commitment over signature, key, timestamp, nonce, and tx ID
+	Proof          []byte `json:"proof,omitempty"`            // Lightweight consistency proof for the receipt fields
+}
+
+const GenesisVaultAddress = "0000000000000000000000000000000000000001"
+
+// IsSystemTransaction returns true for protocol-created transactions that are
+// valid without an external SPHINCS+ signature.
+func (tx *Transaction) IsSystemTransaction() bool {
+	return tx != nil && (tx.Sender == "genesis" || tx.Sender == GenesisVaultAddress)
+}
+
+// HasFullAuthBundle returns true when all fields needed for real SPHINCS+
+// transaction authentication are present.
+func (tx *Transaction) HasFullAuthBundle() bool {
+	return tx != nil &&
+		len(tx.Signature) > 0 &&
+		len(tx.SignatureHash) == 32 &&
+		len(tx.PublicKey) > 0 &&
+		len(tx.MerkleRootHash) == 32 &&
+		len(tx.Commitment) == 32 &&
+		len(tx.Proof) == 32
 }
 
 // Outpoint represents a specific transaction output.

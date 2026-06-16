@@ -75,8 +75,8 @@ type Mempool struct {
 	// Memory tracking
 	currentBytes uint64 // tracks total bytes used by transactions
 
-	// ADD THIS: SPHINCS+ manager for signature hash verification
-	sphincsManager *sign.SphincsManager
+	// SPHINCS+ manager for full transaction authentication verification.
+	sphincsManager *sign.STHINCSManager
 
 	// ADD THIS FIELD:
 	publicKeyRegistry map[string][]byte // Maps sender address -> serialized SPHINCS+ public key

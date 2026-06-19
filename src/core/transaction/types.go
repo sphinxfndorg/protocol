@@ -77,6 +77,8 @@ type Transaction struct {
 	Data           []byte `json:"data,omitempty"`
 	SignatureHash  []byte `json:"signature_hash"`             // ADD THIS - 32-byte hash of signature for replay detection
 	PublicKey      []byte `json:"public_key"`                 // Serialized SPHINCS+ public key (NOT sender address string)
+	AuthTimestamp  []byte `json:"auth_timestamp,omitempty"`   // 8-byte timestamp bound inside the SPHINCS signature
+	AuthNonce      []byte `json:"auth_nonce,omitempty"`       // 16-byte random nonce bound inside the SPHINCS signature
 	MerkleRootHash []byte `json:"merkle_root_hash,omitempty"` // SPHINCS+ receipt root derived from signature leaves
 	Commitment     []byte `json:"commitment,omitempty"`       // Binding commitment over signature, key, timestamp, nonce, and tx ID
 	Proof          []byte `json:"proof,omitempty"`            // Lightweight consistency proof for the receipt fields
@@ -97,6 +99,8 @@ func (tx *Transaction) HasFullAuthBundle() bool {
 		len(tx.Signature) > 0 &&
 		len(tx.SignatureHash) == 32 &&
 		len(tx.PublicKey) > 0 &&
+		len(tx.AuthTimestamp) == 8 &&
+		len(tx.AuthNonce) == 16 &&
 		len(tx.MerkleRootHash) == 32 &&
 		len(tx.Commitment) == 32 &&
 		len(tx.Proof) == 32

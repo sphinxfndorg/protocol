@@ -83,12 +83,16 @@ func (mp *Mempool) verifyTransactionSignature(tx *types.Transaction) error {
 	// Get the public key (already set in tx.PublicKey for non-genesis)
 	pkBytes := tx.PublicKey
 
-	// Convert timestamp to 8 bytes and append
-	tsBytes := uint64ToBytesPool(uint64(tx.Timestamp))
+	tsBytes := tx.AuthTimestamp
+	if len(tsBytes) == 0 {
+		tsBytes = uint64ToBytesPool(uint64(tx.Timestamp))
+	}
 
-	// Convert nonce to 16 bytes (first 8 bytes contain the actual nonce value)
-	nonceBytes := make([]byte, 16)
-	binary.BigEndian.PutUint64(nonceBytes[0:8], tx.Nonce)
+	nonceBytes := tx.AuthNonce
+	if len(nonceBytes) == 0 {
+		nonceBytes = make([]byte, 16)
+		binary.BigEndian.PutUint64(nonceBytes[0:8], tx.Nonce)
+	}
 
 	if !tx.HasFullAuthBundle() {
 		return fmt.Errorf("missing full SPHINCS transaction auth bundle")

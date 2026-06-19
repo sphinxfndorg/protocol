@@ -181,6 +181,75 @@ func (p *SphinxChainParameters) CalculateTransactionFee(bytes uint64, ops uint64
 	return govPolicy.CalculateFees(bytes, ops, hashes)
 }
 
+// MinimumTransactionFee returns the governance-policy fee floor in nSPX.
+func (bc *Blockchain) MinimumTransactionFee(bytes uint64, ops uint64, hashes uint64) *big.Int {
+	if bc != nil && bc.chainParams != nil {
+		return bc.chainParams.CalculateTransactionFee(bytes, ops, hashes).TotalFee
+	}
+	return policy.GetDefaultPolicyParams().CalculateMinimumFee(bytes, ops, hashes)
+}
+
+// EstimateTransactionPolicyCost estimates the policy dimensions used for a
+// standard value-transfer transaction.
+func (bc *Blockchain) EstimateTransactionPolicyCost(tx *types.Transaction) (uint64, uint64, uint64, *big.Int, error) {
+	if tx == nil {
+		return 0, 0, 0, nil, fmt.Errorf("nil transaction")
+	}
+
+	size, err := bc.calculateTxsSize(tx)
+	if err != nil {
+		return 0, 0, 0, nil, err
+	}
+
+	ops := uint64(1)
+	if tx.HasReturnData() {
+		ops++
+	}
+	if len(tx.Signature) > 0 {
+		ops++
+	}
+
+	hashes := uint64(1)
+	if len(tx.SignatureHash) == 32 {
+		hashes++
+	}
+	if len(tx.MerkleRootHash) == 32 {
+		hashes++
+	}
+	if len(tx.Commitment) == 32 {
+		hashes++
+	}
+	if len(tx.Proof) == 32 {
+		hashes++
+	}
+
+	fee := bc.MinimumTransactionFee(size, ops, hashes)
+	return size, ops, hashes, fee, nil
+}
+
+// ValidateTransactionPolicy enforces governance policy for non-system txs.
+func (bc *Blockchain) ValidateTransactionPolicy(tx *types.Transaction) error {
+	if tx == nil {
+		return fmt.Errorf("nil transaction")
+	}
+	if tx.IsSystemTransaction() {
+		return nil
+	}
+	if tx.GasLimit == nil || tx.GasPrice == nil {
+		return fmt.Errorf("missing gas fields")
+	}
+
+	_, _, _, requiredFee, err := bc.EstimateTransactionPolicyCost(tx)
+	if err != nil {
+		return err
+	}
+	offeredFee := tx.GetGasFee()
+	if offeredFee.Cmp(requiredFee) < 0 {
+		return fmt.Errorf("transaction fee below policy minimum: offered %s, required %s", offeredFee.String(), requiredFee.String())
+	}
+	return nil
+}
+
 // GetInflationRate returns the current inflation rate based on stake ratio
 func (p *SphinxChainParameters) GetInflationRate(currentStakeRatio float64) float64 {
 	govPolicy := p.GetGovernancePolicy()

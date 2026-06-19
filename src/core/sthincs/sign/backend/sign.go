@@ -178,6 +178,19 @@ type STHINCSManager struct {
 	mu         sync.RWMutex              // Mutex for thread-safe database operations
 }
 
+// TransactionAuthBundle is the wire-ready authentication material attached to
+// a blockchain transaction.
+type TransactionAuthBundle struct {
+	Signature      []byte
+	SignatureHash  []byte
+	Timestamp      []byte
+	Nonce          []byte
+	MerkleRootHash []byte
+	Commitment     []byte
+	Proof          []byte
+	PublicKey      []byte
+}
+
 // =============================================================================
 // CONSTRUCTOR
 // =============================================================================
@@ -972,6 +985,46 @@ func (sm *STHINCSManager) SignMessage(
 	// The signature object is still needed for the local sanity check, but
 	// will be discarded after transmission.
 	return signature, merkleRoot, timestamp, nonce, commitment, nil
+}
+
+// SignTransactionAuth signs a canonical transaction message and returns every
+// authentication field required by mempool, P2P, and block validation.
+func (sm *STHINCSManager) SignTransactionAuth(
+	message []byte,
+	privateKey *sthincs.SPHINCS_SK,
+	publicKey *sthincs.SPHINCS_PK,
+) (*TransactionAuthBundle, error) {
+	sig, merkleRoot, timestamp, nonce, commitment, err := sm.SignMessage(message, privateKey, publicKey)
+	if err != nil {
+		return nil, err
+	}
+
+	sigBytes, err := sig.SerializeSignature()
+	if err != nil {
+		return nil, err
+	}
+
+	pkBytes, err := sm.serializePK(publicKey)
+	if err != nil {
+		return nil, err
+	}
+
+	merkleRootHash := merkleRoot.Hash.Bytes()
+	proof, err := GenerateReceiptProof(message, timestamp, nonce, merkleRootHash, commitment, pkBytes)
+	if err != nil {
+		return nil, err
+	}
+
+	return &TransactionAuthBundle{
+		Signature:      sigBytes,
+		SignatureHash:  sm.ComputeSignatureHash(sigBytes),
+		Timestamp:      timestamp,
+		Nonce:          nonce,
+		MerkleRootHash: merkleRootHash,
+		Commitment:     commitment,
+		Proof:          proof,
+		PublicKey:      pkBytes,
+	}, nil
 }
 
 // =============================================================================

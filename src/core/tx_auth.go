@@ -1,22 +1,34 @@
 // Copyright (c) 2024-present Sphinx Core Dev
 // MIT License https://opensource.org/license/mit
 
+// go/src/core/tx_auth.go
 package core
 
 import (
 	"encoding/binary"
 	"fmt"
 
+	key "github.com/sphinxorg/protocol/src/core/sthincs/key/backend"
 	types "github.com/sphinxorg/protocol/src/core/transaction"
 )
 
 func transactionAuthTimestamp(tx *types.Transaction) []byte {
+	if len(tx.AuthTimestamp) == 8 {
+		out := make([]byte, 8)
+		copy(out, tx.AuthTimestamp)
+		return out
+	}
 	out := make([]byte, 8)
 	binary.BigEndian.PutUint64(out, uint64(tx.Timestamp))
 	return out
 }
 
 func transactionAuthNonce(tx *types.Transaction) []byte {
+	if len(tx.AuthNonce) == 16 {
+		out := make([]byte, 16)
+		copy(out, tx.AuthNonce)
+		return out
+	}
 	out := make([]byte, 16)
 	binary.BigEndian.PutUint64(out[:8], tx.Nonce)
 	return out
@@ -99,6 +111,48 @@ func (bc *Blockchain) validateBlockTransactionAuth(block *types.Block, storeEvid
 			return err
 		}
 	}
+
+	return nil
+}
+
+// SignTransaction fills a transaction with the full SPHINCS auth bundle required
+// for mempool admission, P2P gossip, and block validation.
+func (bc *Blockchain) SignTransaction(tx *types.Transaction, skBytes, pkBytes []byte) error {
+	if tx == nil {
+		return fmt.Errorf("nil transaction")
+	}
+	if tx.IsSystemTransaction() {
+		return nil
+	}
+	if bc.sphincsManager == nil {
+		return fmt.Errorf("STHINCS manager is not configured")
+	}
+	if tx.ID == "" {
+		tx.ID = tx.Hash()
+	}
+
+	km, err := key.NewKeyManager()
+	if err != nil {
+		return fmt.Errorf("failed to initialize key manager: %w", err)
+	}
+	privateKey, publicKey, err := km.DeserializeKeyPair(skBytes, pkBytes)
+	if err != nil {
+		return fmt.Errorf("failed to deserialize transaction signing key pair: %w", err)
+	}
+
+	bundle, err := bc.sphincsManager.SignTransactionAuth([]byte(tx.ID), privateKey, publicKey)
+	if err != nil {
+		return fmt.Errorf("failed to sign transaction auth bundle: %w", err)
+	}
+
+	tx.Signature = bundle.Signature
+	tx.SignatureHash = bundle.SignatureHash
+	tx.PublicKey = bundle.PublicKey
+	tx.AuthTimestamp = bundle.Timestamp
+	tx.AuthNonce = bundle.Nonce
+	tx.MerkleRootHash = bundle.MerkleRootHash
+	tx.Commitment = bundle.Commitment
+	tx.Proof = bundle.Proof
 
 	return nil
 }

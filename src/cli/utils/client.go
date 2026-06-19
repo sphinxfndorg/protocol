@@ -6,16 +6,22 @@ package utils
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"math/big"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	key "github.com/sphinxorg/protocol/src/core/sthincs/key/backend"
+	sign "github.com/sphinxorg/protocol/src/core/sthincs/sign/backend"
+	types "github.com/sphinxorg/protocol/src/core/transaction"
 	logger "github.com/sphinxorg/protocol/src/log"
+	"github.com/sphinxorg/protocol/src/policy"
 )
 
 // SendTransaction sends a transaction via JSON-RPC
@@ -41,36 +47,188 @@ func SendTransaction(opts SendTxOptions) error {
 		logger.Debugf("Using nonce: %d", nonce)
 	}
 
-	// Prepare transaction parameters
-	params := map[string]interface{}{
-		"from":     opts.From,
-		"to":       opts.To,
-		"value":    "0x" + weiAmount.Text(16),
-		"gas":      "0x" + strconv.FormatInt(parseIntOrDefault(opts.GasLimit, 21000), 16),
-		"gasPrice": "0x" + strconv.FormatInt(parseIntOrDefault(opts.GasPrice, 1), 16),
-		"nonce":    "0x" + strconv.FormatUint(nonce, 16),
+	if opts.KeyFile == "" {
+		return fmt.Errorf("--key is required: transactions must be locally signed with a full SPHINCS auth bundle before broadcast")
 	}
 
-	// Make JSON-RPC call - Using spx_sendTransaction
-	var result string
-	err := callRPC(opts.RPCURL, "spx_sendTransaction", []interface{}{params}, &result)
+	tx, err := buildSignedTransaction(opts, weiAmount, nonce)
+	if err != nil {
+		return err
+	}
+
+	rawTx, err := json.Marshal(tx)
+	if err != nil {
+		return fmt.Errorf("failed to marshal signed transaction: %w", err)
+	}
+
+	var result map[string]string
+	err = callRPC(opts.RPCURL, "sendrawtransaction", []interface{}{hex.EncodeToString(rawTx)}, &result)
 	if err != nil {
 		return fmt.Errorf("RPC call failed: %v", err)
 	}
 
-	logger.Infof("Transaction sent! TX ID: %s", result)
+	txID := result["txid"]
+	if txID == "" {
+		txID = tx.ID
+	}
+	logger.Infof("Transaction sent! TX ID: %s", txID)
 
 	// Wait for confirmation if requested
 	if opts.Wait {
 		logger.Info("Waiting for transaction confirmation...")
 		return WatchTransaction(WatchTxOptions{
 			RPCURL:      opts.RPCURL,
-			TxID:        result,
+			TxID:        txID,
 			TimeoutSecs: 120,
 		})
 	}
 
 	return nil
+}
+
+func buildSignedTransaction(opts SendTxOptions, amount *big.Int, nonce uint64) (*types.Transaction, error) {
+	gasLimit := big.NewInt(parseIntOrDefault(opts.GasLimit, 21000))
+	gasPrice := big.NewInt(parseIntOrDefault(opts.GasPrice, 1))
+
+	tx := &types.Transaction{
+		Sender:    opts.From,
+		Receiver:  opts.To,
+		Amount:    new(big.Int).Set(amount),
+		GasLimit:  gasLimit,
+		GasPrice:  gasPrice,
+		Nonce:     nonce,
+		Timestamp: time.Now().Unix(),
+	}
+	tx.ID = tx.Hash()
+
+	skBytes, pkBytes, err := loadSigningKeyFile(opts.KeyFile)
+	if err != nil {
+		return nil, err
+	}
+
+	km, err := key.NewKeyManager()
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize key manager: %w", err)
+	}
+	privateKey, publicKey, err := km.DeserializeKeyPair(skBytes, pkBytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to deserialize key file: %w", err)
+	}
+
+	manager := sign.NewSTHINCSManager(nil, km, km.GetSPHINCSParameters())
+	bundle, err := manager.SignTransactionAuth([]byte(tx.ID), privateKey, publicKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to sign transaction: %w", err)
+	}
+
+	tx.Signature = bundle.Signature
+	tx.SignatureHash = bundle.SignatureHash
+	tx.PublicKey = bundle.PublicKey
+	tx.AuthTimestamp = bundle.Timestamp
+	tx.AuthNonce = bundle.Nonce
+	tx.MerkleRootHash = bundle.MerkleRootHash
+	tx.Commitment = bundle.Commitment
+	tx.Proof = bundle.Proof
+
+	ensurePolicyFee(tx)
+
+	return tx, nil
+}
+
+func ensurePolicyFee(tx *types.Transaction) {
+	estimatedSize := uint64(len(tx.ID) + len(tx.Sender) + len(tx.Receiver) + 16)
+	if tx.Amount != nil {
+		estimatedSize += uint64(len(tx.Amount.Bytes()))
+	}
+	if tx.GasLimit != nil {
+		estimatedSize += uint64(len(tx.GasLimit.Bytes()))
+	}
+	if tx.GasPrice != nil {
+		estimatedSize += uint64(len(tx.GasPrice.Bytes()))
+	}
+	estimatedSize += 16 // nonce + timestamp
+	estimatedSize += uint64(len(tx.Signature) + len(tx.SignatureHash) + len(tx.PublicKey))
+	estimatedSize += uint64(len(tx.AuthTimestamp) + len(tx.AuthNonce))
+	estimatedSize += uint64(len(tx.MerkleRootHash) + len(tx.Commitment) + len(tx.Proof))
+	estimatedSize += uint64(len(tx.ReturnData) + len(tx.Data))
+
+	ops := uint64(2)
+	if tx.HasReturnData() {
+		ops++
+	}
+	hashes := uint64(5)
+	requiredFee := policy.GetDefaultPolicyParams().CalculateMinimumFee(estimatedSize, ops, hashes)
+	if tx.GetGasFee().Cmp(requiredFee) >= 0 {
+		return
+	}
+
+	gasLimit := tx.GasLimit
+	if gasLimit == nil || gasLimit.Sign() <= 0 {
+		gasLimit = big.NewInt(21000)
+		tx.GasLimit = gasLimit
+	}
+	tx.GasPrice = new(big.Int).Div(requiredFee, gasLimit)
+	if new(big.Int).Mul(tx.GasPrice, gasLimit).Cmp(requiredFee) < 0 {
+		tx.GasPrice.Add(tx.GasPrice, big.NewInt(1))
+	}
+}
+
+func loadSigningKeyFile(path string) ([]byte, []byte, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to read key file: %w", err)
+	}
+
+	var keyFile struct {
+		PrivateKey string `json:"private_key"`
+		PublicKey  string `json:"public_key"`
+		SK         string `json:"sk"`
+		PK         string `json:"pk"`
+	}
+	if err := json.Unmarshal(data, &keyFile); err == nil {
+		privateKey := firstNonEmpty(keyFile.PrivateKey, keyFile.SK)
+		publicKey := firstNonEmpty(keyFile.PublicKey, keyFile.PK)
+		if privateKey == "" || publicKey == "" {
+			return nil, nil, fmt.Errorf("key file must contain private_key/public_key or sk/pk")
+		}
+		skBytes, err := decodeKeyBytes(privateKey)
+		if err != nil {
+			return nil, nil, fmt.Errorf("invalid private key encoding: %w", err)
+		}
+		pkBytes, err := decodeKeyBytes(publicKey)
+		if err != nil {
+			return nil, nil, fmt.Errorf("invalid public key encoding: %w", err)
+		}
+		return skBytes, pkBytes, nil
+	}
+
+	lines := strings.Fields(string(data))
+	if len(lines) < 2 {
+		return nil, nil, fmt.Errorf("key file must be JSON or contain private/public key hex on separate lines")
+	}
+	skBytes, err := decodeKeyBytes(lines[0])
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid private key encoding: %w", err)
+	}
+	pkBytes, err := decodeKeyBytes(lines[1])
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid public key encoding: %w", err)
+	}
+	return skBytes, pkBytes, nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func decodeKeyBytes(value string) ([]byte, error) {
+	value = strings.TrimSpace(strings.TrimPrefix(value, "0x"))
+	return hex.DecodeString(value)
 }
 
 // GetBalance queries the balance of an address

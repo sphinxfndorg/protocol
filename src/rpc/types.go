@@ -5,7 +5,6 @@
 package rpc
 
 import (
-	"hash"
 	"math/rand"
 	"net"
 	"sync"
@@ -18,9 +17,6 @@ import (
 
 // NodeID represents a unique 256-bit node identifier.
 type NodeID [32]byte
-
-// Key represents a 256-bit key for the key-value store.
-type Key [32]byte
 
 // Codec provides binary encoding/decoding utilities.
 type Codec struct{}
@@ -154,24 +150,26 @@ const (
 	expiredInterval = 10 * time.Second
 )
 
-// checksum represents a hash checksum for deduplication.
+// checksum holds a 256-bit BLAKE3 digest packed as four uint64 values.
+// Using a struct (instead of [32]byte) makes it directly usable as a map key
+// and avoids repeated array copies on comparison.
 type checksum struct {
-	v1 uint64
-	v2 uint64
-	v3 uint64
-	v4 uint64
+	v1, v2, v3, v4 uint64
 }
 
-// stored represents a stored key-value entry with TTL.
+// Key is the DHT key type used to index stored records.
+type Key [32]byte
+
+// stored holds the values and metadata associated with a single DHT key.
 type stored struct {
-	ttl      time.Time
-	values   [][]byte
-	included map[checksum]struct{}
+	values   [][]byte              // Deduplicated list of values
+	included map[checksum]struct{} // Set of checksums already stored (for O(1) dedup)
+	ttl      time.Time             // Expiry time for this record
 }
 
-// KVStore is an in-memory key-value store.
+// KVStore is a thread-safe, in-memory key-value store with TTL-based expiry
+// and content-addressed deduplication backed by BLAKE3.
 type KVStore struct {
 	mu   sync.Mutex
-	hash hash.Hash
 	data map[Key]*stored
 }

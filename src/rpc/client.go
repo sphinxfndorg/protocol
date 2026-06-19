@@ -51,7 +51,7 @@ func CallRPC(address, method string, params interface{}, nodeID NodeID, ttl uint
 		Query:   true,
 		TTL:     ttl,
 		Target:  NodeID{}, // Set to target node ID in production
-		RPCID:   RPCID(time.Now().UnixNano()),
+		RPCID:   GetRPCID(),
 		From: Remote{
 			NodeID:  nodeID,
 			Address: net.UDPAddr{IP: net.ParseIP("0.0.0.0"), Port: 0}, // Set actual address in production

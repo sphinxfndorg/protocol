@@ -17,7 +17,6 @@ require (
 	github.com/jung-kurt/gofpdf v1.16.2
 	github.com/kasperdi/SPHINCSPLUS-golang v0.0.0-20231223193046-84468b93f7e9
 	github.com/lni/goutils v1.4.0
-	github.com/minio/highwayhash v1.0.3
 	github.com/pdfcpu/pdfcpu v0.13.0
 	github.com/prometheus/client_golang v1.22.0
 	github.com/syndtr/goleveldb v1.0.0

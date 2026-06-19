@@ -537,6 +537,12 @@ func (mp *Mempool) CalculateTransactionSize(tx *types.Transaction) uint64 {
 	if tx.PublicKey != nil {
 		size += uint64(len(tx.PublicKey))
 	}
+	if tx.AuthTimestamp != nil {
+		size += uint64(len(tx.AuthTimestamp))
+	}
+	if tx.AuthNonce != nil {
+		size += uint64(len(tx.AuthNonce))
+	}
 	if tx.MerkleRootHash != nil {
 		size += uint64(len(tx.MerkleRootHash))
 	}

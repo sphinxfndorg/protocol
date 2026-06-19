@@ -153,16 +153,25 @@ func (bc *Blockchain) GetMiningInfo() map[string]interface{} {
 //
 // Returns: Map with fee estimates
 func (bc *Blockchain) EstimateFee(blocks int) map[string]interface{} {
-	// Basic fee estimation
-	baseFee := big.NewInt(1000000) // Base fee in smallest unit
+	if blocks <= 0 {
+		blocks = 1
+	}
+
+	const estimatedTransferBytes = uint64(5120)
+	const estimatedTransferOps = uint64(1)
+	const estimatedTransferHashes = uint64(8)
+
+	fee := bc.MinimumTransactionFee(estimatedTransferBytes, estimatedTransferOps, estimatedTransferHashes)
+	economic := new(big.Int).Set(fee)
+	conservative := new(big.Int).Mul(fee, big.NewInt(2))
 
 	// Return fee estimates
 	return map[string]interface{}{
-		"feerate": baseFee.String(), // Fee rate
-		"blocks":  blocks,           // Target blocks
+		"feerate": fee.String(), // Fee rate
+		"blocks":  blocks,       // Target blocks
 		"estimates": map[string]interface{}{
-			"conservative": baseFee.String(), // Conservative estimate
-			"economic":     baseFee.String(), // Economic estimate
+			"conservative": conservative.String(), // Conservative estimate
+			"economic":     economic.String(),     // Economic estimate
 		},
 	}
 }
@@ -607,6 +616,10 @@ func (bc *Blockchain) CacheTypeString(cacheType CacheType) string {
 // Returns: Error if transaction addition fails
 // In blockchain.go
 func (bc *Blockchain) AddTransaction(tx *types.Transaction) error {
+	if err := bc.ValidateTransactionPolicy(tx); err != nil {
+		return err
+	}
+
 	bc.storage.RecordTransaction()
 
 	// Record transaction for TPS monitoring

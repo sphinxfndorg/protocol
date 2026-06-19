@@ -1322,6 +1322,11 @@ func (bc *Blockchain) selectTransactionsForBlock(pendingTxs []*types.Transaction
 			continue
 		}
 
+		if err := bc.ValidateTransactionPolicy(tx); err != nil {
+			logger.Warn("Transaction %s failed policy validation: %v", tx.ID, err)
+			continue
+		}
+
 		// Check if adding this transaction would exceed block size
 		if currentSize+txSize > availableSize {
 			continue
@@ -1422,6 +1427,13 @@ func (bc *Blockchain) calculateTxsSize(tx *types.Transaction) (uint64, error) {
 
 	// Account for signature
 	estimatedSize += uint64(len(tx.Signature)) // Signature size
+	estimatedSize += uint64(len(tx.SignatureHash))
+	estimatedSize += uint64(len(tx.PublicKey))
+	estimatedSize += uint64(len(tx.AuthTimestamp))
+	estimatedSize += uint64(len(tx.AuthNonce))
+	estimatedSize += uint64(len(tx.MerkleRootHash))
+	estimatedSize += uint64(len(tx.Commitment))
+	estimatedSize += uint64(len(tx.Proof))
 
 	// Account for transaction version (uint32 = 4 bytes) - MISSING
 	estimatedSize += 4
@@ -1584,6 +1596,11 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 
 	if err := bc.validateBlockTransactionAuth(typeBlock, false); err != nil {
 		return fmt.Errorf("CommitBlock: transaction authentication failed: %w", err)
+	}
+	for _, tx := range typeBlock.Body.TxsList {
+		if err := bc.ValidateTransactionPolicy(tx); err != nil {
+			return fmt.Errorf("CommitBlock: transaction policy failed: %w", err)
+		}
 	}
 
 	// Execute block: apply transactions, mint reward, compute real StateRoot.

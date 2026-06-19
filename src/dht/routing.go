@@ -15,7 +15,6 @@
 package dht
 
 import (
-	"encoding/binary"
 	"net"
 	"sort"
 	"time"
@@ -303,47 +302,22 @@ func sortByDistance(selected []rpc.Remote, target rpc.NodeID) []rpc.Remote {
 	return selected
 }
 
-// getRandomInterestedNodeID generates a random node ID that would fall into a specific bucket
-// Used to find nodes for empty buckets by generating a target in that bucket's range
+// getRandomInterestedNodeID generates a node ID that would fall into a specific bucket.
+// Used to find nodes for empty buckets by generating a target in that bucket's range.
+//
+// prefixLen is the number of leading bits that must match r.nodeID (0-255 for a
+// 256-bit NodeID). Flipping the bit immediately after that shared prefix yields an
+// ID whose CommonPrefixLength with r.nodeID is exactly prefixLen, placing it in
+// buckets[prefixLen]. The flip covers the full 32-byte ID (bits 0-255), not just
+// bytes 0-7 and 16-23 as the previous high/low-uint64 version did.
 func (r *routingTable) getRandomInterestedNodeID(prefixLen int) rpc.NodeID {
 	// Start with this node's ID as base
 	result := r.nodeID
 
-	// Extract high and low 64-bit parts
-	// NodeID is 32 bytes (256 bits)
-	high := binary.BigEndian.Uint64(result[:8])   // First 8 bytes (bits 0-63)
-	low := binary.BigEndian.Uint64(result[16:24]) // Bytes 16-23 (bits 128-191)
+	byteIdx := prefixLen / 8      // Which of the 32 bytes the target bit lives in
+	bitIdx := 7 - (prefixLen % 8) // Bit position within that byte, MSB first
 
-	// Flip the bit at position prefixLen to get a node ID in the desired bucket
-	if prefixLen <= 63 {
-		// Bit is in the high 64 bits
-		pos := 63 - prefixLen    // Position within high (0-63)
-		mask := uint64(1) << pos // Create mask with 1 at that position
-		high ^= mask             // Flip the bit using XOR
-	} else {
-		// Bit is in the low 64 bits
-		pos := 63 - (prefixLen - 64) // Position within low (0-63)
-		mask := uint64(1) << pos     // Create mask
-		low ^= mask                  // Flip the bit
-	}
+	result[byteIdx] ^= 1 << bitIdx // Flip the bit using XOR
 
-	// Create new node ID with flipped bits
-	var newNodeID rpc.NodeID
-
-	// Write modified high part back
-	binary.BigEndian.PutUint64(newNodeID[:8], high)
-	// Write modified low part back
-	binary.BigEndian.PutUint64(newNodeID[16:24], low)
-
-	// Copy unchanged middle bytes (bytes 8-15)
-	for i := 8; i < 16; i++ {
-		newNodeID[i] = result[i]
-	}
-
-	// Copy unchanged last bytes (bytes 24-31)
-	for i := 24; i < 32; i++ {
-		newNodeID[i] = result[i]
-	}
-
-	return newNodeID
+	return result
 }

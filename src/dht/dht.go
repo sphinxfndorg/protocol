@@ -145,13 +145,17 @@ func (d *DHT) Put(key network.Key, value []byte, ttl uint16) {
 }
 
 // Get implements network.DHT.Get.
-// Retrieves values associated with a key from the DHT
+// Retrieves values associated with a key from the DHT.
+//
+// Note: responses to RPCGet queries are written into d.cached by
+// handleGetResponse (running on the DHT's main loop goroutine), not pushed
+// back through a call-local channel. So this method fires the query, waits
+// out the timeout window to give remote nodes a chance to reply and populate
+// the cache, and then reads from the cache — it does not block on a channel
+// no one writes to.
 func (d *DHT) Get(key network.Key) ([][]byte, bool) {
 	// Generate a unique RPC ID for this query
 	rpcID := rpc.GetRPCID()
-
-	// Channel to receive response
-	responseCh := make(chan [][]byte, 1)
 
 	// Register this get operation with the query manager
 	d.ongoing.AddGet(rpcID)
@@ -173,12 +177,10 @@ func (d *DHT) Get(key network.Key) ([][]byte, bool) {
 		d.sendMessage(msg, rt.Address)
 	}
 
-	// Wait for response or timeout
+	// Wait for the response window to elapse (or for shutdown), then read
+	// whatever handleGetResponse has placed in the cache.
 	select {
-	case values := <-responseCh:
-		return values, true // Got response
 	case <-time.After(defaultFindNodeTimeout):
-		// Timeout - fallback to cached store
 		values, ok := d.cached.Get(rpc.Key(key))
 		return values, ok
 	case <-d.stopper.ShouldStop():
@@ -548,25 +550,16 @@ func (d *DHT) toLocalNode(addr net.UDPAddr) bool {
 
 // sendMessage encodes and sends an RPC message to a remote node
 func (d *DHT) sendMessage(m rpc.Message, addr net.UDPAddr) {
+	// Set the secret before marshaling/encoding so it is actually included on the wire
+	m.Secret = d.cfg.Secret
+
 	// Verify message has required fields
 	d.verifyMessage(m)
 
-	// First marshal the RPC message to bytes
-	data, err := m.Marshal(make([]byte, m.MarshalSize()))
-	if err != nil {
-		d.log.Error("Failed to marshal message", zap.Error(err))
-		return
-	}
-
-	// Create a wrapper message for getMessageBuf
-	wrapperMsg := rpc.Message{}
-	if err := wrapperMsg.Unmarshal(data); err != nil {
-		d.log.Error("Failed to unmarshal for wrapper", zap.Error(err))
-		return
-	}
-
-	// Use getMessageBuf to add magic header and BLAKE3 hash
-	encodedMsg, err := d.conn.EncodeMessage(wrapperMsg)
+	// Use getMessageBuf to add magic header and BLAKE3 hash.
+	// EncodeMessage marshals m internally, so there is no need to marshal here
+	// and then unmarshal into a throwaway wrapper just to pass it back in.
+	encodedMsg, err := d.conn.EncodeMessage(m)
 	if err != nil {
 		d.log.Error("Failed to encode message with getMessageBuf", zap.Error(err))
 		return
@@ -579,9 +572,6 @@ func (d *DHT) sendMessage(m rpc.Message, addr net.UDPAddr) {
 		d.log.Error("Failed to encode security message", zap.Error(err))
 		return
 	}
-
-	// Set the secret in the message
-	m.Secret = d.cfg.Secret
 
 	// Create send request
 	req := sendReq{Addr: addr, Msg: m, EncodedData: encodedData}

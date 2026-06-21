@@ -1,4 +1,3 @@
-```markdown
 # Sphinx Wallet Key Management
 
 How SPHINCS+ key pairs are generated, encrypted, stored on disk, backed up to USB, and how to locate and inspect the files created by the wallet.
@@ -335,4 +334,3 @@ sudo find / -name "sphinx-usb-keystore" -type d 2>/dev/null
 7. Verify wallet integrity.
 
 The SPIF address format is standardized and ready for wallet integration.
-```

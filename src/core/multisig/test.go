@@ -8,17 +8,29 @@ import (
 	"log"
 
 	multisig "github.com/sphinxorg/protocol/src/core/multisig/mps"
-	"github.com/sphinxorg/protocol/src/core/wallet/utils"
 )
 
+// REMOVED DEPENDENCY: this file imported
+//
+//	"github.com/sphinxorg/protocol/src/core/wallet/utils"
+//
+// solely to call utils.NewWalletConfig() / walletConfig.Close(). Tracing
+// the rest of the file: walletConfig was never read from or written to
+// again after creation — every operation below (NewMultiSig, SignMessage,
+// AddSig, VerifySignatures, AddSigFromPubKey) goes through `manager`, not
+// `walletConfig`. So this wasn't a partial dependency to replace, it was
+// dead initialization to delete. If your multisig manager is SUPPOSED to
+// be backed by wallet config storage (e.g. for persistence), that wiring
+// was never actually present here either — `manager.GetStoredSK()` /
+// `GetStoredPK()` already imply multisig has its own storage internally.
+//
+// NOT REVIEWED: github.com/sphinxorg/protocol/src/core/multisig/mps was
+// not shared with me — NewMultiSig/SignMessage/AddSig/VerifySignatures/
+// AddSigFromPubKey/GetStoredSK/GetStoredPK are all assumed unchanged from
+// your original file. If that package also imports the deleted
+// wallet/auth or wallet/utils internally, this file will still fail to
+// build until that's fixed too — that's outside what I can see from here.
 func main() {
-	// Initialize wallet configuration
-	walletConfig, err := utils.NewWalletConfig()
-	if err != nil {
-		log.Fatal("Failed to initialize wallet config:", err)
-	}
-	defer walletConfig.Close()
-
 	// Set quorum for multisignature (e.g., 3 participants required)
 	quorum := 3
 	manager, err := multisig.NewMultiSig(quorum)

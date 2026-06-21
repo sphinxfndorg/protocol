@@ -8,14 +8,12 @@ require (
 	fyne.io/fyne/v2 v2.7.1
 	github.com/actuallyachraf/algebra v0.1.0
 	github.com/actuallyachraf/go-merkle v0.0.0-20200130102531-0ff8ce0d081e
-	github.com/btcsuite/btcutil v1.0.2
 	github.com/cloudflare/circl v1.6.3
 	github.com/elliotchance/orderedmap/v2 v2.7.0
 	github.com/gin-gonic/gin v1.10.1
 	github.com/gorilla/websocket v1.5.3
 	github.com/holiman/uint256 v1.3.2
 	github.com/jung-kurt/gofpdf v1.16.2
-	github.com/kasperdi/SPHINCSPLUS-golang v0.0.0-20231223193046-84468b93f7e9
 	github.com/lni/goutils v1.4.0
 	github.com/pdfcpu/pdfcpu v0.13.0
 	github.com/prometheus/client_golang v1.22.0
@@ -23,6 +21,7 @@ require (
 	go.uber.org/zap v1.27.0
 	golang.org/x/crypto v0.52.0
 	golang.org/x/sys v0.45.0
+	golang.org/x/term v0.43.0
 	lukechampine.com/blake3 v1.4.1
 )
 

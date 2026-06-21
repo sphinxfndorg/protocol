@@ -17,7 +17,7 @@ import (
 
 	"github.com/sphinxorg/protocol/src/accounts/key"
 	"github.com/sphinxorg/protocol/src/core/wallet/crypter"
-	"golang.org/x/crypto/sha3"
+	"golang.org/x/crypto/argon2"
 )
 
 // NewDiskKeyStore creates a new disk keystore instance  // Changed from NewHotKeyStore
@@ -302,15 +302,42 @@ func (ks *DiskKeyStore) generateKeyID() string { // Changed receiver type
 	return fmt.Sprintf("disk_key_%d_%x", timestamp, randomBytes) // Changed from "hot_key_"
 }
 
+// generateSalt derives a deterministic per-passphrase salt for this
+// keystore, using Argon2id (memory-hard) the same way USBKeyStore does.
+//
+// FIX: previously this used a single pass of SHAKE256(passphrase ||
+// domain-string). SHAKE256 is a fast XOF — it costs essentially nothing to
+// compute, so it added no resistance to brute-force/GPU passphrase
+// guessing; it was functioning as a deterministic-salt generator only, not
+// as a KDF stage in its own right. USBKeyStore, right next to this file,
+// already used argon2.IDKey for the same purpose. Aligned Disk to match:
+// same algorithm, same parameters (3 passes, 64 MiB, 2 threads), same
+// output size (WALLET_CRYPTO_IV_SIZE), differing only in the domain
+// separation string so disk- and USB-derived salts never collide for the
+// same passphrase.
+//
+// NOTE on double-stretching: the salt returned here is then passed into
+// CCrypter.SetKeyFromPassphrase(passphrase, salt, 1000), which itself runs
+// 1000 rounds of SHA3-512 stretching on (passphrase || salt). So the actual
+// cost-to-attacker is "one Argon2id pass (memory-hard) feeding into 1000
+// rounds of SHA3-512 (CPU-only)." That's intentional layered hardening, not
+// redundant — Argon2id specifically resists GPU/ASIC parallelism via memory
+// cost, while the SHA3-512 rounds add a second, independent cost factor.
+// Keeping both rather than relying on just one.
+//
+// Existing keys created under the old SHAKE256 scheme will NOT decrypt
+// under this new salt derivation — see the migration note in CHANGES.md /
+// the comment on ChangePassphrase below before deploying this to anything
+// with real stored keys.
 func (ks *DiskKeyStore) generateSalt(passphrase string) []byte {
-	out := make([]byte, crypter.WALLET_CRYPTO_IV_SIZE)
-
-	sh := sha3.NewShake256()
-	sh.Write([]byte(passphrase))
-	sh.Write([]byte("sphinx-disk-keystore-salt"))
-	sh.Read(out)
-
-	return out
+	return argon2.IDKey(
+		[]byte(passphrase),
+		[]byte("sphinx-disk-keystore-salt"), // domain-separated from USB's string
+		3,                                   // time cost (passes)
+		64*1024,                             // memory cost: 64 MiB
+		2,                                   // parallelism
+		crypter.WALLET_CRYPTO_IV_SIZE,       // output length
+	)
 }
 
 func (ks *DiskKeyStore) validateKeyPair(keyPair *key.KeyPair) error { // Changed receiver type

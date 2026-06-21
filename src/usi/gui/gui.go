@@ -15,7 +15,7 @@ import (
 	"time"
 
 	seed "github.com/sphinxorg/protocol/src/accounts/phrase"
-	vault "github.com/sphinxorg/protocol/src/usi/core/crypter/vault"
+	vault "github.com/sphinxorg/protocol/src/core/wallet/vault"
 	keys "github.com/sphinxorg/protocol/src/usi/core/key"
 	"github.com/sphinxorg/protocol/src/usi/core/sign"
 	pubkeydir "github.com/sphinxorg/protocol/src/usi/server/server"
@@ -51,9 +51,10 @@ func Run() {
 	})
 	themeToggle.SetChecked(true)
 
+	// NEW — asks the actual storage layer whether any key has been stored
 	isRegistered := func() bool {
-		_, err := os.Stat(keys.KeyDir)
-		return err == nil
+		ids, err := keys.ListKeys()
+		return err == nil && len(ids) > 0
 	}
 
 	var publicFingerprint string
@@ -1483,11 +1484,40 @@ func Run() {
 		updateLayout(true)
 
 		// ── Wallet state ──────────────────────────────────────────
-		// Replace these stubs with real wallet package calls, e.g.:
-		//   balance, _ := wallet.GetBalance(sessionFingerprint)
-		//   txHistory, _ := wallet.GetTransactions(sessionFingerprint, 20)
-		walletBalance := "1,284.500000"
-		walletUnit := "SPIF"
+		// USI/SPIF is a SPHINCS+ identity & document-signing system, not a
+		// blockchain or token ledger — there is no wallet/chain backend in
+		// this codebase to query for a balance (no GetBalance, no
+		// GetTransactions, no "wallet" package at all; see key.go / kem.go /
+		// vault.go, which only ever encrypt, sign, and store identity keys).
+		// Showing a number here would be fabricated data with no source of
+		// truth behind it, so this honestly reports "unavailable" instead.
+		// If/when a real ledger integration exists, replace this block with:
+		//   balance, err := wallet.GetBalance(sessionFingerprint)
+		//   txHistory, err := wallet.GetTransactions(sessionFingerprint, 20)
+		const balanceUnavailable = "—"
+		walletBalanceKnown := false // flip to true once a real backend exists
+		walletBalance := balanceUnavailable
+
+		// orgDisplayName / orgDescription come from the actual org registry
+		// (org.go), not a hardcoded label — this is the org the signed-in
+		// identity actually belongs to, looked up the same way the rest of
+		// the app does it.
+		activeOrgCode := sessionOrgCode
+		if activeOrgCode == "" {
+			activeOrgCode = "SPIF"
+		}
+		orgDisplayName, err := keys.OrgDisplayName(activeOrgCode)
+		if err != nil {
+			orgDisplayName = activeOrgCode
+		}
+		orgDescription, err := keys.OrgDescription(activeOrgCode)
+		if err != nil {
+			orgDescription = ""
+		}
+
+		// There is no separate currency/token in this system — identities
+		// are SPHINCS+ keypairs addressed under an org code (e.g. "SPIF"),
+		// not balances of a fungible token.
 		walletAddress := publicFingerprint
 
 		addrShort := walletAddress
@@ -1502,7 +1532,7 @@ func Run() {
 		balBg.StrokeWidth = 1
 		balBg.SetMinSize(fyne.NewSize(0, 120))
 
-		balLabel := canvas.NewText("TOTAL BALANCE", colFaint)
+		balLabel := canvas.NewText("ACCOUNT BALANCE", colFaint)
 		balLabel.TextSize = 10
 		balLabel.TextStyle = fyne.TextStyle{Monospace: true}
 
@@ -1510,7 +1540,11 @@ func Run() {
 		balValue.TextSize = 36
 		balValue.TextStyle = fyne.TextStyle{Bold: true}
 
-		balUnit := canvas.NewText(walletUnit+" · SPIF Network", colMuted)
+		balSubtext := orgDisplayName + " identity registry"
+		if !walletBalanceKnown {
+			balSubtext = "No balance backend connected"
+		}
+		balUnit := canvas.NewText(balSubtext, colMuted)
 		balUnit.TextSize = 12
 
 		balInner := container.NewVBox(
@@ -1521,77 +1555,28 @@ func Run() {
 		)
 		balCard := container.NewMax(balBg, container.NewPadded(balInner))
 
-		// ── Send button & dialog ──────────────────────────────────
+		// ── Send button ────────────────────────────────────────────
+		// Disabled: there is no transfer backend (no wallet.Send, no fee
+		// estimator, no network to submit to) anywhere in this codebase.
+		// The previous version of this dialog collected an amount/memo,
+		// did nothing with them, and then showed a fake "submitted to the
+		// SPIF network" success dialog — that's not a stub, it's a lie to
+		// the user about a transaction having happened. Disabled until a
+		// real ledger/transfer backend exists to back this button.
 		sendBtn := widget.NewButtonWithIcon("Send", theme.MailSendIcon(), func() {
-			toEntry := widget.NewEntry()
-			toEntry.SetPlaceHolder("Recipient fingerprint / address")
-
-			amountEntry := widget.NewEntry()
-			amountEntry.SetPlaceHolder("0.000000")
-
-			memoEntry := widget.NewEntry()
-			memoEntry.SetPlaceHolder("Optional memo")
-
-			feeLabel := widget.NewLabel("Estimated fee: —")
-			feeLabel.TextStyle = fyne.TextStyle{Italic: true}
-
-			amountEntry.OnChanged = func(v string) {
-				if v != "" {
-					feeLabel.SetText("Estimated fee: 0.001000 " + walletUnit)
-				} else {
-					feeLabel.SetText("Estimated fee: —")
-				}
-			}
-
-			sendForm := widget.NewForm(
-				widget.NewFormItem("To", toEntry),
-				widget.NewFormItem("Amount ("+walletUnit+")", amountEntry),
-				widget.NewFormItem("Memo", memoEntry),
-				widget.NewFormItem("", feeLabel),
-			)
-
-			d := dialog.NewCustomConfirm(
-				"Send "+walletUnit,
-				"Confirm Send", "Cancel",
-				container.NewVBox(
-					alertBox("Double-check the recipient address. Transactions cannot be reversed.",
-						color.RGBA{255, 179, 71, 20}, colWarn),
-					spacer(8),
-					sendForm,
-				),
-				func(ok bool) {
-					if !ok {
-						return
-					}
-					if toEntry.Text == "" || amountEntry.Text == "" {
-						dialog.ShowError(errors.New("recipient and amount are required"), window)
-						return
-					}
-					if sessionPassphrase == "" {
-						dialog.ShowError(errors.New("not logged in — please log in again"), window)
-						return
-					}
-					validatePassphraseDialog(window, "Confirm Transaction",
-						"Enter your passphrase to authorise this transfer:", func(passphrase string) {
-							// TODO: replace stub with real wallet.Send(...)
-							peerShort := toEntry.Text
-							if len(peerShort) > 16 {
-								peerShort = peerShort[:16]
-							}
-							addActivity(fmt.Sprintf("Sent %s %s → %s…", amountEntry.Text, walletUnit, peerShort))
-							dialog.ShowInformation("Sent",
-								fmt.Sprintf("Transfer of %s %s submitted to the SPIF network.\nMemo: %s",
-									amountEntry.Text, walletUnit, memoEntry.Text), window)
-							showWalletScreen()
-						})
-				}, window)
-			d.Resize(fyne.NewSize(500, 400))
-			d.Show()
+			dialog.ShowInformation("Not available",
+				"Sending is not available yet — there is no transfer backend connected. "+
+					"This identity can currently sign and encrypt documents, but it cannot send or receive value.",
+				window)
 		})
-		sendBtn.Importance = widget.HighImportance
+		sendBtn.Importance = widget.LowImportance
+		sendBtn.Disable()
 
 		// ── Receive button & dialog ───────────────────────────────
-		receiveBtn := widget.NewButtonWithIcon("Receive", theme.DownloadIcon(), func() {
+		// "Receive" here just means sharing your address/fingerprint so
+		// someone else can address a vault or signed document to you —
+		// it is not a token-receive flow (there is no token).
+		receiveBtn := widget.NewButtonWithIcon("Share Address", theme.DownloadIcon(), func() {
 			addrLbl := widget.NewLabel(walletAddress)
 			addrLbl.TextStyle = fyne.TextStyle{Monospace: true}
 			addrLbl.Wrapping = fyne.TextWrapBreak
@@ -1604,14 +1589,14 @@ func Run() {
 
 			copyAddrBtn := widget.NewButtonWithIcon("Copy Address", theme.ContentCopyIcon(), func() {
 				myApp.Clipboard().SetContent(walletAddress)
-				dialog.ShowInformation("Copied", "Wallet address copied to clipboard", window)
+				dialog.ShowInformation("Copied", "Address copied to clipboard", window)
 			})
 			copyAddrBtn.Importance = widget.HighImportance
 
 			receiveContent := container.NewVBox(
-				widget.NewLabelWithStyle("Your wallet address", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
+				widget.NewLabelWithStyle("Your identity address", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
 				spacer(8),
-				alertBox("Share this address to receive "+walletUnit+" tokens.",
+				alertBox("Share this address so others can address vaults or signed documents to you.",
 					color.RGBA{74, 222, 158, 15}, colAccent),
 				spacer(12),
 				addrBox,
@@ -1619,7 +1604,7 @@ func Run() {
 				container.NewCenter(copyAddrBtn),
 			)
 
-			d := dialog.NewCustom("Receive "+walletUnit, "Close", receiveContent, window)
+			d := dialog.NewCustom("Your Address", "Close", receiveContent, window)
 			d.Resize(fyne.NewSize(520, 300))
 			d.Show()
 		})
@@ -1651,95 +1636,51 @@ func Run() {
 
 		addrRow := container.NewBorder(nil, nil, nil, copyAddrInlineBtn, addrContainer)
 
-		// ── Transaction history ───────────────────────────────────
-		// Stub transaction data — replace with wallet.GetTransactions(sessionFingerprint, 20)
-		type txEntry struct {
-			direction string // "in" | "out"
-			amount    string
-			peer      string
-			memo      string
-			ts        string
-			status    string // "confirmed" | "pending" | "failed"
-		}
-
-		stubTxs := []txEntry{
-			{"in", "500.000000", "SPIF:3a9f…c12e", "Initial allocation", "2025-06-12 09:14", "confirmed"},
-			{"in", "784.500000", "SPIF:7b2d…aa01", "Q2 budget disbursement", "2025-06-10 14:30", "confirmed"},
-			{"out", "0.500000", "SPIF:9e1c…ff44", "Service fee", "2025-06-09 11:02", "confirmed"},
-			{"out", "0.250000", "SPIF:2c8a…3301", "Test transfer", "2025-06-08 08:55", "pending"},
-		}
+		// ── Recent activity ────────────────────────────────────────
+		// There is no transaction backend (no GetTransactions, no ledger),
+		// so this no longer fabricates a transaction list. It shows the
+		// real, in-memory activity log (addActivity / activityList in
+		// helper.go) that every other screen in this app already writes
+		// to — sign events, vault events, login events, etc. — instead of
+		// invented amounts and peer addresses in a format ("SPIF:3a9f…c12e")
+		// the real address formatter (keys.FormatOrgAddress) never produces.
+		activityListLock.Lock()
+		recentActivity := make([]string, len(activityList))
+		copy(recentActivity, activityList)
+		activityListLock.Unlock()
 
 		txBox := container.NewVBox()
 
-		if len(stubTxs) == 0 {
-			noTx := canvas.NewText("No transactions yet.", colMuted)
+		if len(recentActivity) == 0 {
+			noTx := canvas.NewText("No activity yet.", colMuted)
 			noTx.TextSize = 12
 			txBox.Add(container.NewCenter(noTx))
 		} else {
-			for _, tx := range stubTxs {
-				tx := tx // capture loop variable
+			for _, entry := range recentActivity {
+				entry := entry // capture loop variable
 
-				// Direction styling
-				dirIcon := "↓"
-				dirCol := colAccent
-				amtSign := "+"
-				if tx.direction == "out" {
-					dirIcon = "↑"
-					dirCol = colDanger
-					amtSign = "-"
+				// entry is "<timestamp> | <message>" (see addActivity).
+				ts := ""
+				msg := entry
+				if parts := strings.SplitN(entry, " | ", 2); len(parts) == 2 {
+					ts = parts[0]
+					msg = parts[1]
 				}
 
-				// Status colour
-				statusCol := colAccent
-				switch tx.status {
-				case "pending":
-					statusCol = colWarn
-				case "failed":
-					statusCol = colDanger
-				}
-
-				// Direction badge — extract components via the color.Color interface
-				// (dirCol is color.Color, not color.RGBA, so we use RGBA() method)
-				dr, dg, db, _ := dirCol.RGBA() // returns 16-bit values 0–65535
-				dirT := canvas.NewText(dirIcon, dirCol)
+				dirT := canvas.NewText("•", colAccent)
 				dirT.TextSize = 14
 				dirT.TextStyle = fyne.TextStyle{Bold: true}
-				dirBadgeBg := canvas.NewRectangle(color.RGBA{
-					R: uint8(dr >> 8),
-					G: uint8(dg >> 8),
-					B: uint8(db >> 8),
-					A: 30,
-				})
+				dirBadgeBg := canvas.NewRectangle(colAccentDim)
 				dirBadgeBg.CornerRadius = 20
 				dirBadgeBg.SetMinSize(fyne.NewSize(30, 30))
 				dirBadge := container.NewMax(dirBadgeBg, container.NewCenter(dirT))
 
-				// Left column: peer + memo
-				peerT := canvas.NewText(tx.peer, colText)
-				peerT.TextSize = 11
-				peerT.TextStyle = fyne.TextStyle{Monospace: true}
-				memoT := canvas.NewText(tx.memo, colMuted)
-				memoT.TextSize = 10
-				leftCol := container.NewVBox(peerT, memoT)
+				msgT := canvas.NewText(msg, colText)
+				msgT.TextSize = 11
 
-				// Right column: amount + timestamp + status
-				amtT := canvas.NewText(amtSign+tx.amount+" "+walletUnit, dirCol)
-				amtT.TextSize = 12
-				amtT.TextStyle = fyne.TextStyle{Bold: true}
-				amtT.Alignment = fyne.TextAlignTrailing
-
-				tsT := canvas.NewText(tx.ts, colFaint)
+				tsT := canvas.NewText(ts, colFaint)
 				tsT.TextSize = 10
-
-				statusT := canvas.NewText(tx.status, statusCol)
-				statusT.TextSize = 10
-				statusT.TextStyle = fyne.TextStyle{Monospace: true}
-
-				rightCol := container.NewVBox(
-					amtT,
-					container.NewHBox(layout.NewSpacer(), tsT),
-					container.NewHBox(layout.NewSpacer(), statusT),
-				)
+				tsT.Alignment = fyne.TextAlignTrailing
 
 				rowBg := canvas.NewRectangle(colSurface)
 				rowBg.CornerRadius = 8
@@ -1749,7 +1690,7 @@ func Run() {
 				inner := container.NewBorder(nil, nil,
 					container.NewHBox(dirBadge, spacer(10)),
 					nil,
-					container.NewBorder(nil, nil, leftCol, rightCol),
+					container.NewBorder(nil, nil, msgT, tsT),
 				)
 				row := container.NewMax(rowBg, container.NewPadded(inner))
 				txBox.Add(row)
@@ -1773,37 +1714,39 @@ func Run() {
 			return styledCard(inner, 0, 52)
 		}
 
+		// "Activity Logged" is the real count of entries in activityList —
+		// not a fabricated transaction count. There is no Received/Sent/
+		// Pending breakdown because there is no value-transfer backend to
+		// report on.
 		statsGrid := container.NewGridWithColumns(2,
-			makeStatMini("Received", "+1,284.500000", colAccent),
-			makeStatMini("Sent", "-0.750000", colDanger),
-			makeStatMini("Pending", "0.250000", colWarn),
-			makeStatMini("Transactions", "4", colText),
+			makeStatMini("Identity", "SPHINCS+", colText),
+			makeStatMini("Activity Logged", fmt.Sprintf("%d", len(recentActivity)), colAccent),
 		)
 
 		panel := container.NewVBox(
-			infoPanel("Wallet Details", []fyne.CanvasObject{
-				infoRow("Network", "SPIF Mainnet", colAccent),
-				infoRow("Token", walletUnit, colText),
-				infoRow("Identity", "USI / SPHINCS+", colText),
-				infoRow("Organization", "SPIF", colAccent),
+			infoPanel("Identity Details", []fyne.CanvasObject{
+				infoRow("System", orgDisplayName, colAccent),
+				infoRow("Description", orgDescription, colText),
+				infoRow("Identity Scheme", "USI / SPHINCS+", colText),
+				infoRow("Org Code", activeOrgCode, colAccent),
 			}),
 			spacer(12),
 			sectionLabel("Statistics"),
 			spacer(8),
 			statsGrid,
 			spacer(12),
-			alertBox("Transactions are signed with your SPHINCS+ key and cannot be forged.",
+			alertBox("Signed documents use your SPHINCS+ key and cannot be forged.",
 				color.RGBA{74, 222, 158, 15}, colAccent),
 			spacer(8),
-			alertBox("Keep your passphrase safe — it authorises every transfer.",
+			alertBox("Keep your passphrase safe — it authorises every signature and decryption.",
 				color.RGBA{255, 179, 71, 20}, colWarn),
 		)
 
 		// ── Main form ─────────────────────────────────────────────
 		form := container.NewVBox(
-			screenTitle("Wallet"),
+			screenTitle("Identity"),
 			spacer(4),
-			screenSubtitle("SPIF token balance, send & receive"),
+			screenSubtitle(orgDisplayName+" identity — address & activity"),
 			spacer(20),
 			balCard,
 			spacer(16),
@@ -1819,7 +1762,7 @@ func Run() {
 			spacer(20),
 			hRule(),
 			spacer(12),
-			sectionLabel("Transaction History"),
+			sectionLabel("Recent Activity"),
 			spacer(8),
 			txCard,
 			spacer(24),
@@ -2244,6 +2187,7 @@ func Run() {
 	mainContentContainer = container.NewMax()
 
 	if isRegistered() {
+		log.Println("[INFO] Bootstrap: key found in storage, prompting for passphrase")
 		passEntry := widget.NewPasswordEntry()
 		passEntry.SetPlaceHolder("Enter your passphrase")
 		passEntry.Validator = func(s string) error {
@@ -2291,6 +2235,7 @@ func Run() {
 		d.Resize(fyne.NewSize(420, 220))
 		d.Show()
 	} else {
+		log.Println("[INFO] Bootstrap: no key found, showing welcome screen")
 		publicFingerprint = ""
 		showWelcomeScreen()
 	}

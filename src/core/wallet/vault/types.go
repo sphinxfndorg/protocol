@@ -1,7 +1,7 @@
 // Copyright (c) 2024-present Sphinx Core Dev
 // MIT License https://opensource.org/license/mit
 
-// go/src/usi/core/crypter/vault/types.go
+// go/src/core/wallet/vault/types.go
 package vault
 
 // -----------------------------------------------------------------------------

@@ -9,26 +9,20 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"os"
+	"log"
 
 	"github.com/cloudflare/circl/kem/kyber/kyber768"
-	crypter "github.com/sphinxorg/protocol/src/usi/core/crypter/key"
-	db "github.com/sphinxorg/protocol/src/usi/core/dbkey"
+	"github.com/sphinxorg/protocol/src/accounts/key"
 	"golang.org/x/crypto/curve25519"
 )
 
-const (
-	kemPublicDBKey = "kem_public" // merged X25519+Kyber768 public key blob
-	kemSaltDBKey   = "kem_salt"   // shared salt for the hybrid keypair
-)
-
-// Hybrid KEM private key wire format (stored in KEMDatPath after encryption):
+// Hybrid KEM private key wire format (stored after encryption):
 //
 //	[ 2 bytes: X25519 len (little-endian uint16) ]
 //	[ X25519 private key  (32 bytes)             ]
 //	[ Kyber768 private key (remaining bytes)     ]
 //
-// Hybrid KEM public key wire format (stored in KEMDBPath):
+// Hybrid KEM public key wire format:
 //
 //	[ 2 bytes: X25519 len (little-endian uint16) ]
 //	[ X25519 public key  (32 bytes)              ]
@@ -39,12 +33,8 @@ const (
 // ─────────────────────────────────────────────
 
 // GenerateAndStoreKEMKey generates a hybrid X25519+Kyber768 KEM keypair,
-// merges both halves into a single blob, and encrypts it with a single
-// passphrase-derived key — one salt, one .dat file, one DB entry.
-//
-// Derivation mirrors key.go:
-//
-//	GeneratePureSalt → DeriveKeyFromPassphrase → SecureEncryptWithKey
+// merges both halves into a single blob, and encrypts it using the storage
+// manager pattern (diskStorage.EncryptData).
 func GenerateAndStoreKEMKey(passphrase string) error {
 	// ── 1. Generate Kyber768 keypair ─────────────────────────────────────────
 	scheme := kyber768.Scheme()
@@ -85,44 +75,45 @@ func GenerateAndStoreKEMKey(passphrase string) error {
 
 	pubBlob := marshalHybridKey(x25519Pub, kyberPubBytes)
 
-	// ── 4. Derive single encryption key ─────────────────────────────────────
-	salt, err := GeneratePureSalt(32)
-	if err != nil {
-		return fmt.Errorf("generate KEM salt: %w", err)
-	}
-
-	derivedKey := DeriveKeyFromPassphrase(passphrase, salt)
-	secureKey := crypter.NewSecureBuffer(derivedKey)
-	defer secureKey.Clear()
-
-	// ── 5. Encrypt merged private key blob ───────────────────────────────────
-	encPrivBlob, err := crypter.SecureEncryptWithKey(privBlob, secureKey)
+	// ── 4. Encrypt merged private key blob using diskStorage.EncryptData ─────
+	// This matches the pattern in test_encrypt.go
+	encPrivBlob, err := diskStorage.EncryptData(privBlob, passphrase)
 	if err != nil {
 		return fmt.Errorf("encrypt hybrid KEM private key: %w", err)
 	}
 
-	// ── 6. Persist to disk (single file) ─────────────────────────────────────
-	if err := os.MkdirAll(KEMKeyDir, 0700); err != nil {
-		return fmt.Errorf("create KEM key directory: %w", err)
-	}
-	if err := os.WriteFile(KEMDatPath, encPrivBlob, 0600); err != nil {
-		return fmt.Errorf("write hybrid KEM private key: %w", err)
-	}
+	// ── 5. Store encrypted key using diskStorage.StoreEncryptedKey ──────────
+	// Generate an address for the KEM key
+	address := "kem_" + fmt.Sprintf("%x", pubBlob[:8])
 
-	// ── 7. Persist merged public key blob and salt to database ───────────────
-	database, err := db.Open(KEMDBPath)
+	storedKeyPair, err := diskStorage.StoreEncryptedKey(
+		encPrivBlob,
+		pubBlob,
+		address,
+		key.WalletTypeDisk,
+		7331, // Sphinx Mainnet chain ID
+		"",   // derivation path
+		nil,  // additional data
+	)
 	if err != nil {
-		return fmt.Errorf("open KEM database: %w", err)
-	}
-	defer database.Close()
-
-	if err := database.Put([]byte(kemPublicDBKey), pubBlob); err != nil {
-		return fmt.Errorf("store hybrid KEM public key: %w", err)
-	}
-	if err := database.Put([]byte(kemSaltDBKey), salt); err != nil {
-		return fmt.Errorf("store KEM salt: %w", err)
+		return fmt.Errorf("store encrypted KEM key: %w", err)
 	}
 
+	// Store public key blob in a separate entry
+	_, err = diskStorage.StoreEncryptedKey(
+		pubBlob,
+		pubBlob,
+		"kem_public",
+		key.WalletTypeDisk,
+		7331,
+		"",
+		nil,
+	)
+	if err != nil {
+		log.Printf("Warning: failed to store KEM public key separately: %v", err)
+	}
+
+	log.Printf("KEM key stored successfully with ID: %s", storedKeyPair.ID)
 	return nil
 }
 
@@ -139,50 +130,59 @@ func LoadRegistrarKEMPublicKey() ([]byte, error) {
 // LoadKEMPublicKey returns the merged X25519+Kyber768 public key blob.
 // Use SplitHybridKey to extract each half.
 func LoadKEMPublicKey() ([]byte, error) {
-	database, err := db.Open(KEMDBPath)
+	// Try to load the KEM public key by ID
+	keys, err := ListKeys()
 	if err != nil {
-		return nil, fmt.Errorf("open KEM database: %w", err)
+		return nil, fmt.Errorf("list keys: %w", err)
 	}
-	defer database.Close()
 
-	pub, err := database.Get([]byte(kemPublicDBKey))
-	if err != nil {
-		return nil, fmt.Errorf("retrieve hybrid KEM public key: %w", err)
+	for _, keyID := range keys {
+		if len(keyID) > 11 && keyID[:11] == "kem_public_" {
+			loadedKey, err := diskStorage.GetKey(keyID)
+			if err != nil {
+				continue
+			}
+			return loadedKey.PublicKey, nil
+		}
 	}
-	return pub, nil
+
+	return nil, fmt.Errorf("KEM public key not found")
 }
 
-// LoadKEMPrivateKey decrypts the single kem.dat blob and returns both halves
-// of the hybrid keypair.
+// LoadKEMPrivateKey decrypts the stored KEM key and returns both halves
+// of the hybrid keypair using the storage manager pattern.
 //
 // fingerprint is reserved for future per-recipient key selection and is
 // currently unused in the lookup.
 //
 // Returns (x25519PrivateKey, kyber768PrivateKey, error).
 func LoadKEMPrivateKey(passphrase, fingerprint string) ([]byte, []byte, error) {
-	// ── Recover shared salt ──────────────────────────────────────────────────
-	database, err := db.Open(KEMDBPath)
+	// ── Find the KEM key ──────────────────────────────────────────────────
+	keys, err := ListKeys()
 	if err != nil {
-		return nil, nil, fmt.Errorf("open KEM database: %w", err)
-	}
-	defer database.Close()
-
-	salt, err := database.Get([]byte(kemSaltDBKey))
-	if err != nil {
-		return nil, nil, fmt.Errorf("retrieve KEM salt: %w", err)
+		return nil, nil, fmt.Errorf("list keys: %w", err)
 	}
 
-	// ── Re-derive encryption key and decrypt blob ─────────────────────────────
-	derivedKey := DeriveKeyFromPassphrase(passphrase, salt)
-	secureKey := crypter.NewSecureBuffer(derivedKey)
-	defer secureKey.Clear()
-
-	encPrivBlob, err := os.ReadFile(KEMDatPath)
-	if err != nil {
-		return nil, nil, fmt.Errorf("read hybrid KEM private key: %w", err)
+	var kemKeyID string
+	for _, keyID := range keys {
+		if len(keyID) > 4 && keyID[:4] == "kem_" && keyID != "kem_public" {
+			kemKeyID = keyID
+			break
+		}
 	}
 
-	privBlob, err := crypter.SecureDecryptWithKey(encPrivBlob, secureKey)
+	if kemKeyID == "" {
+		return nil, nil, fmt.Errorf("KEM private key not found")
+	}
+
+	// ── Load the encrypted key ──────────────────────────────────────────────
+	loadedKeyPair, err := diskStorage.GetKey(kemKeyID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("load KEM key: %w", err)
+	}
+
+	// ── Decrypt using diskStorage.DecryptKey ─────────────────────────────────
+	privBlob, err := diskStorage.DecryptKey(loadedKeyPair, passphrase)
 	if err != nil {
 		return nil, nil, fmt.Errorf("decrypt hybrid KEM private key (wrong passphrase or corrupted key): %w", err)
 	}

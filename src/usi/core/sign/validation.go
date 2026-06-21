@@ -14,7 +14,6 @@ import (
 
 	"github.com/pdfcpu/pdfcpu/pkg/api"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
-	keys "github.com/sphinxorg/protocol/src/usi/core/key"
 )
 
 // IsAlreadySigned returns true (and the existing fingerprint) when the file
@@ -143,15 +142,8 @@ func validateSPHINCSSignature(signatureHex string) bool {
 	}
 	log.Printf("[INFO] validateSPHINCSSignature: valid hex encoding, decoded size: %d bytes", len(decoded))
 
-	// Reference keys.DefaultParams to ensure consistency with the actual SPHINCS+ parameters
-	// The actual signature verification uses keys.DefaultParams in the Verify function
-	_ = keys.DefaultParams // This ensures the params are linked/loaded
-
-	// Note: Different parameter sets have different signature sizes:
-	// - SHAKE256-128f: 17088 bytes
-	// - SHAKE256-128s: 7856 bytes
-	// - SHAKE256-192s: 16224 bytes
-	// We don't check length here because the crypto verification will handle it
+	// The actual signature verification uses the key manager's Verify method
+	// No need to reference DefaultParams here
 
 	log.Printf("[SUCCESS] validateSPHINCSSignature: signature format validation passed")
 	return true

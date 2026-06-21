@@ -1,7 +1,7 @@
 // Copyright (c) 2024-present Sphinx Core Dev
 // MIT License https://opensource.org/license/mit
 
-// go/src/usi/core/crypter/vault/helper.go
+// go/src/core/wallet/vault/helper.go
 package vault
 
 import (

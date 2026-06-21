@@ -13,8 +13,6 @@ import (
 	"log"
 	"os"
 	"strings"
-
-	"golang.org/x/crypto/argon2"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -27,57 +25,6 @@ var SPIFPrefix = []byte("SPIF")
 
 // ChecksumLength in bytes.
 const ChecksumLength = 4
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Key derivation
-// ─────────────────────────────────────────────────────────────────────────────
-
-// DeriveKeyFromPassphrase uses Argon2id with SHA3-512 stretching.
-func DeriveKeyFromPassphrase(passphrase string, salt []byte) []byte {
-	log.Printf("[INFO] DeriveKeyFromPassphrase: deriving key from passphrase using Argon2id with SHA3-512")
-	log.Printf("[DEBUG] DeriveKeyFromPassphrase: passphrase length: %d chars, salt size: %d bytes", len(passphrase), len(salt))
-
-	argon2Key := argon2.IDKey([]byte(passphrase), salt, 3, 64*1024, 4, 32)
-	log.Printf("[INFO] DeriveKeyFromPassphrase: Argon2id key derivation completed: %d bytes", len(argon2Key))
-
-	sha3Hash := sha3.New512()
-	if _, err := sha3Hash.Write(argon2Key); err != nil {
-		log.Printf("[ERROR] DeriveKeyFromPassphrase: error during SHA3-512 hashing: %v", err)
-		for i := range argon2Key {
-			argon2Key[i] = 0
-		}
-		return make([]byte, 32)
-	}
-
-	finalKey := sha3Hash.Sum(nil)[:32]
-	log.Printf("[DEBUG] DeriveKeyFromPassphrase: final key (first 8 bytes): %x", finalKey[:8])
-
-	for i := range argon2Key {
-		argon2Key[i] = 0
-	}
-	log.Printf("[DEBUG] DeriveKeyFromPassphrase: intermediate buffer cleared")
-
-	log.Printf("[SUCCESS] DeriveKeyFromPassphrase: key derived successfully with SHA3-512 stretching")
-	return finalKey
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Salt generation
-// ─────────────────────────────────────────────────────────────────────────────
-
-// GeneratePureSalt generates n random bytes with no prefix.
-func GeneratePureSalt(n int) ([]byte, error) {
-	log.Printf("[INFO] GeneratePureSalt: generating pure salt, size: %d bytes", n)
-	salt := make([]byte, n)
-	_, err := rand.Read(salt)
-	if err != nil {
-		log.Printf("[ERROR] GeneratePureSalt: error generating salt: %v", err)
-		return nil, err
-	}
-	log.Printf("[SUCCESS] GeneratePureSalt: salt generated successfully (size: %d bytes)", n)
-	log.Printf("[DEBUG] GeneratePureSalt: salt (first 8 bytes): %x", salt[:min(8, len(salt))])
-	return salt, nil
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Checksum helpers (SHA-256 based, for fingerprint/address integrity)
@@ -481,4 +428,12 @@ func GetPublicKeyFingerprintFromBytesLegacy(pubKeyBytes []byte) string {
 
 	log.Printf("[SUCCESS] GetPublicKeyFingerprintFromBytesLegacy: generated SPIF fingerprint: %s", result[:min(50, len(result))])
 	return result
+}
+
+// min helper function
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

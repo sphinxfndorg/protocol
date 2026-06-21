@@ -1853,19 +1853,8 @@ func Run() {
 					return
 				}
 
-				if err := keys.GenerateAndStoreKEMKey(passphrase); err != nil {
-					fyne.Do(func() {
-						dialog.ShowError(err, window)
-						progBar.Hide()
-						progLabel.Hide()
-						generateBtn.Enable()
-						generateBtn.SetText("Setup Master Key")
-					})
-					return
-				}
-
 				// publishRegistrarPublicBundle requires the key server.
-				// If it is offline (e.g. localhost:8080 not running) we log a
+				// If it is offline (e.g. localhost:8080 not running) we log
 				// warning and continue — the local key pair was already written
 				// to disk successfully. The bundle can be re-published later.
 				publishErr := publishRegistrarPublicBundle(passphrase, "Registrar", string(chosenOrg))

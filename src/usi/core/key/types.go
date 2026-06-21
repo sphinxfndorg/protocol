@@ -1,6 +1,3 @@
-// Copyright (c) 2024-present Sphinx Core Dev
-// MIT License https://opensource.org/license/mit
-
 // go/src/usi/core/key/types.go
 package keys
 
@@ -20,4 +17,9 @@ type KeyPair struct {
 
 	// Address is the human-readable address derived from the public key and org code
 	Address string
+
+	// KEM keys (Kyber768+X25519) for post-quantum key exchange
+	// These are stored in the same encrypted file as the SPHINCS+ key
+	KEMPublicKey  []byte `json:"kem_public_key,omitempty"`
+	KEMPrivateKey []byte `json:"kem_private_key,omitempty"`
 }

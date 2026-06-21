@@ -1,14 +1,13 @@
-// Copyright (c) 2024-present Sphinx Core Dev
-// MIT License https://opensource.org/license/mit
-
 // go/src/usi/core/key/key.go
 package keys
 
 import (
+	"encoding/base64"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/sphinxorg/protocol/src/accounts/key"
 	utils "github.com/sphinxorg/protocol/src/accounts/key/utils"
@@ -59,7 +58,7 @@ func GenerateKeyPairWithOrg(passphrase string, orgCode OrgCode) (*KeyPair, error
 		return nil, fmt.Errorf("unsupported organisation code: %q", orgCode)
 	}
 
-	// Use the SPHINCS+ key manager (matches test_encrypt.go pattern)
+	// Use the SPHINCS+ key manager
 	sk, pk, err := keyManager.GenerateKey()
 	if err != nil {
 		return nil, fmt.Errorf("generate keys: %w", err)
@@ -75,22 +74,37 @@ func GenerateKeyPairWithOrg(passphrase string, orgCode OrgCode) (*KeyPair, error
 		return nil, fmt.Errorf("serialize private key: %w", err)
 	}
 
-	// Use diskStorage.EncryptData (matches test_encrypt.go pattern)
-	encryptedSK, err := diskStorage.EncryptData(skBytes, passphrase)
+	// Generate KEM keys
+	log.Println("Generating KEM keys...")
+	kemPub, kemPriv, err := GenerateKEMKeys()
 	if err != nil {
-		return nil, fmt.Errorf("encrypt private key: %w", err)
+		return nil, fmt.Errorf("generate KEM keys: %w", err)
+	}
+	log.Printf("KEM keys generated: public=%d bytes, private=%d bytes", len(kemPub), len(kemPriv))
+
+	// Combine SPHINCS+ private key and KEM private key
+	combinedSK := append(skBytes, kemPriv...)
+	log.Printf("Combined private key size: %d bytes", len(combinedSK))
+
+	// Encrypt the combined private key
+	encryptedSK, err := diskStorage.EncryptData(combinedSK, passphrase)
+	if err != nil {
+		return nil, fmt.Errorf("encrypt combined private keys: %w", err)
 	}
 
 	// Generate address from public key
 	address := generateAddress(pkBytes, orgCode)
 
 	kp := &KeyPair{
-		PublicKey:  pkBytes,
-		PrivateKey: encryptedSK,
-		OrgCode:    string(orgCode),
-		Address:    address,
+		PublicKey:     pkBytes,
+		PrivateKey:    encryptedSK,
+		OrgCode:       string(orgCode),
+		Address:       address,
+		KEMPublicKey:  kemPub,
+		KEMPrivateKey: kemPriv,
 	}
 
+	// Save to disk - this creates ONLY ONE file
 	if err := saveKeyToDisk(kp); err != nil {
 		return nil, fmt.Errorf("save key pair: %w", err)
 	}
@@ -126,14 +140,30 @@ func GetPublicKeyFingerprint(kp *KeyPair) string {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Persistence using StorageManager (matches test_encrypt.go pattern)
+// Persistence using StorageManager
 // ─────────────────────────────────────────────────────────────────────────────
 
 func saveKeyToDisk(kp *KeyPair) error {
 	log.Println("Saving keypair to disk")
 
-	// Store the encrypted key using diskStorage.StoreEncryptedKey
-	// This matches the pattern in test_encrypt.go
+	if kp == nil {
+		return fmt.Errorf("key pair is nil")
+	}
+
+	// Create metadata with KEM public key
+	metadata := map[string]interface{}{
+		"algorithm":     "SPHINCS+",
+		"encrypted":     true,
+		"storage":       "disk",
+		"kem_public":    base64.StdEncoding.EncodeToString(kp.KEMPublicKey),
+		"kem_algorithm": "Kyber768+X25519",
+		"has_kem":       true,
+	}
+
+	log.Printf("Saving with KEM metadata: has_kem=%v, kem_public_size=%d",
+		true, len(kp.KEMPublicKey))
+
+	// Store the encrypted key with KEM metadata
 	storedKeyPair, err := diskStorage.StoreEncryptedKey(
 		kp.PrivateKey,
 		kp.PublicKey,
@@ -141,7 +171,7 @@ func saveKeyToDisk(kp *KeyPair) error {
 		key.WalletTypeDisk,
 		7331, // Sphinx Mainnet chain ID
 		"",   // derivation path
-		nil,  // additional data
+		metadata,
 	)
 	if err != nil {
 		return fmt.Errorf("store encrypted key: %w", err)
@@ -158,12 +188,11 @@ func saveKeyToDisk(kp *KeyPair) error {
 		return fmt.Errorf("write key index: %w", err)
 	}
 
-	log.Printf("Keypair saved successfully with ID: %s", storedKeyPair.ID)
+	log.Printf("Keypair with KEM saved successfully with ID: %s", storedKeyPair.ID)
 	return nil
 }
 
 // LoadKeyFromDisk loads and decrypts the key pair using StorageManager.
-// This follows the test_encrypt.go pattern for loading keys.
 func LoadKeyFromDisk(passphrase string) (*KeyPair, []byte, error) {
 	log.Println("Loading keypair from disk")
 
@@ -177,27 +206,65 @@ func LoadKeyFromDisk(passphrase string) (*KeyPair, []byte, error) {
 		return nil, nil, fmt.Errorf("no keys found in storage")
 	}
 
-	// Load the first key found (similar to test_encrypt.go pattern)
-	keyID := keyIDs[0]
-	loadedKeyPair, err := diskStorage.GetKey(keyID)
+	// Load the first key found (filter out any "kem_" keys if present)
+	var mainKeyID string
+	for _, id := range keyIDs {
+		// Skip any KEM-only keys (they start with "kem_")
+		if len(id) > 4 && id[:4] == "kem_" {
+			continue
+		}
+		mainKeyID = id
+		break
+	}
+
+	if mainKeyID == "" {
+		mainKeyID = keyIDs[0] // Fallback
+	}
+
+	loadedKeyPair, err := diskStorage.GetKey(mainKeyID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("load key pair: %w", err)
 	}
 
-	kp := &KeyPair{
-		PublicKey:  loadedKeyPair.PublicKey,
-		PrivateKey: loadedKeyPair.EncryptedSK,
-		Path:       keyID,
-	}
-
-	// Decrypt the secret key using diskStorage.DecryptKey (matches test_encrypt.go)
-	skBytes, err := diskStorage.DecryptKey(loadedKeyPair, passphrase)
+	// Decrypt the combined secret key (SPHINCS+ + KEM)
+	combinedSK, err := diskStorage.DecryptKey(loadedKeyPair, passphrase)
 	if err != nil {
-		return nil, nil, fmt.Errorf("decryption failed (wrong passphrase or corrupted key): %w", err)
+		return nil, nil, fmt.Errorf("decryption failed: %w", err)
 	}
 
-	// Verify the decrypted secret matches the stored public key
-	// This matches test_encrypt.go step 7
+	// Extract SPHINCS+ private key (first 64 bytes for SPHINCS+)
+	// SPHINCS+ private key is always 64 bytes
+	const sphincsPrivateKeySize = 64
+
+	if len(combinedSK) < sphincsPrivateKeySize {
+		return nil, nil, fmt.Errorf("combined key too short: got %d bytes, need at least %d",
+			len(combinedSK), sphincsPrivateKeySize)
+	}
+
+	skBytes := combinedSK[:sphincsPrivateKeySize]
+
+	// Extract KEM private key (remaining bytes)
+	kemPrivBytes := combinedSK[sphincsPrivateKeySize:]
+
+	kp := &KeyPair{
+		PublicKey:     loadedKeyPair.PublicKey,
+		PrivateKey:    loadedKeyPair.EncryptedSK,
+		Path:          mainKeyID,
+		KEMPrivateKey: kemPrivBytes,
+	}
+
+	// Load KEM public key from metadata
+	if loadedKeyPair.Metadata != nil {
+		if kemPubB64, ok := loadedKeyPair.Metadata["kem_public"].(string); ok {
+			kemPub, err := base64.StdEncoding.DecodeString(kemPubB64)
+			if err == nil {
+				kp.KEMPublicKey = kemPub
+				log.Printf("KEM public key loaded from metadata (%d bytes)", len(kemPub))
+			}
+		}
+	}
+
+	// Verify the SPHINCS+ private key matches the stored public key
 	ok, err := keyManager.VerifyPubKey(skBytes, loadedKeyPair.PublicKey)
 	if err != nil {
 		return nil, nil, fmt.Errorf("verify public key: %w", err)
@@ -210,7 +277,9 @@ func LoadKeyFromDisk(passphrase string) (*KeyPair, []byte, error) {
 	kp.OrgCode = "SPIF"
 	kp.Address = GetPublicKeyFingerprint(kp)
 
-	log.Printf("Keypair loaded successfully")
+	log.Printf("Keypair loaded successfully (SPHINCS+: %d bytes, KEM: %d bytes)",
+		len(skBytes), len(kemPrivBytes))
+
 	return kp, skBytes, nil
 }
 
@@ -223,19 +292,39 @@ func GetKeyByID(keyID, passphrase string) (*KeyPair, []byte, error) {
 		return nil, nil, fmt.Errorf("load key pair: %w", err)
 	}
 
-	kp := &KeyPair{
-		PublicKey:  loadedKeyPair.PublicKey,
-		PrivateKey: loadedKeyPair.EncryptedSK,
-		Path:       keyID,
-	}
-
-	// Decrypt the secret key using diskStorage.DecryptKey
-	skBytes, err := diskStorage.DecryptKey(loadedKeyPair, passphrase)
+	// Decrypt the combined secret key
+	combinedSK, err := diskStorage.DecryptKey(loadedKeyPair, passphrase)
 	if err != nil {
 		return nil, nil, fmt.Errorf("decryption failed: %w", err)
 	}
 
-	// Verify the decrypted secret matches the stored public key
+	// Extract SPHINCS+ private key (first 64 bytes)
+	const sphincsPrivateKeySize = 64
+	if len(combinedSK) < sphincsPrivateKeySize {
+		return nil, nil, fmt.Errorf("combined key too short")
+	}
+
+	skBytes := combinedSK[:sphincsPrivateKeySize]
+	kemPrivBytes := combinedSK[sphincsPrivateKeySize:]
+
+	kp := &KeyPair{
+		PublicKey:     loadedKeyPair.PublicKey,
+		PrivateKey:    loadedKeyPair.EncryptedSK,
+		Path:          keyID,
+		KEMPrivateKey: kemPrivBytes,
+	}
+
+	// Load KEM public key from metadata
+	if loadedKeyPair.Metadata != nil {
+		if kemPubB64, ok := loadedKeyPair.Metadata["kem_public"].(string); ok {
+			kemPub, err := base64.StdEncoding.DecodeString(kemPubB64)
+			if err == nil {
+				kp.KEMPublicKey = kemPub
+			}
+		}
+	}
+
+	// Verify the SPHINCS+ private key matches the stored public key
 	ok, err := keyManager.VerifyPubKey(skBytes, loadedKeyPair.PublicKey)
 	if err != nil {
 		return nil, nil, fmt.Errorf("verify public key: %w", err)
@@ -260,17 +349,53 @@ func ListKeys() ([]string, error) {
 		if id != "" {
 			// Verify the key actually exists in storage before returning.
 			if _, err := diskStorage.GetKey(id); err == nil {
+				// Check if this is a KEM-only key (should skip)
+				if len(id) > 4 && id[:4] == "kem_" {
+					// It's a KEM key, look for the main key
+					return findMainKey(), nil
+				}
 				return []string{id}, nil
 			}
 		}
 	}
 
-	// Fallback: probe legacy hardcoded IDs (pre-index registrations).
+	// Fallback: find main key from all keys
+	return findMainKey(), nil
+}
+
+// findMainKey returns the main SPHINCS+ key ID (skipping KEM-only keys)
+func findMainKey() []string {
+	// Get all keys from storage manager
+	// Since we can't directly list all keys, we'll use a different approach
+	// Check common key patterns
 	for _, id := range []string{"default", "0", "key_0"} {
 		if _, err := diskStorage.GetKey(id); err == nil {
-			return []string{id}, nil
+			return []string{id}
 		}
 	}
 
-	return []string{}, nil
+	// Try to find a key that is NOT a KEM key
+	// This is a bit hacky but necessary with the current API
+	keyDir := GetKeyDir()
+	files, err := os.ReadDir(filepath.Join(keyDir, "..", "disk-keystore", "keys"))
+	if err == nil {
+		for _, file := range files {
+			if file.IsDir() {
+				continue
+			}
+			name := file.Name()
+			if strings.HasSuffix(name, ".json") {
+				id := strings.TrimSuffix(name, ".json")
+				// Skip KEM-only keys
+				if strings.HasPrefix(id, "kem_") {
+					continue
+				}
+				if _, err := diskStorage.GetKey(id); err == nil {
+					return []string{id}
+				}
+			}
+		}
+	}
+
+	return []string{}
 }

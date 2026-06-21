@@ -5,16 +5,19 @@
 package keys
 
 // KeyPair holds the SPHINCS+ public key, the passphrase-encrypted private key,
-// the salt used for key derivation, and the organisation code chosen at
-// registration time.
+// the organisation code, and the address.
+// Note: Salt is no longer stored separately - it's embedded in the encrypted blob
+// by diskStorage.EncryptData (matching the wallet pattern).
 type KeyPair struct {
 	PublicKey  []byte
 	PrivateKey []byte
-	Salt       []byte
 	Path       string
 
 	// OrgCode identifies which organisation this key belongs to.
-	// It is persisted in LevelDB and used to format the human-readable address.
+	// It is persisted and used to format the human-readable address.
 	// Empty string means a legacy key created before the org-address system.
 	OrgCode string
+
+	// Address is the human-readable address derived from the public key and org code
+	Address string
 }

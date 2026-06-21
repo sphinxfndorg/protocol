@@ -1,10 +1,10 @@
 // Copyright (c) 2024-present Sphinx Core Dev
 // MIT License https://opensource.org/license/mit
 
+// go/src/core/wallet/crypter/crypter.go
 package crypter
 
 import (
-	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -19,43 +19,22 @@ import (
 const (
 	WALLET_CRYPTO_KEY_SIZE   = 32               // AES-256: 256-bit (32 bytes) key size
 	WALLET_CRYPTO_IV_SIZE    = 16               // Size of IV: 16 bytes (fixed for AES)
+	WALLET_CRYPTO_SALT_SIZE  = 16               // Size of salt used for key derivation (kept distinct from IV conceptually)
 	WALLET_CRYPTO_NONCE_SIZE = 12               // AES GCM: 12-byte nonce (used as IV)
 	AES_BLOCKSIZE            = 16               // AES block size: 16 bytes (128 bits, fixed for AES)
 	CSHA512OutputSize        = 64               // SHA-512 output size: 64 bytes
 	AES_GCM_TAG_SIZE         = 16               // GCM authentication tag size: 16 bytes
 	AES_GCM_OVERHEAD         = AES_GCM_TAG_SIZE // Overhead for GCM: size of the authentication tag
+
+	// FIX: EncryptSecret/DecryptSecret now prepend the salt to the output, the
+	// same way Encrypt/Decrypt prepend the GCM nonce. This constant is the
+	// minimum valid length of an EncryptSecret() result: salt + nonce + tag.
+	minEncryptSecretLen = WALLET_CRYPTO_SALT_SIZE + WALLET_CRYPTO_NONCE_SIZE + AES_GCM_TAG_SIZE
+
+	// Number of PBKDF rounds used by EncryptSecret/DecryptSecret. Pulled out
+	// to a named constant so the two call sites can't drift out of sync.
+	secretDeriveRounds = 10000
 )
-
-// MasterKey represents the structure of a master key,
-// used in cryptographic operations for deriving encryption keys.
-type MasterKey struct {
-	// VchCryptedKey holds the encrypted version of the private key or master key.
-	// "Vch" stands for "vector of characters" (or bytes) often used for byte slices in cryptographic contexts.
-	VchCryptedKey []byte `json:"vchCryptedKey"`
-
-	// VchSalt contains the salt used during key derivation to add randomness and strengthen security.
-	// "Vch" again refers to a byte slice (vector of characters).
-	VchSalt []byte `json:"vchSalt"`
-
-	// NDerivationMethod specifies the method used for deriving keys (e.g., PBKDF2, scrypt).
-	// "N" is a common notation for numeric values or counts.
-	NDerivationMethod uint32 `json:"nDerivationMethod"`
-
-	// NDeriveIterations defines how many iterations are applied during key derivation,
-	// typically used to increase computational cost and security.
-	NDeriveIterations uint32 `json:"nDeriveIterations"`
-
-	// VchOtherDerivationParameters is an additional byte slice that holds any other parameters
-	// required by the derivation method, if applicable.
-	VchOtherDerivationParameters []byte `json:"vchOtherDerivationParameters"`
-}
-
-// CCrypter handles AES encryption and decryption with key and IV.
-type CCrypter struct {
-	vchKey  []byte
-	vchIV   []byte
-	fKeySet bool
-}
 
 // NewMasterKey creates a new instance of MasterKey with default values.
 func NewMasterKey() *MasterKey {
@@ -74,11 +53,6 @@ func (mk *MasterKey) Serialize() ([]byte, error) {
 // Deserialize populates the MasterKey from a byte slice.
 func (mk *MasterKey) Deserialize(data []byte) error {
 	return json.Unmarshal(data, mk)
-}
-
-// Uint256 represents a 256-bit unsigned integer.
-type Uint256 struct {
-	uint256 *uint256.Int
 }
 
 // NewUint256 creates a new Uint256 from a byte slice.
@@ -102,13 +76,20 @@ func BytesToUint256(b []byte) *Uint256 {
 
 // NewCrypter: Initializes a new CCrypter instance and sets the encryption key from the master key.
 // It returns the initialized CCrypter instance or an error if the key could not be set.
-func NewCrypter(masterKey []byte) (*CCrypter, error) {
+//
+// FIX: the original implementation called c.SetKey(masterKey, nil), but
+// SetKey requires len(newIV) == WALLET_CRYPTO_IV_SIZE and rejects nil/short
+// IVs, so this always failed with "failed to set key". NewCrypter is meant
+// to wrap an *already derived* key+IV pair (as produced by
+// BytesToKeySHA512AES / SetKeyFromPassphrase), not a raw passphrase, so it
+// now takes both and validates their lengths explicitly instead of silently
+// going through a path that could never succeed.
+func NewCrypter(key, iv []byte) (*CCrypter, error) {
 	// Create a new instance of CCrypter.
 	cKeyCrypter := &CCrypter{}
 
-	// Set the encryption key using the provided masterKey.
-	// The second parameter (nil) indicates that no salt is used in this example.
-	if !cKeyCrypter.SetKey(masterKey, nil) {
+	// Set the encryption key/IV directly; both must already be the correct size.
+	if !cKeyCrypter.SetKey(key, iv) {
 		// If setting the key fails, return an error indicating the failure.
 		return nil, errors.New("failed to set key")
 	}
@@ -159,10 +140,19 @@ func (c *CCrypter) BytesToKeySHA512AES(salt, keyData []byte, count int) ([]byte,
 	}
 
 	// Split the final hash buffer into the key and IV.
-	key := buf[:WALLET_CRYPTO_KEY_SIZE]                                              // First 32 bytes for the key.
-	iv := buf[WALLET_CRYPTO_KEY_SIZE : WALLET_CRYPTO_KEY_SIZE+WALLET_CRYPTO_IV_SIZE] // Next 16 bytes for the IV.
+	// FIX: the original code sliced buf directly (key := buf[:32], iv :=
+	// buf[32:48]) and then called memoryCleanse(buf) on the *same backing
+	// array* a few lines later. Since Go slices share the underlying array,
+	// that zeroed out the key and IV bytes Claude was about to return,
+	// silently handing the caller two all-zero slices. Every key derived
+	// through this path was a fixed all-zero AES-256 key.
+	key := make([]byte, WALLET_CRYPTO_KEY_SIZE)
+	iv := make([]byte, WALLET_CRYPTO_IV_SIZE)
+	copy(key, buf[:WALLET_CRYPTO_KEY_SIZE])
+	copy(iv, buf[WALLET_CRYPTO_KEY_SIZE:WALLET_CRYPTO_KEY_SIZE+WALLET_CRYPTO_IV_SIZE])
 
-	// Zero out the buffer to cleanse sensitive data from memory.
+	// Zero out the buffer to cleanse sensitive data from memory. Safe now
+	// that key/iv are independent copies rather than sub-slices of buf.
 	memoryCleanse(buf)
 
 	// Return the derived key and IV.
@@ -262,7 +252,17 @@ func (c *CCrypter) Encrypt(plaintext []byte) ([]byte, error) {
 	ciphertext := gcm.Seal(nil, iv, plaintext, nil)
 
 	// Prepend the IV (nonce) to the ciphertext so it can be used for decryption.
-	result := append(iv, ciphertext...)
+	// FIX: the original wrote `result := append(iv, ciphertext...)`. Since iv
+	// is a 12-byte slice with cap == len (from make([]byte, 12)), append
+	// happens to allocate a new backing array here, so this specific call
+	// site was not actually corrupting iv. But it relies on an implementation
+	// detail (cap-vs-len) rather than a guarantee, and the identical pattern
+	// elsewhere in this file (BytesToKeySHA512AES) demonstrates how easily
+	// append-aliasing bugs creep in. Made the allocation explicit so
+	// correctness doesn't depend on append's capacity-growth behavior.
+	result := make([]byte, 0, len(iv)+len(ciphertext))
+	result = append(result, iv...)
+	result = append(result, ciphertext...)
 
 	// Return the result (IV + ciphertext) as the final encrypted output.
 	return result, nil
@@ -306,91 +306,125 @@ func (c *CCrypter) Decrypt(ciphertext []byte) ([]byte, error) {
 	return plaintext, nil
 }
 
-// EncryptSecret: Encrypts the given plaintext using a master key and an IV (Uint256).
-func EncryptSecret(masterKey []byte, plaintext []byte, iv *Uint256) ([]byte, error) {
-	// Initialize the crypter struct, which handles AES encryption and decryption.
+// EncryptSecret: Encrypts the given plaintext using a master key.
+//
+// FIX (critical): the original generated a fresh random salt with
+// GenerateRandomBytes on every call and then discarded it once the function
+// returned. DecryptSecret independently generated *its own* random salt,
+// which (with overwhelming probability) differed from the one used during
+// encryption, so SetKeyFromPassphrase derived a different AES key on
+// decrypt and gcm.Open failed with "cipher: message authentication failed"
+// essentially every time. This is the bug you asked about: not an AES-CBC
+// vs AES-GCM mismatch, it's that the GCM key itself was never reproducible.
+//
+// Fix: persist the salt by prepending it to the returned blob, the same way
+// Encrypt() prepends its nonce. Output layout is now:
+//
+//	salt (16 bytes) || nonce (12 bytes) || GCM(ciphertext) || tag (16 bytes)
+//
+// The unused `iv *Uint256` parameter from the original signature has been
+// removed — it was accepted but never read in either Encrypt or Decrypt
+// path, which was itself a signal something was wired up incorrectly here.
+// If your wallet format expects per-key IVs derived from the pubkey (as
+// DecryptKey suggests), that's now handled via AAD — see DecryptKey below.
+func EncryptSecret(masterKey []byte, plaintext []byte) ([]byte, error) {
 	cKeyCrypter := &CCrypter{}
 
 	// Generate a random salt of size equal to WALLET_CRYPTO_IV_SIZE for key derivation.
-	salt, err := GenerateRandomBytes(WALLET_CRYPTO_IV_SIZE) // Use IV size for salt.
+	salt, err := GenerateRandomBytes(WALLET_CRYPTO_SALT_SIZE)
 	if err != nil {
-		// Return an error if salt generation fails.
 		return nil, err
 	}
 
 	// Set the encryption key using the masterKey and the derived salt.
-	// 10000 rounds of key derivation are used here (as an example). This simulates a password-based key derivation function.
-	if !cKeyCrypter.SetKeyFromPassphrase(masterKey, salt, 10000) {
-		// Return an error if setting the key fails.
+	if !cKeyCrypter.SetKeyFromPassphrase(masterKey, salt, secretDeriveRounds) {
 		return nil, errors.New("failed to set key")
 	}
 
 	// Encrypt the plaintext using the AES-256-GCM cipher.
 	ciphertext, err := cKeyCrypter.Encrypt(plaintext)
 	if err != nil {
-		// Return an error if the encryption process fails.
 		return nil, err
 	}
 
-	// Return the ciphertext as the result of the encryption process.
-	return ciphertext, nil
+	// Prepend the salt so DecryptSecret can re-derive the identical key.
+	result := make([]byte, 0, len(salt)+len(ciphertext))
+	result = append(result, salt...)
+	result = append(result, ciphertext...)
+
+	return result, nil
 }
 
-// DecryptSecret: Decrypts the ciphertext using a master key and an IV (Uint256).
-func DecryptSecret(masterKey []byte, ciphertext []byte, iv *Uint256) ([]byte, error) {
-	// Initialize the crypter struct for handling AES decryption.
-	cKeyCrypter := &CCrypter{}
-
-	// Generate a random salt (must match the one used during encryption).
-	salt, err := GenerateRandomBytes(WALLET_CRYPTO_IV_SIZE)
-	if err != nil {
-		// Return an error if salt generation fails.
-		return nil, err
+// DecryptSecret: Decrypts a blob produced by EncryptSecret using a master key.
+//
+// FIX: now reads the salt back out of the blob (see EncryptSecret) instead
+// of generating a new random one, which is what made decryption work at
+// all. Also added a minimum-length check up front so a too-short input
+// fails with a clear error instead of a slice-bounds panic.
+func DecryptSecret(masterKey []byte, blob []byte) ([]byte, error) {
+	if len(blob) < minEncryptSecretLen {
+		return nil, errors.New("ciphertext too short")
 	}
 
-	// Set the decryption key using the masterKey and the derived salt.
-	// The same number of rounds (10000) used during encryption must be applied.
-	if !cKeyCrypter.SetKeyFromPassphrase(masterKey, salt, 10000) {
-		// Return an error if setting the key fails.
+	salt := blob[:WALLET_CRYPTO_SALT_SIZE]
+	ciphertext := blob[WALLET_CRYPTO_SALT_SIZE:]
+
+	cKeyCrypter := &CCrypter{}
+
+	// Re-derive the same key using the salt that was actually used at
+	// encryption time, instead of a freshly generated random one.
+	if !cKeyCrypter.SetKeyFromPassphrase(masterKey, salt, secretDeriveRounds) {
 		return nil, errors.New("failed to set key")
 	}
 
-	// Decrypt the ciphertext using AES-256-GCM cipher.
 	plaintext, err := cKeyCrypter.Decrypt(ciphertext)
 	if err != nil {
-		// Return an error if the decryption process fails.
 		return nil, err
 	}
 
-	// Return the decrypted plaintext.
 	return plaintext, nil
 }
 
-// DecryptKey: Decrypts a crypted secret using a master key and IV derived from the public key.
-func DecryptKey(masterKey []byte, cryptedSecret []byte, pubKey []byte) ([]byte, error) {
-	// Convert the public key (pubKey) to a Uint256 structure, which will be used as the IV during decryption.
-	iv := BytesToUint256(pubKey)
-
-	// Decrypt the crypted secret using the master key and the IV derived from the public key.
-	secret, err := DecryptSecret(masterKey, cryptedSecret, iv)
+// DecryptKey: Decrypts a crypted secret using a master key.
+//
+// FIX: the original built `iv := BytesToUint256(pubKey)` and passed it into
+// DecryptSecret, but DecryptSecret never used that parameter — it was dead
+// on arrival before this fix and stays unused now since EncryptSecret/
+// DecryptSecret no longer take an iv param at all (see above).
+//
+// FIX (layering + correctness): this used to also call VerifyPubKey(secret,
+// pubKey) directly here, with a hardcoded `len(secret) != 32` size check.
+// Both were wrong for real SPHINCS+ keys: SerializeSK (see
+// sthincs/key/backend/key.go) produces SKseed||SKprf||PKseed||PKroot, which
+// is NOT 32 bytes for any real SPHINCS+ parameter set, and is a different
+// length entirely from the serialized public key it was being compared
+// against — bytes.Equal(secret, pubKey) could never succeed.
+//
+// Public-key verification has moved to key.KeyManager.VerifyPubKey (see
+// sthincs/key/backend/verify.go), because it needs SPHINCS+-aware
+// deserialization (km.Params) that this generic AES/crypter package has no
+// business knowing about — crypter encrypts/decrypts arbitrary byte blobs
+// for multiple callers (disk.go, usb.go) that aren't all SPHINCS+ keys.
+//
+// DecryptKey here is now decrypt-only. Callers that need the old
+// "decrypt AND verify against a known public key" behavior should call:
+//
+//	secretBytes, err := crypter.DecryptKey(masterKey, cryptedSecret)
+//	// ... handle err ...
+//	ok, err := keyManager.VerifyPubKey(secretBytes, pubKeyBytes)
+//
+// as two explicit steps, with whatever *key.KeyManager they already have
+// in scope (e.g. wherever StoreRawKey / DecryptKey is invoked in disk.go).
+func DecryptKey(masterKey []byte, cryptedSecret []byte) ([]byte, error) {
+	secret, err := DecryptSecret(masterKey, cryptedSecret)
 	if err != nil {
-		// Return an error if the decryption process fails.
 		return nil, err
 	}
 
-	// Ensure that the decrypted secret is of the expected size (32 bytes).
-	if len(secret) != 32 {
-		// Return an error if the size doesn't match.
-		return nil, errors.New("decrypted secret size mismatch")
+	if len(secret) == 0 {
+		return nil, errors.New("decrypted secret is empty")
 	}
 
-	// Verify that the decrypted secret corresponds to the provided public key.
-	if !VerifyPubKey(secret, pubKey) {
-		// Return an error if the verification fails (decrypted secret doesn't match the public key).
-		return nil, errors.New("decrypted key mismatch with public key")
-	}
-
-	// Return the decrypted secret as the result.
 	return secret, nil
 }
 
@@ -401,13 +435,7 @@ func memoryCleanse(data []byte) {
 	}
 }
 
-// VerifyPubKey: Dummy verification for now
-func VerifyPubKey(secret, pubKey []byte) bool {
-	// Assumes pubKey derived from secret
-	return bytes.Equal(secret, pubKey)
-}
-
-// Modify GenerateRandomBytes to accept an appropriate size for IV and Key
+// GenerateRandomBytes returns size cryptographically random bytes.
 func GenerateRandomBytes(size int) ([]byte, error) {
 	if size <= 0 {
 		return nil, errors.New("size must be greater than 0")

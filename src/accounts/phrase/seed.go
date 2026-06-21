@@ -5,6 +5,7 @@ package seed
 
 import (
 	"bytes"
+	"crypto/hmac"
 	"crypto/rand"
 
 	"encoding/base32"
@@ -15,8 +16,6 @@ import (
 	sips3 "github.com/sphinxorg/protocol/src/accounts/mnemonic"
 	"github.com/sphinxorg/protocol/src/common"
 	key "github.com/sphinxorg/protocol/src/core/sthincs/key/backend"
-	auth "github.com/sphinxorg/protocol/src/core/wallet/auth"
-	utils "github.com/sphinxorg/protocol/src/core/wallet/utils"
 	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/sha3"
 )
@@ -41,7 +40,21 @@ const (
 	memory      = 64 * 1024 // Memory cost set to 64 KiB (64 * 1024 bytes) for demonstration purpose
 	iterations  = 2         // Number of iterations for Argon2id set to 2
 	parallelism = 1         // Degree of parallelism set to 1
-	tagSize     = 32        // Tag size set to 256 bits (32 bytes)
+
+	// REMOVED DEPENDENCY: auth.GenerateChainCode / utils.GenerateMacKey /
+	// utils.VerifyBase32Passkey / utils.NewWalletConfig all lived in
+	// src/core/wallet/{auth,utils}, which you've deleted. This file no
+	// longer imports either package — see the inline notes at each call
+	// site below for what replaced what (and what was simply removed).
+
+	// macKeyDomain / chainCodeDomain are HKDF-style domain-separation
+	// labels for the local SHAKE256-based replacements below. Using
+	// distinct labels for each derived value (instead of one shared
+	// label, or none) ensures macKey and chainCode are cryptographically
+	// independent even though both derive from the same (passkeyBytes,
+	// hashedPasskey) inputs.
+	macKeyDomainLabel    = "sphinx-seed-mac-key-v1"
+	chainCodeDomainLabel = "sphinx-seed-chain-code-v1"
 )
 
 // GenerateSalt generates a cryptographically secure random salt.
@@ -188,6 +201,40 @@ func EncodeBase32(data []byte) string {
 	return base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(data)
 }
 
+// DecodeBase32 decodes a no-padding Base32 string back into bytes. Added
+// as the missing counterpart to EncodeBase32 — the original codebase had
+// no exported decode function in this package; callers apparently relied
+// on the now-deleted utils.VerifyBase32Passkey to do decode-and-verify
+// together. This is decode-only, with no verification semantics attached.
+func DecodeBase32(s string) ([]byte, error) {
+	return base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(s)
+}
+
+// deriveLabeledKey is a local, dependency-free replacement for what
+// utils.GenerateMacKey used to do. It derives a fixed-length key from
+// (passkeyBytes, hashedPasskey) using a domain-separation label, via
+// keyed SHAKE256 — the same primitive GenerateKeys() already uses below
+// for its own PRF step, so this introduces no new cryptographic
+// machinery to the file, just reuses sha3.NewShake256 with a label.
+//
+// NOT REVIEWED AGAINST THE ORIGINAL: I don't have utils.GenerateMacKey's
+// source, so this is a clean re-derivation matching its apparent contract
+// (two []byte inputs -> []byte output), not a verified drop-in replica.
+// If macKey/chainCode are consumed anywhere that hard-codes assumptions
+// about the OLD algorithm (e.g. another package re-deriving the same
+// value independently to check equality), that caller needs updating too
+// — grep for GenerateMacKey/macKey usage outside this file before
+// treating this as done.
+func deriveLabeledKey(label string, passkeyBytes, hashedPasskey []byte, outLen int) []byte {
+	sh := sha3.NewShake256()
+	sh.Write([]byte(label))
+	sh.Write(passkeyBytes)
+	sh.Write(hashedPasskey)
+	out := make([]byte, outLen)
+	sh.Read(out)
+	return out
+}
+
 // GenerateKeys generates a passphrase, a hashed Base32-encoded passkey, and its fingerprint.
 // It derives a 6–8 byte output cryptographically from a large intermediate state to ensure
 // the output is protected by the state's entropy against brute-force attacks.
@@ -236,17 +283,65 @@ func GenerateKeys() (passphrase string, base32Passkey string, hashedPasskey []by
 	// Step 8: Encode passkey in Base32
 	base32Passkey = EncodeBase32(passkeyBytes)
 
-	// Step 9: Generate MAC key and chain code from passkey and hashedPasskey
-	macKey, chainCode, err = utils.GenerateMacKey(passkeyBytes, hashedPasskey)
-	if err != nil {
-		return "", "", nil, nil, nil, nil, fmt.Errorf("failed to generate macKey: %v", err)
-	}
+	// Step 9: Generate MAC key and chain code from passkey and hashedPasskey.
+	//
+	// REMOVED DEPENDENCY: was utils.GenerateMacKey(passkeyBytes, hashedPasskey).
+	// Replaced with deriveLabeledKey using domain-separated SHAKE256 — see
+	// the warning on that function above. macKey and chainCode use
+	// different labels so they're independent outputs despite sharing
+	// inputs (chainCode being 32 bytes matches typical BIP-32 chain code
+	// size; adjust outLen if your HD-derivation code expects something else).
+	macKey = deriveLabeledKey(macKeyDomainLabel, passkeyBytes, hashedPasskey, 32)
+	chainCode = deriveLabeledKey(chainCodeDomainLabel, passkeyBytes, hashedPasskey, 32)
 
-	// Step 10: Generate fingerprint linking passphrase and passkey
-	fingerprint, err = auth.GenerateChainCode(passphrase, passkeyBytes)
-	if err != nil {
-		return "", "", nil, nil, nil, nil, fmt.Errorf("failed to generate fingerprint: %v", err)
-	}
+	// Step 10: Generate fingerprint linking passphrase and passkey.
+	//
+	// REMOVED DEPENDENCY: was auth.GenerateChainCode(passphrase, passkeyBytes)
+	// (note: despite the name "GenerateChainCode", this populated
+	// `fingerprint`, not `chainCode` — that naming mismatch existed in your
+	// original code, not introduced here). Replaced with an HMAC-SHA3-512
+	// over passkeyBytes, keyed by passphrase: a fingerprint that lets you
+	// later verify "does this passphrase correspond to this passkey?"
+	// without storing the passphrase itself — see VerifyFingerprint below,
+	// which is the matching replacement for auth.VerifyFingerPrint and
+	// MUST stay in sync with this construction.
+	fingerprint = computeFingerprint(passphrase, passkeyBytes)
 
 	return passphrase, base32Passkey, hashedPasskey, macKey, chainCode, fingerprint, nil
+}
+
+// computeFingerprint and VerifyFingerprint are a local, dependency-free
+// replacement pair for auth.GenerateChainCode (used as a fingerprint
+// generator) / auth.VerifyFingerPrint. They MUST be changed together —
+// VerifyFingerprint only works correctly if it recomputes the fingerprint
+// exactly the way computeFingerprint built it.
+//
+// NOT REVIEWED AGAINST THE ORIGINAL: same caveat as deriveLabeledKey above
+// — I don't have auth.GenerateChainCode's source, so this satisfies the
+// same (passphrase, passkeyBytes) -> fingerprint -> bool contract your
+// code already calls, but isn't a verified bit-for-bit replica of the
+// deleted implementation. Any previously-generated fingerprints (e.g.
+// already persisted to disk under the old auth package) will NOT verify
+// against this new construction — this is a breaking change for existing
+// data, not just a recompile fix.
+func computeFingerprint(passphrase string, passkeyBytes []byte) []byte {
+	mac := hmac.New(sha3.New512, []byte(passphrase))
+	mac.Write(passkeyBytes)
+	return mac.Sum(nil)
+}
+
+// VerifyFingerprint recomputes the fingerprint from (passphrase,
+// passkeyBytes) and compares it against an expected value using a
+// constant-time comparison (hmac.Equal), to avoid leaking timing
+// information about how much of the fingerprint matched.
+//
+// REMOVED DEPENDENCY: replaces auth.VerifyFingerPrint(base32Passkey, passphrase).
+// Note the original took base32Passkey (the encoded string) and
+// internally must have decoded it before comparing — this version takes
+// the raw passkeyBytes and the expected fingerprint directly, which is a
+// cleaner contract but DOES change the call signature. Callers (e.g.
+// test_key.go) need updating accordingly — see the rewritten test_key.go.
+func VerifyFingerprint(passphrase string, passkeyBytes []byte, expectedFingerprint []byte) bool {
+	computed := computeFingerprint(passphrase, passkeyBytes)
+	return hmac.Equal(computed, expectedFingerprint)
 }

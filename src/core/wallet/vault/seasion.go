@@ -1,7 +1,7 @@
 // Copyright (c) 2024-present Sphinx Core Dev
 // MIT License https://opensource.org/license/mit
 
-// go/src/usi/core/crypter/vault/session.go
+// go/src/core/wallet/vault/seasion.go
 package vault
 
 // All shared types (HybridPublicKey, RecipientEntry, manifest, SecureBuffer,

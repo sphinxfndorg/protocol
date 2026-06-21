@@ -437,10 +437,3 @@ func hexVal(c byte) byte {
 	}
 	return 255
 }
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}

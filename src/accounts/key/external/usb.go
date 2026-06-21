@@ -195,19 +195,59 @@ func (ks *USBKeyStore) RemoveKey(keyID string) error {
 }
 
 // BackupFromDisk creates a backup of disk wallet keys to USB  // Renamed from BackupFromHot
+//
+// FIX: previously this only wrote into "<mountPath>/backup/<timestamp>/",
+// while ListKeys()/RestoreToDisk() only ever read from "<mountPath>/keys/"
+// (via the in-memory ks.keys map, populated from keys/ at Mount time).
+// Backup and restore were pointed at two directories that never overlapped
+// — a restore immediately after a successful backup would silently return
+// zero keys. Per the decision to make backups immediately restorable: this
+// now writes each key into keys/ (the same path StoreKey/saveKeyToUSB
+// already use) as the source of truth, AND still writes the timestamped
+// backup/<timestamp>/ copy + manifest as a dated audit trail. The two are
+// no longer the same write — keys/ is "current restorable state on this
+// USB drive", backup/<timestamp>/ is "what a backup looked like at time T,
+// for history/debugging", and only the former is what RestoreToDisk reads.
 func (ks *USBKeyStore) BackupFromDisk(diskStore interface{ ListKeys() []*key.KeyPair }, passphrase string) error {
+	ks.mu.Lock()
+	defer ks.mu.Unlock()
+
 	if !ks.isMounted {
 		return fmt.Errorf("USB device not mounted")
 	}
 
 	diskKeys := diskStore.ListKeys() // Changed from hotKeys
-	backupPath := filepath.Join(ks.mountPath, "backup", time.Now().Format("2006-01-02_15-04-05"))
 
+	// --- Write into keys/ : the restorable, current-state copy ---
+	keysDir := filepath.Join(ks.mountPath, "keys")
+	if err := os.MkdirAll(keysDir, 0700); err != nil {
+		return fmt.Errorf("failed to create keys directory: %w", err)
+	}
+	for _, keyPair := range diskKeys {
+		keyData, err := json.MarshalIndent(keyPair, "", "  ")
+		if err != nil {
+			return fmt.Errorf("failed to marshal key %s: %w", keyPair.ID, err)
+		}
+
+		keyFile := filepath.Join(keysDir, keyPair.ID+".json")
+		if err := os.WriteFile(keyFile, keyData, 0600); err != nil {
+			return fmt.Errorf("failed to write key file %s: %w", keyPair.ID, err)
+		}
+
+		// Keep the in-memory cache in sync so ListKeys()/GetKey() reflect
+		// this backup immediately, without requiring an Unmount+Mount
+		// round trip to re-trigger loadKeysFromUSB().
+		ks.keys[keyPair.ID] = keyPair
+	}
+
+	// --- Also write a timestamped audit copy under backup/<timestamp>/ ---
+	// This is history, not the restore source. RestoreToDisk does not read
+	// from here.
+	backupPath := filepath.Join(ks.mountPath, "backup", time.Now().Format("2006-01-02_15-04-05"))
 	if err := os.MkdirAll(backupPath, 0700); err != nil {
 		return fmt.Errorf("failed to create backup directory: %w", err)
 	}
 
-	// Create backup manifest
 	manifest := map[string]interface{}{
 		"version":     "1.0",
 		"backup_time": time.Now().Format(time.RFC3339),
@@ -222,16 +262,15 @@ func (ks *USBKeyStore) BackupFromDisk(diskStore interface{ ListKeys() []*key.Key
 		return fmt.Errorf("failed to write backup manifest: %w", err)
 	}
 
-	// Backup each key individually
 	for _, keyPair := range diskKeys {
 		keyData, err := json.MarshalIndent(keyPair, "", "  ")
 		if err != nil {
-			return fmt.Errorf("failed to marshal key %s: %w", keyPair.ID, err)
+			return fmt.Errorf("failed to marshal key %s for audit copy: %w", keyPair.ID, err)
 		}
 
 		keyFile := filepath.Join(backupPath, keyPair.ID+".json")
 		if err := os.WriteFile(keyFile, keyData, 0600); err != nil {
-			return fmt.Errorf("failed to write key file %s: %w", keyPair.ID, err)
+			return fmt.Errorf("failed to write audit copy of key file %s: %w", keyPair.ID, err)
 		}
 	}
 

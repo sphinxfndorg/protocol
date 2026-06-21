@@ -1,7 +1,7 @@
 // Copyright (c) 2024-present Sphinx Core Dev
 // MIT License https://opensource.org/license/mit
 
-// go/src/usi/core/crypter/vault/params.go
+// go/src/core/wallet/vault/params.go
 package vault
 
 // DefaultKeyDerivationParams provides secure default parameters for Argon2id

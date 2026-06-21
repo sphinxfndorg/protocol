@@ -12,7 +12,7 @@ import (
 	"log"
 	"time"
 
-	"github.com/kasperdi/SPHINCSPLUS-golang/sphincs"
+	sthincs "github.com/sphinxorg/protocol/src/crypto/STHINCS/sthincs"
 	keys "github.com/sphinxorg/protocol/src/usi/core/key"
 )
 
@@ -30,8 +30,7 @@ func Sign(msg []byte, passphrase string) (*Signature, error) {
 		log.Printf("[ERROR] Sign: failed to load keypair: %v", err)
 		return nil, fmt.Errorf("load key: %w", err)
 	}
-	// FIX #1: Zero the raw private key bytes immediately after use.
-	// Ranging over a nil slice is safe in Go, so no nil check needed.
+	// Zero the raw private key bytes immediately after use.
 	defer func() {
 		for i := range skBytes {
 			skBytes[i] = 0
@@ -39,22 +38,46 @@ func Sign(msg []byte, passphrase string) (*Signature, error) {
 		log.Printf("[INFO] Sign: private key bytes zeroed")
 	}()
 
-	sk, err := sphincs.DeserializeSK(keys.DefaultParams, skBytes)
+	// Get the key manager from the keys package
+	keyManager := keys.GetKeyManager()
+	if keyManager == nil {
+		return nil, fmt.Errorf("key manager not initialized")
+	}
+
+	// Get SPHINCS+ parameters from key manager
+	params := keyManager.GetSPHINCSParameters()
+	if params == nil || params.Params == nil {
+		return nil, fmt.Errorf("SPHINCS+ parameters not initialized")
+	}
+
+	// Deserialize the private key using the key manager's DeserializeKeyPair
+	// We only need the private key, but DeserializeKeyPair needs both
+	sk, _, err := keyManager.DeserializeKeyPair(skBytes, kp.PublicKey)
 	if err != nil {
-		log.Printf("[ERROR] Sign: failed to deserialize private key: %v", err)
-		return nil, fmt.Errorf("deserialize SK: %w", err)
+		log.Printf("[ERROR] Sign: failed to deserialize key pair: %v", err)
+		return nil, fmt.Errorf("deserialize key pair: %w", err)
 	}
 	log.Printf("[INFO] Sign: private key deserialized successfully")
 
-	pk, err := sphincs.DeserializePK(keys.DefaultParams, kp.PublicKey)
-	if err != nil {
-		log.Printf("[ERROR] Sign: failed to deserialize public key: %v", err)
-		return nil, fmt.Errorf("deserialize PK: %w", err)
+	// Create a proper SPHINCS_SK struct for signing
+	sphincsSK := &sthincs.SPHINCS_SK{
+		SKseed: sk.SKseed,
+		SKprf:  sk.SKprf,
+		PKseed: sk.PKseed,
+		PKroot: sk.PKroot,
 	}
-	log.Printf("[INFO] Sign: public key deserialized successfully")
-	log.Printf("[DEBUG] Sign: public key (hex): %s", hex.EncodeToString(kp.PublicKey))
 
-	sigObj := sphincs.Spx_sign(keys.DefaultParams, msg, sk)
+	// Generate the signature using the SPHINCS+ library
+	// Spx_sign returns (signature, error)
+	sigObj, err := sthincs.Spx_sign(params.Params, msg, sphincsSK)
+	if err != nil {
+		log.Printf("[ERROR] Sign: failed to create signature: %v", err)
+		return nil, fmt.Errorf("sign: %w", err)
+	}
+	if sigObj == nil {
+		log.Printf("[ERROR] Sign: failed to create signature - nil object")
+		return nil, fmt.Errorf("failed to create signature")
+	}
 	log.Printf("[INFO] Sign: SPHINCS+ signature created")
 
 	sigBytes, err := sigObj.SerializeSignature()
@@ -63,7 +86,14 @@ func Sign(msg []byte, passphrase string) (*Signature, error) {
 		return nil, fmt.Errorf("serialize signature: %w", err)
 	}
 	log.Printf("[INFO] Sign: signature serialized (size: %d bytes)", len(sigBytes))
-	log.Printf("[DEBUG] Sign: signature (hex prefix): %s...", hex.EncodeToString(sigBytes)[:min(64, len(sigBytes))])
+
+	// Deserialize public key for serialization
+	pk, err := sthincs.DeserializePK(params.Params, kp.PublicKey)
+	if err != nil {
+		log.Printf("[ERROR] Sign: failed to deserialize public key: %v", err)
+		return nil, fmt.Errorf("deserialize PK: %w", err)
+	}
+	log.Printf("[INFO] Sign: public key deserialized successfully")
 
 	pkBytes, err := pk.SerializePK()
 	if err != nil {
@@ -82,23 +112,11 @@ func Sign(msg []byte, passphrase string) (*Signature, error) {
 
 // Verify checks a SPHINCS+ signature against an explicitly trusted public key.
 //
-// FIX #2 (Critical): The trusted key MUST come from a local key store or
-// an out-of-band trusted source — never from the same untrusted file that
-// contains the signature being verified. Passing the embedded public key
-// from an untrusted file allows a full signature-bypass attack.
-//
-// Correct usage:
-//
-//	registeredKP, _, _ := keys.LoadKeyFromDisk(passphrase)
-//	ok, err := Verify(hash, sig, registeredKP.PublicKey)
-//
-// Incorrect (still vulnerable) usage:
-//
-//	ok, err := Verify(hash, sig, sig.PublicKey)   // ← DO NOT DO THIS
+// The trusted key MUST come from a local key store or an out-of-band trusted
+// source — never from the same untrusted file that contains the signature.
 func Verify(msg []byte, sig *Signature, trustedPKBytes []byte) (bool, error) {
 	startTime := time.Now()
 	log.Printf("[INFO] Verify: starting verification for message length %d bytes", len(msg))
-	log.Printf("[DEBUG] Verify: message hash (hex): %s", hex.EncodeToString(msg))
 
 	if len(trustedPKBytes) == 0 {
 		log.Printf("[ERROR] Verify: empty trusted public key")
@@ -112,25 +130,36 @@ func Verify(msg []byte, sig *Signature, trustedPKBytes []byte) (bool, error) {
 		log.Printf("[ERROR] Verify: empty signature bytes")
 		return false, fmt.Errorf("empty signature bytes")
 	}
-	log.Printf("[INFO] Verify: signature size: %d bytes", len(sig.Signature))
-	log.Printf("[DEBUG] Verify: signature (hex prefix): %s...", hex.EncodeToString(sig.Signature)[:min(64, len(sig.Signature))])
-	log.Printf("[DEBUG] Verify: trusted public key (hex prefix): %s...", hex.EncodeToString(trustedPKBytes)[:min(64, len(trustedPKBytes))])
 
-	pk, err := sphincs.DeserializePK(keys.DefaultParams, trustedPKBytes)
+	// Get the key manager and parameters
+	keyManager := keys.GetKeyManager()
+	if keyManager == nil {
+		return false, fmt.Errorf("key manager not initialized")
+	}
+
+	params := keyManager.GetSPHINCSParameters()
+	if params == nil || params.Params == nil {
+		return false, fmt.Errorf("SPHINCS+ parameters not initialized")
+	}
+
+	// Deserialize the trusted public key
+	pk, err := sthincs.DeserializePK(params.Params, trustedPKBytes)
 	if err != nil {
 		log.Printf("[ERROR] Verify: failed to deserialize trusted public key: %v", err)
 		return false, fmt.Errorf("deserialize trusted PK: %w", err)
 	}
 	log.Printf("[INFO] Verify: trusted public key deserialized successfully")
 
-	sigObj, err := sphincs.DeserializeSignature(keys.DefaultParams, sig.Signature)
+	// Deserialize the signature
+	sigObj, err := sthincs.DeserializeSignature(params.Params, sig.Signature)
 	if err != nil {
 		log.Printf("[ERROR] Verify: failed to deserialize signature: %v", err)
 		return false, fmt.Errorf("deserialize signature: %w", err)
 	}
 	log.Printf("[INFO] Verify: signature deserialized successfully")
 
-	ok := sphincs.Spx_verify(keys.DefaultParams, msg, sigObj, pk)
+	// Verify the signature
+	ok := sthincs.Spx_verify(params.Params, msg, sigObj, pk)
 	elapsed := time.Since(startTime)
 	if ok {
 		log.Printf("[SUCCESS] Verify: signature verified successfully against trusted key in %v", elapsed)
@@ -141,13 +170,9 @@ func Verify(msg []byte, sig *Signature, trustedPKBytes []byte) (bool, error) {
 }
 
 // VerifyWithRegisteredKey verifies a signature against the key currently
-// registered on disk for the given passphrase. This is the preferred
-// verification path for all local operations (vault decryption, document
-// sign-check) because it closes the embedded-key substitution attack.
+// registered on disk for the given passphrase.
 func VerifyWithRegisteredKey(msg []byte, sig *Signature, passphrase string) (bool, error) {
-	startTime := time.Now()
 	log.Printf("[INFO] VerifyWithRegisteredKey: starting verification")
-	log.Printf("[DEBUG] VerifyWithRegisteredKey: message hash (hex): %s", hex.EncodeToString(msg))
 
 	if passphrase == "" {
 		log.Printf("[ERROR] VerifyWithRegisteredKey: empty passphrase")
@@ -159,36 +184,29 @@ func VerifyWithRegisteredKey(msg []byte, sig *Signature, passphrase string) (boo
 		log.Printf("[ERROR] VerifyWithRegisteredKey: failed to load registered key: %v", err)
 		return false, fmt.Errorf("load registered key: %w", err)
 	}
-	// Zero the decrypted SK — we only needed the KP to obtain the public key.
 	defer func() {
 		for i := range skBytes {
 			skBytes[i] = 0
 		}
 		log.Printf("[INFO] VerifyWithRegisteredKey: private key bytes zeroed")
 	}()
-	log.Printf("[INFO] VerifyWithRegisteredKey: registered key loaded")
-	log.Printf("[DEBUG] VerifyWithRegisteredKey: registered public key (hex prefix): %s...", hex.EncodeToString(registeredKP.PublicKey)[:min(64, len(registeredKP.PublicKey))])
 
 	result, err := Verify(msg, sig, registeredKP.PublicKey)
-	elapsed := time.Since(startTime)
-	log.Printf("[INFO] VerifyWithRegisteredKey: verification completed in %v", elapsed)
+	if result {
+		log.Printf("[SUCCESS] VerifyWithRegisteredKey: verification successful")
+	} else {
+		log.Printf("[FAILED] VerifyWithRegisteredKey: verification failed")
+	}
 	return result, err
 }
 
 // VerifyWithEmbeddedKey verifies a signature using the public key embedded
 // inside the Signature struct itself.
 //
-// WARNING — SECURITY CONSTRAINT: This function MUST only be used when the
-// caller has already independently confirmed that sig.PublicKey equals the
-// registered public key on disk (see BindingCheck). Using this function
-// without that prior check is equivalent to trusting attacker-supplied data.
-//
-// The only legitimate internal caller is verifyManifestSignature in vault.go,
-// which calls BindingCheck immediately before calling this function.
+// WARNING: This function MUST only be used when the caller has already
+// independently confirmed that sig.PublicKey matches the registered key.
 func VerifyWithEmbeddedKey(msg []byte, sig *Signature, passphrase string) (bool, error) {
-	startTime := time.Now()
 	log.Printf("[INFO] VerifyWithEmbeddedKey: starting verification with embedded key")
-	log.Printf("[DEBUG] VerifyWithEmbeddedKey: message hash (hex): %s", hex.EncodeToString(msg))
 
 	// First verify key matches registered key
 	registeredKP, _, err := keys.LoadKeyFromDisk(passphrase)
@@ -198,117 +216,23 @@ func VerifyWithEmbeddedKey(msg []byte, sig *Signature, passphrase string) (bool,
 	}
 	if subtle.ConstantTimeCompare(sig.PublicKey, registeredKP.PublicKey) != 1 {
 		log.Printf("[ERROR] VerifyWithEmbeddedKey: embedded key does not match registered key")
-		log.Printf("[DEBUG] VerifyWithEmbeddedKey: embedded key (hex prefix): %s...", hex.EncodeToString(sig.PublicKey)[:min(64, len(sig.PublicKey))])
-		log.Printf("[DEBUG] VerifyWithEmbeddedKey: registered key (hex prefix): %s...", hex.EncodeToString(registeredKP.PublicKey)[:min(64, len(registeredKP.PublicKey))])
 		return false, errors.New("embedded key does not match registered key")
 	}
 	log.Printf("[INFO] VerifyWithEmbeddedKey: key binding verification passed")
 
-	if sig == nil || len(sig.PublicKey) == 0 {
-		log.Printf("[ERROR] VerifyWithEmbeddedKey: missing embedded public key")
-		return false, fmt.Errorf("embedded public key missing")
-	}
-	log.Printf("[DEBUG] VerifyWithEmbeddedKey: embedded public key (hex prefix): %s...", hex.EncodeToString(sig.PublicKey)[:min(64, len(sig.PublicKey))])
-
-	pk, err := sphincs.DeserializePK(keys.DefaultParams, sig.PublicKey)
-	if err != nil {
-		log.Printf("[ERROR] VerifyWithEmbeddedKey: failed to deserialize embedded PK: %v", err)
-		return false, fmt.Errorf("deserialize embedded PK: %w", err)
-	}
-	log.Printf("[INFO] VerifyWithEmbeddedKey: embedded public key deserialized")
-
-	sigObj, err := sphincs.DeserializeSignature(keys.DefaultParams, sig.Signature)
-	if err != nil {
-		log.Printf("[ERROR] VerifyWithEmbeddedKey: failed to deserialize signature: %v", err)
-		return false, fmt.Errorf("deserialize signature: %w", err)
-	}
-	log.Printf("[INFO] VerifyWithEmbeddedKey: signature deserialized")
-	log.Printf("[DEBUG] VerifyWithEmbeddedKey: signature size: %d bytes", len(sig.Signature))
-
-	result := sphincs.Spx_verify(keys.DefaultParams, msg, sigObj, pk)
-	elapsed := time.Since(startTime)
+	result, err := Verify(msg, sig, sig.PublicKey)
 	if result {
-		log.Printf("[SUCCESS] VerifyWithEmbeddedKey: verification successful in %v", elapsed)
+		log.Printf("[SUCCESS] VerifyWithEmbeddedKey: verification successful")
 	} else {
-		log.Printf("[FAILED] VerifyWithEmbeddedKey: verification failed in %v", elapsed)
+		log.Printf("[FAILED] VerifyWithEmbeddedKey: verification failed")
 	}
-	return result, nil
-}
-
-// BindingCheck confirms that the public key embedded in a Signature struct
-// matches the registered public key for the given passphrase. Call this
-// BEFORE calling VerifyWithEmbeddedKey to prevent key-substitution attacks.
-//
-// Returns the registered KeyPair and any error.
-func BindingCheck(sig *Signature, passphrase string) (*keys.KeyPair, error) {
-	startTime := time.Now()
-	log.Printf("[INFO] BindingCheck: starting key binding check")
-
-	if sig == nil || len(sig.PublicKey) == 0 {
-		log.Printf("[ERROR] BindingCheck: signature has no embedded public key")
-		return nil, fmt.Errorf("signature has no embedded public key")
-	}
-	log.Printf("[DEBUG] BindingCheck: embedded public key (hex prefix): %s...", hex.EncodeToString(sig.PublicKey)[:min(64, len(sig.PublicKey))])
-
-	registeredKP, skBytes, err := keys.LoadKeyFromDisk(passphrase)
-	if err != nil {
-		log.Printf("[ERROR] BindingCheck: failed to load registered key: %v", err)
-		return nil, fmt.Errorf("load registered key for binding check: %w", err)
-	}
-
-	// Always zero the sensitive key material before returning
-	defer func() {
-		if skBytes != nil {
-			for i := range skBytes {
-				skBytes[i] = 0
-			}
-			_ = skBytes // Prevent compiler optimization
-			log.Printf("[INFO] BindingCheck: private key bytes zeroed")
-		}
-	}()
-	log.Printf("[INFO] BindingCheck: registered key loaded")
-	log.Printf("[DEBUG] BindingCheck: registered public key (hex prefix): %s...", hex.EncodeToString(registeredKP.PublicKey)[:min(64, len(registeredKP.PublicKey))])
-
-	// Constant-time comparison of public keys
-	if subtle.ConstantTimeCompare(sig.PublicKey, registeredKP.PublicKey) != 1 {
-		log.Printf("[ERROR] BindingCheck: key binding failed - embedded key does not match registered identity")
-		return nil, fmt.Errorf("key binding check failed: embedded key does not match registered identity")
-	}
-
-	elapsed := time.Since(startTime)
-	log.Printf("[SUCCESS] BindingCheck: key binding verified successfully in %v", elapsed)
-	return registeredKP, nil
-}
-
-// LoadKeyPairForSigning returns the decrypted SK raw bytes together with the
-// public key. The caller MUST zero skBytes immediately after use:
-//
-//	_, skBytes, err := LoadKeyPairForSigning(passphrase)
-//	defer func() { for i := range skBytes { skBytes[i] = 0 } }()
-func LoadKeyPairForSigning(passphrase string) (pkBytes, skBytes []byte, err error) {
-	log.Printf("[INFO] LoadKeyPairForSigning: loading keypair")
-
-	kp, sk, err := keys.LoadKeyFromDisk(passphrase)
-	if err != nil {
-		log.Printf("[ERROR] LoadKeyPairForSigning: failed to load keypair: %v", err)
-		return nil, nil, err
-	}
-	log.Printf("[INFO] LoadKeyPairForSigning: keypair loaded - caller MUST zero skBytes after use")
-	log.Printf("[DEBUG] LoadKeyPairForSigning: public key (hex prefix): %s...", hex.EncodeToString(kp.PublicKey)[:min(64, len(kp.PublicKey))])
-	return kp.PublicKey, sk, nil
+	return result, err
 }
 
 // VerifyWithPublicKey verifies a SPHINCS+ signature using explicit raw public
-// key bytes supplied by the caller. Intended for the key server, which holds
-// Bob's SphincsPub bytes directly and has no passphrase to load from disk.
-//
-// The pubKey parameter is authoritative — sig.PublicKey is ignored entirely.
-// This prevents a caller from accidentally passing an untrusted embedded key.
+// key bytes supplied by the caller.
 func VerifyWithPublicKey(message []byte, sig *Signature, pubKey []byte) (bool, error) {
-	startTime := time.Now()
 	log.Printf("[INFO] VerifyWithPublicKey: starting verification with explicit public key (size: %d bytes)", len(pubKey))
-	log.Printf("[DEBUG] VerifyWithPublicKey: message hash (hex): %s", hex.EncodeToString(message))
-	log.Printf("[DEBUG] VerifyWithPublicKey: public key (hex prefix): %s...", hex.EncodeToString(pubKey)[:min(64, len(pubKey))])
 
 	if len(pubKey) == 0 {
 		log.Printf("[ERROR] VerifyWithPublicKey: empty public key")
@@ -318,29 +242,59 @@ func VerifyWithPublicKey(message []byte, sig *Signature, pubKey []byte) (bool, e
 		log.Printf("[ERROR] VerifyWithPublicKey: nil or empty signature")
 		return false, fmt.Errorf("VerifyWithPublicKey: nil or empty signature")
 	}
-	log.Printf("[INFO] VerifyWithPublicKey: signature size: %d bytes", len(sig.Signature))
-	log.Printf("[DEBUG] VerifyWithPublicKey: signature (hex prefix): %s...", hex.EncodeToString(sig.Signature)[:min(64, len(sig.Signature))])
 
-	pk, err := sphincs.DeserializePK(keys.DefaultParams, pubKey)
-	if err != nil {
-		log.Printf("[ERROR] VerifyWithPublicKey: failed to deserialize public key: %v", err)
-		return false, fmt.Errorf("VerifyWithPublicKey: deserialize public key: %w", err)
-	}
-	log.Printf("[INFO] VerifyWithPublicKey: public key deserialized successfully")
-
-	sigObj, err := sphincs.DeserializeSignature(keys.DefaultParams, sig.Signature)
-	if err != nil {
-		log.Printf("[ERROR] VerifyWithPublicKey: failed to deserialize signature: %v", err)
-		return false, fmt.Errorf("VerifyWithPublicKey: deserialize signature: %w", err)
-	}
-	log.Printf("[INFO] VerifyWithPublicKey: signature deserialized successfully")
-
-	ok := sphincs.Spx_verify(keys.DefaultParams, message, sigObj, pk)
-	elapsed := time.Since(startTime)
-	if ok {
-		log.Printf("[SUCCESS] VerifyWithPublicKey: signature verified successfully in %v", elapsed)
+	result, err := Verify(message, sig, pubKey)
+	if result {
+		log.Printf("[SUCCESS] VerifyWithPublicKey: verification successful")
 	} else {
-		log.Printf("[FAILED] VerifyWithPublicKey: signature verification failed in %v", elapsed)
+		log.Printf("[FAILED] VerifyWithPublicKey: verification failed")
 	}
-	return ok, nil
+	return result, err
+}
+
+// BindingCheck confirms that the public key embedded in a Signature struct
+// matches the registered public key for the given passphrase.
+func BindingCheck(sig *Signature, passphrase string) (*keys.KeyPair, error) {
+	log.Printf("[INFO] BindingCheck: starting key binding check")
+
+	if sig == nil || len(sig.PublicKey) == 0 {
+		log.Printf("[ERROR] BindingCheck: signature has no embedded public key")
+		return nil, fmt.Errorf("signature has no embedded public key")
+	}
+
+	registeredKP, skBytes, err := keys.LoadKeyFromDisk(passphrase)
+	if err != nil {
+		log.Printf("[ERROR] BindingCheck: failed to load registered key: %v", err)
+		return nil, fmt.Errorf("load registered key for binding check: %w", err)
+	}
+	defer func() {
+		if skBytes != nil {
+			for i := range skBytes {
+				skBytes[i] = 0
+			}
+			log.Printf("[INFO] BindingCheck: private key bytes zeroed")
+		}
+	}()
+
+	if subtle.ConstantTimeCompare(sig.PublicKey, registeredKP.PublicKey) != 1 {
+		log.Printf("[ERROR] BindingCheck: key binding failed - embedded key does not match registered identity")
+		return nil, fmt.Errorf("key binding check failed: embedded key does not match registered identity")
+	}
+
+	log.Printf("[SUCCESS] BindingCheck: key binding verified successfully")
+	return registeredKP, nil
+}
+
+// LoadKeyPairForSigning returns the decrypted SK raw bytes together with the
+// public key. The caller MUST zero skBytes immediately after use.
+func LoadKeyPairForSigning(passphrase string) (pkBytes, skBytes []byte, err error) {
+	log.Printf("[INFO] LoadKeyPairForSigning: loading keypair")
+
+	kp, sk, err := keys.LoadKeyFromDisk(passphrase)
+	if err != nil {
+		log.Printf("[ERROR] LoadKeyPairForSigning: failed to load keypair: %v", err)
+		return nil, nil, err
+	}
+	log.Printf("[INFO] LoadKeyPairForSigning: keypair loaded - caller MUST zero skBytes after use")
+	return kp.PublicKey, sk, nil
 }

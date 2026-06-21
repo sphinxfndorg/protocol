@@ -5,18 +5,53 @@
 package keys
 
 import (
-	"encoding/json"
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 
-	"github.com/kasperdi/SPHINCSPLUS-golang/sphincs"
-	crypter "github.com/sphinxorg/protocol/src/usi/core/crypter/key"
-	db "github.com/sphinxorg/protocol/src/usi/core/dbkey"
+	"github.com/sphinxorg/protocol/src/accounts/key"
+	utils "github.com/sphinxorg/protocol/src/accounts/key/utils"
+	sphincs "github.com/sphinxorg/protocol/src/core/sthincs/key/backend"
 )
 
+// StorageManager is a global storage manager instance
+var storageManager *utils.StorageManager
+var diskStorage key.StorageInterface
+var keyManager *sphincs.KeyManager
+
+// GetKeyManager returns the global SPHINCS+ key manager
+func GetKeyManager() *sphincs.KeyManager {
+	return keyManager
+}
+
+func init() {
+	var err error
+	storageManager, err = utils.NewStorageManager()
+	if err != nil {
+		log.Printf("Failed to initialize storage manager: %v", err)
+		return
+	}
+	diskStorage = storageManager.GetStorage(string(utils.StorageTypeDisk))
+
+	// Initialize the SPHINCS+ key manager (matches test_encrypt.go pattern)
+	keyManager, err = sphincs.NewKeyManager()
+	if err != nil {
+		log.Printf("Failed to initialize KeyManager: %v", err)
+	}
+}
+
+// GetKeyDir returns the key directory path for UI display
+func GetKeyDir() string {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		homeDir = "."
+	}
+	return filepath.Join(homeDir, ".sphinx", "keys")
+}
+
 // GenerateKeyPairWithOrg is the primary entry point for the registration flow.
-// The orgCode is persisted in LevelDB and used to format all future addresses.
+// The orgCode is persisted and used to format all future addresses.
 func GenerateKeyPairWithOrg(passphrase string, orgCode OrgCode) (*KeyPair, error) {
 	log.Printf("Generating SPHINCS+ keypair for org %q", orgCode)
 
@@ -24,7 +59,11 @@ func GenerateKeyPairWithOrg(passphrase string, orgCode OrgCode) (*KeyPair, error
 		return nil, fmt.Errorf("unsupported organisation code: %q", orgCode)
 	}
 
-	sk, pk := sphincs.Spx_keygen(DefaultParams)
+	// Use the SPHINCS+ key manager (matches test_encrypt.go pattern)
+	sk, pk, err := keyManager.GenerateKey()
+	if err != nil {
+		return nil, fmt.Errorf("generate keys: %w", err)
+	}
 	log.Println("SPHINCS+ key pair generated successfully")
 
 	pkBytes, err := pk.SerializePK()
@@ -36,23 +75,20 @@ func GenerateKeyPairWithOrg(passphrase string, orgCode OrgCode) (*KeyPair, error
 		return nil, fmt.Errorf("serialize private key: %w", err)
 	}
 
-	salt, err := GeneratePureSalt(32)
-	if err != nil {
-		return nil, fmt.Errorf("generate salt: %w", err)
-	}
-
-	key := DeriveKeyFromPassphrase(passphrase, salt)
-
-	encryptedSK, err := crypter.SecureEncryptWithKey(skBytes, crypter.NewSecureBuffer(key))
+	// Use diskStorage.EncryptData (matches test_encrypt.go pattern)
+	encryptedSK, err := diskStorage.EncryptData(skBytes, passphrase)
 	if err != nil {
 		return nil, fmt.Errorf("encrypt private key: %w", err)
 	}
 
+	// Generate address from public key
+	address := generateAddress(pkBytes, orgCode)
+
 	kp := &KeyPair{
 		PublicKey:  pkBytes,
 		PrivateKey: encryptedSK,
-		Salt:       salt,
 		OrgCode:    string(orgCode),
+		Address:    address,
 	}
 
 	if err := saveKeyToDisk(kp); err != nil {
@@ -60,6 +96,12 @@ func GenerateKeyPairWithOrg(passphrase string, orgCode OrgCode) (*KeyPair, error
 	}
 
 	return kp, nil
+}
+
+// generateAddress creates an address from public key and org code
+func generateAddress(pkBytes []byte, orgCode OrgCode) string {
+	raw := SHAKE256HashWithOrg(pkBytes, orgCode)
+	return FormatOrgAddress(raw, orgCode)
 }
 
 // GetPublicKeyFingerprint generates a SHAKE256-based address using the
@@ -84,101 +126,151 @@ func GetPublicKeyFingerprint(kp *KeyPair) string {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Persistence
+// Persistence using StorageManager (matches test_encrypt.go pattern)
 // ─────────────────────────────────────────────────────────────────────────────
-
-// keyMeta is the structure persisted in LevelDB.
-type keyMeta struct {
-	PublicKey []byte `json:"pk"`
-	Salt      []byte `json:"salt"`
-	OrgCode   string `json:"org_code,omitempty"`
-}
 
 func saveKeyToDisk(kp *KeyPair) error {
 	log.Println("Saving keypair to disk")
 
-	if err := os.MkdirAll(KeyDir, 0700); err != nil {
-		return fmt.Errorf("create key directory: %w", err)
-	}
-
-	if err := WriteFile(DatPath, kp.PrivateKey); err != nil {
-		return fmt.Errorf("write private key: %w", err)
-	}
-	kp.Path = DatPath
-
-	metadataDB, err := db.Open(DBPath)
+	// Store the encrypted key using diskStorage.StoreEncryptedKey
+	// This matches the pattern in test_encrypt.go
+	storedKeyPair, err := diskStorage.StoreEncryptedKey(
+		kp.PrivateKey,
+		kp.PublicKey,
+		kp.Address,
+		key.WalletTypeDisk,
+		7331, // Sphinx Mainnet chain ID
+		"",   // derivation path
+		nil,  // additional data
+	)
 	if err != nil {
-		return fmt.Errorf("open metadata DB: %w", err)
-	}
-	defer metadataDB.Close()
-
-	meta := keyMeta{
-		PublicKey: kp.PublicKey,
-		Salt:      kp.Salt,
-		OrgCode:   kp.OrgCode,
-	}
-	data, err := json.Marshal(meta)
-	if err != nil {
-		return fmt.Errorf("marshal metadata: %w", err)
+		return fmt.Errorf("store encrypted key: %w", err)
 	}
 
-	if err := metadataDB.Put([]byte("keypair"), data); err != nil {
-		return fmt.Errorf("store metadata: %w", err)
+	kp.Path = storedKeyPair.ID
+
+	// Persist the dynamic key ID so ListKeys can find it on next run.
+	indexPath := filepath.Join(GetKeyDir(), "keyindex")
+	if err := os.MkdirAll(GetKeyDir(), 0700); err != nil {
+		return fmt.Errorf("create key dir: %w", err)
+	}
+	if err := os.WriteFile(indexPath, []byte(storedKeyPair.ID), 0600); err != nil {
+		return fmt.Errorf("write key index: %w", err)
 	}
 
-	log.Println("Keypair metadata saved successfully")
+	log.Printf("Keypair saved successfully with ID: %s", storedKeyPair.ID)
 	return nil
 }
 
-// LoadKeyFromDisk loads and decrypts the key pair from key.dat + LevelDB.
+// LoadKeyFromDisk loads and decrypts the key pair using StorageManager.
+// This follows the test_encrypt.go pattern for loading keys.
 func LoadKeyFromDisk(passphrase string) (*KeyPair, []byte, error) {
 	log.Println("Loading keypair from disk")
 
-	metadataDB, err := db.Open(DBPath)
+	// Get all key IDs from storage
+	keyIDs, err := ListKeys()
 	if err != nil {
-		return nil, nil, fmt.Errorf("open metadata DB: %w", err)
-	}
-	defer metadataDB.Close()
-
-	data, err := metadataDB.Get([]byte("keypair"))
-	if err != nil {
-		return nil, nil, fmt.Errorf("retrieve metadata: %w", err)
+		return nil, nil, fmt.Errorf("list keys: %w", err)
 	}
 
-	var meta keyMeta
-	if err := json.Unmarshal(data, &meta); err != nil {
-		return nil, nil, fmt.Errorf("unmarshal metadata: %w", err)
+	if len(keyIDs) == 0 {
+		return nil, nil, fmt.Errorf("no keys found in storage")
 	}
 
-	encryptedSK, err := ReadFile(DatPath)
+	// Load the first key found (similar to test_encrypt.go pattern)
+	keyID := keyIDs[0]
+	loadedKeyPair, err := diskStorage.GetKey(keyID)
 	if err != nil {
-		return nil, nil, fmt.Errorf("read encrypted private key: %w", err)
+		return nil, nil, fmt.Errorf("load key pair: %w", err)
 	}
 
 	kp := &KeyPair{
-		PublicKey:  meta.PublicKey,
-		PrivateKey: encryptedSK,
-		Salt:       meta.Salt,
-		Path:       DatPath,
-		OrgCode:    meta.OrgCode,
+		PublicKey:  loadedKeyPair.PublicKey,
+		PrivateKey: loadedKeyPair.EncryptedSK,
+		Path:       keyID,
 	}
 
-	derivedKey := DeriveKeyFromPassphrase(passphrase, kp.Salt)
-	secureKey := crypter.NewSecureBuffer(derivedKey)
-	defer secureKey.Clear()
-
-	skBytes, err := crypter.SecureDecryptWithKey(kp.PrivateKey, secureKey)
+	// Decrypt the secret key using diskStorage.DecryptKey (matches test_encrypt.go)
+	skBytes, err := diskStorage.DecryptKey(loadedKeyPair, passphrase)
 	if err != nil {
 		return nil, nil, fmt.Errorf("decryption failed (wrong passphrase or corrupted key): %w", err)
 	}
 
-	if _, err = sphincs.DeserializeSK(DefaultParams, skBytes); err != nil {
-		return nil, nil, fmt.Errorf("invalid private key: %w", err)
+	// Verify the decrypted secret matches the stored public key
+	// This matches test_encrypt.go step 7
+	ok, err := keyManager.VerifyPubKey(skBytes, loadedKeyPair.PublicKey)
+	if err != nil {
+		return nil, nil, fmt.Errorf("verify public key: %w", err)
 	}
-	if _, err = sphincs.DeserializePK(DefaultParams, kp.PublicKey); err != nil {
-		return nil, nil, fmt.Errorf("invalid public key: %w", err)
+	if !ok {
+		return nil, nil, fmt.Errorf("decrypted secret key does not match the stored public key")
 	}
 
-	log.Printf("Keypair loaded successfully (org: %q)", kp.OrgCode)
+	// Generate address from public key
+	kp.OrgCode = "SPIF"
+	kp.Address = GetPublicKeyFingerprint(kp)
+
+	log.Printf("Keypair loaded successfully")
 	return kp, skBytes, nil
+}
+
+// GetKeyByID loads a specific key by its ID (matches test_encrypt.go pattern)
+func GetKeyByID(keyID, passphrase string) (*KeyPair, []byte, error) {
+	log.Printf("Loading keypair by ID: %s", keyID)
+
+	loadedKeyPair, err := diskStorage.GetKey(keyID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("load key pair: %w", err)
+	}
+
+	kp := &KeyPair{
+		PublicKey:  loadedKeyPair.PublicKey,
+		PrivateKey: loadedKeyPair.EncryptedSK,
+		Path:       keyID,
+	}
+
+	// Decrypt the secret key using diskStorage.DecryptKey
+	skBytes, err := diskStorage.DecryptKey(loadedKeyPair, passphrase)
+	if err != nil {
+		return nil, nil, fmt.Errorf("decryption failed: %w", err)
+	}
+
+	// Verify the decrypted secret matches the stored public key
+	ok, err := keyManager.VerifyPubKey(skBytes, loadedKeyPair.PublicKey)
+	if err != nil {
+		return nil, nil, fmt.Errorf("verify public key: %w", err)
+	}
+	if !ok {
+		return nil, nil, fmt.Errorf("decrypted secret key does not match the stored public key")
+	}
+
+	kp.Address = GetPublicKeyFingerprint(kp)
+
+	return kp, skBytes, nil
+}
+
+// ListKeys lists all stored key IDs
+// This follows the StorageManager pattern
+func ListKeys() ([]string, error) {
+	// Read the key ID written by saveKeyToDisk at registration time.
+	indexPath := filepath.Join(GetKeyDir(), "keyindex")
+	data, err := os.ReadFile(indexPath)
+	if err == nil {
+		id := string(data)
+		if id != "" {
+			// Verify the key actually exists in storage before returning.
+			if _, err := diskStorage.GetKey(id); err == nil {
+				return []string{id}, nil
+			}
+		}
+	}
+
+	// Fallback: probe legacy hardcoded IDs (pre-index registrations).
+	for _, id := range []string{"default", "0", "key_0"} {
+		if _, err := diskStorage.GetKey(id); err == nil {
+			return []string{id}, nil
+		}
+	}
+
+	return []string{}, nil
 }

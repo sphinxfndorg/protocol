@@ -38,9 +38,7 @@ var (
 var (
 	keyStore     pubkeydir.Store
 	keyStoreOnce sync.Once
-	// Check env var, default to true if not set
-	useRemoteServer = os.Getenv("USI_NO_SERVER") != "true" // Default to ON unless explicitly disabled
-	serverURL       = "http://localhost:8080"
+	serverURL    = "http://localhost:8080"
 )
 
 func addActivity(activity string) {
@@ -303,7 +301,7 @@ func getVaultSenderInfo(vaultPath string) (senderFP string, senderOrg string, er
 			// Always use SPIF
 			orgCode := keys.OrgCode("SPIF")
 			senderFP = keys.GetPublicKeyFingerprintFromBytes(pubKeyBytes, orgCode)
-			senderOrg = "SPIF - Sistem Pertahanan Identitas Fakta"
+			senderOrg = "SPIF - Sphinx Fingerprint"
 			log.Printf("[SUCCESS] getVaultSenderInfo: found via server lookup, using SPIF, fp: %.16s...", senderFP)
 			return senderFP, senderOrg, nil
 		}
@@ -315,14 +313,14 @@ func getVaultSenderInfo(vaultPath string) (senderFP string, senderOrg string, er
 	// Use session org code if available (always SPIF)
 	if sessionOrgCode != "" {
 		senderFP = keys.GetPublicKeyFingerprintFromBytes(pubKeyBytes, keys.OrgCode("SPIF"))
-		senderOrg = "SPIF - Sistem Pertahanan Identitas Fakta"
+		senderOrg = "SPIF - Sphinx Fingerprint"
 		log.Printf("[INFO] getVaultSenderInfo: using session org code: SPIF")
 		return senderFP, senderOrg, nil
 	}
 
 	// Fallback - use SPIF
 	senderFP = keys.GetPublicKeyFingerprintFromBytes(pubKeyBytes, keys.OrgCode("SPIF"))
-	senderOrg = "SPIF - Sistem Pertahanan Identitas Fakta"
+	senderOrg = "SPIF - Sphinx Fingerprint"
 	log.Printf("[WARN] getVaultSenderInfo: using SPIF as fallback, fp: %.16s...", senderFP)
 	return senderFP, senderOrg, nil
 }
@@ -390,7 +388,7 @@ func BuildOrgSelector(window fyne.Window) *OrgSelector {
 	fixedLabel := widget.NewLabelWithStyle("Organization: SPIF", fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
 	fixedLabel.Importance = widget.HighImportance
 
-	infoLabel := widget.NewLabel("SPIF - Sistem Pertahanan Identitas Fakta")
+	infoLabel := widget.NewLabel("SPIF - Sphinx Fingerprint")
 	infoLabel.TextStyle = fyne.TextStyle{Italic: true}
 	infoLabel.Alignment = fyne.TextAlignCenter
 

@@ -1,18 +1,15 @@
-// Copyright (c) 2024-present Sphinx Core Dev
-// MIT License https://opensource.org/license/mit
-
 // go/src/usi/core/key/kem.go
 package keys
 
 import (
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"log"
 
 	"github.com/cloudflare/circl/kem/kyber/kyber768"
-	"github.com/sphinxorg/protocol/src/accounts/key"
 	"golang.org/x/crypto/curve25519"
 )
 
@@ -29,33 +26,34 @@ import (
 //	[ Kyber768 public key (remaining bytes)      ]
 
 // ─────────────────────────────────────────────
-// GENERATE & STORE
+// GENERATE KEM KEYS
 // ─────────────────────────────────────────────
 
-// GenerateAndStoreKEMKey generates a hybrid X25519+Kyber768 KEM keypair,
-// merges both halves into a single blob, and encrypts it using the storage
-// manager pattern (diskStorage.EncryptData).
-func GenerateAndStoreKEMKey(passphrase string) error {
+// GenerateKEMKeys generates a hybrid X25519+Kyber768 KEM keypair.
+// Returns (kemPublicKey, kemPrivateKey, error) as merged blobs.
+func GenerateKEMKeys() ([]byte, []byte, error) {
+	log.Println("[KEM] Generating hybrid X25519+Kyber768 keypair")
+
 	// ── 1. Generate Kyber768 keypair ─────────────────────────────────────────
 	scheme := kyber768.Scheme()
 	kyberPub, kyberPriv, err := scheme.GenerateKeyPair()
 	if err != nil {
-		return fmt.Errorf("generate Kyber768 key pair: %w", err)
+		return nil, nil, fmt.Errorf("generate Kyber768 key pair: %w", err)
 	}
 	kyberPubBytes, err := kyberPub.MarshalBinary()
 	if err != nil {
-		return fmt.Errorf("serialize Kyber768 public key: %w", err)
+		return nil, nil, fmt.Errorf("serialize Kyber768 public key: %w", err)
 	}
 	kyberPrivBytes, err := kyberPriv.MarshalBinary()
 	if err != nil {
-		return fmt.Errorf("serialize Kyber768 private key: %w", err)
+		return nil, nil, fmt.Errorf("serialize Kyber768 private key: %w", err)
 	}
 	defer zeroBytes(kyberPrivBytes)
 
 	// ── 2. Generate X25519 keypair ───────────────────────────────────────────
 	x25519Priv := make([]byte, curve25519.ScalarSize)
 	if _, err := rand.Read(x25519Priv); err != nil {
-		return fmt.Errorf("generate X25519 private key: %w", err)
+		return nil, nil, fmt.Errorf("generate X25519 private key: %w", err)
 	}
 	defer zeroBytes(x25519Priv)
 
@@ -66,83 +64,57 @@ func GenerateAndStoreKEMKey(passphrase string) error {
 
 	x25519Pub, err := curve25519.X25519(x25519Priv, curve25519.Basepoint)
 	if err != nil {
-		return fmt.Errorf("derive X25519 public key: %w", err)
+		return nil, nil, fmt.Errorf("derive X25519 public key: %w", err)
 	}
 
 	// ── 3. Merge into single blobs ───────────────────────────────────────────
+	pubBlob := marshalHybridKey(x25519Pub, kyberPubBytes)
 	privBlob := marshalHybridKey(x25519Priv, kyberPrivBytes)
 	defer zeroBytes(privBlob)
 
-	pubBlob := marshalHybridKey(x25519Pub, kyberPubBytes)
+	log.Printf("[KEM] KEM keys generated successfully (public: %d bytes, private: %d bytes)",
+		len(pubBlob), len(privBlob))
 
-	// ── 4. Encrypt merged private key blob using diskStorage.EncryptData ─────
-	// This matches the pattern in test_encrypt.go
-	encPrivBlob, err := diskStorage.EncryptData(privBlob, passphrase)
-	if err != nil {
-		return fmt.Errorf("encrypt hybrid KEM private key: %w", err)
-	}
-
-	// ── 5. Store encrypted key using diskStorage.StoreEncryptedKey ──────────
-	// Generate an address for the KEM key
-	address := "kem_" + fmt.Sprintf("%x", pubBlob[:8])
-
-	storedKeyPair, err := diskStorage.StoreEncryptedKey(
-		encPrivBlob,
-		pubBlob,
-		address,
-		key.WalletTypeDisk,
-		7331, // Sphinx Mainnet chain ID
-		"",   // derivation path
-		nil,  // additional data
-	)
-	if err != nil {
-		return fmt.Errorf("store encrypted KEM key: %w", err)
-	}
-
-	// Store public key blob in a separate entry
-	_, err = diskStorage.StoreEncryptedKey(
-		pubBlob,
-		pubBlob,
-		"kem_public",
-		key.WalletTypeDisk,
-		7331,
-		"",
-		nil,
-	)
-	if err != nil {
-		log.Printf("Warning: failed to store KEM public key separately: %v", err)
-	}
-
-	log.Printf("KEM key stored successfully with ID: %s", storedKeyPair.ID)
-	return nil
+	return pubBlob, privBlob, nil
 }
 
 // ─────────────────────────────────────────────
-// LOAD
+// LOAD KEM KEYS
 // ─────────────────────────────────────────────
-
-// LoadRegistrarKEMPublicKey is an alias for LoadKEMPublicKey.
-// Deprecated: use LoadKEMPublicKey.
-func LoadRegistrarKEMPublicKey() ([]byte, error) {
-	return LoadKEMPublicKey()
-}
 
 // LoadKEMPublicKey returns the merged X25519+Kyber768 public key blob.
-// Use SplitHybridKey to extract each half.
+// This function looks for KEM public key in the SPHINCS+ key file metadata first.
 func LoadKEMPublicKey() ([]byte, error) {
-	// Try to load the KEM public key by ID
-	keys, err := ListKeys()
+	log.Println("[KEM] Loading KEM public key")
+
+	// Try to load from SPHINCS+ key file metadata first
+	keyIDs, err := ListKeys()
 	if err != nil {
 		return nil, fmt.Errorf("list keys: %w", err)
 	}
 
-	for _, keyID := range keys {
-		if len(keyID) > 11 && keyID[:11] == "kem_public_" {
-			loadedKey, err := diskStorage.GetKey(keyID)
-			if err != nil {
+	if len(keyIDs) > 0 {
+		// Find the main SPHINCS+ key (skip KEM-only keys)
+		var mainKeyID string
+		for _, id := range keyIDs {
+			if len(id) > 4 && id[:4] == "kem_" {
 				continue
 			}
-			return loadedKey.PublicKey, nil
+			mainKeyID = id
+			break
+		}
+
+		if mainKeyID != "" {
+			loadedKeyPair, err := diskStorage.GetKey(mainKeyID)
+			if err == nil && loadedKeyPair.Metadata != nil {
+				if kemPubB64, ok := loadedKeyPair.Metadata["kem_public"].(string); ok {
+					kemPub, err := base64.StdEncoding.DecodeString(kemPubB64)
+					if err == nil && len(kemPub) > 0 {
+						log.Printf("[KEM] KEM public key loaded from SPHINCS+ key file (%d bytes)", len(kemPub))
+						return kemPub, nil
+					}
+				}
+			}
 		}
 	}
 
@@ -150,46 +122,24 @@ func LoadKEMPublicKey() ([]byte, error) {
 }
 
 // LoadKEMPrivateKey decrypts the stored KEM key and returns both halves
-// of the hybrid keypair using the storage manager pattern.
-//
-// fingerprint is reserved for future per-recipient key selection and is
-// currently unused in the lookup.
+// of the hybrid keypair.
+// This function looks for KEM private key in the combined SPHINCS+ key file.
 //
 // Returns (x25519PrivateKey, kyber768PrivateKey, error).
 func LoadKEMPrivateKey(passphrase, fingerprint string) ([]byte, []byte, error) {
-	// ── Find the KEM key ──────────────────────────────────────────────────
-	keys, err := ListKeys()
+	log.Println("[KEM] Loading KEM private key")
+
+	// Load from SPHINCS+ key file (combined storage)
+	kp, _, err := LoadKeyFromDisk(passphrase)
 	if err != nil {
-		return nil, nil, fmt.Errorf("list keys: %w", err)
+		return nil, nil, fmt.Errorf("load key pair: %w", err)
 	}
 
-	var kemKeyID string
-	for _, keyID := range keys {
-		if len(keyID) > 4 && keyID[:4] == "kem_" && keyID != "kem_public" {
-			kemKeyID = keyID
-			break
-		}
+	if len(kp.KEMPrivateKey) == 0 {
+		return nil, nil, fmt.Errorf("KEM private key not found in key file")
 	}
 
-	if kemKeyID == "" {
-		return nil, nil, fmt.Errorf("KEM private key not found")
-	}
-
-	// ── Load the encrypted key ──────────────────────────────────────────────
-	loadedKeyPair, err := diskStorage.GetKey(kemKeyID)
-	if err != nil {
-		return nil, nil, fmt.Errorf("load KEM key: %w", err)
-	}
-
-	// ── Decrypt using diskStorage.DecryptKey ─────────────────────────────────
-	privBlob, err := diskStorage.DecryptKey(loadedKeyPair, passphrase)
-	if err != nil {
-		return nil, nil, fmt.Errorf("decrypt hybrid KEM private key (wrong passphrase or corrupted key): %w", err)
-	}
-	defer zeroBytes(privBlob)
-
-	// ── Split merged blob into X25519 and Kyber768 halves ────────────────────
-	x25519Priv, kyberPriv, err := SplitHybridKey(privBlob)
+	x25519Priv, kyberPriv, err := SplitHybridKey(kp.KEMPrivateKey)
 	if err != nil {
 		return nil, nil, fmt.Errorf("malformed hybrid KEM private key: %w", err)
 	}
@@ -201,6 +151,7 @@ func LoadKEMPrivateKey(passphrase, fingerprint string) ([]byte, []byte, error) {
 			len(x25519Priv), curve25519.ScalarSize)
 	}
 
+	log.Println("[KEM] KEM private key loaded from combined SPHINCS+ key file")
 	return x25519Priv, kyberPriv, nil
 }
 

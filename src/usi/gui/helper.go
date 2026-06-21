@@ -97,7 +97,7 @@ func publishRegistrarPublicBundle(passphrase, label, org string) error {
 	log.Printf("[DEBUG] publishRegistrarPublicBundle: keypair loaded")
 	log.Printf("[DEBUG] publishRegistrarPublicBundle: public key size: %d bytes", len(kp.PublicKey))
 
-	kemPub, err := keys.LoadRegistrarKEMPublicKey()
+	kemPub, err := keys.LoadKEMPublicKey()
 	if err != nil {
 		log.Printf("[ERROR] publishRegistrarPublicBundle: load KEM key: %v", err)
 		return fmt.Errorf("publishRegistrarPublicBundle: load KEM key: %w", err)

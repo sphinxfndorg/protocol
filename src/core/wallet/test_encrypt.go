@@ -6,6 +6,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
@@ -16,41 +17,10 @@ import (
 	utils "github.com/sphinxorg/protocol/src/accounts/key/utils"
 	seed "github.com/sphinxorg/protocol/src/accounts/phrase"
 	sphincs "github.com/sphinxorg/protocol/src/core/sthincs/key/backend"
+	keys "github.com/sphinxorg/protocol/src/usi/core/key"
+	"golang.org/x/crypto/sha3"
 	"golang.org/x/term"
 )
-
-// CHANGE FROM ORIGINAL: the previous version of this file talked to
-// `config.NewWalletConfig()` / `walletConfig.SaveKeyPair(...)` /
-// `walletConfig.LoadKeyPair()` — a LevelDB-backed API that doesn't exist
-// anywhere in src/accounts/key/*. It also hand-rolled its own salt
-// derivation (the bug from earlier in this conversation: random salt,
-// generated independently on encrypt vs decrypt, never persisted).
-//
-// This version routes everything through `utils.StorageManager` /
-// `disk.DiskKeyStore`, which is the real account-setup layer already
-// present in this codebase (see local.go / usb.go / keystore.go /
-// utils.go). That layer solves salt persistence differently and more
-// simply than what we discussed earlier: DiskKeyStore.generateSalt derives
-// the salt deterministically from the passphrase itself (now via Argon2id —
-// see the fix in local.go), so there is nothing to lose between encrypt and
-// decrypt calls. No salt needs to be stored or threaded through at all.
-//
-// Two secrets are still kept conceptually separate, matching how production
-// wallets (Bitcoin Core / Electrum / MetaMask-style HD wallets) do this:
-//   - the SIPS-0003 mnemonic from seed.GenerateKeys() (this codebase's own
-//     mnemonic/word-list system, src/accounts/mnemonic + src/accounts/phrase)
-//     is the wallet's root of trust — shown once, written down by the user,
-//     never stored.
-//   - a separate `passphrase` (encryption password) is what's actually fed
-//     into DiskKeyStore.EncryptData/DecryptKey for routine unlock. Reusing
-//     the mnemonic itself as that password is possible but means anyone who
-//     ever sees the unlock prompt has effectively seen the recovery phrase
-//     too — most wallets avoid that by keeping a shorter, separate password.
-//
-// NOTE: key.NewKeyManager()/GenerateKey()/SerializeSK()/SerializePK() come
-// from src/core/sthincs/key/backend, which is not among the files you've
-// shared — I'm keeping its usage as a black box (same call shape as your
-// original main.go) since I don't have its source to verify against.
 
 // minPassphraseLen is a floor, not a strength guarantee. It exists to catch
 // the obvious case (empty string, single character) — it is NOT a substitute
@@ -148,6 +118,14 @@ func promptExistingPassphrase() ([]byte, error) {
 	return pw, nil
 }
 
+// getFingerprintFromBytes computes the SHA3-256 fingerprint from public key bytes.
+// This matches the implementation in keys.GetPublicKeyFingerprint but works with raw bytes.
+func getFingerprintFromBytes(pubKeyBytes []byte) string {
+	hasher := sha3.New256()
+	hasher.Write(pubKeyBytes)
+	return hex.EncodeToString(hasher.Sum(nil))
+}
+
 func main() {
 	// --- 1. Initialize the real storage layer ---
 	storageManager, err := utils.NewStorageManager()
@@ -193,16 +171,6 @@ func main() {
 	fmt.Println("========================================================")
 
 	// --- 4. Set a separate encryption passphrase for routine unlock ---
-	// CHANGE FROM ORIGINAL: the previous version derived the AES key
-	// straight from the mnemonic (`passphrase`) via a hand-built salt. Now
-	// DiskKeyStore.EncryptData takes a passphrase directly and derives its
-	// own salt deterministically (Argon2id) internally — see local.go.
-	//
-	// CHANGE: was previously hardcoded as a placeholder string. Now reads
-	// from a masked terminal prompt, defined directly above in this file —
-	// entered twice with confirmation, since this is the creation path.
-	// passphraseBytes is sensitive and is cleansed via defer right after
-	// it's done being used.
 	passphraseBytes, err := promptNewPassphrase()
 	if err != nil {
 		log.Fatalf("Failed to read encryption passphrase: %v", err)
@@ -211,22 +179,25 @@ func main() {
 	encryptionPassphrase := string(passphraseBytes)
 
 	// --- 5. Encrypt + store the key pair via the real keystore API ---
-	address := fmt.Sprintf("%x", pkBytes[:20]) // placeholder address derivation;
-	// replace with your real address scheme (e.g. hash of pkBytes per your
-	// chain's address format) — using a raw prefix slice here only so this
-	// file compiles end-to-end; it is NOT a real address derivation.
+	// Generate the SPIF address and fingerprint from the public key bytes
+	// This matches the vault package's address derivation pattern
+	fingerprint := getFingerprintFromBytes(pkBytes)
+
+	// Normalize the fingerprint (remove spaces, etc.) to match vault format
+	normalizedFingerprint, err := keys.NormalizeOrgAddress(fingerprint)
+	if err != nil {
+		log.Fatalf("Failed to normalize fingerprint: %v", err)
+	}
+
+	// Format as SPIF address (matches vault package pattern)
+	// In vault.go, addresses are stored as "SPIF" + hex(SHA3-256(public_key))
+	spifAddress := "SPIF" + normalizedFingerprint
+
+	fmt.Printf("SPIF Address: %s\n", spifAddress)
+	fmt.Printf("Fingerprint: %s\n", normalizedFingerprint)
 
 	derivationPath := "" // fill in if/when this wallet supports HD derivation
 
-	// CHANGE FROM ORIGINAL DRAFT: DiskKeyStore.StoreRawKey is a convenience
-	// method that does exactly EncryptData + StoreEncryptedKey internally,
-	// but it isn't part of key.StorageInterface — only EncryptData and
-	// StoreEncryptedKey are. Calling StoreRawKey here would have required
-	// a type assertion back to *disk.DiskKeyStore (or importing the disk
-	// package directly), defeating the point of coding against
-	// StorageInterface in the first place. Calling the two interface
-	// methods directly instead keeps this working identically against
-	// whatever GetStorage(...) returns — disk or USB — with no assertion.
 	encryptedSK, err := diskStorage.EncryptData(skBytes, encryptionPassphrase)
 	if err != nil {
 		log.Fatalf("Failed to encrypt secret key: %v", err)
@@ -235,7 +206,7 @@ func main() {
 	storedKeyPair, err := diskStorage.StoreEncryptedKey(
 		encryptedSK,
 		pkBytes,
-		address,
+		spifAddress, // Use the SPIF address as the key ID
 		key.WalletTypeDisk,
 		7331, // Sphinx Mainnet chain ID, per keystore.go's GetMainnetKeystoreConfig
 		derivationPath,
@@ -248,17 +219,6 @@ func main() {
 	fmt.Printf("Stored Encrypted Secret Key: %x\n", storedKeyPair.EncryptedSK)
 
 	// --- 6. Simulate a fresh reload: fetch by ID and decrypt ---
-	// This proves the round trip works without relying on any in-memory
-	// state from steps above — generateSalt re-derives identically from the
-	// passphrase alone, with nothing extra needing to be persisted or
-	// threaded through.
-	//
-	// CHANGE: previously reused the same in-memory `encryptionPassphrase`
-	// variable from step 4 for the decrypt call. That's not actually
-	// testing a "fresh reload" — a real reload happens in a new process
-	// invocation where nothing from step 4 is in scope, and the user must
-	// re-enter their passphrase. Prompting again here (single entry) makes
-	// this step test what it claims to.
 	loadedKeyPair, err := diskStorage.GetKey(storedKeyPair.ID)
 	if err != nil {
 		log.Fatalf("Failed to load key pair: %v", err)
@@ -277,18 +237,6 @@ func main() {
 	fmt.Printf("Decrypted Secret Key: %x\n", decryptedSecretKey)
 
 	// --- 7. Verify the decrypted secret matches the stored public key ---
-	// CHANGE: this step didn't exist before. The original crypter.go had a
-	// VerifyPubKey placeholder (bytes.Equal(secret, pubKey)) that could
-	// never actually pass for real SPHINCS+ keys — and this file never
-	// called it anyway, so a successful decrypt was treated as sufficient
-	// proof of correctness. It isn't: AES-GCM decrypting successfully only
-	// proves the passphrase was right and the ciphertext wasn't tampered
-	// with — it says nothing about whether the resulting key material is
-	// the SPHINCS+ keypair you think it is (e.g. after a storage bug, a
-	// migration, or a corrupted-but-still-GCM-valid record).
-	//
-	// keyManager already exists in scope from step 2 with the right
-	// Params for this — no new initialization needed, just using it.
 	ok, err := keyManager.VerifyPubKey(decryptedSecretKey, loadedKeyPair.PublicKey)
 	if err != nil {
 		log.Fatalf("Failed to verify public key: %v", err)
@@ -297,4 +245,14 @@ func main() {
 		log.Fatal("Decrypted secret key does not match the stored public key")
 	}
 	fmt.Println("Verified: decrypted secret key matches stored public key.")
+
+	// --- 8. Display the SPIF wallet address summary ---
+	fmt.Println("\n=== SPIF WALLET SUMMARY ===")
+	fmt.Printf("SPIF Address:   %s\n", spifAddress)
+	fmt.Printf("Fingerprint:    %s\n", normalizedFingerprint)
+	fmt.Printf("Public Key:     %x\n", pkBytes)
+	fmt.Printf("Key ID:         %s\n", storedKeyPair.ID)
+	fmt.Println("==========================")
+	fmt.Println("\nIMPORTANT: Save your recovery mnemonic and passphrase safely!")
+	fmt.Println("The SPIF address above is your wallet address for receiving funds.")
 }

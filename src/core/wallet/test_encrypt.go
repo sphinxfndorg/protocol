@@ -1,24 +1,26 @@
 // Copyright (c) 2024-present Sphinx Core Dev
 // MIT License https://opensource.org/license/mit
 
-// go/src/core/wallet/tesst_encrypt.go
+// go/src/core/wallet/test_encrypt.go
 package main
 
 import (
 	"bufio"
-	"encoding/hex"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/sphinxorg/protocol/src/accounts/key"
 	utils "github.com/sphinxorg/protocol/src/accounts/key/utils"
 	seed "github.com/sphinxorg/protocol/src/accounts/phrase"
+	"github.com/sphinxorg/protocol/src/core"
 	sphincs "github.com/sphinxorg/protocol/src/core/sthincs/key/backend"
+	"github.com/sphinxorg/protocol/src/core/wallet/vault"
 	keys "github.com/sphinxorg/protocol/src/usi/core/key"
-	"golang.org/x/crypto/sha3"
 	"golang.org/x/term"
 )
 
@@ -118,14 +120,6 @@ func promptExistingPassphrase() ([]byte, error) {
 	return pw, nil
 }
 
-// getFingerprintFromBytes computes the SHA3-256 fingerprint from public key bytes.
-// This matches the implementation in keys.GetPublicKeyFingerprint but works with raw bytes.
-func getFingerprintFromBytes(pubKeyBytes []byte) string {
-	hasher := sha3.New256()
-	hasher.Write(pubKeyBytes)
-	return hex.EncodeToString(hasher.Sum(nil))
-}
-
 func main() {
 	// --- 1. Initialize the real storage layer ---
 	storageManager, err := utils.NewStorageManager()
@@ -143,7 +137,7 @@ func main() {
 
 	sk, pk, err := keyManager.GenerateKey()
 	if err != nil {
-		log.Fatal("Failed to generate keys:", err)
+		log.Fatal("Failed to generate SPHINCS+ keys:", err)
 	}
 
 	skBytes, err := sk.SerializeSK()
@@ -156,21 +150,31 @@ func main() {
 		log.Fatal("Failed to serialize PK:", err)
 	}
 
-	// --- 3. Generate the recovery mnemonic (account root of trust) ---
-	// Shown once. The wallet itself must NOT persist this — only the user's
-	// physical record of it should survive past this point. This is your
-	// own SIPS-0003 mnemonic system (seed.GenerateKeys -> sips3.NewMnemonic),
-	// untouched here.
+	// --- 2.5. Generate SHA3-256 fingerprint for validation ---
+	orgCode := keys.OrgSPIF
+	sha3Fingerprint := vault.GetSHA3FingerprintFromBytes(pkBytes)
+	fmt.Printf("SHA3-256 Fingerprint (validation): %s\n", sha3Fingerprint)
+
+	// --- 3. Generate KEM keys (Kyber768+X25519) ---
+	fmt.Println("\nGenerating KEM keys (Kyber768+X25519)...")
+	kemPub, kemPriv, err := keys.GenerateKEMKeys()
+	if err != nil {
+		log.Fatalf("Failed to generate KEM keys: %v", err)
+	}
+	fmt.Printf("KEM public key size: %d bytes\n", len(kemPub))
+	fmt.Printf("KEM private key size: %d bytes\n", len(kemPriv))
+
+	// --- 4. Generate the recovery mnemonic (account root of trust) ---
 	mnemonic, base32Passkey, _, _, _, _, err := seed.GenerateKeys()
 	if err != nil {
 		log.Fatalf("Failed to generate keys from seed: %v", err)
 	}
-	fmt.Println("=== WRITE THIS DOWN — shown only once, never stored ===")
+	fmt.Println("\n=== WRITE THIS DOWN — shown only once, never stored ===")
 	fmt.Printf("Mnemonic: %s\n", mnemonic)
 	fmt.Printf("Base32Passkey: %s\n", base32Passkey)
 	fmt.Println("========================================================")
 
-	// --- 4. Set a separate encryption passphrase for routine unlock ---
+	// --- 5. Set a separate encryption passphrase for routine unlock ---
 	passphraseBytes, err := promptNewPassphrase()
 	if err != nil {
 		log.Fatalf("Failed to read encryption passphrase: %v", err)
@@ -178,47 +182,120 @@ func main() {
 	defer cleanse(passphraseBytes)
 	encryptionPassphrase := string(passphraseBytes)
 
-	// --- 5. Encrypt + store the key pair via the real keystore API ---
-	// Generate the SPIF address and fingerprint from the public key bytes
-	// This matches the vault package's address derivation pattern
-	fingerprint := getFingerprintFromBytes(pkBytes)
+	// --- 6. Combine SPHINCS+ private key and KEM private key ---
+	combinedSK := append(skBytes, kemPriv...)
+	fmt.Printf("\nCombined private key size: %d bytes\n", len(combinedSK))
 
-	// Normalize the fingerprint (remove spaces, etc.) to match vault format
-	normalizedFingerprint, err := keys.NormalizeOrgAddress(fingerprint)
+	// --- 7. Encrypt the combined private key ---
+	encryptedSK, err := diskStorage.EncryptData(combinedSK, encryptionPassphrase)
 	if err != nil {
-		log.Fatalf("Failed to normalize fingerprint: %v", err)
+		log.Fatalf("Failed to encrypt combined private key: %v", err)
 	}
 
-	// Format as SPIF address (matches vault package pattern)
-	// In vault.go, addresses are stored as "SPIF" + hex(SHA3-256(public_key))
-	spifAddress := "SPIF" + normalizedFingerprint
+	// --- 8. Generate SPIF address (SHAKE-256 based) ---
+	address := keys.GetPublicKeyFingerprintFromBytes(pkBytes, orgCode)
+	fmt.Printf("SPIF Address (SHAKE-256): %s\n", address)
 
-	fmt.Printf("SPIF Address: %s\n", spifAddress)
-	fmt.Printf("Fingerprint: %s\n", normalizedFingerprint)
+	// --- 8.5. Validate fingerprints ---
+	fmt.Println("\n--- Fingerprint Validation ---")
 
-	derivationPath := "" // fill in if/when this wallet supports HD derivation
-
-	encryptedSK, err := diskStorage.EncryptData(skBytes, encryptionPassphrase)
-	if err != nil {
-		log.Fatalf("Failed to encrypt secret key: %v", err)
+	// Validate SHA3-256 fingerprint
+	if vault.ValidateFingerprint(pkBytes, sha3Fingerprint) {
+		fmt.Println("✅ SHA3-256 fingerprint validation passed")
+	} else {
+		fmt.Println("❌ SHA3-256 fingerprint validation failed")
 	}
 
+	// Validate SPIF address fingerprint
+	if vault.ValidateAddressFingerprint(pkBytes, address, orgCode) {
+		fmt.Println("✅ SPIF address validation passed")
+	} else {
+		fmt.Println("❌ SPIF address validation failed")
+	}
+
+	// Normalize address for comparison
+	normalizedAddr, err := keys.NormalizeOrgAddress(address)
+	if err == nil {
+		fmt.Printf("Normalized Address: %s\n", normalizedAddr)
+	}
+
+	// --- 9. Create KeyPair with KEM keys ---
+	kp := &keys.KeyPair{
+		PublicKey:     pkBytes,
+		PrivateKey:    encryptedSK,
+		OrgCode:       string(orgCode),
+		Address:       address,
+		KEMPublicKey:  kemPub,
+		KEMPrivateKey: kemPriv,
+	}
+
+	// --- 10. Get chain header from params.go (LIGHTWEIGHT - NO BLOCKCHAIN INIT) ---
+	// Directly call core.GetSphinxChainHeader() from params.go
+	header := core.GetSphinxChainHeader()
+	if header == nil {
+		header = core.GetMainnetChainHeader()
+	}
+
+	// Convert uint64 to uint32 for BIP44 coin type
+	bip44CoinType := uint32(header.BIP44CoinType)
+	bip44Path := fmt.Sprintf("m/44'/%d'/0'/0/0", bip44CoinType)
+
+	// --- 11. Generate Ledger headers metadata ---
+	ledgerHeaders := map[string]interface{}{
+		"version": "1.0",
+		"bip44": map[string]interface{}{
+			"path":      bip44Path,
+			"coin_type": bip44CoinType,
+			"purpose":   44,
+			"account":   0,
+			"change":    0,
+			"index":     0,
+		},
+		"chain": map[string]interface{}{
+			"id":          header.ChainID,
+			"name":        header.ChainName,
+			"symbol":      header.Symbol,
+			"magic":       header.MagicNumber,
+			"ledger_name": header.LedgerName,
+		},
+		"address":       kp.Address,
+		"public_key":    base64.StdEncoding.EncodeToString(kp.PublicKey),
+		"has_kem":       len(kp.KEMPublicKey) > 0,
+		"kem_algorithm": "Kyber768+X25519",
+	}
+
+	// --- 12. Create metadata with KEM and Ledger headers ---
+	metadata := map[string]interface{}{
+		"algorithm":            "SPHINCS+",
+		"encrypted":            true,
+		"storage":              "disk",
+		"kem_public":           base64.StdEncoding.EncodeToString(kemPub),
+		"kem_algorithm":        "Kyber768+X25519",
+		"has_kem":              true,
+		"ledger":               ledgerHeaders,
+		"bip44_path":           bip44Path,
+		"ledger_version":       "1.0",
+		"sha3_fingerprint":     sha3Fingerprint,
+		"fingerprint_verified": true,
+	}
+
+	// --- 13. Store the key pair with KEM and Ledger metadata ---
 	storedKeyPair, err := diskStorage.StoreEncryptedKey(
 		encryptedSK,
 		pkBytes,
-		spifAddress, // Use the SPIF address as the key ID
+		address,
 		key.WalletTypeDisk,
-		7331, // Sphinx Mainnet chain ID, per keystore.go's GetMainnetKeystoreConfig
-		derivationPath,
-		nil,
+		7331, // Sphinx Mainnet chain ID
+		"",   // derivation path
+		metadata,
 	)
 	if err != nil {
 		log.Fatalf("Failed to store key pair: %v", err)
 	}
-	fmt.Printf("Stored key pair with ID: %s\n", storedKeyPair.ID)
-	fmt.Printf("Stored Encrypted Secret Key: %x\n", storedKeyPair.EncryptedSK)
+	fmt.Printf("\nStored key pair with ID: %s\n", storedKeyPair.ID)
 
-	// --- 6. Simulate a fresh reload: fetch by ID and decrypt ---
+	// --- 14. Simulate a fresh reload: fetch by ID and decrypt ---
+	fmt.Println("\n--- Simulating key reload ---")
 	loadedKeyPair, err := diskStorage.GetKey(storedKeyPair.ID)
 	if err != nil {
 		log.Fatalf("Failed to load key pair: %v", err)
@@ -230,29 +307,80 @@ func main() {
 	}
 	defer cleanse(unlockBytes)
 
-	decryptedSecretKey, err := diskStorage.DecryptKey(loadedKeyPair, string(unlockBytes))
+	decryptedCombined, err := diskStorage.DecryptKey(loadedKeyPair, string(unlockBytes))
 	if err != nil {
 		log.Fatalf("Failed to decrypt secret key: %v", err)
 	}
-	fmt.Printf("Decrypted Secret Key: %x\n", decryptedSecretKey)
+	fmt.Printf("Decrypted Combined Key size: %d bytes\n", len(decryptedCombined))
 
-	// --- 7. Verify the decrypted secret matches the stored public key ---
-	ok, err := keyManager.VerifyPubKey(decryptedSecretKey, loadedKeyPair.PublicKey)
+	// Extract SPHINCS+ private key (first 64 bytes)
+	const sphincsKeySize = 64
+	if len(decryptedCombined) < sphincsKeySize {
+		log.Fatal("Decrypted key too short")
+	}
+	decryptedSK := decryptedCombined[:sphincsKeySize]
+	decryptedKEM := decryptedCombined[sphincsKeySize:]
+
+	fmt.Printf("SPHINCS+ private key: %x\n", decryptedSK)
+	fmt.Printf("KEM private key size: %d bytes\n", len(decryptedKEM))
+
+	// --- 15. Verify the decrypted SPHINCS+ key matches the stored public key ---
+	ok, err := keyManager.VerifyPubKey(decryptedSK, loadedKeyPair.PublicKey)
 	if err != nil {
 		log.Fatalf("Failed to verify public key: %v", err)
 	}
 	if !ok {
 		log.Fatal("Decrypted secret key does not match the stored public key")
 	}
-	fmt.Println("Verified: decrypted secret key matches stored public key.")
+	fmt.Println("✅ Verified: decrypted secret key matches stored public key.")
 
-	// --- 8. Display the SPIF wallet address summary ---
+	// --- 16. Verify fingerprint from metadata ---
+	fmt.Println("\n--- Metadata Fingerprint Verification ---")
+	if loadedKeyPair.Metadata != nil {
+		if storedFP, ok := loadedKeyPair.Metadata["sha3_fingerprint"].(string); ok {
+			if vault.ValidateFingerprint(pkBytes, storedFP) {
+				fmt.Println("✅ Fingerprint verification from metadata passed")
+			} else {
+				fmt.Println("❌ Fingerprint verification from metadata failed")
+			}
+		}
+	}
+	// --- 17. Display Ledger header example ---
+	fmt.Println("\n--- Ledger Header Example ---")
+	headerExample := fmt.Sprintf(
+		"=== SPHINX LEDGER OPERATION ===\n"+
+			"Chain: %s\n"+
+			"Chain ID: %d\n"+
+			"Operation: send\n"+
+			"Amount: %.6f %s\n"+
+			"Address: %s\n"+
+			"Memo: Test transaction\n"+
+			"BIP44: %s\n"+
+			"Timestamp: %d\n"+
+			"========================",
+		header.ChainName,
+		header.ChainID,
+		1.0,
+		header.Symbol,
+		kp.Address,
+		bip44Path,
+		time.Now().Unix(),
+	)
+	fmt.Println(headerExample)
+
+	// --- 18. Display the SPIF wallet address summary ---
 	fmt.Println("\n=== SPIF WALLET SUMMARY ===")
-	fmt.Printf("SPIF Address:   %s\n", spifAddress)
-	fmt.Printf("Fingerprint:    %s\n", normalizedFingerprint)
-	fmt.Printf("Public Key:     %x\n", pkBytes)
-	fmt.Printf("Key ID:         %s\n", storedKeyPair.ID)
+	fmt.Printf("SPIF Address (SHAKE-256):   %s\n", address)
+	fmt.Printf("SHA3-256 Fingerprint:       %s\n", sha3Fingerprint)
+	fmt.Printf("Public Key:                 %x\n", pkBytes)
+	fmt.Printf("Key ID:                     %s\n", storedKeyPair.ID)
+	fmt.Printf("KEM Algorithm:              Kyber768+X25519\n")
+	fmt.Printf("KEM Public:                 %x...\n", kemPub[:32])
+	fmt.Printf("BIP44 Path:                 %s\n", bip44Path)
+	fmt.Printf("Chain:                      %s (ID: %d)\n", header.ChainName, header.ChainID)
 	fmt.Println("==========================")
 	fmt.Println("\nIMPORTANT: Save your recovery mnemonic and passphrase safely!")
-	fmt.Println("The SPIF address above is your wallet address for receiving funds.")
+	fmt.Println("The SPIF address above is your identity address.")
+	fmt.Println("The SHA3-256 fingerprint is stored in metadata for validation.")
+	fmt.Println("Ledger headers are stored in the key file metadata.")
 }

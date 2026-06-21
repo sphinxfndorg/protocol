@@ -1,3 +1,6 @@
+// Copyright (c) 2024-present Sphinx Core Dev
+// MIT License https://opensource.org/license/mit
+
 // go/src/usi/core/key/key.go
 package keys
 
@@ -8,9 +11,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/sphinxorg/protocol/src/accounts/key"
 	utils "github.com/sphinxorg/protocol/src/accounts/key/utils"
+	"github.com/sphinxorg/protocol/src/core"
 	sphincs "github.com/sphinxorg/protocol/src/core/sthincs/key/backend"
 )
 
@@ -140,6 +145,49 @@ func GetPublicKeyFingerprint(kp *KeyPair) string {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Ledger Header Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+// generateLedgerHeadersForKey creates Ledger header templates for a key
+// Uses GetSphinxChainHeader() which is lightweight and does NOT mine blocks
+func generateLedgerHeadersForKey(kp *KeyPair) map[string]interface{} {
+	// Get chain header WITHOUT mining genesis block
+	header := core.GetSphinxChainHeader()
+	if header == nil {
+		log.Println("[WARN] Failed to get chain header, using defaults")
+		header = core.GetMainnetChainHeader()
+	}
+
+	// Generate BIP44 derivation path
+	bip44CoinType := uint32(header.BIP44CoinType)
+	bip44Path := fmt.Sprintf("m/44'/%d'/0'/0/0", bip44CoinType)
+
+	// Return ledger configuration
+	return map[string]interface{}{
+		"version": "1.0",
+		"bip44": map[string]interface{}{
+			"path":      bip44Path,
+			"coin_type": bip44CoinType,
+			"purpose":   44,
+			"account":   0,
+			"change":    0,
+			"index":     0,
+		},
+		"chain": map[string]interface{}{
+			"id":          header.ChainID,
+			"name":        header.ChainName,
+			"symbol":      header.Symbol,
+			"magic":       header.MagicNumber,
+			"ledger_name": header.LedgerName,
+		},
+		"address":       kp.Address,
+		"public_key":    base64.StdEncoding.EncodeToString(kp.PublicKey),
+		"has_kem":       len(kp.KEMPublicKey) > 0,
+		"kem_algorithm": "Kyber768+X25519",
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Persistence using StorageManager
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -150,14 +198,28 @@ func saveKeyToDisk(kp *KeyPair) error {
 		return fmt.Errorf("key pair is nil")
 	}
 
-	// Create metadata with KEM public key
+	// Generate Ledger headers
+	ledgerHeaders := generateLedgerHeadersForKey(kp)
+
+	// Extract BIP44 path from ledger headers
+	bip44Path := ""
+	if bip44, ok := ledgerHeaders["bip44"].(map[string]interface{}); ok {
+		if path, ok := bip44["path"].(string); ok {
+			bip44Path = path
+		}
+	}
+
+	// Create metadata with KEM public key and Ledger headers
 	metadata := map[string]interface{}{
-		"algorithm":     "SPHINCS+",
-		"encrypted":     true,
-		"storage":       "disk",
-		"kem_public":    base64.StdEncoding.EncodeToString(kp.KEMPublicKey),
-		"kem_algorithm": "Kyber768+X25519",
-		"has_kem":       true,
+		"algorithm":      "SPHINCS+",
+		"encrypted":      true,
+		"storage":        "disk",
+		"kem_public":     base64.StdEncoding.EncodeToString(kp.KEMPublicKey),
+		"kem_algorithm":  "Kyber768+X25519",
+		"has_kem":        true,
+		"ledger":         ledgerHeaders,
+		"bip44_path":     bip44Path,
+		"ledger_version": "1.0",
 	}
 
 	log.Printf("Saving with KEM metadata: has_kem=%v, kem_public_size=%d",
@@ -188,7 +250,7 @@ func saveKeyToDisk(kp *KeyPair) error {
 		return fmt.Errorf("write key index: %w", err)
 	}
 
-	log.Printf("Keypair with KEM saved successfully with ID: %s", storedKeyPair.ID)
+	log.Printf("Keypair with KEM and Ledger headers saved successfully with ID: %s", storedKeyPair.ID)
 	return nil
 }
 
@@ -261,6 +323,11 @@ func LoadKeyFromDisk(passphrase string) (*KeyPair, []byte, error) {
 				kp.KEMPublicKey = kemPub
 				log.Printf("KEM public key loaded from metadata (%d bytes)", len(kemPub))
 			}
+		}
+
+		// Log Ledger headers if present
+		if ledger, ok := loadedKeyPair.Metadata["ledger"]; ok {
+			log.Printf("Ledger headers loaded from metadata: %+v", ledger)
 		}
 	}
 
@@ -398,4 +465,83 @@ func findMainKey() []string {
 	}
 
 	return []string{}
+}
+
+// GetLedgerHeaders returns the Ledger headers from a key pair's metadata
+func GetLedgerHeaders(kp *KeyPair) (map[string]interface{}, error) {
+	if kp == nil {
+		return nil, fmt.Errorf("key pair is nil")
+	}
+
+	// Load the key from disk to get metadata
+	loadedKeyPair, err := diskStorage.GetKey(kp.Path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load key: %w", err)
+	}
+
+	if loadedKeyPair.Metadata == nil {
+		return nil, fmt.Errorf("no metadata found for key")
+	}
+
+	ledger, ok := loadedKeyPair.Metadata["ledger"].(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("no Ledger headers found in metadata")
+	}
+
+	return ledger, nil
+}
+
+// GenerateLedgerHeader generates a complete Ledger header for a transaction
+func GenerateLedgerHeader(kp *KeyPair, operation string, amount float64, memo string) (string, error) {
+	if kp == nil {
+		return "", fmt.Errorf("key pair is nil")
+	}
+
+	// Get Ledger headers from metadata
+	ledger, err := GetLedgerHeaders(kp)
+	if err != nil {
+		return "", fmt.Errorf("failed to get Ledger headers: %w", err)
+	}
+
+	// Extract BIP44 path
+	bip44, ok := ledger["bip44"].(map[string]interface{})
+	if !ok {
+		return "", fmt.Errorf("BIP44 config not found in Ledger headers")
+	}
+	path, ok := bip44["path"].(string)
+	if !ok {
+		return "", fmt.Errorf("BIP44 path not found")
+	}
+
+	// Extract chain info
+	chain, ok := ledger["chain"].(map[string]interface{})
+	if !ok {
+		return "", fmt.Errorf("chain info not found in Ledger headers")
+	}
+	chainName, _ := chain["name"].(string)
+	chainID, _ := chain["id"].(uint64)
+	symbol, _ := chain["symbol"].(string)
+
+	// Generate the full header
+	return fmt.Sprintf(
+		"=== SPHINX LEDGER OPERATION ===\n"+
+			"Chain: %s\n"+
+			"Chain ID: %d\n"+
+			"Operation: %s\n"+
+			"Amount: %.6f %s\n"+
+			"Address: %s\n"+
+			"Memo: %s\n"+
+			"BIP44: %s\n"+
+			"Timestamp: %d\n"+
+			"========================",
+		chainName,
+		chainID,
+		operation,
+		amount,
+		symbol,
+		kp.Address,
+		memo,
+		path,
+		time.Now().Unix(),
+	), nil
 }

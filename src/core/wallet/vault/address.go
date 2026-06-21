@@ -10,6 +10,7 @@ import (
 	"crypto/rand"
 	"crypto/sha3"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,6 +23,38 @@ import (
 	"github.com/sphinxorg/protocol/src/usi/core/sign"
 	pubkeydir "github.com/sphinxorg/protocol/src/usi/server/server"
 )
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Fingerprint Validation Functions
+// ─────────────────────────────────────────────────────────────────────────────
+
+// GetSHA3FingerprintFromBytes computes the SHA3-256 fingerprint from public key bytes.
+// This is used for validation purposes and as a secondary fingerprint format.
+func GetSHA3FingerprintFromBytes(pubKeyBytes []byte) string {
+	hasher := sha3.New256()
+	hasher.Write(pubKeyBytes)
+	return hex.EncodeToString(hasher.Sum(nil))
+}
+
+// ValidateFingerprint validates that a SHA3-256 fingerprint matches the public key.
+func ValidateFingerprint(pubKeyBytes []byte, expectedFingerprint string) bool {
+	computed := GetSHA3FingerprintFromBytes(pubKeyBytes)
+	return computed == expectedFingerprint
+}
+
+// ValidateAddressFingerprint validates that a SPIF address matches the public key.
+func ValidateAddressFingerprint(pubKeyBytes []byte, address string, orgCode keys.OrgCode) bool {
+	computed := keys.GetPublicKeyFingerprintFromBytes(pubKeyBytes, orgCode)
+	normalizedComputed, err := keys.NormalizeOrgAddress(computed)
+	if err != nil {
+		return false
+	}
+	normalizedAddress, err := keys.NormalizeOrgAddress(address)
+	if err != nil {
+		return false
+	}
+	return normalizedComputed == normalizedAddress
+}
 
 // ValidateAndNormalizeRecipients processes a list of recipient fingerprints
 func ValidateAndNormalizeRecipients(recipientFingerprints []string) ([]string, error) {

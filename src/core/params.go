@@ -10,9 +10,21 @@ import (
 	"time"
 
 	"github.com/sphinxorg/protocol/src/accounts/key"
+	"github.com/sphinxorg/protocol/src/params/commit"
 	"github.com/sphinxorg/protocol/src/policy"
 	"github.com/sphinxorg/protocol/src/pool"
 )
+
+// SphinxChainHeader contains only the fields needed for Ledger headers and wallet operations.
+// This lightweight struct does NOT require blockchain initialization.
+type SphinxChainHeader struct {
+	ChainID       uint64 `json:"chain_id"`
+	ChainName     string `json:"chain_name"`
+	Symbol        string `json:"symbol"`
+	MagicNumber   uint32 `json:"magic_number"`
+	LedgerName    string `json:"ledger_name"`
+	BIP44CoinType uint64 `json:"bip44_coin_type"`
+}
 
 // GetChainParams returns the chain parameters from the mock provider
 // This implements the ChainParamsProvider interface
@@ -54,19 +66,22 @@ func GetSphinxChainParams() *SphinxChainParameters {
 	// This guarantees the genesis extra data matches genesis.go
 	canonicalExtraData := DefaultGenesisState().ExtraData
 
-	// Return complete mainnet configuration
+	// Get base chain parameters from commit package
+	baseParams := commit.SphinxChainParams()
+
+	// Return complete mainnet configuration with proper type conversions
 	return &SphinxChainParameters{
 		// Network Identification - unique identifiers for the blockchain
-		ChainID:       7331,             // Unique chain identifier
-		ChainName:     "Sphinx Mainnet", // Human-readable network name
-		Symbol:        "SPX",            // Token symbol
-		GenesisTime:   1732070400,       // Fixed genesis timestamp - MUST MATCH genesisBlockDefinition
-		GenesisHash:   genesisHash,      // Genesis block hash
-		Version:       "1.0.0",          // Protocol version
-		MagicNumber:   0x53504858,       // "SPHX" - Magic number for message validation
-		DefaultPort:   32307,            // Default P2P port
-		BIP44CoinType: 7331,             // BIP44 coin type for wallet derivation
-		LedgerName:    "Sphinx",         // Ledger hardware wallet app name
+		ChainID:       baseParams.ChainID,               // uint64
+		ChainName:     baseParams.ChainName,             // string
+		Symbol:        baseParams.Symbol,                // string
+		GenesisTime:   baseParams.GenesisTime,           // int64
+		GenesisHash:   genesisHash,                      // Genesis block hash
+		Version:       baseParams.Version,               // string
+		MagicNumber:   baseParams.MagicNumber,           // uint32
+		DefaultPort:   int(baseParams.DefaultPort),      // uint16 -> int
+		BIP44CoinType: uint64(baseParams.BIP44CoinType), // uint32 -> uint64
+		LedgerName:    baseParams.LedgerName,            // string
 
 		// Denominations - unit conversions for the native token
 		Denominations: map[string]*big.Int{
@@ -99,6 +114,28 @@ func GetSphinxChainParams() *SphinxChainParameters {
 		// Performance Configuration - node optimization settings
 		PerformanceConfig: GetDefaultPerformanceConfig(),
 	}
+}
+
+// GetSphinxChainHeader returns ONLY the header fields needed for Ledger headers and wallet operations.
+// This does NOT initialize the blockchain/genesis block - it's lightweight and fast.
+func GetSphinxChainHeader() *SphinxChainHeader {
+	// Get base chain parameters from commit package (no blockchain init)
+	baseParams := commit.SphinxChainParams()
+
+	// Return only the fields needed for Ledger headers
+	return &SphinxChainHeader{
+		ChainID:       baseParams.ChainID,
+		ChainName:     baseParams.ChainName,
+		Symbol:        baseParams.Symbol,
+		MagicNumber:   baseParams.MagicNumber,
+		LedgerName:    baseParams.LedgerName,
+		BIP44CoinType: uint64(baseParams.BIP44CoinType),
+	}
+}
+
+// GetMainnetChainHeader returns mainnet header WITHOUT initializing genesis.
+func GetMainnetChainHeader() *SphinxChainHeader {
+	return GetSphinxChainHeader()
 }
 
 // GetDefaultMempoolConfig returns the default mempool configuration
@@ -153,17 +190,22 @@ func GetDefaultPerformanceConfig() *PerformanceConfig {
 
 // GetTestnetChainParams returns testnet parameters
 // Testnet is used for testing before mainnet deployment
-// GetTestnetChainParams returns testnet parameters that inherit the devnet genesis.
-// Chain continuity is preserved by locking GenesisHash to the devnet genesis
-// and incrementing only the ChainID and operational parameters.
+// Uses commit.TestnetChainParams() for base parameters
 func GetTestnetChainParams() *SphinxChainParameters {
 	params := GetSphinxChainParams()
 
-	params.ChainName = "Sphinx Testnet"
-	params.ChainID = 17331
-	params.DefaultPort = 32308
-	params.BIP44CoinType = 1
-	params.LedgerName = "Sphinx Testnet"
+	// Get testnet base parameters from commit package
+	testnetBase := commit.TestnetChainParams()
+
+	params.ChainID = testnetBase.ChainID                     // uint64
+	params.ChainName = testnetBase.ChainName                 // string
+	params.DefaultPort = int(testnetBase.DefaultPort)        // uint16 -> int
+	params.BIP44CoinType = uint64(testnetBase.BIP44CoinType) // uint32 -> uint64
+	params.LedgerName = testnetBase.LedgerName               // string
+	params.MagicNumber = testnetBase.MagicNumber             // uint32
+	params.Symbol = testnetBase.Symbol                       // string
+	params.GenesisTime = testnetBase.GenesisTime             // int64
+	params.Version = testnetBase.Version                     // string
 
 	// Inherit the devnet genesis hash — testnet continues from the same genesis
 	// block, so nodes that started on devnet can verify the ancestry.
@@ -183,7 +225,20 @@ func GetTestnetChainParams() *SphinxChainParameters {
 // The genesis block is identical across all environments; only operational
 // parameters (ports, gas limits, block times) change per environment.
 func GetMainnetChainParams() *SphinxChainParameters {
+	// Get mainnet base parameters from commit package
+	baseParams := commit.SphinxChainParams()
 	params := GetSphinxChainParams()
+
+	// Ensure mainnet parameters match commit package with proper type conversions
+	params.ChainID = baseParams.ChainID                     // uint64
+	params.ChainName = baseParams.ChainName                 // string
+	params.Symbol = baseParams.Symbol                       // string
+	params.GenesisTime = baseParams.GenesisTime             // int64
+	params.Version = baseParams.Version                     // string
+	params.MagicNumber = baseParams.MagicNumber             // uint32
+	params.DefaultPort = int(baseParams.DefaultPort)        // uint16 -> int
+	params.BIP44CoinType = uint64(baseParams.BIP44CoinType) // uint32 -> uint64
+	params.LedgerName = baseParams.LedgerName               // string
 
 	// GenesisHash is already set by GetSphinxChainParams → GetGenesisHash().
 	// No override needed — mainnet shares the same genesis ancestry.
@@ -195,6 +250,7 @@ func GetMainnetChainParams() *SphinxChainParameters {
 func GetDevnetChainParams() *SphinxChainParameters {
 	params := GetSphinxChainParams()
 
+	// Devnet uses custom parameters (not defined in commit package)
 	params.ChainName = "Sphinx Devnet"
 	params.ChainID = 73310
 	params.DefaultPort = 32309
@@ -265,11 +321,11 @@ func ValidateChainParams(params *SphinxChainParameters) error {
 }
 
 // GetNetworkName returns human-readable network name
-// Provides a user-friendly network identifier
-// params.go — GetNetworkName() still has the old logic
+// Delegates to commit package for consistent naming
 func (p *SphinxChainParameters) GetNetworkName() string {
+	// Use commit package's GetNetworkName for consistency
 	switch p.ChainID {
-	case 73310: // ← add devnet's new ChainID
+	case 73310:
 		return "Sphinx Devnet"
 	case 7331:
 		return "Sphinx Mainnet"
@@ -343,12 +399,10 @@ func (p *SphinxChainParameters) GetKeystoreConfig() *key.KeystoreConfig {
 }
 
 // GenerateLedgerHeaders generates headers specifically formatted for Ledger hardware
-// This method now delegates to the centralized keystore package
+// This method now delegates to the commit package's header generator
 func (p *SphinxChainParameters) GenerateLedgerHeaders(operation string, amount float64, address string, memo string) string {
-	// Get appropriate keystore config for this network
-	keystoreConfig := p.GetKeystoreConfig()
-	// Delegate to keystore's Ledger header generator
-	return keystoreConfig.GenerateLedgerHeaders(operation, amount, address, memo)
+	// Delegate to commit package's header generator
+	return commit.GenerateLedgerHeaders(operation, amount, address, memo)
 }
 
 // GetRecommendedBlockSize returns a recommended block size (could be target or a percentage of max)

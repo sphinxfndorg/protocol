@@ -32,6 +32,33 @@ func (m *MockChainParamsProvider) GetChainParams() *SphinxChainParameters {
 	return m.params // Return the stored parameters
 }
 
+// NetworkNames provides a single source of truth for network display names
+var NetworkNames = map[string]string{
+	"devnet":  "Sphinx Devnet",
+	"testnet": "Sphinx Testnet",
+	"mainnet": "Sphinx Mainnet",
+}
+
+// GetNetworkDisplayName returns the human-readable name for a network phase
+func GetNetworkDisplayName(phase string) string {
+	if name, ok := NetworkNames[phase]; ok {
+		return name
+	}
+	return phase // fallback
+}
+
+// GetNetworkDisplayNameFromParams returns the display name from chain parameters
+func (p *SphinxChainParameters) GetNetworkDisplayName() string {
+	switch {
+	case p.IsDevnet():
+		return NetworkNames["devnet"]
+	case p.IsTestnet():
+		return NetworkNames["testnet"]
+	default:
+		return NetworkNames["mainnet"]
+	}
+}
+
 // GetWalletDerivationPaths now delegates to the centralized keystore package
 // Returns the appropriate BIP44 derivation paths for the current network
 func (m *MockChainParamsProvider) GetWalletDerivationPaths() map[string]string {
@@ -257,7 +284,7 @@ func GetDevnetChainParams() *SphinxChainParameters {
 	params := GetSphinxChainParams()
 
 	// Devnet uses custom parameters (not defined in commit package)
-	params.ChainName = "Sphinx Devnet"
+	params.ChainName = NetworkNames["devnet"] // "Sphinx Devnet"
 	params.ChainID = 73310
 	params.DefaultPort = 32309
 	params.BIP44CoinType = 1

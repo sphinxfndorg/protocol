@@ -381,6 +381,22 @@ func (bc *Blockchain) StoreChainState(nodes []*storage.NodeInfo) error {
 		return fmt.Errorf("chain parameters not initialized")
 	}
 
+	// ========== FIX: Read from MEMORY first ==========
+	var latestBlock *types.Block
+	if len(bc.chain) > 0 {
+		latestBlock = bc.chain[len(bc.chain)-1]
+		logger.Info("StoreChainState: using in-memory chain (height=%d)", latestBlock.GetHeight())
+	} else {
+		// Fallback to storage
+		block, err := bc.storage.GetLatestBlock()
+		if err != nil || block == nil {
+			return fmt.Errorf("no blocks available in memory or storage")
+		}
+		latestBlock = block
+		logger.Info("StoreChainState: using storage (height=%d)", latestBlock.GetHeight())
+	}
+	// ==================================================
+
 	// Convert genesis_time to ISO RFC format for output (human-readable)
 	// Get current time in ISO format for timestamp
 	genesisTimeISO := common.GetTimeService().GetCurrentTimeInfo().ISOUTC
@@ -1652,13 +1668,44 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 		}
 	}
 
-	// Execute block: apply transactions, mint reward, compute real StateRoot.
+	// ========== Execute block: apply transactions, mint reward, compute real StateRoot ==========
 	stateRoot, err := bc.ExecuteBlock(typeBlock)
 	if err != nil {
 		logger.Error("❌ ExecuteBlock failed: %v", err)
 		return fmt.Errorf("CommitBlock: execution failed: %w", err)
 	}
 	logger.Info("✅ Block executed, stateRoot=%x", stateRoot)
+
+	// ========== PRODUCTION FIX: Force state DB flush ==========
+	// Get the state DB as concrete *StateDB type (which has Commit method)
+	stateDBInterface, err := bc.NewStateDB()
+	if err != nil {
+		logger.Error("❌ Failed to get state DB: %v", err)
+		return fmt.Errorf("CommitBlock: failed to get state DB: %w", err)
+	}
+
+	// Type assert to *StateDB to access Commit method
+	stateDB, ok := stateDBInterface.(*StateDB)
+	if !ok {
+		logger.Error("❌ Failed to cast state DB to *StateDB")
+		return fmt.Errorf("CommitBlock: state DB is not *StateDB")
+	}
+
+	// Force commit to flush all changes to disk
+	if _, err := stateDB.Commit(); err != nil {
+		logger.Error("❌ Failed to flush state DB: %v", err)
+		return fmt.Errorf("CommitBlock: failed to flush state DB: %w", err)
+	}
+	logger.Info("✅ State DB flushed successfully after block execution")
+
+	// Also verify the state DB flush worked by checking vault balance
+	if typeBlock.GetHeight() >= 1 {
+		vaultBalance, err := stateDB.GetBalance(GenesisVaultAddress)
+		if err == nil && vaultBalance != nil {
+			logger.Info("✅ State DB verification: vault balance = %s nSPX", vaultBalance.String())
+		}
+	}
+	// ==========================================================
 
 	// Process OP_RETURN data in transactions
 	for _, tx := range typeBlock.Body.TxsList {
@@ -1708,40 +1755,40 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 	}
 
 	// Stamp the real state root into the block header before storage.
-	// CRITICAL: Do NOT call FinalizeHash() again - the hash was already
-	// finalized in CreateBlock and agreed upon by consensus.
 	typeBlock.Header.StateRoot = stateRoot
-	// The block hash remains unchanged - consensus already agreed on this hash
 
-	// ========== Store block with delay to prevent race condition ==========
-	logger.Info("📝 Attempting to store block at height %d with hash %s",
+	// ========== PRODUCTION FIX: Store block in storage AFTER state flush ==========
+	logger.Info("📝 Storing block at height %d with hash %s to storage",
 		typeBlock.GetHeight(), typeBlock.GetHash())
 
-	// Store block in storage (now with the real StateRoot).
 	if err := bc.storage.StoreBlock(typeBlock); err != nil {
 		logger.Error("❌ Failed to store block: %v", err)
 		return fmt.Errorf("failed to store block: %w", err)
 	}
 	logger.Info("✅ Block stored in storage successfully at %s", time.Now().Format("15:04:05.000"))
 
+	// Update in-memory chain AFTER storage
+	bc.lock.Lock()
+	bc.chain = append(bc.chain, typeBlock)
+	bc.lock.Unlock()
+	logger.Info("✅ Block added to in-memory chain at height %d", typeBlock.GetHeight())
+	// ================================================================
+
 	if err := bc.validateBlockTransactionAuth(typeBlock, true); err != nil {
 		return fmt.Errorf("CommitBlock: failed to store canonical transaction evidence: %w", err)
 	}
 	logger.Info("✅ Canonical transaction replay and receipt evidence stored")
 
-	// Add a small delay to ensure block is visible to other goroutines
-	time.Sleep(200 * time.Millisecond)
-	logger.Info("✅ Block storage confirmed after delay")
-
-	// Update in-memory chain
-	bc.lock.Lock()
-	bc.chain = append(bc.chain, typeBlock)
-	logger.Info("✅ Block added to in-memory chain")
-	bc.lock.Unlock()
+	// ========== FIX: Write checkpoint immediately after block commit ==========
+	if err := bc.WriteChainCheckpoint(); err != nil {
+		logger.Warn("Failed to write checkpoint after block commit: %v", err)
+	} else {
+		logger.Info("✅ Checkpoint updated after block commit at height %d", typeBlock.GetHeight())
+	}
+	// ========================================================================
 
 	// ========== Add signature to consensus engine ==========
 	if bc.consensusEngine != nil {
-		// Create a consensus signature for this block
 		signature := &consensus.ConsensusSignature{
 			BlockHash:    typeBlock.GetHash(),
 			BlockHeight:  typeBlock.GetHeight(),
@@ -1755,15 +1802,12 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 			Status:       "committed",
 		}
 
-		// Add signature to consensus engine
 		bc.consensusEngine.AddConsensusSignature(signature)
 		logger.Info("✅ Added commit signature for block %s to consensus engine", typeBlock.GetHash())
 
-		// Now get signatures and save chain state
 		signatures := bc.consensusEngine.GetConsensusSignatures()
 		logger.Info("📊 Total consensus signatures in engine after adding: %d", len(signatures))
 
-		// Force save chain state to persist signatures
 		if err := bc.SaveBasicChainState(); err != nil {
 			logger.Warn("Failed to save chain state after block commit: %v", err)
 		} else {

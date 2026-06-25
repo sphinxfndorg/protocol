@@ -41,62 +41,109 @@ func NewGenesisAllocationSPX(address string, spx int64, label string) *GenesisAl
 }
 
 // NewFounderAlloc is a domain-specific shorthand for the primary founder account.
-// Allocation: 10% — 10,000,000 SPX ($600,000 at $0.06/SPX).
-// Distribution: 3-year vesting with quarterly unlocks; includes planned charity allocation.
+// Allocation: 30,000,000 SPX total, with 5,000,000 SPX sold in Angel Round.
+// 25,000,000 SPX remaining — 4-year vesting with 12-month cliff.
+// Includes planned charity allocation.
 // It calls NewGenesisAllocationSPX with the label "Founder".
 func NewFounderAlloc(address string, spx int64) *GenesisAllocation {
 	return NewGenesisAllocationSPX(address, spx, "Founder")
 }
 
-// NewCoFounderAlloc is a domain-specific shorthand for the co-founder account.
-// Allocation: 7% — 7,000,000 SPX ($420,000 at $0.06/SPX).
-// Distribution: 3-year vesting with quarterly unlocks; includes planned charity allocation.
+// NewCoFounderAlloc is a domain-specific shorthand for the co-founder accounts.
+// Allocation: 95,000,000 SPX total (4 co-founders), with 10,000,000 SPX sold in Angel Round.
+// 85,000,000 SPX remaining — 4-year vesting with 12-month cliff.
+// Includes planned charity allocation.
 // It calls NewGenesisAllocationSPX with the label "CoFounder".
 func NewCoFounderAlloc(address string, spx int64) *GenesisAllocation {
 	return NewGenesisAllocationSPX(address, spx, "CoFounder")
 }
 
 // NewDevelopmentAlloc is a domain-specific shorthand for the Development Fund.
-// Allocation: 30% — 30,000,000 SPX ($1,800,000 at $0.06/SPX).
-// Distribution: Paid per completed module; the first 2,000 modules are targeted
+// Allocation: 200,000,000 SPX total, with 50,000,000 SPX sold (25%):
+//   - 10,000,000 in Angel Round
+//   - 30,000,000 in Private Sale
+//   - 10,000,000 in Public ICO
+//
+// 150,000,000 SPX remaining — module-based development fund.
+// Paid per completed module (10,000 SPX/module). First 2,000 modules targeted
 // for completion over approximately 2 years.
 // It calls NewGenesisAllocationSPX with the label "Development".
 func NewDevelopmentAlloc(address string, spx int64) *GenesisAllocation {
 	return NewGenesisAllocationSPX(address, spx, "Development")
 }
 
-// NewContributorAlloc is a domain-specific shorthand for contributor accounts
-// (Legal, Advisors, Chief Security, Partners, Community Managers).
-// Allocation: 20% — 20,000,000 SPX ($1,200,000 at $0.06/SPX).
-// Distribution: Split based on individual roles; either vesting or
-// milestone-based schedules.
+// NewContributorAlloc is a domain-specific shorthand for contributor accounts.
+// Allocation: 90,000,000 SPX total, with 15,000,000 SPX sold (16.7%):
+//   - 5,000,000 in Angel Round
+//   - 10,000,000 in Private Sale
+//
+// 75,000,000 SPX remaining — milestone-based vesting.
+// Covers: Legal (10M, 2yr), Advisors (15M, 2yr), CSO (15M, 3yr),
+// Partners (25M, milestone), Managers (25M, 2yr).
 // It calls NewGenesisAllocationSPX with the label "Contributors".
 func NewContributorAlloc(address string, spx int64) *GenesisAllocation {
 	return NewGenesisAllocationSPX(address, spx, "Contributors")
 }
 
 // NewFoundationAlloc is a domain-specific shorthand for the SPHINX Foundation.
-// Allocation: 20% — 20,000,000 SPX ($1,200,000 at $0.06/SPX).
-// Distribution: Supports ecosystem growth, ongoing development, and long-term sustainability.
+// Allocation: 300,000,000 SPX — 0% sold, fully kept for ecosystem.
+// Distribution:
+//   - Ecosystem Grants: 120,000,000 SPX
+//   - Liquidity Provision: 60,000,000 SPX
+//   - R&D: 50,000,000 SPX
+//   - Strategic Partnerships: 30,000,000 SPX
+//   - Emergency Reserve: 20,000,000 SPX
+//   - Buybacks (optional): 20,000,000 SPX
+//
+// Governance: Multi-sig wallet (5-of-9), quarterly transparency reports,
+// community oversight committee.
 // It calls NewGenesisAllocationSPX with the label "Foundation".
 func NewFoundationAlloc(address string, spx int64) *GenesisAllocation {
 	return NewGenesisAllocationSPX(address, spx, "Foundation")
 }
 
 // NewCampaignAlloc is a domain-specific shorthand for campaigns and outreach.
-// Allocation: 8% — 8,000,000 SPX ($480,000 at $0.06/SPX).
-// Distribution: Used for outreach, strategic partnerships, and awareness campaigns.
+// Allocation: 35,000,000 SPX total, with 20,000,000 SPX sold (57%):
+//   - 20,000,000 in Private Sale
+//
+// 15,000,000 SPX remaining — future marketing and partnerships.
 // It calls NewGenesisAllocationSPX with the label "Campaigns".
 func NewCampaignAlloc(address string, spx int64) *GenesisAllocation {
 	return NewGenesisAllocationSPX(address, spx, "Campaigns")
 }
 
 // NewAirdropAlloc is a domain-specific shorthand for community airdrop pools.
-// Allocation: 5% — 5,000,000 SPX ($300,000 at $0.06/SPX).
-// Distribution: To incentivize user engagement and adoption.
+// Allocation: 90,000,000 SPX — 0% sold, fully kept for community.
+// Distribution:
+//   - Phase 1: Genesis — 20,000,000 SPX (Early testnet users)
+//   - Phase 2: Adoption — 20,000,000 SPX (Wallet creation & usage)
+//   - Phase 3: Staking — 25,000,000 SPX (First 10,000 stakers)
+//   - Phase 4: Engagement — 25,000,000 SPX (Governance & referrals)
+//
+// Rules: No vesting, sybil resistance, proof-of-humanity verification,
+// gradual release over 12 months.
 // It calls NewGenesisAllocationSPX with the label "Airdrops".
 func NewAirdropAlloc(address string, spx int64) *GenesisAllocation {
 	return NewGenesisAllocationSPX(address, spx, "Airdrops")
+}
+
+// NewPublicICOPoolAlloc is a domain-specific shorthand for the Public ICO Pool.
+// Allocation: 200,000,000 SPX total, with 100,000,000 SPX sold (50%):
+//   - 10,000,000 in Private Sale
+//   - 90,000,000 in Public ICO
+//
+// 100,000,000 SPX remaining — future public sales.
+// It calls NewGenesisAllocationSPX with the label "PublicICOPool".
+func NewPublicICOPoolAlloc(address string, spx int64) *GenesisAllocation {
+	return NewGenesisAllocationSPX(address, spx, "PublicICOPool")
+}
+
+// NewReserveAlloc is a domain-specific shorthand for the Reserve / Unsold pool.
+// Allocation: 200,000,000 SPX — 0% sold.
+// Reserved for future ecosystem needs, emergencies, and strategic initiatives.
+// It calls NewGenesisAllocationSPX with the label "Reserve".
+func NewReserveAlloc(address string, spx int64) *GenesisAllocation {
+	return NewGenesisAllocationSPX(address, spx, "Reserve")
 }
 
 // ------------------------------------------------------------------------------
@@ -109,64 +156,98 @@ func NewAirdropAlloc(address string, spx int64) *GenesisAllocation {
 // order would produce a different allocation Merkle root and therefore a
 // different genesis hash, forking the network.
 //
-// Total genesis supply  :  100,000,000 SPX  (10^8 SPX = 10^26 nSPX)
-// USD value at $0.06/SPX:  $6,000,000        (fully allocated)
+// Total genesis supply  : 1,240,000,000 SPX (24.8% of 5B max supply)
 //
 // Distribution:
 //
-//	Category                              %     SPX           USD
-//	──────────────────────────────────────────────────────────────────
-//	Founder                              10%   10,000,000    $600,000
-//	Co-founder                            7%    7,000,000    $420,000
-//	Development Fund                     30%   30,000,000  $1,800,000
-//	Contributors (Legal, Advisors,
-//	  Chief Security, Partners,
-//	  Community Managers)                20%   20,000,000  $1,200,000
-//	SPHINX Foundation                    20%   20,000,000  $1,200,000
-//	Campaigns                             8%    8,000,000    $480,000
-//	Community Airdrops                    5%    5,000,000    $300,000
-//	──────────────────────────────────────────────────────────────────
-//	Total                               100%  100,000,000  $6,000,000
+//	Category                    Original      Sold      Remaining    % of Max  Notes
+//	─────────────────────────────────────────────────────────────────────────────────────
+//	Founder (Lead)             30,000,000    5,000,000  25,000,000    0.6%     4yr vesting, 12mo cliff
+//	Co-founders (4)            95,000,000   10,000,000  85,000,000    1.9%     4yr vesting, 12mo cliff
+//	Development Fund          200,000,000   50,000,000 150,000,000    4.0%     Module-based (10k/module)
+//	Contributors               90,000,000   15,000,000  75,000,000    1.8%     Milestone-based vesting
+//	SPHINX Foundation         300,000,000          0   300,000,000    6.0%     Ecosystem grants, liquidity
+//	Campaigns                  35,000,000   20,000,000  15,000,000    0.7%     Marketing & partnerships
+//	Community Airdrops         90,000,000          0    90,000,000    1.8%     Free distribution, 4 phases
+//	Public ICO Pool           200,000,000  100,000,000 100,000,000    4.0%     Future public sales
+//	Reserve / Unsold          200,000,000          0   200,000,000    4.0%     Ecosystem reserve
+//	─────────────────────────────────────────────────────────────────────────────────────
+//	Total                    1,240,000,000  200,000,000 1,040,000,000  24.8%
+//
+// Funding Rounds Sold:
+//   - Angel Round: 30,000,000 SPX @ $0.06 = $1,800,000
+//     Source: Founder (5M) + Co-founders (10M) + Dev Fund (10M) + Contributors (5M)
+//   - Private Sale: 70,000,000 SPX @ $0.24 = $16,800,000
+//     Source: Dev Fund (30M) + Contributors (10M) + Campaigns (20M) + Public ICO Pool (10M)
+//   - Public ICO: 100,000,000 SPX @ $0.36 = $36,000,000
+//     Source: Public ICO Pool (90M) + Dev Fund (10M)
+//
+// Total Raised: $54,600,000
+//
+// Vesting Schedules:
+//   - Founders (Lead + 4): 4-year vesting, 12-month cliff
+//     Month 12: 25% | Month 24: 25% | Month 36: 25% | Month 48: 25%
+//   - Development Fund: Module-based (10,000 SPX/module, 3,000 modules total)
+//   - Contributors: Role-based vesting (Legal 2yr, Advisors 2yr, CSO 3yr,
+//     Partners milestone, Managers 2yr)
+//   - SPHINX Foundation: Multi-sig wallet (5-of-9), quarterly transparency reports
+//   - Community Airdrops: No vesting, 12-month gradual release
 //
 // These addresses are placeholder hex strings. Replace them with the actual
 // multisig or keystore addresses before mainnet launch.
 func DefaultGenesisAllocations() []*GenesisAllocation {
 	return []*GenesisAllocation{
-		// ── Founder (10%) ─────────────────────────────────────────────────
-		// 10,000,000 SPX · $600,000 at $0.06/SPX.
-		// 3-year vesting, quarterly unlocks. Includes planned charity allocation.
-		NewFounderAlloc("1000000000000000000000000000000000000001", 10_000_000),
+		// ── Founder (Lead) ─────────────────────────────────────────────────
+		// 30,000,000 SPX total · 5,000,000 sold in Angel Round.
+		// 25,000,000 SPX remaining — 4-year vesting, 12-month cliff.
+		NewFounderAlloc("1000000000000000000000000000000000000001", 30_000_000),
 
-		// ── Co-founder (7%) ───────────────────────────────────────────────
-		// 7,000,000 SPX · $420,000 at $0.06/SPX.
-		// 3-year vesting, quarterly unlocks. Includes planned charity allocation.
-		NewCoFounderAlloc("2000000000000000000000000000000000000001", 7_000_000),
+		// ── Co-founders (4) ───────────────────────────────────────────────
+		// 95,000,000 SPX total · 10,000,000 sold in Angel Round.
+		// 85,000,000 SPX remaining — 4-year vesting, 12-month cliff.
+		NewCoFounderAlloc("2000000000000000000000000000000000000001", 95_000_000),
 
-		// ── Development Fund (30%) ────────────────────────────────────────
-		// 30,000,000 SPX · $1,800,000 at $0.06/SPX.
-		// Paid per completed module. First 2,000 modules targeted over ~2 years.
-		NewDevelopmentAlloc("3000000000000000000000000000000000000001", 30_000_000),
+		// ── Development Fund ───────────────────────────────────────────────
+		// 200,000,000 SPX total · 50,000,000 sold (25%):
+		//   Angel: 10M · Private: 30M · Public ICO: 10M.
+		// 150,000,000 SPX remaining — module-based (10,000/module).
+		NewDevelopmentAlloc("3000000000000000000000000000000000000001", 200_000_000),
 
-		// ── Contributors (20%) ────────────────────────────────────────────
-		// 20,000,000 SPX · $1,200,000 at $0.06/SPX.
-		// Covers Legal, Advisors, Chief Security, Partners, Community Managers.
-		// Split based on roles; individual vesting or milestone-based schedules.
-		NewContributorAlloc("4000000000000000000000000000000000000001", 20_000_000),
+		// ── Contributors ───────────────────────────────────────────────────
+		// 90,000,000 SPX total · 15,000,000 sold (16.7%):
+		//   Angel: 5M · Private: 10M.
+		// 75,000,000 SPX remaining — milestone-based vesting.
+		// Roles: Legal (10M/2yr) · Advisors (15M/2yr) · CSO (15M/3yr)
+		//        Partners (25M/milestone) · Managers (25M/2yr)
+		NewContributorAlloc("4000000000000000000000000000000000000001", 90_000_000),
 
-		// ── SPHINX Foundation (20%) ───────────────────────────────────────
-		// 20,000,000 SPX · $1,200,000 at $0.06/SPX.
-		// Supports ecosystem growth, development initiatives, and sustainability.
-		NewFoundationAlloc("5000000000000000000000000000000000000001", 20_000_000),
+		// ── SPHINX Foundation ──────────────────────────────────────────────
+		// 300,000,000 SPX · 0% sold — fully kept for ecosystem.
+		// Grants: 120M · Liquidity: 60M · R&D: 50M
+		// Partnerships: 30M · Emergency: 20M · Buybacks: 20M (optional)
+		NewFoundationAlloc("5000000000000000000000000000000000000001", 300_000_000),
 
-		// ── Campaigns (8%) ────────────────────────────────────────────────
-		// 8,000,000 SPX · $480,000 at $0.06/SPX.
-		// Used for outreach, strategic partnerships, and awareness campaigns.
-		NewCampaignAlloc("6000000000000000000000000000000000000001", 8_000_000),
+		// ── Campaigns ──────────────────────────────────────────────────────
+		// 35,000,000 SPX total · 20,000,000 sold in Private Sale (57%).
+		// 15,000,000 SPX remaining — future marketing and partnerships.
+		NewCampaignAlloc("6000000000000000000000000000000000000001", 35_000_000),
 
-		// ── Community Airdrops (5%) ───────────────────────────────────────
-		// 5,000,000 SPX · $300,000 at $0.06/SPX.
-		// To incentivize user engagement and adoption.
-		NewAirdropAlloc("7000000000000000000000000000000000000001", 5_000_000),
+		// ── Community Airdrops ─────────────────────────────────────────────
+		// 90,000,000 SPX · 0% sold — fully kept.
+		// Phases: Genesis (20M) · Adoption (20M) · Staking (25M) · Engagement (25M)
+		// No vesting · Sybil resistance · 12-month release.
+		NewAirdropAlloc("7000000000000000000000000000000000000001", 90_000_000),
+
+		// ── Public ICO Pool ───────────────────────────────────────────────
+		// 200,000,000 SPX total · 100,000,000 sold (50%):
+		//   Private: 10M · Public ICO: 90M.
+		// 100,000,000 SPX remaining — future public sales.
+		NewPublicICOPoolAlloc("8000000000000000000000000000000000000001", 200_000_000),
+
+		// ── Reserve / Unsold ───────────────────────────────────────────────
+		// 200,000,000 SPX · 0% sold.
+		// Reserved for future ecosystem needs, emergencies, and strategic initiatives.
+		NewReserveAlloc("9000000000000000000000000000000000000001", 200_000_000),
 	}
 }
 

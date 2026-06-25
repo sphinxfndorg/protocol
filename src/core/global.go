@@ -2,6 +2,10 @@
 // MIT License https://opensource.org/license/mit
 
 // go/src/core/global.go
+// Copyright (c) 2024-present Sphinx Core Dev
+// MIT License https://opensource.org/license/mit
+
+// go/src/core/global.go
 package core
 
 import (
@@ -172,4 +176,26 @@ func GetGenesisHash() string {
 func GenerateGenesisHash() string {
 	logger.Warn("GenerateGenesisHash is deprecated, using GetGenesisHash for consistency")
 	return GetGenesisHash()
+}
+
+// ============================================================================
+// SUPPLY STATUS HELPERS - Quick access to supply info
+// ============================================================================
+
+// GetMaxSupplySPX returns the maximum supply in whole SPX
+func GetMaxSupplySPX() *big.Int {
+	return new(big.Int).SetInt64(denom.MaxSupplySPX)
+}
+
+// GetMaxSupplyNSPX returns the maximum supply in nSPX
+func GetMaxSupplyNSPX() *big.Int {
+	return new(big.Int).Mul(
+		big.NewInt(denom.MaxSupplySPX),
+		big.NewInt(denom.SPX),
+	)
+}
+
+// GetGenesisVaultAddress returns the genesis vault address constant
+func GetGenesisVaultAddress() string {
+	return GenesisVaultAddress
 }

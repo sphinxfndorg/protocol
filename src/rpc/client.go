@@ -77,6 +77,10 @@ func CallRPC(address, method string, params interface{}, nodeID NodeID, ttl uint
 		rpcType = RPCGetBalance
 	case "gettransactionhistory":
 		rpcType = RPCGetTransactionHistory
+	case "getsupplystatus": // ADD THIS
+		rpcType = RPCGetSupplyStatus
+	case "getcheckpoint":
+		rpcType = RPCGetCheckpoint
 	default:
 		return nil, ErrUnsupportedRPCType
 	}

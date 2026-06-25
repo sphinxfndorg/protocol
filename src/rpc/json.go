@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/sphinxorg/protocol/src/consensus"
 	"github.com/sphinxorg/protocol/src/core"
 	types "github.com/sphinxorg/protocol/src/core/transaction"
 	security "github.com/sphinxorg/protocol/src/handshake"
@@ -70,6 +71,15 @@ func (h *JSONRPCHandler) getBlockHash(params interface{}) (interface{}, error) {
 		return nil, errors.New("block not found")
 	}
 	return hash, nil
+}
+
+// getSupplyStatus returns detailed supply information including genesis allocation,
+// rewards minted, remaining supply, and distribution status.
+func (h *JSONRPCHandler) getSupplyStatus(params interface{}) (interface{}, error) {
+	if h.server.blockchain == nil {
+		return nil, errors.New("blockchain not initialized")
+	}
+	return h.server.blockchain.GetSupplyStatus()
 }
 
 // getDifficulty returns the current network difficulty as a string
@@ -251,6 +261,32 @@ func (h *JSONRPCHandler) getRawTransaction(params interface{}) (interface{}, err
 	return result, nil
 }
 
+// getCheckpoint returns the current checkpoint information
+func (h *JSONRPCHandler) getCheckpoint(params interface{}) (interface{}, error) {
+	if h.server.blockchain == nil {
+		return nil, errors.New("blockchain not initialized")
+	}
+
+	cp, err := h.server.blockchain.GetCheckpointMessage()
+	if err != nil {
+		return nil, err
+	}
+
+	return map[string]interface{}{
+		"genesis_hash":     cp.GenesisHash,
+		"tip_height":       cp.TipHeight,
+		"tip_hash":         cp.TipHash,
+		"total_supply":     cp.TotalSupply,
+		"genesis_supply":   cp.GenesisSupply,
+		"rewards_minted":   cp.RewardsMinted,
+		"remaining_supply": cp.RemainingSupply,
+		"vault_balance":    cp.VaultBalance,
+		"timestamp":        cp.Timestamp,
+		"phase":            cp.Phase,
+		"minted_spx":       cp.MintedSPX,
+	}, nil
+}
+
 // registerMethods registers all supported RPC methods with their handler functions
 func (h *JSONRPCHandler) registerMethods() {
 	// Existing methods
@@ -280,6 +316,8 @@ func (h *JSONRPCHandler) registerMethods() {
 	h.methods["getrawtransaction"] = h.getRawTransaction
 	h.methods["getbalance"] = h.getBalance
 	h.methods["gettransactionhistory"] = h.getTransactionHistory
+	h.methods["getsupplystatus"] = h.getSupplyStatus
+	h.methods["getcheckpoint"] = h.getCheckpoint
 }
 
 // ProcessRequest processes a JSON-RPC request or batch of requests.
@@ -505,6 +543,10 @@ func (h *JSONRPCHandler) mapRPCTypeToMethod(rpcType RPCType) (string, error) {
 		return "getbalance", nil
 	case RPCGetTransactionHistory:
 		return "gettransactionhistory", nil
+	case RPCGetSupplyStatus: // ADD THIS
+		return "getsupplystatus", nil
+	case RPCGetCheckpoint:
+		return "getcheckpoint", nil
 	default:
 		return "", ErrUnsupportedRPCType
 	}
@@ -561,6 +603,10 @@ func (t RPCType) String() string {
 		return "getbalance"
 	case RPCGetTransactionHistory:
 		return "gettransactionhistory"
+	case RPCGetSupplyStatus: // ADD THIS
+		return "getsupplystatus"
+	case RPCGetCheckpoint:
+		return "getcheckpoint"
 	default:
 		return "unknown"
 	}
@@ -815,3 +861,54 @@ func (h *JSONRPCHandler) parseParams(params interface{}, target interface{}) err
 	}
 	return json.Unmarshal(data, target)
 }
+
+// RPCCallerImpl implements core.RPCCaller
+type RPCCallerImpl struct {
+	nodeID NodeID
+}
+
+// NewRPCCaller creates a new RPC caller with the given node ID
+func NewRPCCaller(nodeID NodeID) *RPCCallerImpl {
+	return &RPCCallerImpl{nodeID: nodeID}
+}
+
+// GetCheckpoint retrieves a checkpoint from a peer
+func (c *RPCCallerImpl) GetCheckpoint(peerAddress string) (*consensus.CheckpointMessage, error) {
+	msg, err := CallRPC(peerAddress, "getcheckpoint", nil, c.nodeID, 60)
+	if err != nil {
+		return nil, fmt.Errorf("RPC call failed: %w", err)
+	}
+
+	if len(msg.Values) == 0 {
+		return nil, fmt.Errorf("empty response from peer")
+	}
+
+	var cp consensus.CheckpointMessage
+	if err := json.Unmarshal(msg.Values[0], &cp); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal checkpoint: %w", err)
+	}
+
+	return &cp, nil
+}
+
+// GetSupplyStatus retrieves supply status from a peer
+func (c *RPCCallerImpl) GetSupplyStatus(peerAddress string) (map[string]interface{}, error) {
+	msg, err := CallRPC(peerAddress, "getsupplystatus", nil, c.nodeID, 60)
+	if err != nil {
+		return nil, fmt.Errorf("RPC call failed: %w", err)
+	}
+
+	if len(msg.Values) == 0 {
+		return nil, fmt.Errorf("empty response from peer")
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(msg.Values[0], &result); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal supply status: %w", err)
+	}
+
+	return result, nil
+}
+
+// Ensure RPCCallerImpl implements core.RPCCaller
+var _ core.RPCCaller = (*RPCCallerImpl)(nil)

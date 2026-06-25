@@ -5,6 +5,7 @@
 package consensus
 
 import (
+	"encoding/json"
 	"fmt"
 	"math/big"
 	"sort"
@@ -326,4 +327,58 @@ func (vs *ValidatorSet) SetStakeFromBalance(validatorID string, balanceNSPX *big
 	logger.Info("✅ Validator %s stake set to %d SPX from balance",
 		validatorID, stakeSPXUint)
 	return nil
+}
+
+// BroadcastCheckpoint broadcasts the current checkpoint to all peers
+func (c *Consensus) BroadcastCheckpoint() error {
+	if c.blockChain == nil { // FIX: blockChain (not blockchain)
+		return fmt.Errorf("blockchain not available")
+	}
+
+	// Get checkpoint from blockchain
+	cp, err := c.blockChain.GetCheckpointMessage() // FIX: blockChain
+	if err != nil {
+		return fmt.Errorf("failed to get checkpoint: %w", err)
+	}
+
+	data, err := json.Marshal(cp)
+	if err != nil {
+		return fmt.Errorf("failed to marshal checkpoint: %w", err)
+	}
+
+	// Broadcast to all peers
+	return c.nodeManager.BroadcastMessage("checkpoint", data)
+}
+
+// HandleCheckpointMessage processes a checkpoint message from a peer
+func (c *Consensus) HandleCheckpointMessage(data []byte, fromNodeID string) error {
+	var cp CheckpointMessage
+	if err := json.Unmarshal(data, &cp); err != nil {
+		return fmt.Errorf("failed to unmarshal checkpoint: %w", err)
+	}
+
+	logger.Info("Received checkpoint from %s: height=%d, phase=%s, supply=%s SPX",
+		fromNodeID, cp.TipHeight, cp.Phase, cp.MintedSPX)
+
+	if c.blockChain == nil { // FIX: blockChain
+		return fmt.Errorf("blockchain not available")
+	}
+
+	// Check if peer is ahead
+	latest := c.blockChain.GetLatestBlock() // FIX: blockChain
+	if latest != nil && cp.TipHeight <= latest.GetHeight() {
+		// Peer is not ahead or equal, ignore
+		return nil
+	}
+
+	// Apply checkpoint to blockchain
+	return c.blockChain.ApplyCheckpointFromPeer(&cp) // FIX: blockChain
+}
+
+// GetCheckpoint returns the current checkpoint message
+func (c *Consensus) GetCheckpoint() (*CheckpointMessage, error) {
+	if c.blockChain == nil { // FIX: blockChain
+		return nil, fmt.Errorf("blockchain not available")
+	}
+	return c.blockChain.GetCheckpointMessage() // FIX: blockChain
 }

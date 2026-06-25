@@ -134,6 +134,8 @@ type Blockchain struct {
 	svmMutex        sync.RWMutex             // Mutex for SVM data access
 	returnDataStore map[string][]byte        // In-memory store for OP_RETURN data
 	svmFailures     []map[string]interface{} // Tracks SVM failures for monitoring
+
+	rpcCaller RPCCaller // Add this field
 }
 
 // GenesisState holds the complete genesis configuration used to bootstrap a node.
@@ -324,18 +326,58 @@ type AllocationSet struct {
 // ChainPhase identifies which operational phase a network is in.
 type ChainPhase string
 
-// ChainCheckpoint captures the state at the moment devnet finishes distribution.
-// It is written to disk so testnet/mainnet nodes can bootstrap from it without
-// re-running devnet.
+// types.go - Updated ChainCheckpoint struct with nested structure
+// ChainCheckpoint captures the complete supply state including genesis vs rewards
 type ChainCheckpoint struct {
-	Phase           ChainPhase `json:"phase"`             // "devnet"
-	GenesisHash     string     `json:"genesis_hash"`      // canonical genesis hash
-	TipHeight       uint64     `json:"tip_height"`        // last devnet block height
-	TipHash         string     `json:"tip_hash"`          // last devnet block hash
-	VaultBalance    string     `json:"vault_balance"`     // should be "0"
-	TotalSupply     string     `json:"total_supply"`      // circulating supply in nSPX
-	Timestamp       string     `json:"timestamp"`         // RFC3339 when checkpoint was taken
-	DistributedNSPX string     `json:"distributed_n_spx"` // total nSPX distributed
+	Phase       string `json:"phase"`        // "devnet", "testnet", "mainnet"
+	GenesisHash string `json:"genesis_hash"` // canonical genesis hash
+	Timestamp   string `json:"timestamp"`    // RFC3339 when checkpoint was taken
+
+	// Supply breakdown with both nSPX and SPX representations
+	Supply struct {
+		Max struct {
+			NSPX string `json:"nspx"` // maximum supply in nSPX (5B * 1e18)
+			SPX  string `json:"spx"`  // maximum supply in whole SPX (5,000,000,000)
+		} `json:"max"`
+		Genesis struct {
+			NSPX string `json:"nspx"` // genesis allocation in nSPX
+			SPX  string `json:"spx"`  // genesis allocation in whole SPX
+		} `json:"genesis"`
+		Minted struct {
+			NSPX string `json:"nspx"` // total minted so far in nSPX
+			SPX  string `json:"spx"`  // total minted so far in whole SPX
+		} `json:"minted"`
+		Remaining struct {
+			NSPX string `json:"nspx"` // remaining to be mined in nSPX
+			SPX  string `json:"spx"`  // remaining to be mined in whole SPX
+		} `json:"remaining"`
+	} `json:"supply"`
+
+	// Vault information - the genesis vault address and its balance
+	Vault struct {
+		Address     string `json:"address"`      // GenesisVaultAddress constant
+		BalanceNSPX string `json:"balance_nspx"` // vault balance in nSPX
+		BalanceSPX  string `json:"balance_spx"`  // vault balance in whole SPX
+	} `json:"vault"`
+
+	// Rewards tracking - block rewards minted separately from genesis
+	Rewards struct {
+		MintedNSPX string `json:"minted_nspx"` // rewards minted in nSPX
+		MintedSPX  string `json:"minted_spx"`  // rewards minted in whole SPX
+	} `json:"rewards"`
+
+	// Distribution status - tracks whether genesis allocations have been distributed
+	Distribution struct {
+		Status            string `json:"status"`              // "pending" or "complete"
+		TotalAllocations  int    `json:"total_allocations"`   // number of genesis allocations
+		TotalAllocatedSPX string `json:"total_allocated_spx"` // total allocated in whole SPX
+	} `json:"distribution"`
+
+	// Chain tip information
+	Tip struct {
+		Height uint64 `json:"height"` // current block height
+		Hash   string `json:"hash"`   // current block hash
+	} `json:"tip"`
 }
 
 // accountRecord is the JSON shape stored in LevelDB for each address.
@@ -353,8 +395,11 @@ type accountEntry struct {
 // StateDB is an in-memory account-state cache backed by *database.DB.
 type StateDB struct {
 	mu          sync.RWMutex
-	db          *database.DB             // the LevelDB wrapper from src/core/state/database.go
-	pending     map[string]*accountEntry // dirty accounts not yet written to disk
-	totalSupply *big.Int                 // circulating supply in nSPX
-	blockchain  *Blockchain              // reference to blockchain for mempool access
+	db          *database.DB
+	pending     map[string]*accountEntry
+	totalSupply *big.Int
+	// NEW: Track genesis allocation separately from rewards
+	genesisSupply *big.Int
+	rewardsMinted *big.Int
+	blockchain    *Blockchain
 }

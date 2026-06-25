@@ -8,52 +8,64 @@
   "initial_difficulty": "17179869184",
   "initial_gas_limit": "5000",
   "nonce": "0000000000000042",
-  "total_allocations": 7,
-  "total_allocated_nspx": "100000000000000000000000000",
-  "total_allocated_spx": "100000000",
+  "total_allocations": 9,
+  "total_allocated_nspx": "1240000000000000000000000000",
+  "total_allocated_spx": "1240000000",
   "total_validators": 0,
   "allocations": [
     {
       "address": "1000000000000000000000000000000000000001",
-      "balance_nspx": "10000000000000000000000000",
-      "balance_spx": "10000000",
+      "balance_nspx": "30000000000000000000000000",
+      "balance_spx": "30000000",
       "label": "Founder"
     },
     {
       "address": "2000000000000000000000000000000000000001",
-      "balance_nspx": "7000000000000000000000000",
-      "balance_spx": "7000000",
+      "balance_nspx": "95000000000000000000000000",
+      "balance_spx": "95000000",
       "label": "CoFounder"
     },
     {
       "address": "3000000000000000000000000000000000000001",
-      "balance_nspx": "30000000000000000000000000",
-      "balance_spx": "30000000",
+      "balance_nspx": "200000000000000000000000000",
+      "balance_spx": "200000000",
       "label": "Development"
     },
     {
       "address": "4000000000000000000000000000000000000001",
-      "balance_nspx": "20000000000000000000000000",
-      "balance_spx": "20000000",
+      "balance_nspx": "90000000000000000000000000",
+      "balance_spx": "90000000",
       "label": "Contributors"
     },
     {
       "address": "5000000000000000000000000000000000000001",
-      "balance_nspx": "20000000000000000000000000",
-      "balance_spx": "20000000",
+      "balance_nspx": "300000000000000000000000000",
+      "balance_spx": "300000000",
       "label": "Foundation"
     },
     {
       "address": "6000000000000000000000000000000000000001",
-      "balance_nspx": "8000000000000000000000000",
-      "balance_spx": "8000000",
+      "balance_nspx": "35000000000000000000000000",
+      "balance_spx": "35000000",
       "label": "Campaigns"
     },
     {
       "address": "7000000000000000000000000000000000000001",
-      "balance_nspx": "5000000000000000000000000",
-      "balance_spx": "5000000",
+      "balance_nspx": "90000000000000000000000000",
+      "balance_spx": "90000000",
       "label": "Airdrops"
+    },
+    {
+      "address": "8000000000000000000000000000000000000001",
+      "balance_nspx": "200000000000000000000000000",
+      "balance_spx": "200000000",
+      "label": "PublicICOPool"
+    },
+    {
+      "address": "9000000000000000000000000000000000000001",
+      "balance_nspx": "200000000000000000000000000",
+      "balance_spx": "200000000",
+      "label": "Reserve"
     }
   ]
 }

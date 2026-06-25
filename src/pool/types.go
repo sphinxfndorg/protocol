@@ -56,30 +56,53 @@ type PooledTransaction struct {
 	Priority    int // Higher priority transactions get included first
 }
 
+// BalanceResult represents the balance information for an address
+type BalanceResult struct {
+	Confirmed *big.Int
+	Pending   *big.Int
+	Unlocked  *big.Int
+}
+
+// BlockchainStateProvider defines the interface that pool needs from blockchain
+type BlockchainStateProvider interface {
+	NewStateDB() (StateDB, error)
+}
+
+// StateDB defines the interface for state database operations
+type StateDB interface {
+	GetBalance(address string) (*big.Int, error)
+	GetNonce(address string) (uint64, error)
+	GetLastNonce(address string) (uint64, error)
+	GetLastTransactionTimestamp(address string) (int64, error)
+	GetBalanceResult(address string) (*BalanceResult, error)
+	GetTransactionHistory(address string, limit int) ([]*types.Transaction, error)
+	Close() error
+}
+
 // Mempool manages all transaction pools (broadcast, pending, validation)
 type Mempool struct {
 	lock sync.RWMutex
 
 	// Main pools
-	broadcastPool  map[string]*PooledTransaction // Newly broadcast transactions
-	pendingPool    map[string]*PooledTransaction // Validated transactions waiting for blocks
-	validationPool map[string]*PooledTransaction // Transactions being validated
-	invalidPool    map[string]*PooledTransaction // Failed transactions (for monitoring)
-
-	// Indexes for quick lookup
+	broadcastPool   map[string]*PooledTransaction
+	pendingPool     map[string]*PooledTransaction
+	validationPool  map[string]*PooledTransaction
+	invalidPool     map[string]*PooledTransaction
 	allTransactions map[string]*PooledTransaction
 
 	// Configuration
 	config *MempoolConfig
 
 	// Memory tracking
-	currentBytes uint64 // tracks total bytes used by transactions
+	currentBytes uint64
 
-	// SPHINCS+ manager for full transaction authentication verification.
+	// SPHINCS+ manager
 	sphincsManager *sign.STHINCSManager
 
-	// ADD THIS FIELD:
-	publicKeyRegistry map[string][]byte // Maps sender address -> serialized SPHINCS+ public key
+	// CHANGE: Use interface instead of concrete type
+	stateProvider BlockchainStateProvider
+
+	publicKeyRegistry map[string][]byte
 
 	// Statistics
 	stats struct {

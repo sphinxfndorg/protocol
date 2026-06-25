@@ -84,13 +84,16 @@ type Storage struct {
 	stateDir  string
 
 	// Database handles
-	db      *database.DB // Main database for blocks and transactions
-	stateDB *database.DB // State database for consensus state
+	db      *database.DB
+	stateDB *database.DB
 
 	// In-memory indices for fast access
-	blockIndex  map[string]*types.Block       // hash -> block
-	heightIndex map[uint64]*types.Block       // height -> block
-	txIndex     map[string]*types.Transaction // txID -> transaction
+	blockIndex  map[string]*types.Block
+	heightIndex map[uint64]*types.Block
+	txIndex     map[string]*types.Transaction
+
+	// Account set for balance calculations (replaces UTXO set)
+	accountSet *types.AccountSet // ← ADD THIS
 
 	// Chain state
 	bestBlockHash string

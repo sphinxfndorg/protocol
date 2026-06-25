@@ -39,6 +39,8 @@ func (vs *ValidatorSet) GetMinStakeSPX() uint64 {
 }
 
 // AddValidator adds or updates a validator's stake (in SPX).
+// AddValidator adds or updates a validator's stake (in SPX).
+// This is the primary method for setting stakes - it handles both add and update
 func (vs *ValidatorSet) AddValidator(id string, stakeSPX uint64) error {
 	vs.mu.Lock()
 	defer vs.mu.Unlock()
@@ -48,24 +50,34 @@ func (vs *ValidatorSet) AddValidator(id string, stakeSPX uint64) error {
 		big.NewInt(denom.SPX),
 	)
 
+	// If below minimum, use minimum
 	if stakeNSPX.Cmp(vs.minStakeAmount) < 0 {
 		minStakeSPX := vs.GetMinStakeSPX()
-		return fmt.Errorf("stake %d SPX below minimum %d SPX", stakeSPX, minStakeSPX)
+		logger.Warn("Stake %d SPX below minimum %d SPX, using minimum", stakeSPX, minStakeSPX)
+		stakeSPX = minStakeSPX
+		stakeNSPX = new(big.Int).Mul(
+			big.NewInt(int64(stakeSPX)),
+			big.NewInt(denom.SPX),
+		)
 	}
 
+	// Check if validator already exists
 	if val, exists := vs.validators[id]; exists {
+		// Update existing validator
 		vs.totalStake.Sub(vs.totalStake, val.StakeAmount)
 		val.StakeAmount = stakeNSPX
 		vs.totalStake.Add(vs.totalStake, stakeNSPX)
+		logger.Info("✅ Validator %s updated to %d SPX stake", id, stakeSPX)
 	} else {
+		// Add new validator
 		vs.validators[id] = &StakedValidator{
 			ID:          id,
 			StakeAmount: stakeNSPX,
 		}
 		vs.totalStake.Add(vs.totalStake, stakeNSPX)
+		logger.Info("✅ Validator %s added with %d SPX stake", id, stakeSPX)
 	}
 
-	logger.Info("✅ Validator %s added/updated with %d SPX stake", id, stakeSPX)
 	return nil
 }
 
@@ -254,5 +266,64 @@ func (vs *ValidatorSet) UpdateStake(id string, stakeSPX uint64) error {
 	logger.Info("✅ Validator %s stake updated from %d SPX to %d SPX",
 		id, oldSPX.Uint64(), stakeSPX)
 
+	return nil
+}
+
+// SetStakeFromBalance sets a validator's stake from their actual balance
+func (vs *ValidatorSet) SetStakeFromBalance(validatorID string, balanceNSPX *big.Int) error {
+	vs.mu.Lock()
+	defer vs.mu.Unlock()
+
+	if balanceNSPX == nil || balanceNSPX.Sign() < 0 {
+		return fmt.Errorf("invalid balance for validator %s", validatorID)
+	}
+
+	// Convert balance to SPX for stake
+	stakeSPX := new(big.Int).Div(balanceNSPX, big.NewInt(denom.SPX))
+	if stakeSPX.Sign() == 0 {
+		// If balance is less than 1 SPX, use minimum stake
+		stakeSPX = new(big.Int).Set(vs.minStakeAmount)
+		logger.Warn("Validator %s balance %s nSPX is less than 1 SPX, using minimum stake",
+			validatorID, balanceNSPX.String())
+	}
+
+	// Get stake amount in SPX as uint64
+	stakeSPXUint := stakeSPX.Uint64()
+	minStakeSPX := vs.GetMinStakeSPX()
+
+	// Ensure minimum stake
+	if stakeSPXUint < minStakeSPX {
+		logger.Warn("Validator %s stake %d SPX below minimum %d SPX, using minimum",
+			validatorID, stakeSPXUint, minStakeSPX)
+		stakeSPXUint = minStakeSPX
+	}
+
+	// Check if validator exists
+	v, exists := vs.validators[validatorID]
+	if !exists {
+		v = &StakedValidator{
+			ID:          validatorID,
+			StakeAmount: new(big.Int),
+		}
+		vs.validators[validatorID] = v
+	}
+
+	// Calculate stake in nSPX
+	stakeNSPX := new(big.Int).Mul(
+		big.NewInt(int64(stakeSPXUint)),
+		big.NewInt(denom.SPX),
+	)
+
+	// Update total stake
+	oldStake := v.StakeAmount
+	if oldStake != nil && oldStake.Sign() > 0 {
+		vs.totalStake.Sub(vs.totalStake, oldStake)
+	}
+
+	v.StakeAmount = stakeNSPX
+	vs.totalStake.Add(vs.totalStake, stakeNSPX)
+
+	logger.Info("✅ Validator %s stake set to %d SPX from balance",
+		validatorID, stakeSPXUint)
 	return nil
 }

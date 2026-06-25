@@ -19,12 +19,13 @@ import (
 )
 
 // NewMempool creates a new comprehensive mempool instance
-func NewMempool(config *MempoolConfig) *Mempool {
+// CHANGE: Accept BlockchainStateProvider interface instead of *core.Blockchain
+func NewMempool(config *MempoolConfig, stateProvider BlockchainStateProvider) *Mempool {
 	if config == nil {
 		config = &MempoolConfig{
 			MaxSize:           10000,
-			MaxBytes:          100 * 1024 * 1024, // 100MB
-			MaxTxSize:         100 * 1024,        // 100KB
+			MaxBytes:          100 * 1024 * 1024,
+			MaxTxSize:         100 * 1024,
 			ValidationTimeout: 30 * time.Second,
 			ExpiryTime:        24 * time.Hour,
 			MaxBroadcastSize:  5000,
@@ -40,6 +41,7 @@ func NewMempool(config *MempoolConfig) *Mempool {
 		allTransactions:   make(map[string]*PooledTransaction),
 		config:            config,
 		currentBytes:      0,
+		stateProvider:     stateProvider, // Store interface reference
 		broadcastChan:     make(chan *types.Transaction, 1000),
 		validationChan:    make(chan *PooledTransaction, 1000),
 		cleanupChan:       make(chan struct{}, 1),
@@ -48,9 +50,7 @@ func NewMempool(config *MempoolConfig) *Mempool {
 		publicKeyRegistry: make(map[string][]byte),
 	}
 
-	// Start background workers
 	mp.startWorkers()
-
 	return mp
 }
 

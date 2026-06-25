@@ -6,48 +6,67 @@ package core
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"sort"
-	"sync"
 
 	"github.com/sphinxorg/protocol/src/common"
 	database "github.com/sphinxorg/protocol/src/core/state"
+	types "github.com/sphinxorg/protocol/src/core/transaction"
 	logger "github.com/sphinxorg/protocol/src/log"
+	"github.com/sphinxorg/protocol/src/pool"
 )
 
 const (
-	accountPrefix  = "acct:"        // LevelDB key prefix for account records
-	totalSupplyKey = "supply:total" // LevelDB key for total circulating supply
+	accountPrefix  = "acct:"
+	totalSupplyKey = "supply:total"
 )
 
-// accountRecord is the JSON shape stored in LevelDB for each address.
-// Balance is kept as a decimal string so json.Marshal/Unmarshal round-trips
-// correctly without custom big.Int marshaling.
-type accountRecord struct {
-	Balance string `json:"balance"` // decimal string, nSPX
-	Nonce   uint64 `json:"nonce"`
+// Ensure StateDB implements pool.StateDB
+var _ pool.StateDB = (*StateDB)(nil)
+
+// Close implements pool.StateDB - closes the underlying database connection
+func (db *StateDB) Close() error {
+	if db.db != nil {
+		return db.db.Close()
+	}
+	return nil
 }
 
-// accountEntry is the in-memory mutable form used inside StateDB.
-type accountEntry struct {
-	balance *big.Int
-	nonce   uint64
+// GetLastTransactionTimestamp implements pool.StateDB
+func (db *StateDB) GetLastTransactionTimestamp(address string) (int64, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	// For now, return 0 (no previous transactions)
+	// In a real implementation, you would store the last timestamp per address
+	// and retrieve it from the state
+	return 0, nil
 }
 
-// StateDB is an in-memory account-state cache backed by *database.DB.
-// All writes are buffered in `pending` and flushed to LevelDB on Commit().
-// Commit() returns a deterministic Merkle root that replaces the placeholder
-// StateRoot in block headers.
-type StateDB struct {
-	mu          sync.RWMutex
-	db          *database.DB             // the LevelDB wrapper from src/core/state/database.go
-	pending     map[string]*accountEntry // dirty accounts not yet written to disk
-	totalSupply *big.Int                 // circulating supply in nSPX
+// GetLastNonce implements pool.StateDB
+func (db *StateDB) GetLastNonce(address string) (uint64, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	// Load the account entry
+	entry := db.load(address)
+	if entry == nil {
+		return 0, nil // No previous transactions
+	}
+
+	// Get the last nonce from the account
+	// For now, return the current nonce (which represents the last used nonce + 1)
+	// If you want the last used nonce, subtract 1
+	nonce := entry.nonce
+	if nonce > 0 {
+		return nonce - 1, nil // Return the last used nonce
+	}
+	return 0, nil // No previous transactions
 }
 
 // NewStateDB creates a StateDB backed by the given *database.DB.
-// Pass bc.storage.GetDB() from blockchain.go (see storage_db.go for GetDB).
 func NewStateDB(db *database.DB) *StateDB {
 	s := &StateDB{
 		db:          db,
@@ -62,6 +81,13 @@ func NewStateDB(db *database.DB) *StateDB {
 		}
 	}
 	return s
+}
+
+// SetBlockchain sets the blockchain reference for mempool access.
+func (s *StateDB) SetBlockchain(bc *Blockchain) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.blockchain = bc
 }
 
 // ----------------------------------------------------------------------------
@@ -91,8 +117,7 @@ func (s *StateDB) load(address string) *accountEntry {
 	return &accountEntry{balance: bal, nonce: rec.Nonce}
 }
 
-// dirty returns a mutable *accountEntry for address, copying from storage into
-// the pending map the first time so subsequent writes accumulate in memory.
+// dirty returns a mutable *accountEntry for address.
 func (s *StateDB) dirty(address string) *accountEntry {
 	if e, ok := s.pending[address]; ok {
 		return e
@@ -107,21 +132,27 @@ func (s *StateDB) dirty(address string) *accountEntry {
 }
 
 // ----------------------------------------------------------------------------
-// Public read methods
+// Public read methods - Core Account State
 // ----------------------------------------------------------------------------
 
 // GetBalance returns the current balance of address in nSPX.
-func (s *StateDB) GetBalance(address string) *big.Int {
+func (s *StateDB) GetBalance(address string) (*big.Int, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return new(big.Int).Set(s.load(address).balance)
+	if address == "" {
+		return nil, errors.New("address cannot be empty")
+	}
+	return new(big.Int).Set(s.load(address).balance), nil
 }
 
 // GetNonce returns the current nonce for address.
-func (s *StateDB) GetNonce(address string) uint64 {
+func (s *StateDB) GetNonce(address string) (uint64, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.load(address).nonce
+	if address == "" {
+		return 0, errors.New("address cannot be empty")
+	}
+	return s.load(address).nonce, nil
 }
 
 // GetTotalSupply returns the current circulating supply in nSPX.
@@ -129,6 +160,129 @@ func (s *StateDB) GetTotalSupply() *big.Int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return new(big.Int).Set(s.totalSupply)
+}
+
+// GetBalanceResult returns the confirmed, pending, and unlocked balance for an address.
+func (s *StateDB) GetBalanceResult(address string) (*pool.BalanceResult, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if address == "" {
+		return nil, errors.New("address cannot be empty")
+	}
+
+	result := &pool.BalanceResult{
+		Confirmed: big.NewInt(0),
+		Pending:   big.NewInt(0),
+		Unlocked:  big.NewInt(0),
+	}
+
+	// Get confirmed balance from StateDB
+	balanceNSPX := s.load(address).balance
+	if balanceNSPX != nil {
+		result.Confirmed.Set(balanceNSPX)
+		result.Unlocked.Set(balanceNSPX)
+	}
+
+	// Check mempool for pending transactions
+	if s.blockchain != nil && s.blockchain.mempool != nil {
+		for _, tx := range s.blockchain.mempool.GetPendingTransactions() {
+			if tx == nil {
+				continue
+			}
+			if tx.Sender == address {
+				amount := tx.Amount
+				gasFee := tx.GetGasFee()
+				totalOut := new(big.Int).Add(amount, gasFee)
+				if result.Pending.Cmp(totalOut) < 0 {
+					result.Pending.SetInt64(0)
+				} else {
+					result.Pending.Sub(result.Pending, totalOut)
+				}
+			}
+			if tx.Receiver == address {
+				result.Pending.Add(result.Pending, tx.Amount)
+			}
+		}
+	}
+
+	return result, nil
+}
+
+// GetTransactionHistory returns recent transactions involving the given address.
+func (s *StateDB) GetTransactionHistory(address string, limit int) ([]*types.Transaction, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if address == "" {
+		return nil, errors.New("address cannot be empty")
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+
+	var txs []*types.Transaction
+	txMap := make(map[string]bool)
+
+	if s.blockchain == nil {
+		return txs, nil
+	}
+
+	// Search blocks from newest to oldest
+	height := s.blockchain.GetBlockCount()
+	blocksScanned := uint64(0)
+	maxBlocksToScan := uint64(1000)
+
+	for height > 0 && len(txs) < limit && blocksScanned < maxBlocksToScan {
+		block := s.blockchain.GetBlockByNumber(height)
+		if block == nil {
+			height--
+			continue
+		}
+
+		for i := len(block.Body.TxsList) - 1; i >= 0; i-- {
+			tx := block.Body.TxsList[i]
+			if tx == nil {
+				continue
+			}
+			if tx.Sender == address || tx.Receiver == address {
+				if !txMap[tx.ID] {
+					txMap[tx.ID] = true
+					txs = append(txs, tx)
+					if len(txs) >= limit {
+						break
+					}
+				}
+			}
+		}
+		height--
+		blocksScanned++
+	}
+
+	// Check mempool for pending transactions
+	if s.blockchain.mempool != nil {
+		for _, tx := range s.blockchain.mempool.GetPendingTransactions() {
+			if tx == nil {
+				continue
+			}
+			if (tx.Sender == address || tx.Receiver == address) && len(txs) < limit {
+				if !txMap[tx.ID] {
+					txMap[tx.ID] = true
+					txs = append(txs, tx)
+				}
+			}
+		}
+	}
+
+	// Sort by timestamp descending (newest first)
+	sort.Slice(txs, func(i, j int) bool {
+		return txs[i].Timestamp > txs[j].Timestamp
+	})
+
+	logger.Debug("GetTransactionHistory(%s): found %d transactions",
+		address[:16]+"...", len(txs))
+
+	return txs, nil
 }
 
 // ----------------------------------------------------------------------------
@@ -190,15 +344,10 @@ func (s *StateDB) IncrementTotalSupply(amount *big.Int) {
 // ----------------------------------------------------------------------------
 
 // Commit flushes all pending writes to LevelDB and returns the new state root.
-// The pending cache is cleared after a successful flush.
-// The returned []byte should be stored in block.Header.StateRoot.
 func (s *StateDB) Commit() ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Write each dirty account individually using database.DB.Put.
-	// database.DB has no batch API so we call Put per key; for genesis with
-	// 14 accounts this is fine. Add a batch method to database.go if needed.
 	for address, e := range s.pending {
 		rec := accountRecord{
 			Balance: e.balance.String(),
@@ -213,15 +362,12 @@ func (s *StateDB) Commit() ([]byte, error) {
 		}
 	}
 
-	// Persist total supply as a decimal string.
 	if err := s.db.Put(totalSupplyKey, []byte(s.totalSupply.String())); err != nil {
 		return nil, fmt.Errorf("StateDB.Commit: put total supply: %w", err)
 	}
 
-	// Clear dirty cache.
 	s.pending = make(map[string]*accountEntry)
 
-	// Compute and return state root.
 	stateRoot, err := s.computeStateRoot()
 	if err != nil {
 		return nil, err
@@ -233,8 +379,7 @@ func (s *StateDB) Commit() ([]byte, error) {
 }
 
 // computeStateRoot builds a deterministic leaf-hash Merkle root over all
-// account records in LevelDB. Leaves are sorted by key before hashing so the
-// root is identical regardless of insertion order.
+// account records in LevelDB.
 func (s *StateDB) computeStateRoot() ([]byte, error) {
 	keys, err := s.db.ListKeysWithPrefix(accountPrefix)
 	if err != nil {

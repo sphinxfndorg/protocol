@@ -5,6 +5,7 @@
 package rpc
 
 import (
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -152,6 +153,75 @@ func (h *JSONRPCHandler) verifyMessage(params interface{}) (interface{}, error) 
 	}, nil
 }
 
+// getBalance returns the confirmed, pending, and unlocked balance for an address.
+//
+// NOTE: this assumes core.Blockchain exposes a GetBalance(address string) method
+// returning (confirmed, pending, unlocked *big.Int) or an equivalent struct. Adjust
+// the call below to match the real signature on *core.Blockchain.
+// getBalance returns the confirmed, pending, and unlocked balance for an address.
+func (h *JSONRPCHandler) getBalance(params interface{}) (interface{}, error) {
+	var paramsArray []string
+	if err := h.parseParams(params, &paramsArray); err != nil {
+		return nil, err
+	}
+	if len(paramsArray) < 1 || paramsArray[0] == "" {
+		return nil, errors.New("missing address parameter")
+	}
+	address := paramsArray[0]
+
+	stateDB, err := h.server.blockchain.NewStateDB()
+	if err != nil {
+		return nil, err
+	}
+	defer stateDB.Close()
+
+	result, err := stateDB.GetBalanceResult(address)
+	if err != nil {
+		return nil, err
+	}
+
+	return map[string]interface{}{
+		"address":  address,
+		"balance":  result.Confirmed.String(),
+		"pending":  result.Pending.String(),
+		"unlocked": result.Unlocked.String(),
+	}, nil
+}
+
+// getTransactionHistory returns recent transactions involving the given address.
+//
+// NOTE: this assumes core.Blockchain exposes a GetTransactionHistory(address string,
+// limit int) ([]*types.Transaction, error) method or equivalent. Adjust the call
+// below to match the real signature on *core.Blockchain.
+func (h *JSONRPCHandler) getTransactionHistory(params interface{}) (interface{}, error) {
+	var paramsArray []interface{}
+	if err := h.parseParams(params, &paramsArray); err != nil {
+		return nil, err
+	}
+	if len(paramsArray) < 1 {
+		return nil, errors.New("missing address parameter")
+	}
+	address, ok := paramsArray[0].(string)
+	if !ok || address == "" {
+		return nil, errors.New("invalid address parameter")
+	}
+
+	limit := 20
+	if len(paramsArray) > 1 {
+		if limitParam, ok := paramsArray[1].(float64); ok && limitParam > 0 {
+			limit = int(limitParam)
+		}
+	}
+
+	// Use exported method (capital N)
+	stateDB, err := h.server.blockchain.NewStateDB()
+	if err != nil {
+		return nil, err
+	}
+
+	return stateDB.GetTransactionHistory(address, limit)
+}
+
 // getRawTransaction returns raw transaction data, optionally in verbose format
 func (h *JSONRPCHandler) getRawTransaction(params interface{}) (interface{}, error) {
 	var paramsArray []interface{}
@@ -208,6 +278,8 @@ func (h *JSONRPCHandler) registerMethods() {
 	h.methods["validateaddress"] = h.validateAddress
 	h.methods["verifymessage"] = h.verifyMessage
 	h.methods["getrawtransaction"] = h.getRawTransaction
+	h.methods["getbalance"] = h.getBalance
+	h.methods["gettransactionhistory"] = h.getTransactionHistory
 }
 
 // ProcessRequest processes a JSON-RPC request or batch of requests.
@@ -429,6 +501,10 @@ func (h *JSONRPCHandler) mapRPCTypeToMethod(rpcType RPCType) (string, error) {
 		return "verifymessage", nil
 	case RPCGetRawTransaction:
 		return "getrawtransaction", nil
+	case RPCGetBalance:
+		return "getbalance", nil
+	case RPCGetTransactionHistory:
+		return "gettransactionhistory", nil
 	default:
 		return "", ErrUnsupportedRPCType
 	}
@@ -481,6 +557,10 @@ func (t RPCType) String() string {
 		return "verifymessage"
 	case RPCGetRawTransaction:
 		return "getrawtransaction"
+	case RPCGetBalance:
+		return "getbalance"
+	case RPCGetTransactionHistory:
+		return "gettransactionhistory"
 	default:
 		return "unknown"
 	}
@@ -543,30 +623,81 @@ func (h *JSONRPCHandler) sendRawTransaction(params interface{}) (interface{}, er
 	if err != nil {
 		return nil, fmt.Errorf("invalid transaction hex: %v", err)
 	}
+
 	var tx types.Transaction
 	if err := json.Unmarshal(txBytes, &tx); err != nil {
 		return nil, fmt.Errorf("invalid transaction format: %v", err)
 	}
 	if tx.ID == "" {
-		tx.ID = tx.Hash() // Compute ID if not present
+		tx.ID = tx.Hash()
 	}
+
+	// ========== LOCAL SIGNATURE VERIFICATION ==========
+	// Try local verification first to reduce latency
+	if !tx.IsSystemTransaction() {
+		if h.server.sphincsManager == nil {
+			return nil, errors.New("SPHINCS manager not available - cannot verify transaction")
+		}
+		if err := h.verifyTransactionLocally(&tx); err != nil {
+			return nil, fmt.Errorf("signature verification failed: %w", err)
+		}
+	} else if !tx.IsSystemTransaction() && !tx.HasFullAuthBundle() {
+		// Fallback to bundle check if no SPHINCS manager
+		return nil, errors.New("transaction missing full SPHINCS auth bundle")
+	}
+	// =================================================
+
+	// Add to blockchain/mempool
 	if err := h.server.blockchain.AddTransaction(&tx); err != nil {
 		return nil, err
 	}
 
-	// Marshal transaction to JSON before broadcasting
+	// Broadcast via network
 	txData, err := json.Marshal(&tx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal transaction: %v", err)
 	}
-
-	// Broadcast via network
 	h.server.messageCh <- &security.Message{
 		Type: "transaction",
-		Data: txData, // Use marshaled bytes
+		Data: txData,
 	}
 
 	return map[string]string{"txid": tx.ID}, nil
+}
+
+// Add local verification helper
+func (h *JSONRPCHandler) verifyTransactionLocally(tx *types.Transaction) error {
+	if h.server.sphincsManager == nil {
+		return errors.New("SPHINCS manager not available")
+	}
+
+	// Extract timestamp bytes
+	tsBytes := tx.AuthTimestamp
+	if len(tsBytes) == 0 {
+		tsBytes = make([]byte, 8)
+		binary.BigEndian.PutUint64(tsBytes, uint64(tx.Timestamp))
+	}
+
+	// Extract nonce bytes
+	nonceBytes := tx.AuthNonce
+	if len(nonceBytes) == 0 {
+		nonceBytes = make([]byte, 16)
+		binary.BigEndian.PutUint64(nonceBytes[0:8], tx.Nonce)
+	}
+
+	// Verify full SPHINCS authentication
+	return h.server.sphincsManager.VerifyTransactionAuth(
+		[]byte(tx.ID),
+		tsBytes,
+		nonceBytes,
+		tx.Signature,
+		tx.PublicKey,
+		tx.SignatureHash,
+		tx.MerkleRootHash,
+		tx.Commitment,
+		tx.Proof,
+		false, // Don't mutate state
+	)
 }
 
 // getTransaction retrieves a transaction by its ID

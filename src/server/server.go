@@ -12,6 +12,9 @@ import (
 	"time"
 
 	"github.com/sphinxorg/protocol/src/core"
+	config "github.com/sphinxorg/protocol/src/core/sthincs/config"
+	key "github.com/sphinxorg/protocol/src/core/sthincs/key/backend"
+	sign "github.com/sphinxorg/protocol/src/core/sthincs/sign/backend"
 	security "github.com/sphinxorg/protocol/src/handshake"
 	"github.com/sphinxorg/protocol/src/http"
 	"github.com/sphinxorg/protocol/src/network"
@@ -46,20 +49,29 @@ func GetServer(name string) *Server {
 func NewServer(tcpAddr, wsAddr, httpAddr, p2pAddr string, seeds []string, db *leveldb.DB, readyCh chan struct{}, role network.NodeRole) *Server {
 	messageCh := make(chan *security.Message, 100)
 
-	// FIX: Pass all required parameters to NewBlockchain
 	dataDir := fmt.Sprintf("data/blockchain-%s", strings.Replace(p2pAddr, ":", "-", -1))
 	nodeID := fmt.Sprintf("node-%s", strings.Replace(p2pAddr, ":", "-", -1))
 
-	// Create a list of validators (in a real scenario, this would come from config)
-	validators := []string{nodeID} // Single validator for now
+	validators := []string{nodeID}
 
-	// ADD NETWORK TYPE PARAMETER
 	blockchain, err := core.NewBlockchain(dataDir, nodeID, validators, "devnet")
 	if err != nil {
 		log.Fatalf("Failed to create blockchain: %v", err)
 	}
 
-	rpcServer := rpc.NewServer(messageCh, blockchain)
+	// Create SPHINCS manager
+	sphincsParams, err := config.NewSTHINCSParameters() // Now works with imported config
+	if err != nil {
+		log.Fatalf("Failed to create SPHINCS params: %v", err)
+	}
+	keyManager, err := key.NewKeyManager()
+	if err != nil {
+		log.Fatalf("Failed to create key manager: %v", err)
+	}
+	sphincsMgr := sign.NewSTHINCSManager(db, keyManager, sphincsParams)
+
+	// Pass sphincsMgr to rpc.NewServer
+	rpcServer := rpc.NewServer(messageCh, blockchain, sphincsMgr)
 
 	// Validate p2pAddr format and extract port
 	parts := strings.Split(p2pAddr, ":")

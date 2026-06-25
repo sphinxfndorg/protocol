@@ -50,6 +50,9 @@ func Run() {
 		chainHeader = core.GetMainnetChainHeader()
 	}
 
+	// Add this line:
+	walletClient := NewWalletClient("")
+
 	themeToggle := widget.NewCheck("Dark Theme", func(on bool) {
 		if on {
 			myApp.Settings().SetTheme(theme.DarkTheme())
@@ -365,6 +368,11 @@ func Run() {
 				return
 			}
 
+			// Convert to nSPX (1 SPX = 10^18 nSPX)
+			amountNSPX := new(big.Int)
+			amountFloat, _ := amount.Float64()
+			amountNSPX.SetInt64(int64(amountFloat * 1e18))
+
 			validatePassphraseDialog(window, "Confirm Transaction", fmt.Sprintf("Send %.6f %s to:\n%s\n\nMemo: %s",
 				amount, chainHeader.Symbol, recipientEntry.Text, memoEntry.Text),
 				func(passphrase string) {
@@ -373,17 +381,28 @@ func Run() {
 					statusText.Refresh()
 
 					go func() {
-						// Here you would call the actual blockchain transaction
-						// For now, simulate a transaction
-						time.Sleep(2 * time.Second)
+						// Use real RPC transaction
+						txID, err := walletClient.SendTransaction(recipientEntry.Text, amountNSPX, memoEntry.Text)
 
 						fyne.Do(func() {
-							addActivity(fmt.Sprintf("Sent %.6f %s to %s", amount, chainHeader.Symbol, recipientEntry.Text[:16]))
-							statusText.Text = "✅ Transaction sent successfully!"
+							if err != nil {
+								statusText.Text = "❌ Transaction failed: " + err.Error()
+								statusText.Color = colDanger
+								statusText.Refresh()
+								dialog.ShowError(fmt.Errorf("transaction failed: %w", err), window)
+								return
+							}
+
+							addActivity(fmt.Sprintf("Sent %.6f %s to %s (tx: %s)",
+								amount, chainHeader.Symbol, recipientEntry.Text[:16], txID[:8]+"..."))
+							statusText.Text = "✅ Transaction sent! TxID: " + txID[:16] + "..."
 							statusText.Color = colAccent
 							statusText.Refresh()
+
 							dialog.ShowInformation("Transaction Sent",
-								fmt.Sprintf("Successfully sent %.6f %s to %s", amount, chainHeader.Symbol, recipientEntry.Text), window)
+								fmt.Sprintf("Successfully sent %.6f %s to %s\n\nTxID: %s",
+									amount, chainHeader.Symbol, recipientEntry.Text, txID), window)
+
 							recipientEntry.SetText("")
 							amountEntry.SetText("")
 							memoEntry.SetText("")
@@ -1710,6 +1729,7 @@ func Run() {
 		}
 
 		// ── Hero balance card ─────────────────────────────────────
+		// ── Hero balance card ─────────────────────────────────────
 		balBg := canvas.NewRectangle(colSurface2)
 		balBg.CornerRadius = 14
 		balBg.StrokeColor = colAccent
@@ -1720,7 +1740,7 @@ func Run() {
 		balLabel.TextSize = 10
 		balLabel.TextStyle = fyne.TextStyle{Monospace: true}
 
-		balValue := canvas.NewText("0.000000", colAccent)
+		balValue := canvas.NewText("Loading...", colAccent) // Changed from "0.000000"
 		balValue.TextSize = 36
 		balValue.TextStyle = fyne.TextStyle{Bold: true}
 
@@ -1735,6 +1755,28 @@ func Run() {
 			container.NewCenter(balUnit),
 		)
 		balCard := container.NewMax(balBg, container.NewPadded(balInner))
+
+		// ── Fetch balance asynchronously ──────────────────────────
+		go func() {
+			resp, err := walletClient.GetBalance("")
+			fyne.Do(func() {
+				if err != nil {
+					balValue.Text = "Error"
+					balValue.Color = colDanger
+					balValue.Refresh()
+					return
+				}
+				if resp != nil && resp.Balance != nil {
+					balanceSPX := new(big.Float).Quo(
+						new(big.Float).SetInt(resp.Balance),
+						big.NewFloat(1e18),
+					)
+					balValue.Text = balanceSPX.Text('f', 6)
+					balValue.Color = colAccent
+					balValue.Refresh()
+				}
+			})
+		}()
 
 		// ── Send button ────────────────────────────────────────────
 		sendBtn := widget.NewButtonWithIcon(fmt.Sprintf("Send %s", chainHeader.Symbol), theme.MailSendIcon(), func() {

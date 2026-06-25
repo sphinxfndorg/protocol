@@ -464,7 +464,13 @@ func ApplyGenesisState(bc *Blockchain, gs *GenesisState) error {
 
 	// Idempotency: skip if genesis was already applied.
 	if len(gs.Allocations) > 0 {
-		if stateDB.GetBalance(gs.Allocations[0].Address).Sign() > 0 {
+		// FIX: GetBalance now returns (balance, error)
+		bal, err := stateDB.GetBalance(gs.Allocations[0].Address)
+		if err != nil {
+			return fmt.Errorf("ApplyGenesisState: failed to get balance for %s: %w",
+				gs.Allocations[0].Address, err)
+		}
+		if bal.Sign() > 0 {
 			logger.Info("ApplyGenesisState: already applied, skipping")
 			return nil
 		}

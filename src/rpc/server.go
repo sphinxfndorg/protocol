@@ -11,22 +11,25 @@ import (
 	"time"
 
 	"github.com/sphinxorg/protocol/src/core"
+	sign "github.com/sphinxorg/protocol/src/core/sthincs/sign/backend"
 	security "github.com/sphinxorg/protocol/src/handshake"
 )
 
 // NewServer creates a new RPC server instance.
-func NewServer(messageCh chan *security.Message, blockchain *core.Blockchain) *Server {
+// NewServer creates a new RPC server instance with SPHINCS manager
+func NewServer(messageCh chan *security.Message, blockchain *core.Blockchain, sphincsManager *sign.STHINCSManager) *Server {
 	metrics := NewMetrics()
 	server := &Server{
-		messageCh:    messageCh,
-		metrics:      metrics,
-		blockchain:   blockchain,
-		queryManager: NewQueryManager(),
-		store:        NewKVStore(),
+		messageCh:      messageCh,
+		metrics:        metrics,
+		blockchain:     blockchain,
+		queryManager:   NewQueryManager(),
+		store:          NewKVStore(),
+		sphincsManager: sphincsManager,
 	}
 	server.handler = NewJSONRPCHandler(server)
-	server.StartGarbageCollection() // Start GC when server is created
-	go server.handleMessages()      // Start processing messages
+	server.StartGarbageCollection()
+	go server.handleMessages()
 	return server
 }
 

@@ -18,10 +18,22 @@ func NewValidator(senderAddress, recipientAddress string) *Validator {
 	}
 }
 
+// ValidateAccountSpendability checks if an account is spendable at a given height.
+// This is the account-based replacement for UTXO validation.
+func ValidateAccountSpendability(set *AccountSet, address string, height uint64) bool {
+	if set == nil {
+		return false
+	}
+	return set.IsSpendable(address, height)
+}
+
 // ValidateSpendability checks if a UTXO is spendable at a given height.
+// DEPRECATED: Use ValidateAccountSpendability instead.
 func ValidateSpendability(set *UTXOSet, txID string, index int, height uint64) bool {
-	out := Outpoint{TxID: txID, Index: index}
-	return set.IsSpendable(out, height)
+	// This function is deprecated and only kept for backward compatibility.
+	// Since we're now account-based, this always returns false.
+	// Use ValidateAccountSpendability with AccountSet instead.
+	return false
 }
 
 // Validate method checks if the provided note is valid.

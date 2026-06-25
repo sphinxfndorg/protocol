@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sphinxorg/protocol/src/consensus"
+	database "github.com/sphinxorg/protocol/src/core/state"
 	sign "github.com/sphinxorg/protocol/src/core/sthincs/sign/backend"
 	types "github.com/sphinxorg/protocol/src/core/transaction"
 	"github.com/sphinxorg/protocol/src/pool"
@@ -335,4 +336,25 @@ type ChainCheckpoint struct {
 	TotalSupply     string     `json:"total_supply"`      // circulating supply in nSPX
 	Timestamp       string     `json:"timestamp"`         // RFC3339 when checkpoint was taken
 	DistributedNSPX string     `json:"distributed_n_spx"` // total nSPX distributed
+}
+
+// accountRecord is the JSON shape stored in LevelDB for each address.
+type accountRecord struct {
+	Balance string `json:"balance"` // decimal string, nSPX
+	Nonce   uint64 `json:"nonce"`
+}
+
+// accountEntry is the in-memory mutable form used inside StateDB.
+type accountEntry struct {
+	balance *big.Int
+	nonce   uint64
+}
+
+// StateDB is an in-memory account-state cache backed by *database.DB.
+type StateDB struct {
+	mu          sync.RWMutex
+	db          *database.DB             // the LevelDB wrapper from src/core/state/database.go
+	pending     map[string]*accountEntry // dirty accounts not yet written to disk
+	totalSupply *big.Int                 // circulating supply in nSPX
+	blockchain  *Blockchain              // reference to blockchain for mempool access
 }

@@ -8,6 +8,9 @@ import (
 	"encoding/binary"
 	"math/big"
 	"sort"
+
+	logger "github.com/sphinxorg/protocol/src/log"
+	denom "github.com/sphinxorg/protocol/src/params/denom"
 )
 
 // sips0014 https://github.com/sphinxorg/SIPS/blob/main/.github/workflows/sips0014/sips0014.md
@@ -32,6 +35,8 @@ func NewStakeWeightedSelector(vs *ValidatorSet) *StakeWeightedSelector {
 //
 // Because steps 1-4 are fully deterministic given the same inputs, every node
 // that calls SelectProposer with the same epoch and seed returns the same winner.
+// SelectProposer deterministically selects exactly one block proposer for the
+// given epoch using stake-weighted random selection seeded by the RANDAO output.
 func (s *StakeWeightedSelector) SelectProposer(epoch uint64, seed [32]byte) *StakedValidator {
 	// Gather all validators that are active in the given epoch.
 	active := s.validatorSet.GetActiveValidators(epoch)
@@ -50,8 +55,22 @@ func (s *StakeWeightedSelector) SelectProposer(epoch uint64, seed [32]byte) *Sta
 
 	// Sum the stake of all active validators to define the full stake-space range.
 	totalStake := s.validatorSet.GetTotalStake()
+
+	// ========== DEBUG: Log all validator stakes ==========
+	logger.Info("🔍 SelectProposer: epoch=%d, totalStake=%s SPX, validators=%d",
+		epoch,
+		new(big.Int).Div(totalStake, big.NewInt(denom.SPX)).String(),
+		len(active))
+	for _, v := range active {
+		stakeSPX := new(big.Int).Div(v.StakeAmount, big.NewInt(denom.SPX))
+		logger.Info("  Validator %s: stake=%d SPX", v.ID, stakeSPX.Uint64())
+	}
+	// =============================================
+
+	// Check if total stake is zero or nil - SINGLE CHECK
 	if totalStake == nil || totalStake.Sign() == 0 {
 		// No stake recorded — fall back to the first validator in sorted order.
+		logger.Warn("⚠️ Total stake is zero! Using round-robin fallback to first validator: %s", active[0].ID)
 		return active[0]
 	}
 

@@ -37,4 +37,6 @@ const (
 	RPCValidateAddress
 	RPCVerifyMessage
 	RPCGetRawTransaction
+	RPCGetBalance
+	RPCGetTransactionHistory
 )

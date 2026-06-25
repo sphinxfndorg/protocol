@@ -47,7 +47,11 @@ func (bc *Blockchain) WriteChainCheckpoint() error {
 		return fmt.Errorf("WriteChainCheckpoint: %w", err)
 	}
 
-	vaultBal := stateDB.GetBalance(GenesisVaultAddress)
+	// FIX: GetBalance now returns (balance, error)
+	vaultBal, err := stateDB.GetBalance(GenesisVaultAddress)
+	if err != nil {
+		return fmt.Errorf("WriteChainCheckpoint: failed to get vault balance: %w", err)
+	}
 	totalSupply := stateDB.GetTotalSupply()
 
 	// ── FIX: derive phase from actual chain params, not a hardcoded constant ──

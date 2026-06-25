@@ -32,6 +32,8 @@ import (
 	logger "github.com/sphinxorg/protocol/src/log"
 	"github.com/sphinxorg/protocol/src/network"
 	"github.com/sphinxorg/protocol/src/params/commit"
+	denom "github.com/sphinxorg/protocol/src/params/denom"
+	"github.com/sphinxorg/protocol/src/pool"
 	"github.com/sphinxorg/protocol/src/state"
 	"github.com/syndtr/goleveldb/leveldb"
 )
@@ -295,6 +297,79 @@ func StartNode(
 		}
 	}
 
+	// ========== CRITICAL FIX: Map validator IDs to genesis allocation addresses ==========
+	logger.Info("=== MAPPING VALIDATOR IDs TO GENESIS ALLOCATION ADDRESSES ===")
+
+	// Map validator ID to genesis allocation address
+	// The validator IDs are Node-127.0.0.1:32307, Node-127.0.0.1:32308, Node-127.0.0.1:32309
+	// These map to the genesis allocation addresses from allocations.go
+	validatorAddressMap := map[string]string{
+		"Node-127.0.0.1:32307": "1000000000000000000000000000000000000001", // Founder (10M SPX)
+		"Node-127.0.0.1:32308": "2000000000000000000000000000000000000001", // CoFounder (7M SPX)
+		"Node-127.0.0.1:32309": "3000000000000000000000000000000000000001", // Development (30M SPX)
+	}
+
+	// Open StateDB to read actual balances
+	stateDB, err := bc.NewStateDB()
+	if err != nil {
+		logger.Error("Failed to open StateDB for stake reading: %v", err)
+	} else {
+		vs := cons.GetValidatorSet()
+		if vs != nil {
+			minStakeSPX := vs.GetMinStakeSPX()
+			totalBalanceSPX := uint64(0)
+
+			for _, vid := range validatorIDs {
+				// Map validator ID to genesis address
+				var address string
+				var ok bool
+				if address, ok = validatorAddressMap[vid]; !ok {
+					// If no mapping found, use the validator ID as fallback
+					address = vid
+					logger.Warn("No mapping found for validator %s, using ID as address", vid)
+				} else {
+					logger.Info("Validator %s mapped to genesis address %s", vid, address)
+				}
+
+				// Read actual balance from StateDB using the mapped address
+				balanceNSPX, err := stateDB.GetBalance(address)
+				var stakeSPX uint64
+
+				if err != nil {
+					logger.Warn("Failed to get balance for address %s (validator %s): %v", address, vid, err)
+					stakeSPX = minStakeSPX
+				} else if balanceNSPX != nil && balanceNSPX.Cmp(big.NewInt(0)) > 0 {
+					// Convert from nSPX to SPX
+					stakeSPX = uint64(new(big.Int).Div(balanceNSPX, big.NewInt(denom.SPX)).Int64())
+					logger.Info("Validator %s (address %s) has balance %d SPX from genesis allocation",
+						vid, address, stakeSPX)
+				} else {
+					stakeSPX = minStakeSPX
+					logger.Info("Validator %s (address %s) has zero balance, using minimum %d SPX",
+						vid, address, stakeSPX)
+				}
+
+				// Set stake from actual balance using the validator ID (not the address)
+				if err := vs.AddValidator(vid, stakeSPX); err != nil {
+					logger.Warn("Failed to set stake for validator %s: %v", vid, err)
+				} else {
+					logger.Info("✅ Validator %s stake set to %d SPX (from genesis allocation)", vid, stakeSPX)
+					totalBalanceSPX += stakeSPX
+				}
+			}
+
+			totalStake := vs.GetTotalStake()
+			totalSPX := new(big.Int).Div(totalStake, big.NewInt(denom.SPX))
+			logger.Info("📊 Total stake from genesis allocations: %s SPX (sum: %d SPX)",
+				totalSPX.String(), totalBalanceSPX)
+
+			if totalStake.Sign() == 0 {
+				logger.Error("⚠️ CRITICAL: Total stake is 0! This will cause consensus failure!")
+			}
+		}
+	}
+	// ==============================================================
+
 	bc.SetConsensusEngine(cons)
 	bc.SetConsensus(cons)
 	cons.SetTimeout(1 * time.Hour)
@@ -351,7 +426,41 @@ func StartNode(
 			logger.Warn("Failed to add genesis tx to node %d: %v", nodeIndex, err)
 		}
 	}
+	// ========== FIX: Add genesis transactions with nil check ==========
 	logger.Info("✅ Added %d genesis transactions to node %d mempool", len(genesisTransactions), nodeIndex)
+
+	// First, ensure mempool is initialized
+	if bc.GetMempool() == nil {
+		logger.Warn("⚠️ Mempool is nil! Initializing mempool before adding genesis transactions...")
+		// Initialize mempool with default config
+		mempoolConfig := &pool.MempoolConfig{
+			MaxSize:           10000,
+			MaxBytes:          100 * 1024 * 1024,
+			MaxTxSize:         100 * 1024,
+			BlockGasLimit:     big.NewInt(10000000),
+			ValidationTimeout: 30 * time.Second,
+			ExpiryTime:        24 * time.Hour,
+			MaxBroadcastSize:  5000,
+			MaxPendingSize:    5000,
+		}
+		// Pass bc as the state provider (implements BlockchainStateProvider)
+		mempool := pool.NewMempool(mempoolConfig, bc)
+		bc.SetMempool(mempool)
+		logger.Info("✅ Mempool initialized with default config")
+	}
+
+	// Now add transactions - but only if mempool exists
+	if bc.GetMempool() != nil {
+		for _, tx := range genesisTransactions {
+			if err := bc.AddTransaction(tx); err != nil {
+				// Don't fail on genesis transaction errors - they're just for mempool seeding
+				logger.Warn("Failed to add genesis tx to node %d: %v", nodeIndex, err)
+			}
+		}
+	} else {
+		logger.Warn("⚠️ Mempool still nil after initialization, skipping genesis transaction broadcast")
+	}
+	// ============================================================
 
 	// SECTION 11 — TCP listener
 	ctx, cancelCtx := context.WithCancel(context.Background())
@@ -424,22 +533,21 @@ func StartNode(
 	}
 	logger.Info("✅ Key serialization verified")
 
-	// ========== CRITICAL FIX: Cross-register ALL validators ==========
-	logger.Info("=== CROSS-REGISTERING ALL VALIDATORS ===")
-	if vs := cons.GetValidatorSet(); vs != nil {
-		minSPX := new(big.Int).Div(minStakeAmount, big.NewInt(1e18)).Uint64()
-		for _, vid := range validatorIDs {
-			if vid == currentNodeID {
-				continue
-			}
-			if err := vs.AddValidator(vid, minSPX); err != nil {
-				logger.Warn("Failed to add validator %s: %v", vid, err)
-			} else {
-				logger.Info("✅ Registered validator %s with %d SPX stake", vid, minSPX)
-			}
-		}
-	}
-	logger.Info("✅ All %d validators cross-registered", totalNodes)
+	// NOTE: a "cross-register all validators" step used to run here, calling
+	// vs.AddValidator(vid, minSPX) for every peer after key exchange. It has
+	// been removed: the genesis-allocation mapping loop above (see "===
+	// MAPPING VALIDATOR IDs TO GENESIS ALLOCATION ADDRESSES ===") already
+	// registers every validator in validatorIDs — including peers, not just
+	// self — with its correct stake before key exchange happens. Re-running
+	// AddValidator(vid, minSPX) here unconditionally overwrote those correct
+	// stakes (10M/7M/30M SPX) back down to the 32 SPX minimum for every
+	// validator except currentNodeID, which meant each node's local view of
+	// the validator set only had ITS OWN stake correct and every peer at the
+	// floor. That made each node elect itself as leader for view 0 (since it
+	// always looked like the highest-stake validator from its own point of
+	// view), producing 3 different "elected leaders" for the same view and
+	// causing every peer's proposal to be rejected as invalid.
+	logger.Info("✅ All %d validators already registered with genesis-allocation stakes", totalNodes)
 
 	// ========== CRITICAL FIX: Wait for transaction propagation ==========
 	if totalNodes > 1 && nodeIndex == 0 {

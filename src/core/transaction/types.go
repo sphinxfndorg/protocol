@@ -210,3 +210,20 @@ type TPSMonitor struct {
 
 	firstBlockRecorded atomic.Bool
 }
+
+// AccountState represents the state of a single account.
+type AccountState struct {
+	Address  string `json:"address"`
+	Balance  uint64 `json:"balance"`  // Balance in nSPX
+	Nonce    uint64 `json:"nonce"`    // Transaction counter for replay protection
+	Coinbase bool   `json:"coinbase"` // Whether this is a coinbase account (mining rewards)
+	Height   uint64 `json:"height"`   // Block height when this account was created/updated
+	Spent    bool   `json:"spent"`    // Whether the account has been fully spent (for special accounts)
+}
+
+// AccountSet manages all accounts in the system.
+type AccountSet struct {
+	mu          sync.RWMutex
+	accounts    map[string]*AccountState // address -> account state
+	totalSupply *big.Int                 // circulating supply in nSPX
+}

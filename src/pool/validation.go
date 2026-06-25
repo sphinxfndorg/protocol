@@ -97,26 +97,29 @@ func (mp *Mempool) verifyTransactionSignature(tx *types.Transaction) error {
 	if !tx.HasFullAuthBundle() {
 		return fmt.Errorf("missing full SPHINCS transaction auth bundle")
 	}
-	if mp.sphincsManager == nil {
-		return fmt.Errorf("missing STHINCS manager for full transaction authentication")
-	}
-	if err := mp.sphincsManager.VerifyTransactionAuth(
-		[]byte(tx.ID),
-		tsBytes,
-		nonceBytes,
-		tx.Signature,
-		pkBytes,
-		tx.SignatureHash,
-		tx.MerkleRootHash,
-		tx.Commitment,
-		tx.Proof,
-		false, // mempool validation must not mutate canonical replay evidence
-	); err != nil {
-		return fmt.Errorf("full SPHINCS transaction authentication failed: %w", err)
+
+	// ========== 1. SPHINCS Manager Verification ==========
+	if mp.sphincsManager != nil {
+		if err := mp.sphincsManager.VerifyTransactionAuth(
+			[]byte(tx.ID),
+			tsBytes,
+			nonceBytes,
+			tx.Signature,
+			pkBytes,
+			tx.SignatureHash,
+			tx.MerkleRootHash,
+			tx.Commitment,
+			tx.Proof,
+			false,
+		); err != nil {
+			return fmt.Errorf("SPHINCS manager verification failed: %w", err)
+		}
+		logger.Debug("SPHINCS manager verification passed: %s", tx.ID)
+	} else {
+		logger.Warn("SPHINCS manager not available, falling back to SVM verification")
 	}
 
-	logger.Debug("Full SPHINCS transaction authentication verified successfully: %s", tx.ID)
-	return nil
+	// ========== 2. SVM Verification ==========
 
 	// Build the message that was signed
 	// Format: timestamp(8) || nonce(16) || txID
@@ -235,20 +238,20 @@ func (mp *Mempool) verifyTransactionSignature(tx *types.Transaction) error {
 }
 
 // verifyTransactionNonce uses SVM to validate transaction nonce.
-// Nonce is a sequential counter that prevents transaction replay attacks
+// Nonce must be greater than the last used nonce (prevents replay attacks)
 func (mp *Mempool) verifyTransactionNonce(tx *types.Transaction, currentNonce uint64) error {
 	bc := []byte{}
 
-	// Push the expected current nonce value onto the stack
-	bc = append(bc, byte(svm.PUSH8))
-	bc = append(bc, uint64ToBytesPool(currentNonce)...)
-
-	// Push the transaction's nonce value onto the stack
+	// Push the transaction's nonce value onto the stack (first)
 	bc = append(bc, byte(svm.PUSH8))
 	bc = append(bc, uint64ToBytesPool(tx.Nonce)...)
 
-	// Compare the two nonce values (EQ pushes 1 if equal, 0 otherwise)
-	bc = append(bc, byte(svm.EQ))
+	// Push the current/last nonce value onto the stack (second)
+	bc = append(bc, byte(svm.PUSH8))
+	bc = append(bc, uint64ToBytesPool(currentNonce)...)
+
+	// Check if tx.Nonce > currentNonce (GT pushes 1 if true, 0 otherwise)
+	bc = append(bc, byte(svm.GT))
 
 	// Create and run the VM with the bytecode
 	vm := vmachine.NewVM(bc)
@@ -256,15 +259,15 @@ func (mp *Mempool) verifyTransactionNonce(tx *types.Transaction, currentNonce ui
 		return fmt.Errorf("VM nonce validation failed: %w", err)
 	}
 
-	// Get the result (should be 1 if nonces match)
+	// Get the result (should be 1 if tx.Nonce > currentNonce)
 	result, err := vm.GetResult()
 	if err != nil {
 		return fmt.Errorf("VM result error: %w", err)
 	}
 
-	// Verify nonce matches expected value
+	// Verify nonce is greater than current nonce
 	if result != 1 {
-		return fmt.Errorf("invalid nonce: expected %d, got %d", currentNonce, tx.Nonce)
+		return fmt.Errorf("invalid nonce: %d must be > %d", tx.Nonce, currentNonce)
 	}
 	return nil
 }
@@ -428,10 +431,26 @@ func (mp *Mempool) verifyTransactionReplayProtection(tx *types.Transaction, last
 }
 
 // getLastTransactionTimestamp retrieves the timestamp of the last transaction from a sender
-// This is a stub method that would query the blockchain state in production
 func (mp *Mempool) getLastTransactionTimestamp(sender string) int64 {
-	_ = sender // Placeholder - would fetch from state DB
-	return 0
+	if mp.stateProvider == nil {
+		logger.Warn("StateProvider not set, returning default timestamp 0")
+		return 0
+	}
+
+	stateDB, err := mp.stateProvider.NewStateDB()
+	if err != nil {
+		logger.Error("Failed to create StateDB for timestamp query: %v", err)
+		return 0
+	}
+	defer stateDB.Close()
+
+	timestamp, err := stateDB.GetLastTransactionTimestamp(sender)
+	if err != nil {
+		// If no previous transactions, return 0 (skip replay protection)
+		return 0
+	}
+
+	return timestamp
 }
 
 // validationProcessor is a background goroutine that processes transactions for validation
@@ -602,17 +621,49 @@ func (mp *Mempool) performValidation(tx *types.Transaction) error {
 
 // getSenderNonce retrieves the current nonce for a given sender address
 // This is a stub method that would query the blockchain state in production
+// getSenderNonce retrieves the current nonce for a given sender address
+// getSenderNonce retrieves the current nonce for a given sender address
 func (mp *Mempool) getSenderNonce(sender string) uint64 {
-	_ = sender // Placeholder - would fetch from state DB
-	return 0
+	if mp.stateProvider == nil {
+		logger.Warn("StateProvider not set, returning default nonce 0")
+		return 0
+	}
+
+	stateDB, err := mp.stateProvider.NewStateDB()
+	if err != nil {
+		logger.Error("Failed to create StateDB for nonce query: %v", err)
+		return 0
+	}
+	defer stateDB.Close()
+
+	nonce, err := stateDB.GetNonce(sender)
+	if err != nil {
+		return 0 // ← Returns 0 for new accounts
+	}
+	return nonce
 }
 
 // getSenderBalance retrieves the current balance for a given sender address
-// This is a stub method that would query the blockchain state in production
 func (mp *Mempool) getSenderBalance(sender string) *big.Int {
-	_ = sender // Placeholder - would fetch from state DB
-	// Return a large default balance for testing/stub purposes
-	return new(big.Int).SetUint64(1000000000000000000)
+	if mp.stateProvider == nil {
+		logger.Warn("StateProvider not set, returning default balance 0")
+		return big.NewInt(0)
+	}
+
+	stateDB, err := mp.stateProvider.NewStateDB()
+	if err != nil {
+		logger.Error("Failed to create StateDB for balance query: %v", err)
+		return big.NewInt(0)
+	}
+	defer stateDB.Close()
+
+	balance, err := stateDB.GetBalance(sender)
+	if err != nil {
+		logger.Error("Failed to get balance for %s: %v", sender, err)
+		return big.NewInt(0)
+	}
+
+	return balance
 }
 
 // getMinimumGasPrice returns the minimum acceptable gas price for transactions

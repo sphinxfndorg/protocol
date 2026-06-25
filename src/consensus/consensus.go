@@ -21,9 +21,42 @@ import (
 	"golang.org/x/crypto/sha3"
 )
 
-// Workflow:  ProposeBlock → processProposal → processPrepareVote → processVote → commitBlock → CommitBlock → StoreBlock → storeBlockToDisk.
+// ProposeBlock
+//   ├─ signs block, builds Proposal, signs Proposal
+//   ├─ spawns goroutine → processProposal(own proposal)   // leader processes itself
+//   └─ broadcastProposal()                                 // sends to peers
+//
+//   [peer side]
+//   HandleProposal → proposalCh → processProposal
+//        ├─ deserialize/validate block, verify signatures
+//        ├─ re-derive electedLeaderID via selector.SelectProposer (RANDAO seed)
+//        ├─ phase = PhasePrePrepared
+//        ├─ sendPrepareVote()  → broadcasts own Vote (type: prepare)
+//        └─ tryEnterPreparedPhase()   ◄── side door #1
+//
+//   HandlePrepareVote → prepareCh → processPrepareVote
+//        ├─ store vote, accumulate stake in weightedPrepareVotes
+//        └─ tryEnterPreparedPhase()   ◄── side door #2 (same function, called again)
+//
+//        tryEnterPreparedPhase (idempotent, runs from either caller):
+//            requires: hasPrepareQuorum() AND phase==PhasePrePrepared AND preparedBlock set
+//            ├─ phase = PhasePrepared
+//            ├─ lockedBlock = preparedBlock
+//            └─ voteForBlock()  → broadcasts own Vote (type: commit)
+//
+//   HandleVote → voteCh → processVote
+//        ├─ store vote, accumulate stake in weightedCommitVotes
+//        └─ if hasQuorum():
+//              ├─ phase = PhaseCommitted
+//              ├─ attach Attestations to block body
+//              └─ commitBlock(block)
+//
+//   commitBlock
+//        ├─ blockChain.CommitBlock(block)   ← interface call, impl not in these files
+//        ├─ onCommit callback
+//        ├─ reset all round state, currentView++
+//        └─ goroutine: UpdateLeaderStatus() for next round
 
-// NewConsensus creates a new consensus instance with context
 // NewConsensus creates a new consensus instance with context
 func NewConsensus(
 	nodeID string,
@@ -317,50 +350,56 @@ func (c *Consensus) UpdateLeaderStatus() {
 }
 
 // updateLeaderStatus is the private implementation.
+//
+// SLOT PINNING — why we use currentView instead of wall-clock slot:
+// wall-clock slots advance every 12 s.  If two nodes call UpdateLeaderStatus
+// even milliseconds apart and they straddle a slot boundary, each sees a
+// different slot → different RANDAO seed → different winner → the follower
+// rejects every proposal.  Using currentView as the slot index is safe because
+// every node that has committed the same blocks is at the same view number,
+// so they all derive the same seed and elect the same leader regardless of
+// when exactly they call this function.
 func (c *Consensus) updateLeaderStatus() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Fall back to round-robin if stake-weighted selection is disabled
+	// Fall back to round-robin if stake-weighted selection is disabled.
 	if !c.useStakeWeighted {
 		c.updateLeaderStatusRoundRobin()
 		return
 	}
 
-	// Get current slot and epoch from time converter
-	currentSlot := c.timeConverter.CurrentSlot()
-	currentEpoch := currentSlot / SlotsPerEpoch
+	// PIN: use currentView as the canonical slot for this round.
+	viewSlot := c.currentView
+	viewEpoch := viewSlot / SlotsPerEpoch
 
-	// Handle epoch transition if we've moved to a new epoch
-	if currentEpoch > c.currentEpoch {
-		c.onEpochTransition(currentEpoch)
+	// Handle epoch transition if we've moved to a new epoch.
+	if viewEpoch > c.currentEpoch {
+		c.onEpochTransition(viewEpoch)
 	}
 
-	// Get RANDAO seed for current slot and select proposer
-	seed := c.randao.GetSeed(currentSlot)
-	selected := c.selector.SelectProposer(currentEpoch, seed)
+	// Derive seed and run proposer selection.
+	seed := c.randao.GetSeed(viewSlot)
+	selected := c.selector.SelectProposer(viewEpoch, seed)
 
-	// Handle case where no validator was selected
 	if selected == nil {
 		c.isLeader = false
 		c.electedLeaderID = ""
 		c.electedSlot = 0
-		logger.Warn("No validator selected for slot %d", currentSlot)
+		logger.Warn("No validator selected for view-slot %d", viewSlot)
 		return
 	}
 
-	// Store the elected leader information
 	c.electedLeaderID = selected.ID
-	c.electedSlot = currentSlot // Store the slot used for election
+	c.electedSlot = viewSlot // carries the view number, not wall-clock
 	c.isLeader = (selected.ID == c.nodeID)
 
-	// Log selection status with appropriate formatting
 	if c.isLeader {
-		logger.Info("✅ Node %s selected as proposer for slot %d with stake %.2f SPX",
-			c.nodeID, currentSlot, selected.GetStakeInSPX())
+		logger.Info("✅ Node %s elected proposer for view %d (stake %.2f SPX)",
+			c.nodeID, viewSlot, selected.GetStakeInSPX())
 	} else {
-		logger.Info("   Node %s NOT selected for slot %d (selected: %s with %.2f SPX)",
-			c.nodeID, currentSlot, selected.ID, selected.GetStakeInSPX())
+		logger.Info("   Node %s NOT proposer for view %d (elected: %s, stake %.2f SPX)",
+			c.nodeID, viewSlot, selected.ID, selected.GetStakeInSPX())
 	}
 }
 
@@ -393,11 +432,10 @@ func (c *Consensus) ProposeBlock(block Block) error {
 	}
 
 	// Use the slot from election time
-	proposalSlot := c.electedSlot
-	if proposalSlot == 0 {
-		proposalSlot = c.timeConverter.CurrentSlot()
-		logger.Warn("⚠️ electedSlot was 0, using current slot %d", proposalSlot)
-	}
+	// Always use currentView as the canonical seed index
+	proposalSlot := c.currentView
+	logger.Info("📝 Using view %d as proposal slot (view=%d, height=%d)",
+		proposalSlot, c.currentView, block.GetHeight())
 
 	// Get the concrete block for serialization
 	var concreteBlock interface{}
@@ -530,6 +568,15 @@ func (c *Consensus) GetCurrentHeight() uint64 {
 func (c *Consensus) shouldPreventViewChange() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	// Block view change if a proposal is currently being validated.
+	// Without this, the view timer can fire (and advance currentView)
+	// while processProposal is still mid-verification — e.g. waiting on
+	// slow SPHINCS+ signature checks — causing that proposal to be
+	// rejected as stale the instant verification completes, even though
+	// the leader was actively making progress.
+	if c.proposalInFlight {
+		return true
+	}
 	// Block view change if we're in prepare phases
 	if c.phase == PhasePrePrepared || c.phase == PhasePrepared {
 		return true
@@ -542,14 +589,19 @@ func (c *Consensus) shouldPreventViewChange() bool {
 }
 
 // consensusLoop is the main loop that manages view change timeouts
+// consensusLoop is the main loop that manages view change timeouts
 func (c *Consensus) consensusLoop() {
-	// Create timer for view change timeout
-	viewTimer := time.NewTimer(c.timeout)
-	defer viewTimer.Stop() // Ensure timer is stopped on exit
+	// Create timer for view change timeout - use a reasonable timeout
+	timeout := c.timeout
+	if timeout > 30*time.Second {
+		timeout = 10 * time.Second // Cap at 10 seconds for responsiveness
+	}
+	viewTimer := time.NewTimer(timeout)
+	defer viewTimer.Stop()
 
 	// Create ticker for cleaning up stale signatures (every 30 seconds)
 	cleanupTicker := time.NewTicker(30 * time.Second)
-	defer cleanupTicker.Stop() // Ensure ticker is stopped on exit
+	defer cleanupTicker.Stop()
 
 	for {
 		select {
@@ -559,36 +611,31 @@ func (c *Consensus) consensusLoop() {
 				continue
 			}
 
-			c.mu.RLock()
-			currentHeight := c.currentHeight
-			c.mu.RUnlock()
-
-			if currentHeight == 0 {
-				viewTimer.Reset(30 * time.Second)
-				continue
-			}
-
-			// NEW: also skip view change if the chain has already advanced past height 0
-			// (meaning consensus already succeeded for this round)
+			// Check if chain has advanced since our last snapshot.
 			if c.blockChain != nil {
-				chainHeight := c.blockChain.GetLatestBlock()
-				if chainHeight != nil && chainHeight.GetHeight() > currentHeight {
-					// Chain advanced — suppress view change, just update our height
+				c.mu.RLock()
+				currentHeight := c.currentHeight
+				c.mu.RUnlock()
+
+				chainBlock := c.blockChain.GetLatestBlock()
+				if chainBlock != nil && chainBlock.GetHeight() > currentHeight {
 					c.mu.Lock()
-					c.currentHeight = chainHeight.GetHeight()
+					c.currentHeight = chainBlock.GetHeight()
 					c.mu.Unlock()
-					viewTimer.Reset(c.timeout)
+					viewTimer.Reset(10 * time.Second)
 					continue
 				}
 			}
 
+			// No new block within the timeout window — trigger view change.
+			logger.Info("⏰ No new blocks for %v, checking view change...", timeout)
 			c.startViewChange()
-			viewTimer.Reset(c.timeout)
+			viewTimer.Reset(10 * time.Second)
 
 		case <-cleanupTicker.C:
-			c.CleanupStaleSignatures() // Clean up stale signatures
+			c.CleanupStaleSignatures()
 
-		case <-c.ctx.Done(): // Consensus stopping
+		case <-c.ctx.Done():
 			logger.Info("Consensus loop stopped for node %s", c.nodeID)
 			return
 		}
@@ -742,6 +789,17 @@ func (c *Consensus) updateLeaderStatusRoundRobin() {
 func (c *Consensus) processProposal(proposal *Proposal) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	// Mark this proposal as in-flight for the entire duration of validation
+	// (deserialization, block validation, SPHINCS+ signature verification).
+	// shouldPreventViewChange checks this so the view-change timer can't
+	// fire mid-verification and increment currentView out from under a
+	// proposal that hasn't been accepted/rejected yet. Using defer here
+	// guarantees the flag clears on every one of this function's return
+	// points (including the natural fall-through at the end), without
+	// having to touch each individual return statement below.
+	c.proposalInFlight = true
+	defer func() { c.proposalInFlight = false }()
 
 	// ========== FIX: Check if proposal.Block is nil FIRST ==========
 	if proposal.Block == nil && len(proposal.BlockData) > 0 {
@@ -958,16 +1016,17 @@ func (c *Consensus) processProposal(proposal *Proposal) {
 		return
 	}
 
-	// Handle view advancement if proposal is for a newer view
+	// Handle view advancement if proposal is for a newer view.
 	if proposal.View > c.currentView {
 		logger.Info("🔄 Advancing view from %d to %d", c.currentView, proposal.View)
 		c.currentView = proposal.View
 		c.resetConsensusState()
-		// Re-run so electedLeaderID is refreshed for the new view
-		c.updateLeaderStatus()
+		// Do NOT call updateLeaderStatus() here — it would deadlock because
+		// processProposal already holds c.mu.  The re-derive block below
+		// (using proposal.SlotNumber == proposal.View) handles the election.
 	}
 
-	// Verify block height matches expected next height
+	// Verify block height matches expected next height.
 	currentHeight := c.blockChain.GetLatestBlock().GetHeight()
 	if proposal.Block.GetHeight() != currentHeight+1 {
 		logger.Warn("❌ Invalid block height: expected %d, got %d",
@@ -975,15 +1034,17 @@ func (c *Consensus) processProposal(proposal *Proposal) {
 		return
 	}
 
-	// ── KEY FIX: Re-derive electedLeaderID from the proposal's own slot ──────
+	// Re-derive electedLeaderID from the proposal's SlotNumber.
+	// The leader sets SlotNumber = currentView (view-pinned slot), so every
+	// follower that applies the same seed to SelectProposer gets the same winner.
 	if proposal.SlotNumber > 0 {
 		slotEpoch := proposal.SlotNumber / SlotsPerEpoch
 		seed := c.randao.GetSeed(proposal.SlotNumber)
 		selected := c.selector.SelectProposer(slotEpoch, seed)
 		if selected != nil {
 			c.electedLeaderID = selected.ID
-			logger.Info("🔄 Follower re-derived electedLeaderID=%s for slot %d (epoch %d)",
-				c.electedLeaderID, proposal.SlotNumber, slotEpoch)
+			logger.Info("🔄 Follower re-derived electedLeaderID=%s for view-slot %d",
+				c.electedLeaderID, proposal.SlotNumber)
 		} else {
 			logger.Warn("⚠️ SelectProposer returned nil for slot %d, trusting signed proposal", proposal.SlotNumber)
 			c.electedLeaderID = proposal.ProposerID
@@ -992,7 +1053,13 @@ func (c *Consensus) processProposal(proposal *Proposal) {
 		logger.Warn("⚠️ Proposal has no SlotNumber, using embedded ElectedLeaderID=%s", proposal.ElectedLeaderID)
 		c.electedLeaderID = proposal.ElectedLeaderID
 	} else {
-		c.updateLeaderStatus()
+		// SlotNumber and ElectedLeaderID both absent — fall back to view-pinned election.
+		viewSlot := c.currentView
+		viewEpoch := viewSlot / SlotsPerEpoch
+		seed := c.randao.GetSeed(viewSlot)
+		if sel := c.selector.SelectProposer(viewEpoch, seed); sel != nil {
+			c.electedLeaderID = sel.ID
+		}
 	}
 
 	// Validate that the proposer is the legitimate leader
@@ -1044,6 +1111,16 @@ func (c *Consensus) processProposal(proposal *Proposal) {
 	} else {
 		logger.Info("👑 [%s] LEADER: Already sent prepare vote for own block", c.nodeID)
 	}
+
+	// ========== FIX: catch quorum that arrived before this proposal ==========
+	// proposalCh and prepareCh are drained by independent goroutines
+	// (handleProposals / handlePrepareVotes), so peer PREPARE votes can be
+	// processed by processPrepareVote() before this node's own proposal has
+	// been processed here (and thus before c.preparedBlock was set). Without
+	// this call, that ordering silently drops the PrePrepared->Prepared
+	// transition forever, leaving the node stuck and never broadcasting its
+	// own commit vote. See tryEnterPreparedPhase for full details.
+	c.tryEnterPreparedPhase(proposal.Block.GetHash(), proposal.View)
 }
 
 // CacheMerkleRoot stores a merkle root in cache for quick access
@@ -1137,50 +1214,88 @@ func (c *Consensus) processPrepareVote(vote *Vote) {
 	logger.Info("📊 Prepare vote received: node=%s, from=%s, block=%s, votes=%d/%d, phase=%v, prepared=%v",
 		c.nodeID, vote.VoterID, vote.BlockHash, totalVotes, quorumSize, c.phase, c.preparedBlock != nil)
 
-	// Check if we've achieved quorum for this block
+	// Check if we've achieved quorum for this block. The actual
+	// PrePrepared -> Prepared transition and commit-vote broadcast are
+	// handled by tryEnterPreparedPhase (see its doc comment for why that
+	// logic needs to live in one place callable from two sites).
 	if c.hasPrepareQuorum(vote.BlockHash) {
 		logger.Info("🎉 PREPARE QUORUM ACHIEVED for block %s at view %d", vote.BlockHash, vote.View)
+	}
+	c.tryEnterPreparedPhase(vote.BlockHash, vote.View)
+}
 
-		// Verify we have a prepared block for this hash
-		if c.preparedBlock == nil || c.preparedBlock.GetHash() != vote.BlockHash {
-			logger.Warn("❌ No prepared block found for hash %s (have: %v)", vote.BlockHash, c.preparedBlock != nil)
-			if c.preparedBlock != nil {
-				logger.Warn("   Current prepared block hash: %s", c.preparedBlock.GetHash())
-			}
-			return
-		}
+// tryEnterPreparedPhase performs the PrePrepared -> Prepared transition and
+// broadcasts this node's own commit vote, once ALL of the following hold:
+//   - prepare quorum has been reached for blockHash, and
+//   - c.phase is still PhasePrePrepared (i.e. we haven't already moved on), and
+//   - this node has a matching preparedBlock for that hash.
+//
+// MUST be called with c.mu already held (no internal locking). It is safe
+// (and intended) to call this speculatively/repeatedly from multiple call
+// sites — it is a no-op until every precondition holds, and the c.phase
+// guard makes the actual transition idempotent.
+//
+// Why two call sites are required:
+// proposalCh and prepareCh are drained by two independent goroutines
+// (handleProposals / handlePrepareVotes) with no ordering guarantee between
+// them. A peer's PREPARE vote can therefore complete quorum — via
+// processPrepareVote() — before this node's own processProposal() has run
+// and set c.preparedBlock. Previously, the quorum check lived only inside
+// processPrepareVote and simply gave up if preparedBlock wasn't set yet:
+//
+//	if c.preparedBlock == nil || ... { logger.Warn(...); return }
+//
+// That discarded the quorum event permanently — nothing else ever re-checked
+// it once the last needed vote had already been processed — leaving the
+// node stuck in PhasePrePrepared forever, with no commit vote ever sent.
+// That single missing commit vote is enough to stall the *entire* network,
+// since every other node then sits at votes=N-1/N waiting on it and times
+// out every round. Calling this same helper from both processProposal and
+// processPrepareVote closes that race: whichever of {the proposal, the
+// quorum-completing vote} arrives second is the one that completes it.
+func (c *Consensus) tryEnterPreparedPhase(blockHash string, view uint64) {
+	if !c.hasPrepareQuorum(blockHash) {
+		return // not yet — still waiting on prepare votes
+	}
+	if c.phase != PhasePrePrepared {
+		logger.Info("⚠️ Quorum reached for %s but already in phase %v, skipping transition", blockHash, c.phase)
+		return
+	}
+	if c.preparedBlock == nil || c.preparedBlock.GetHash() != blockHash {
+		logger.Info("⏳ Prepare quorum reached for %s but proposal not processed locally yet — will retry once it arrives", blockHash)
+		return
+	}
 
-		// Add this vote to consensus signatures
-		signatureHex := hex.EncodeToString(vote.Signature)
-		consensusSig := &ConsensusSignature{
-			BlockHash:    vote.BlockHash,
-			BlockHeight:  c.currentHeight,
-			SignerNodeID: vote.VoterID,
-			Signature:    signatureHex,
-			MessageType:  "prepare",
-			View:         vote.View,
-			Timestamp:    common.GetTimeService().GetCurrentTimeInfo().ISOLocal,
-			Valid:        true,
-			MerkleRoot:   "pending_calculation",
-			Status:       "prepared",
-		}
-		c.addConsensusSig(consensusSig)
-
-		// Transition to prepared phase if we're in pre-prepared
-		if c.phase == PhasePrePrepared {
-			c.phase = PhasePrepared
-			c.lockedBlock = c.preparedBlock
-
-			// Update block metadata
-			// Update block metadata using interface methods
-			c.preparedBlock.SetCommitStatus("prepared")
-
-			// Send commit vote for this block
-			c.voteForBlock(vote.BlockHash, vote.View)
-		} else {
-			logger.Info("⚠️ Already in phase %v, skipping phase transition", c.phase)
+	// Record a consensus signature for every prepare vote collected for this
+	// block (previously only the single vote that happened to cross the
+	// quorum threshold got recorded; this captures the full set).
+	if votes := c.prepareVotes[blockHash]; votes != nil {
+		for voterID, v := range votes {
+			c.addConsensusSig(&ConsensusSignature{
+				BlockHash:    blockHash,
+				BlockHeight:  c.currentHeight,
+				SignerNodeID: voterID,
+				Signature:    hex.EncodeToString(v.Signature),
+				MessageType:  "prepare",
+				View:         view,
+				Timestamp:    common.GetTimeService().GetCurrentTimeInfo().ISOLocal,
+				Valid:        true,
+				MerkleRoot:   "pending_calculation",
+				Status:       "prepared",
+			})
 		}
 	}
+
+	// Transition to prepared phase.
+	c.phase = PhasePrepared
+	c.lockedBlock = c.preparedBlock
+	c.preparedBlock.SetCommitStatus("prepared")
+
+	logger.Info("[%s] 🔄 Entered PREPARED phase for block %s at height %d — sending commit vote",
+		c.nodeID, blockHash, c.preparedBlock.GetHeight())
+
+	// Send our own commit vote for this block.
+	c.voteForBlock(blockHash, view)
 }
 
 // addConsensusSig adds a signature to the consensus signatures collection
@@ -1456,39 +1571,10 @@ func (c *Consensus) processVote(vote *Vote) {
 		}
 		// ============================================================
 
-		// Commit the block (attestations are already attached)
+		// Commit the block (attestations are already attached).
+		// commitBlock handles state reset, view increment, signature recording,
+		// and schedules UpdateLeaderStatus — all safely without re-locking c.mu.
 		c.commitBlock(blockToCommit)
-
-		// Small delay to ensure block is fully written to storage
-		time.Sleep(200 * time.Millisecond)
-		// ===============================================
-
-		// ========== NOW add the commit signature ==========
-		// The block should now be in storage
-		signatureHex := hex.EncodeToString(vote.Signature)
-
-		// Get the actual stored block to extract correct merkle root
-		storedBlock := c.blockChain.GetBlockByHash(blockToCommit.GetHash())
-		merkleRoot := "pending_calculation"
-		if storedBlock != nil {
-			merkleRoot = c.extractMerkleRootFromBlock(storedBlock)
-		}
-
-		consensusSig := &ConsensusSignature{
-			BlockHash:    blockToCommit.GetHash(), // Use the actual block hash
-			BlockHeight:  blockToCommit.GetHeight(),
-			SignerNodeID: vote.VoterID,
-			Signature:    signatureHex,
-			MessageType:  "commit",
-			View:         vote.View,
-			Timestamp:    common.GetTimeService().GetCurrentTimeInfo().ISOLocal,
-			Valid:        true,
-			MerkleRoot:   merkleRoot,
-			Status:       "committed",
-		}
-		c.addConsensusSig(consensusSig)
-		logger.Info("✅ Added commit signature for block %s after storage", blockToCommit.GetHash()[:16])
-		// =================================================
 	}
 }
 
@@ -1508,14 +1594,26 @@ func (c *Consensus) processTimeout(timeout *TimeoutMsg) {
 		logger.Warn("WARNING: No signing service, accepting unsigned timeout from %s", timeout.VoterID)
 	}
 
-	// If timeout is for a higher view, perform view change
+	// If timeout is for a higher view, perform view change.
 	if timeout.View > c.currentView {
 		logger.Info("View change requested to view %d by %s", timeout.View, timeout.VoterID)
 		c.currentView = timeout.View
 		c.lastViewChange = common.GetTimeService().Now()
 		c.resetConsensusState()
-		c.updateLeaderStatusWithValidators(c.getValidators())
-		logger.Info("View change completed: node=%s, new_view=%d, leader=%v", c.nodeID, c.currentView, c.isLeader)
+		// Use view-pinned RANDAO election so view-change leader matches proposal validation.
+		viewSlot := c.currentView
+		viewEpoch := viewSlot / SlotsPerEpoch
+		seed := c.randao.GetSeed(viewSlot)
+		if sel := c.selector.SelectProposer(viewEpoch, seed); sel != nil {
+			c.electedLeaderID = sel.ID
+			c.electedSlot = viewSlot
+			c.isLeader = (sel.ID == c.nodeID)
+		} else {
+			// Fallback to round-robin if no stake set yet.
+			c.updateLeaderStatusWithValidators(c.getValidators())
+		}
+		logger.Info("View change completed: node=%s, new_view=%d, leader=%v (elected=%s)",
+			c.nodeID, c.currentView, c.isLeader, c.electedLeaderID)
 	}
 }
 
@@ -1544,6 +1642,26 @@ func (c *Consensus) sendPrepareVote(blockHash string, view uint64) {
 
 	// Mark as sent and broadcast
 	c.sentPrepareVotes[blockHash] = true
+
+	// ========== FIX: register our own vote locally before broadcasting ==========
+	// broadcastPrepareVote only sends this vote to peers — it never arrives back
+	// at this node over the network (nodes don't loop messages to themselves).
+	// Without this, processPrepareVote/hasPrepareQuorum only ever see N-1 votes
+	// (everyone else's), so a quorum that should pass at 2-of-3 stake can fail
+	// if the two *peer* votes alone don't clear 2/3 of total stake, even though
+	// this node's own vote would have pushed it over. Insert it the same way
+	// processProposal pre-emptively sets preparedBlock for a self-proposal.
+	if c.prepareVotes[blockHash] == nil {
+		c.prepareVotes[blockHash] = make(map[string]*Vote)
+		c.weightedPrepareVotes[blockHash] = big.NewInt(0)
+	}
+	if _, exists := c.prepareVotes[blockHash][c.nodeID]; !exists {
+		c.prepareVotes[blockHash][c.nodeID] = prepareVote
+		selfStake := c.getValidatorStake(c.nodeID)
+		c.weightedPrepareVotes[blockHash].Add(c.weightedPrepareVotes[blockHash], selfStake)
+	}
+	// ==============================================================================
+
 	c.broadcastPrepareVote(prepareVote)
 	logger.Info("Node %s sent prepare vote for block %s at view %d", c.nodeID, blockHash, view)
 }
@@ -1584,6 +1702,22 @@ func (c *Consensus) voteForBlock(blockHash string, view uint64) {
 
 	// Mark as sent and broadcast
 	c.sentVotes[blockHash] = true
+
+	// ========== FIX: register our own commit vote locally before broadcasting ==========
+	// Same issue as sendPrepareVote above: broadcastVote only reaches peers, so
+	// without this, hasQuorum() never counts this node's own stake toward the
+	// commit quorum it itself is trying to reach.
+	if c.receivedVotes[blockHash] == nil {
+		c.receivedVotes[blockHash] = make(map[string]*Vote)
+		c.weightedCommitVotes[blockHash] = big.NewInt(0)
+	}
+	if _, exists := c.receivedVotes[blockHash][c.nodeID]; !exists {
+		c.receivedVotes[blockHash][c.nodeID] = vote
+		selfStake := c.getValidatorStake(c.nodeID)
+		c.weightedCommitVotes[blockHash].Add(c.weightedCommitVotes[blockHash], selfStake)
+	}
+	// =====================================================================================
+
 	c.broadcastVote(vote)
 	logger.Info("🗳️ Node %s sent COMMIT vote for block %s (height %d) at view %d",
 		c.nodeID, blockHash, blockToVote.GetHeight(), view)
@@ -1729,33 +1863,56 @@ func (c *Consensus) commitBlock(block Block) {
 		tb = direct
 	}
 
-	// In commitBlock, you can keep this as a check
 	if tb != nil {
-		// Set signature validity if proposer signature exists
 		if len(tb.Header.ProposerSignature) > 0 {
 			tb.Header.SigValid = true
 		}
-
-		// Just log if attestations are already there
 		if len(tb.Body.Attestations) > 0 {
 			logger.Info("✅ Block already has %d attestations attached", len(tb.Body.Attestations))
 		} else {
-			// Fallback - try to attach from receivedVotes (should not happen now)
 			logger.Warn("⚠️ No attestations attached to block before commit")
 		}
 	}
+
 	// Commit block to blockchain
 	if err := c.blockChain.CommitBlock(block); err != nil {
 		logger.Error("❌ Error committing block: %v", err)
 		return
 	}
 
-	// ========== FIX: Force signature population after commit ==========
-	// Add a commit signature for this node (self signature)
-	c.mu.Lock()
+	// Execute commit callback if provided (c.mu NOT held here — callback may lock)
+	if c.onCommit != nil {
+		if err := c.onCommit(block); err != nil {
+			logger.Warn("⚠️ Error in commit callback: %v", err)
+		}
+	}
+
+	// Update consensus state.
+	// NOTE: commitBlock is called from processVote which already holds c.mu via
+	// its deferred lock. Do NOT acquire c.mu here — write fields directly.
+	newHeight := block.GetHeight()
+	c.currentHeight = newHeight
+	c.lastBlockTime = common.GetTimeService().Now()
+
+	// Reset ALL per-round state and advance view for next round.
+	c.currentView++ // Increment view for next round
+	c.phase = PhaseIdle
+	c.lockedBlock = nil
+	c.preparedBlock = nil
+	c.preparedView = 0
+	c.preparedBlockHash = ""
+	c.receivedVotes = make(map[string]map[string]*Vote)
+	c.prepareVotes = make(map[string]map[string]*Vote)
+	c.sentVotes = make(map[string]bool)
+	c.sentPrepareVotes = make(map[string]bool)
+	c.weightedPrepareVotes = make(map[string]*big.Int)
+	c.weightedCommitVotes = make(map[string]*big.Int)
+	c.pendingProposals = make(map[string]Block)
+
+	// Add self-commit signature while still under caller's c.mu.
 	commitSig := &ConsensusSignature{
 		BlockHash:    block.GetHash(),
-		BlockHeight:  block.GetHeight(),
+		BlockHeight:  newHeight,
 		SignerNodeID: c.nodeID,
 		Signature:    "committed_by_" + c.nodeID,
 		MessageType:  "commit",
@@ -1766,30 +1923,24 @@ func (c *Consensus) commitBlock(block Block) {
 		Status:       "committed",
 	}
 	c.addConsensusSig(commitSig)
-	logger.Info("📝 Added self-commit signature for block %s", block.GetHash())
-	c.mu.Unlock()
-	// ================================================================
 
-	// Execute commit callback if provided
-	if c.onCommit != nil {
-		if err := c.onCommit(block); err != nil {
-			logger.Warn("⚠️ Error in commit callback: %v", err)
-		}
-	}
+	logger.Info("🎉 Node %s committed block %s at height %d (view now %d)",
+		c.nodeID, block.GetHash(), newHeight, c.currentView)
 
-	// Update consensus state
-	c.currentHeight = block.GetHeight()
-	c.lastBlockTime = common.GetTimeService().Now()
-	c.resetConsensusState()
-
-	// Log current signature count
-	c.signatureMutex.RLock()
-	sigCount := len(c.consensusSignatures)
-	c.signatureMutex.RUnlock()
-	logger.Info("🎉 Node %s successfully committed block %s at height %d (total signatures: %d)",
-		c.nodeID, block.GetHash(), c.currentHeight, sigCount)
+	// UpdateLeaderStatus acquires c.mu itself — schedule it as a goroutine so it
+	// runs after processVote's deferred c.mu.Unlock() releases the lock.
+	go func() {
+		logger.Info("🔄 Updating leader status for next round at height %d, view %d", newHeight, c.currentView)
+		c.UpdateLeaderStatus()
+		c.mu.RLock()
+		isLeader := c.isLeader
+		electedLeader := c.electedLeaderID
+		c.mu.RUnlock()
+		logger.Info("📊 Leader status after commit: isLeader=%v, electedLeader=%s", isLeader, electedLeader)
+	}()
 }
 
+// startViewChange initiates a view change process
 // startViewChange initiates a view change process
 func (c *Consensus) startViewChange() {
 	// Try to acquire view change lock
@@ -1805,10 +1956,12 @@ func (c *Consensus) startViewChange() {
 	if c.phase != PhaseIdle {
 		return // Only change view in idle phase
 	}
-	if common.GetTimeService().Now().Sub(c.lastViewChange) < 5*time.Second {
-		return // Rate limit view changes to 5 seconds instead of 60
+	// ========== FIX: Reduce rate limit ==========
+	if common.GetTimeService().Now().Sub(c.lastViewChange) < 3*time.Second {
+		return // Rate limit view changes to 3 seconds
 	}
-	if c.currentHeight > 0 && common.GetTimeService().Now().Sub(c.lastBlockTime) < 30*time.Second {
+	// ===========================================
+	if c.currentHeight > 0 && common.GetTimeService().Now().Sub(c.lastBlockTime) < 10*time.Second {
 		return // Recent block committed, don't change view
 	}
 
@@ -1816,7 +1969,6 @@ func (c *Consensus) startViewChange() {
 	validators := c.getValidators()
 	if len(validators) == 0 {
 		logger.Warn("Skipping view change - no validators available")
-		c.mu.Unlock()
 		return
 	}
 
@@ -1824,12 +1976,24 @@ func (c *Consensus) startViewChange() {
 	newView := c.currentView + 1
 	logger.Info("🔄 Node %s initiating view change to view %d", c.nodeID, newView)
 
-	// Update consensus state
+	// Update consensus state.
 	c.currentView = newView
 	c.lastViewChange = common.GetTimeService().Now()
 	c.resetConsensusState()
-	c.updateLeaderStatusWithValidators(validators)
+	// Use view-pinned RANDAO election so the leader we choose matches what
+	// proposal validation will compute.  Fall back to round-robin if no stake.
+	viewSlot := c.currentView
+	viewEpoch := viewSlot / SlotsPerEpoch
+	seed := c.randao.GetSeed(viewSlot)
+	if sel := c.selector.SelectProposer(viewEpoch, seed); sel != nil {
+		c.electedLeaderID = sel.ID
+		c.electedSlot = viewSlot
+		c.isLeader = (sel.ID == c.nodeID)
+	} else {
+		c.updateLeaderStatusWithValidators(validators)
+	}
 
+	// Unlock before broadcasting to avoid deadlock
 	c.mu.Unlock()
 
 	// Create and broadcast timeout message
@@ -1844,6 +2008,7 @@ func (c *Consensus) startViewChange() {
 	if c.signingService != nil {
 		if err := c.signingService.SignTimeout(timeoutMsg); err != nil {
 			logger.Warn("Failed to sign timeout message: %v", err)
+			c.mu.Lock()
 			return
 		}
 	}
@@ -1852,6 +2017,7 @@ func (c *Consensus) startViewChange() {
 	if err := c.broadcastTimeout(timeoutMsg); err != nil {
 		logger.Warn("Failed to broadcast timeout message: %v", err)
 	}
+	c.mu.Lock()
 }
 
 // tryViewChangeLock attempts to acquire the view change mutex with timeout
@@ -1903,15 +2069,19 @@ func (c *Consensus) updateLeaderStatusWithValidators(validators []string) {
 }
 
 // resetConsensusState clears all consensus-related state for a new view
+// resetConsensusState clears all consensus-related state for a new view
 func (c *Consensus) resetConsensusState() {
 	c.phase = PhaseIdle
 	c.lockedBlock = nil
 	c.preparedBlock = nil
 	c.preparedView = 0
+	c.preparedBlockHash = "" // ← ADD THIS - clear the hash too
 	c.receivedVotes = make(map[string]map[string]*Vote)
 	c.prepareVotes = make(map[string]map[string]*Vote)
 	c.sentVotes = make(map[string]bool)
 	c.sentPrepareVotes = make(map[string]bool)
+	c.weightedPrepareVotes = make(map[string]*big.Int) // ← ADD THIS
+	c.weightedCommitVotes = make(map[string]*big.Int)  // ← ADD THIS
 	// Note: do NOT clear electedLeaderID or electedSlot here —
 	// they are still needed by ProposeBlock and isValidLeader after a reset.
 }

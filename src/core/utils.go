@@ -42,27 +42,33 @@ func (bc *Blockchain) GetTPSStats() map[string]interface{} {
 // GetStats returns comprehensive blockchain statistics
 // Returns: Map with all blockchain statistics
 func (bc *Blockchain) GetStats() map[string]interface{} {
-	bc.lock.RLock() // Read lock for thread safety
+	bc.lock.RLock()
 	defer bc.lock.RUnlock()
 
-	latestBlock := bc.GetLatestBlock() // Get latest block
+	latestBlock := bc.GetLatestBlock()
 	var latestHeight uint64
 	var latestHash string
 	if latestBlock != nil {
-		latestHeight = latestBlock.GetHeight() // Current height
-		latestHash = latestBlock.GetHash()     // Latest hash
+		latestHeight = latestBlock.GetHeight()
+		latestHash = latestBlock.GetHash()
 	}
 
-	// Build basic statistics
+	// ========== FIX: Check if mempool is nil and convert type ==========
+	pendingTxs := uint64(0)
+	if bc.mempool != nil {
+		pendingTxs = uint64(bc.mempool.GetTransactionCount()) // ← Convert int to uint64
+	}
+	// ==================================================
+
 	stats := map[string]interface{}{
-		"status":            bc.StatusString(bc.status),       // Blockchain status
-		"sync_mode":         bc.SyncModeString(bc.syncMode),   // Sync mode
-		"block_height":      latestHeight,                     // Current height
-		"latest_block_hash": latestHash,                       // Latest block hash
-		"blocks_in_memory":  len(bc.chain),                    // Blocks in memory
-		"pending_txs":       bc.mempool.GetTransactionCount(), // Pending transactions
-		"tx_index_size":     len(bc.txIndex),                  // Transaction index size
-		"total_blocks":      bc.storage.GetTotalBlocks(),      // Total blocks in storage
+		"status":            bc.StatusString(bc.status),
+		"sync_mode":         bc.SyncModeString(bc.syncMode),
+		"block_height":      latestHeight,
+		"latest_block_hash": latestHash,
+		"blocks_in_memory":  len(bc.chain),
+		"pending_txs":       pendingTxs, // Now uint64
+		"tx_index_size":     len(bc.txIndex),
+		"total_blocks":      bc.storage.GetTotalBlocks(),
 	}
 
 	// Add blocksize statistics
@@ -178,17 +184,35 @@ func (bc *Blockchain) EstimateFee(blocks int) map[string]interface{} {
 
 // GetMemPoolInfo returns mempool information
 // Returns: Map with mempool information
+// GetMemPoolInfo returns mempool information
 func (bc *Blockchain) GetMemPoolInfo() map[string]interface{} {
-	mempoolStats := bc.mempool.GetStats() // Get mempool statistics
+	if bc.mempool == nil {
+		return map[string]interface{}{
+			"size":            0,
+			"bytes":           0,
+			"usage":           0,
+			"max_mempool":     300000000,
+			"mempool_min_fee": "0.00001000",
+			"mempool_stats":   map[string]interface{}{},
+			"error":           "mempool not initialized",
+		}
+	}
 
-	// Build mempool info map
+	mempoolStats := bc.mempool.GetStats()
+
+	// Safe type assertion with conversion
+	bytesVal := uint64(0)
+	if val, ok := mempoolStats["mempool_size_bytes"].(uint64); ok {
+		bytesVal = val
+	}
+
 	return map[string]interface{}{
-		"size":            mempoolStats["transaction_count"],               // Transaction count
-		"bytes":           mempoolStats["mempool_size_bytes"],              // Total size in bytes
-		"usage":           mempoolStats["mempool_size_bytes"].(uint64) * 2, // Memory usage estimate
-		"max_mempool":     300000000,                                       // Maximum mempool size (300MB)
-		"mempool_min_fee": "0.00001000",                                    // Minimum fee rate
-		"mempool_stats":   mempoolStats,                                    // Detailed statistics
+		"size":            mempoolStats["transaction_count"],
+		"bytes":           bytesVal,
+		"usage":           bytesVal * 2,
+		"max_mempool":     300000000,
+		"mempool_min_fee": "0.00001000",
+		"mempool_stats":   mempoolStats,
 	}
 }
 
@@ -614,7 +638,6 @@ func (bc *Blockchain) CacheTypeString(cacheType CacheType) string {
 //   - tx: Transaction to add
 //
 // Returns: Error if transaction addition fails
-// In blockchain.go
 func (bc *Blockchain) AddTransaction(tx *types.Transaction) error {
 	if err := bc.ValidateTransactionPolicy(tx); err != nil {
 		return err
@@ -623,7 +646,20 @@ func (bc *Blockchain) AddTransaction(tx *types.Transaction) error {
 	bc.storage.RecordTransaction()
 
 	// Record transaction for TPS monitoring
-	bc.tpsMonitor.RecordTransaction()
+	if bc.tpsMonitor != nil {
+		bc.tpsMonitor.RecordTransaction()
+	}
+
+	// ========== FIX: Check if mempool is nil ==========
+	if bc.mempool == nil {
+		// Mempool not initialized - store transaction in pending list
+		logger.Warn("Mempool is nil, storing transaction %s in pending list", tx.ID)
+		bc.lock.Lock()
+		bc.pendingTx = append(bc.pendingTx, tx)
+		bc.lock.Unlock()
+		return nil
+	}
+	// ==================================================
 
 	return bc.mempool.BroadcastTransaction(tx)
 }

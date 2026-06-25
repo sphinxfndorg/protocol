@@ -28,6 +28,7 @@ import (
 	logger "github.com/sphinxorg/protocol/src/log"
 	"github.com/sphinxorg/protocol/src/network"
 	"github.com/sphinxorg/protocol/src/p2p"
+	"github.com/sphinxorg/protocol/src/pool"
 	"github.com/sphinxorg/protocol/src/rpc"
 	"github.com/sphinxorg/protocol/src/transport"
 	"github.com/syndtr/goleveldb/leveldb"
@@ -101,6 +102,12 @@ func StartSingleNodeInternal(nodeConfig network.NodePortConfig, dataDir string) 
 		return fmt.Errorf("failed to initialize STHINCSParameters: %v", err)
 	}
 
+	// Create SPHINCS manager for this node
+	sphincsMgr := sign.NewSTHINCSManager(nil, keyManager, sphincsParams)
+	if sphincsMgr == nil {
+		return fmt.Errorf("failed to initialize STHINCSManager for %s", nodeConfig.Name)
+	}
+
 	setupConfig := NodeSetupConfig{
 		Name:          nodeConfig.Name,
 		Address:       nodeConfig.TCPAddr,
@@ -170,6 +177,12 @@ func StartSingleNodeInternal(nodeConfig network.NodePortConfig, dataDir string) 
 		blockchain.SetConsensus(consensusEngine)
 	}
 	// ==========================================================
+
+	// Set SPHINCS manager on mempool for transaction validation
+	if mempool := resources[0].Blockchain.GetMempool(); mempool != nil {
+		mempool.SetSTHINCSManager(sphincsMgr) // use sphincsMgr (singular)
+		logger.Infof("Set STHINCS manager on mempool for %s", nodeConfig.Name)
+	}
 
 	// Start peer discovery after setup
 	go func() {
@@ -317,11 +330,17 @@ func RunMultipleNodesInternal() error {
 		log.Printf("Checking P2P server for Node-%d: TCP=%s, UDP=%s", i, resources[i].P2PServer.LocalNode().Address, resources[i].P2PServer.LocalNode().UDPPort)
 	}
 
-	// Set SphincsManager for each P2PServer
+	// Set SphincsManager for each P2PServer and MEMPOOL
 	for i := 0; i < 3; i++ {
 		// FIXED: sphincsMgrs[i] is now *sign.STHINCSManager, which matches SetSphincsMgr parameter type
 		resources[i].P2PServer.SetSphincsMgr(sphincsMgrs[i])
 		resources[i].Blockchain.SetSTHINCSManager(sphincsMgrs[i])
+
+		// ADD THIS LINE - Set SPHINCS manager on mempool for transaction validation
+		if mempool := resources[i].Blockchain.GetMempool(); mempool != nil {
+			mempool.SetSTHINCSManager(sphincsMgrs[i])
+			logger.Infof("Set STHINCS manager on mempool for Node-%d", i)
+		}
 	}
 
 	// Update seed nodes with actual UDP ports BEFORE calling DiscoverPeers
@@ -410,6 +429,7 @@ func ParseRoles(rolesStr string, numNodes int) []network.NodeRole {
 }
 
 // SetupNodes initializes and starts all servers for the given node configurations.
+// SetupNodes initializes and starts all servers for the given node configurations.
 func SetupNodes(configs []NodeSetupConfig, wg *sync.WaitGroup) ([]NodeResources, error) {
 	messageChans := make([]chan *security.Message, len(configs))
 	blockchains := make([]*core.Blockchain, len(configs))
@@ -426,94 +446,116 @@ func SetupNodes(configs []NodeSetupConfig, wg *sync.WaitGroup) ([]NodeResources,
 	dbs := make([]*leveldb.DB, len(configs))
 	closed := make([]bool, len(configs))
 
+	// DEFINE sphincsMgrs HERE - outside the loop so it's available
+	sphincsMgrs := make([]*sign.STHINCSManager, len(configs))
+
+	// FIX: Create SPHINCS managers using package-level function, not config method
+	// FIX: Use 'cfg' instead of 'config' to avoid shadowing the package import
+	for i, cfg := range configs {
+		keyManager, err := key.NewKeyManager()
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize KeyManager: %v", err)
+		}
+
+		// FIX: Now 'config' refers to the package import, not the loop variable
+		sphincsParams, err := config.NewSTHINCSParameters()
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize STHINCSParameters: %v", err)
+		}
+
+		sphincsMgrs[i] = sign.NewSTHINCSManager(nil, keyManager, sphincsParams)
+		if sphincsMgrs[i] == nil {
+			return nil, fmt.Errorf("failed to initialize STHINCSManager for %s", cfg.Name)
+		}
+	}
+
 	// Extract all validator addresses for the state machine
 	allValidators := make([]string, len(configs))
-	for i, config := range configs {
-		allValidators[i] = config.Name // Using node names as validator IDs
+	for i, cfg := range configs {
+		allValidators[i] = cfg.Name
 	}
 
 	// Initialize resources and TCP server configs
 	tcpConfigs := make([]NodeConfig, len(configs))
-	for i, config := range configs {
-		parts := strings.Split(config.Address, ":")
+	for i, cfg := range configs {
+		parts := strings.Split(cfg.Address, ":")
 		if len(parts) != 2 {
-			logger.Errorf("Invalid address format for %s: %s", config.Name, config.Address)
-			return nil, fmt.Errorf("invalid address format for %s: %s", config.Name, config.Address)
+			logger.Errorf("Invalid address format for %s: %s", cfg.Name, cfg.Address)
+			return nil, fmt.Errorf("invalid address format for %s: %s", cfg.Name, cfg.Address)
 		}
 		ip, port := parts[0], parts[1]
 		if err := transport.ValidateIP(ip, port); err != nil {
-			logger.Errorf("Invalid IP or port for %s: %v", config.Name, err)
-			return nil, fmt.Errorf("invalid IP or port for %s: %v", config.Name, err)
+			logger.Errorf("Invalid IP or port for %s: %v", cfg.Name, err)
+			return nil, fmt.Errorf("invalid IP or port for %s: %v", cfg.Name, err)
 		}
 
-		logger.Infof("Initializing blockchain for %s", config.Name)
-		// CHANGED: Use common.GetBlockchainDataDir for standardized blockchain path
-		// CHANGED: Use common.GetBlockchainDataDir for standardized blockchain path
-		dataDir := common.GetBlockchainDataDir(config.Name)
-		// ADD NETWORK TYPE PARAMETER - use "devnet" for testing or get from config
-		// This one is actually correct order — dataDir, nodeID, validators, networkType
-		// BUT the networkType variable needs to be "devnet" not just hardcoded
-		// Verify networkType is set before this call
-		networkType := "devnet" // ensure this is present
-		blockchain, err := core.NewBlockchain(dataDir, config.Name, allValidators, networkType)
+		logger.Infof("Initializing blockchain for %s", cfg.Name)
+		dataDir := common.GetBlockchainDataDir(cfg.Name)
+		networkType := "devnet"
+		blockchain, err := core.NewBlockchain(dataDir, cfg.Name, allValidators, networkType)
 		if err != nil {
-			logger.Errorf("Failed to initialize blockchain for %s: %v", config.Name, err)
-			return nil, fmt.Errorf("failed to initialize blockchain for %s: %w", config.Name, err)
+			logger.Errorf("Failed to initialize blockchain for %s: %v", cfg.Name, err)
+			return nil, fmt.Errorf("failed to initialize blockchain for %s: %w", cfg.Name, err)
 		}
 		blockchains[i] = blockchain
-		logger.Infof("Genesis block created for %s, hash: %x", config.Name, blockchains[i].GetBestBlockHash())
+		logger.Infof("Genesis block created for %s, hash: %x", cfg.Name, blockchains[i].GetBestBlockHash())
+
+		mempool := pool.NewMempool(nil, blockchains[i])
+		blockchains[i].SetMempool(mempool)
+
+		mempool.SetSTHINCSManager(sphincsMgrs[i])
+		logger.Infof("Set STHINCS manager on mempool for %s", cfg.Name)
+
 		messageChans[i] = make(chan *security.Message, 1000)
-		rpcServers[i] = rpc.NewServer(messageChans[i], blockchains[i])
+		rpcServers[i] = rpc.NewServer(messageChans[i], blockchains[i], sphincsMgrs[i])
 
 		tcpConfigs[i] = NodeConfig{
-			Address:   config.Address,
-			Name:      config.Name,
+			Address:   cfg.Address,
+			Name:      cfg.Name,
 			MessageCh: messageChans[i],
 			RPCServer: rpcServers[i],
 			ReadyCh:   tcpReadyCh,
 		}
 
-		// CHANGED: Use common.GetLevelDBPath for standardized LevelDB path
-		db, err := leveldb.OpenFile(common.GetLevelDBPath(config.Name), nil)
+		db, err := leveldb.OpenFile(common.GetLevelDBPath(cfg.Name), nil)
 		if err != nil {
-			logger.Errorf("Failed to open LevelDB for %s: %v", config.Name, err)
-			return nil, fmt.Errorf("failed to open LevelDB for %s: %w", config.Name, err)
+			logger.Errorf("Failed to open LevelDB for %s: %v", cfg.Name, err)
+			return nil, fmt.Errorf("failed to open LevelDB for %s: %w", cfg.Name, err)
 		}
 		dbs[i] = db
 
-		// Initialize p2p.Server with NodePortConfig, ensuring Node.ID is set
 		nodeConfig := network.NodePortConfig{
-			ID:        config.Name,
-			Name:      config.Name,
-			TCPAddr:   config.Address,
-			UDPPort:   config.UDPPort,
-			HTTPPort:  config.HTTPPort,
-			WSPort:    config.WSPort,
-			Role:      config.Role,
-			SeedNodes: config.SeedNodes,
+			ID:        cfg.Name,
+			Name:      cfg.Name,
+			TCPAddr:   cfg.Address,
+			UDPPort:   cfg.UDPPort,
+			HTTPPort:  cfg.HTTPPort,
+			WSPort:    cfg.WSPort,
+			Role:      cfg.Role,
+			SeedNodes: cfg.SeedNodes,
 		}
 		p2pServers[i] = p2p.NewServer(nodeConfig, blockchains[i], db)
 		localNode := p2pServers[i].LocalNode()
-		localNode.ID = config.Name
-		localNode.UpdateRole(config.Role)
-		logger.Infof("Node %s initialized with ID %s and role %s", config.Name, localNode.ID, config.Role)
+		localNode.ID = cfg.Name
+		localNode.UpdateRole(cfg.Role)
+		logger.Infof("Node %s initialized with ID %s and role %s", cfg.Name, localNode.ID, cfg.Role)
 
 		if len(localNode.PublicKey) == 0 || len(localNode.PrivateKey) == 0 {
-			logger.Errorf("Key generation failed for %s", config.Name)
-			return nil, fmt.Errorf("key generation failed for %s", config.Name)
+			logger.Errorf("Key generation failed for %s", cfg.Name)
+			return nil, fmt.Errorf("key generation failed for %s", cfg.Name)
 		}
 
 		pubHex := hex.EncodeToString(localNode.PublicKey)
-		logger.Infof("Node %s public key: %s", config.Name, pubHex)
+		logger.Infof("Node %s public key: %s", cfg.Name, pubHex)
 		if _, exists := publicKeys[pubHex]; exists {
-			logger.Errorf("Duplicate public key detected for %s: %s", config.Name, pubHex)
-			return nil, fmt.Errorf("duplicate public key detected for %s: %s", config.Name, pubHex)
+			logger.Errorf("Duplicate public key detected for %s: %s", cfg.Name, pubHex)
+			return nil, fmt.Errorf("duplicate public key detected for %s: %s", cfg.Name, pubHex)
 		}
-		publicKeys[pubHex] = config.Name
+		publicKeys[pubHex] = cfg.Name
 
-		tcpServers[i] = transport.NewTCPServer(config.Address, messageChans[i], rpcServers[i], tcpReadyCh)
-		wsServers[i] = transport.NewWebSocketServer(config.WSPort, messageChans[i], rpcServers[i])
-		httpServers[i] = http.NewServer(config.HTTPPort, messageChans[i], blockchains[i], readyCh)
+		tcpServers[i] = transport.NewTCPServer(cfg.Address, messageChans[i], rpcServers[i], tcpReadyCh)
+		wsServers[i] = transport.NewWebSocketServer(cfg.WSPort, messageChans[i], rpcServers[i])
+		httpServers[i] = http.NewServer(cfg.HTTPPort, messageChans[i], blockchains[i], readyCh)
 	}
 
 	// Bind TCP servers
@@ -649,7 +691,7 @@ func SetupNodes(configs []NodeSetupConfig, wg *sync.WaitGroup) ([]NodeResources,
 	}
 
 	// Wait for HTTP and WebSocket servers to be ready
-	logger.Infof("Waiting for %d servers to be ready", len(configs)*2) // HTTP and WS only
+	logger.Infof("Waiting for %d servers to be ready", len(configs)*2)
 	for i := 0; i < len(configs)*2; i++ {
 		select {
 		case <-readyCh:

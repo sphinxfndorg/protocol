@@ -21,12 +21,13 @@ import (
 
 	"github.com/sphinxorg/protocol/src/common"
 	"github.com/sphinxorg/protocol/src/consensus"
+	"github.com/sphinxorg/protocol/src/pool"
 
+	sign "github.com/sphinxorg/protocol/src/core/sthincs/sign/backend"
 	svm "github.com/sphinxorg/protocol/src/core/svm/opcodes"
 	"github.com/sphinxorg/protocol/src/core/svm/vm"
 	types "github.com/sphinxorg/protocol/src/core/transaction"
 	logger "github.com/sphinxorg/protocol/src/log"
-	"github.com/sphinxorg/protocol/src/pool"
 	storage "github.com/sphinxorg/protocol/src/state"
 )
 
@@ -64,7 +65,7 @@ func NewBlockchain(dataDir string, nodeID string, validators []string, networkTy
 	blockchain := &Blockchain{
 		storage:         store,                                // Persistent storage for blocks and state
 		stateMachine:    stateMachine,                         // State machine for BFT consensus
-		mempool:         nil,                                  // Transaction pool (initialized later after chain params)
+		mempool:         nil,                                  // Will be set after blockchain is created
 		chain:           []*types.Block{},                     // In-memory chain cache for quick access
 		txIndex:         make(map[string]*types.Transaction),  // Transaction index for fast lookup by ID
 		pendingTx:       []*types.Transaction{},               // Pending transactions waiting for inclusion
@@ -104,20 +105,34 @@ func NewBlockchain(dataDir string, nodeID string, validators []string, networkTy
 		return nil, fmt.Errorf("failed to initialize chain: %w", err)
 	}
 
+	// ========== FIX: Create mempool AFTER blockchain is created ==========
+	// Create mempool with default configuration, passing blockchain as state provider
+	mempoolConfig := GetDefaultMempoolConfig()
+	if mempoolConfig == nil {
+		mempoolConfig = &pool.MempoolConfig{
+			MaxSize:           10000,
+			MaxBytes:          100 * 1024 * 1024,
+			MaxTxSize:         100 * 1024,
+			BlockGasLimit:     big.NewInt(10000000),
+			ValidationTimeout: 30 * time.Second,
+			ExpiryTime:        24 * time.Hour,
+			MaxBroadcastSize:  5000,
+			MaxPendingSize:    5000,
+		}
+	}
+	// Pass blockchain as the state provider (implements BlockchainStateProvider)
+	mempool := pool.NewMempool(mempoolConfig, blockchain)
+	blockchain.mempool = mempool
+	// ===================================================================
+
 	// Now that we have the genesis block, set the chain params with consistent hash
-	// Configure chain parameters based on network type (testnet, devnet, mainnet)
-	// Now that we have the genesis block, set the chain params with consistent hash
-	// Configure chain parameters based on network type (testnet, devnet, mainnet)
 	if len(blockchain.chain) > 0 {
 		// Use consistent genesis hash that's the same for all nodes
-		// chainParams is already set above; just validate against actual genesis.
 		blockchain.chainParams = chainParams
 
 		// Validate that our genesis hash matches the chain params
-		// This ensures consistency across all nodes
 		actualGenesisHash := blockchain.chain[0].GetHash()
 		if actualGenesisHash != chainParams.GenesisHash {
-			// Log warning but continue - this helps identify configuration issues
 			logger.Warn("Genesis hash mismatch: actual=%s, expected=%s",
 				actualGenesisHash, chainParams.GenesisHash)
 		}
@@ -126,11 +141,7 @@ func NewBlockchain(dataDir string, nodeID string, validators []string, networkTy
 		logger.Info("Chain parameters initialized for %s: genesis_hash=%s",
 			chainParams.GetNetworkName(), chainParams.GenesisHash)
 
-		// Initialize mempool with configuration from chain params
-		mempoolConfig := GetMempoolConfigFromChainParams(chainParams)
-		blockchain.mempool = pool.NewMempool(mempoolConfig)
-
-		// ✅ CRITICAL: Set mempool on state machine for transaction replication
+		// CRITICAL: Set mempool on state machine for transaction replication
 		stateMachine.SetMempool(blockchain.mempool)
 
 		// Log chain parameters again for visibility
@@ -168,6 +179,27 @@ func NewBlockchain(dataDir string, nodeID string, validators []string, networkTy
 		blockchain.chainParams.GenesisHash)
 
 	return blockchain, nil
+}
+
+// Ensure Blockchain implements pool.BlockchainStateProvider
+var _ pool.BlockchainStateProvider = (*Blockchain)(nil)
+
+// NewStateDB implements pool.BlockchainStateProvider
+func (bc *Blockchain) NewStateDB() (pool.StateDB, error) {
+	db, err := bc.storage.GetDB()
+	if err != nil {
+		return nil, fmt.Errorf("NewStateDB: %w", err)
+	}
+	stateDB := NewStateDB(db)
+	stateDB.SetBlockchain(bc)
+	return stateDB, nil
+}
+
+// Need to set sphincsManager on Blockchain in NewBlockchain or add a setter
+func (bc *Blockchain) SetSTHINCSManager(mgr *sign.STHINCSManager) {
+	bc.lock.Lock()
+	defer bc.lock.Unlock()
+	bc.sphincsManager = mgr
 }
 
 // GetMerkleRoot returns the Merkle root of transactions for a specific block
@@ -824,6 +856,15 @@ func (bc *Blockchain) StartLeaderLoop(ctx context.Context) {
 				isProposing = true // Mark as proposing
 				leaderMutex.Unlock()
 
+				// ========== FIX: Check if mempool is nil ==========
+				if bc.mempool == nil {
+					logger.Warn("Mempool is nil, cannot check pending transactions")
+					leaderMutex.Lock()
+					isProposing = false
+					leaderMutex.Unlock()
+					continue
+				}
+
 				// Check if we have transactions in mempool
 				hasTxs := bc.mempool.GetTransactionCount() > 0
 				if !hasTxs {
@@ -1005,6 +1046,14 @@ func (bc *Blockchain) GetBlockSizeStats() map[string]interface{} {
 	mempoolStats := bc.mempool.GetStats()
 	for k, v := range mempoolStats {
 		stats[k] = v // Add mempool statistics
+	}
+
+	// ========== FIX: Check if mempool is nil ==========
+	if bc.mempool != nil {
+		mempoolStats := bc.mempool.GetStats()
+		for k, v := range mempoolStats {
+			stats[k] = v
+		}
 	}
 
 	return stats

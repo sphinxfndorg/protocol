@@ -12,6 +12,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sphinxorg/protocol/src/core"
+	sign "github.com/sphinxorg/protocol/src/core/sthincs/sign/backend"
 	security "github.com/sphinxorg/protocol/src/handshake"
 )
 
@@ -65,12 +66,13 @@ type Metrics struct {
 
 // Server processes RPC requests.
 type Server struct {
-	messageCh    chan *security.Message
-	metrics      *Metrics
-	blockchain   *core.Blockchain
-	handler      *JSONRPCHandler
-	queryManager *QueryManager
-	store        *KVStore
+	messageCh      chan *security.Message
+	metrics        *Metrics
+	blockchain     *core.Blockchain
+	handler        *JSONRPCHandler
+	queryManager   *QueryManager
+	store          *KVStore
+	sphincsManager *sign.STHINCSManager // Added
 }
 
 // JSONRPCRequest represents a JSON-RPC 2.0 request.

@@ -14,13 +14,19 @@ import (
 
 // CallRPC sends an RPC request to a peer, supporting both JSON and binary formats.
 func CallRPC(address, method string, params interface{}, nodeID NodeID, ttl uint16) (*Message, error) {
-	conn, err := net.Dial("udp", address)
+	conn, err := net.Dial("tcp", address)
 	if err != nil {
 		return nil, err
 	}
 	defer conn.Close()
 
-	// Convert method to RPCType
+	// Convert method to RPCType.
+	// NOTE: this must stay in sync with JSONRPCHandler.registerMethods /
+	// mapRPCTypeToMethod in json.go — previously only 6 of the ~20 server
+	// methods were mapped here, so calls like "getbalance", "getnetworkinfo",
+	// "ping", or "gettransactionhistory" failed locally with
+	// ErrUnsupportedRPCType before ever reaching the network, silently
+	// forcing callers (e.g. WalletClient) onto their mock-data fallback.
 	var rpcType RPCType
 	switch method {
 	case "getblockcount":
@@ -35,6 +41,42 @@ func CallRPC(address, method string, params interface{}, nodeID NodeID, ttl uint
 		rpcType = RPCSendRawTransaction
 	case "gettransaction":
 		rpcType = RPCGetTransaction
+	case "ping":
+		rpcType = RPCPing
+	case "join":
+		rpcType = RPCJoin
+	case "findnode":
+		rpcType = RPCFindNode
+	case "get":
+		rpcType = RPCGet
+	case "store":
+		rpcType = RPCStore
+	case "getblockbynumber":
+		rpcType = RPCGetBlockByNumber
+	case "getblockhash":
+		rpcType = RPCGetBlockHash
+	case "getdifficulty":
+		rpcType = RPCGetDifficulty
+	case "getchaintip":
+		rpcType = RPCGetChainTip
+	case "getnetworkinfo":
+		rpcType = RPCGetNetworkInfo
+	case "getmininginfo":
+		rpcType = RPCGetMiningInfo
+	case "estimatefee":
+		rpcType = RPCEstimateFee
+	case "getmempoolinfo":
+		rpcType = RPCGetMemPoolInfo
+	case "validateaddress":
+		rpcType = RPCValidateAddress
+	case "verifymessage":
+		rpcType = RPCVerifyMessage
+	case "getrawtransaction":
+		rpcType = RPCGetRawTransaction
+	case "getbalance":
+		rpcType = RPCGetBalance
+	case "gettransactionhistory":
+		rpcType = RPCGetTransactionHistory
 	default:
 		return nil, ErrUnsupportedRPCType
 	}

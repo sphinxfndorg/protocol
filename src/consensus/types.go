@@ -278,6 +278,16 @@ type Consensus struct {
 	preparedBlockHash string // Track the hash of preparedBlock for cleanup
 
 	electedSlot uint64 // slot number used when electedLeaderID was set
+
+	// proposalInFlight is true while processProposal is actively validating
+	// a just-received proposal (deserialization, block validation, SPHINCS+
+	// signature checks, etc). These steps can take several seconds, and
+	// during that window the proposal hasn't been rejected or accepted yet —
+	// it's "in flight". shouldPreventViewChange checks this flag so the
+	// view-change timer doesn't fire and advance currentView out from under
+	// a proposal that is still being verified, which would otherwise cause
+	// it to be discarded as stale the moment verification finishes.
+	proposalInFlight bool
 }
 
 // SigningService handles cryptographic signing for consensus messages

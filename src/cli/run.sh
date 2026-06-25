@@ -1,6 +1,3 @@
-# Copyright (c) 2024-present Sphinx Core Dev
-# MIT License https://opensource.org/license/mit
-
 #!/bin/bash
 
 # Sphinx Protocol Launcher
@@ -15,8 +12,8 @@ if [ "$MODE" == "single" ]; then
         --node-index=0 \
         --nodes=1 \
         --role=validator \
-        --tcp-addr=127.0.0.1:30307 \
-        --udp-port=30308 \
+        --tcp-addr=127.0.0.1:32307 \
+        --udp-port=32308 \
         --http-port=127.0.0.1:8545 \
         --datadir=./data/node0 \
         --mode=development \
@@ -28,7 +25,7 @@ else
     # Open Terminal 1 (Node 0) - Genesis node
     osascript -e 'tell application "Terminal"
         activate
-        do script "cd ~/desktop/protocol && rm -rf ./data/node0 && go run ./src/cli/main.go node --node-index=0 --nodes=3 --role=validator --tcp-addr=127.0.0.1:30307 --udp-port=30308 --http-port=127.0.0.1:8545 --datadir=./data/node0 --pbft --mode=development --network=devnet"
+        do script "cd ~/desktop/protocol && rm -rf ./data/node0 && go run ./src/cli/main.go node --node-index=0 --nodes=3 --role=validator --tcp-addr=127.0.0.1:32307 --udp-port=32308 --http-port=127.0.0.1:8545 --datadir=./data/node0 --pbft --mode=development --network=devnet"
     end tell'
     
     sleep 2
@@ -36,7 +33,7 @@ else
     # Open Terminal 2 (Node 1)
     osascript -e 'tell application "Terminal"
         activate
-        do script "cd ~/desktop/protocol && rm -rf ./data/node1 && go run ./src/cli/main.go node --node-index=1 --nodes=3 --role=validator --tcp-addr=127.0.0.1:30309 --udp-port=30310 --http-port=127.0.0.1:8546 --datadir=./data/node1 --pbft --mode=development --network=devnet"
+        do script "cd ~/desktop/protocol && rm -rf ./data/node1 && go run ./src/cli/main.go node --node-index=1 --nodes=3 --role=validator --tcp-addr=127.0.0.1:32308 --udp-port=32309 --http-port=127.0.0.1:8546 --datadir=./data/node1 --pbft --mode=development --network=devnet"
     end tell'
     
     sleep 2
@@ -44,7 +41,7 @@ else
     # Open Terminal 3 (Node 2)
     osascript -e 'tell application "Terminal"
         activate
-        do script "cd ~/desktop/protocol && rm -rf ./data/node2 && go run ./src/cli/main.go node --node-index=2 --nodes=3 --role=validator --tcp-addr=127.0.0.1:30311 --udp-port=30312 --http-port=127.0.0.1:8547 --datadir=./data/node2 --pbft --mode=development --network=devnet"
+        do script "cd ~/desktop/protocol && rm -rf ./data/node2 && go run ./src/cli/main.go node --node-index=2 --nodes=3 --role=validator --tcp-addr=127.0.0.1:32309 --udp-port=32310 --http-port=127.0.0.1:8547 --datadir=./data/node2 --pbft --mode=development --network=devnet"
     end tell'
     
     echo ""
@@ -53,9 +50,9 @@ else
     echo "════════════════════════════════════════════════════════════════"
     echo ""
     echo "Port Mapping:"
-    echo "  Node 0: TCP 30307 | UDP 30308 | HTTP 8545"
-    echo "  Node 1: TCP 30309 | UDP 30310 | HTTP 8546"
-    echo "  Node 2: TCP 30311 | UDP 30312 | HTTP 8547"
+    echo "  Node 0: TCP 32307 | UDP 32308 | HTTP 8545"
+    echo "  Node 1: TCP 32308 | UDP 32309 | HTTP 8546"
+    echo "  Node 2: TCP 32309 | UDP 32310 | HTTP 8547"
     echo ""
     echo "Monitor Node 0:"
     echo "  tail -f ./logs/node0.log"

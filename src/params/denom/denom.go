@@ -20,7 +20,8 @@ const (
 	SPX  = 1e18 // 1 SPX equals 1e18 nSPX, similar to how 1 Ether equals 1e18 wei.
 
 	// Maximum supply of SPX set to 5 billion coins (5e9 SPX)
-	MaximumSupply = 5e9 * SPX // This is 5 billion SPX, equivalent to 5e9 * 1e18 nSPX.
+	MaxSupplySPX  = 5e9                // The coin-count cap, in whole SPX. Fits in int64/uint64 — use this with big.NewInt() rather than MaximumSupply, which (5e9 * 1e18) overflows int64.
+	MaximumSupply = MaxSupplySPX * SPX // This is 5 billion SPX, equivalent to 5e9 * 1e18 nSPX. Too large for int64 — only safe as a compile-time constant or float64, not big.NewInt().
 )
 
 // In the same way that 1 Ether = 1e18 wei, here:

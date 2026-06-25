@@ -330,6 +330,7 @@ type ChainPhase string
 // ChainCheckpoint captures the complete supply state including genesis vs rewards
 type ChainCheckpoint struct {
 	Phase       string `json:"phase"`        // "devnet", "testnet", "mainnet"
+	ChainName   string `json:"chain_name"`   // "Sphinx Devnet", "Sphinx Testnet", "Sphinx Mainnet"
 	GenesisHash string `json:"genesis_hash"` // canonical genesis hash
 	Timestamp   string `json:"timestamp"`    // RFC3339 when checkpoint was taken
 

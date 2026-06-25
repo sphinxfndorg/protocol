@@ -432,7 +432,6 @@ func (c *Consensus) ProposeBlock(block Block) error {
 	}
 
 	// Use the slot from election time
-	// Always use currentView as the canonical seed index
 	proposalSlot := c.currentView
 	logger.Info("📝 Using view %d as proposal slot (view=%d, height=%d)",
 		proposalSlot, c.currentView, block.GetHeight())
@@ -475,22 +474,17 @@ func (c *Consensus) ProposeBlock(block Block) error {
 		}
 	}
 
-	// ========== FIX: Process proposal locally BEFORE broadcasting ==========
-	// The leader needs to set preparedBlock so it's ready when prepare votes arrive.
-	// Use a goroutine with a small delay to ensure the proposal is fully processed
-	// before we start receiving prepare votes from other nodes.
-	go func() {
-		// Small delay to ensure this function returns first
-		time.Sleep(50 * time.Millisecond)
-		c.processProposal(proposal)
-		logger.Info("✅ Leader %s processed its own proposal locally", c.nodeID)
-	}()
-	// =======================================================================
+	// ========== FIX: Process proposal locally IMMEDIATELY ==========
+	// The leader needs preparedBlock set before prepare votes arrive.
+	// Process synchronously (this will set preparedBlock), then broadcast.
+	c.processProposal(proposal)
+	logger.Info("✅ Leader %s processed its own proposal locally", c.nodeID)
 
 	// Broadcast the proposal to all peers
 	if err := c.broadcastProposal(proposal); err != nil {
 		return fmt.Errorf("failed to broadcast proposal: %w", err)
 	}
+	// ====================================================================
 
 	logger.Info("✅ [%s] Block proposed and broadcast, waiting for consensus...", c.nodeID)
 	return nil
@@ -1948,6 +1942,11 @@ func (c *Consensus) commitBlock(block Block) {
 		c.mu.RUnlock()
 		logger.Info("📊 Leader status after commit: isLeader=%v, electedLeader=%s", isLeader, electedLeader)
 	}()
+}
+
+// StartViewChange initiates a view change process (public wrapper for startViewChange)
+func (c *Consensus) StartViewChange() {
+	c.startViewChange()
 }
 
 // startViewChange initiates a view change process

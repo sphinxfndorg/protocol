@@ -6,10 +6,11 @@ package core
 
 import (
 	"encoding/json"
-	"fmt"
+	"errors"
 	"math/big"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/sphinxorg/protocol/src/consensus"
@@ -38,13 +39,15 @@ func (bc *Blockchain) newStateDB() (*StateDB, error) {
 	// Call the public NewStateDB which returns pool.StateDB
 	stateDB, err := bc.NewStateDB()
 	if err != nil {
-		return nil, err
+		logger.Error("newStateDB: failed to get StateDB: %v", err)
+		return nil, errors.New("failed to get internal StateDB")
 	}
 	// Type assert back to *StateDB for internal use
 	if sdb, ok := stateDB.(*StateDB); ok {
 		return sdb, nil
 	}
-	return nil, fmt.Errorf("failed to get internal StateDB")
+	logger.Error("newStateDB: StateDB type assertion failed")
+	return nil, errors.New("failed to get internal StateDB")
 }
 
 // IsDistributionComplete returns true when the genesis vault has been fully
@@ -83,30 +86,47 @@ func TotalAllocatedNSPX() *big.Int {
 // CHECKPOINT FUNCTIONS - Supply Tracking
 // ============================================================================
 
-// executor.go - Updated WriteChainCheckpoint with nested structure
 // WriteChainCheckpoint writes the current chain state including reward tracking
 func (bc *Blockchain) WriteChainCheckpoint() error {
 	bc.lock.RLock()
 	defer bc.lock.RUnlock()
 
-	if len(bc.chain) == 0 {
-		return fmt.Errorf("no blocks in chain")
-	}
+	// ========== FIX: Read from MEMORY first, fallback to storage ==========
+	// The in-memory chain is updated immediately in CommitBlock()
+	// Storage may lag behind, so prioritize memory for the checkpoint
+	var latestBlock *types.Block
 
-	latest := bc.chain[len(bc.chain)-1]
-	if latest == nil {
-		return fmt.Errorf("latest block is nil")
+	if len(bc.chain) > 0 {
+		latestBlock = bc.chain[len(bc.chain)-1]
+		logger.Info("WriteChainCheckpoint: using in-memory chain (height=%d)", latestBlock.GetHeight())
+	} else {
+		// Fallback to storage if memory is empty
+		block, err := bc.storage.GetLatestBlock()
+		if err != nil || block == nil {
+			logger.Error("WriteChainCheckpoint: no blocks in chain or storage")
+			return errors.New("no blocks available")
+		}
+		latestBlock = block
+		logger.Info("WriteChainCheckpoint: using storage (height=%d)", latestBlock.GetHeight())
+	}
+	// =============================================================
+
+	if latestBlock == nil {
+		logger.Error("WriteChainCheckpoint: latest block is nil")
+		return errors.New("latest block is nil")
 	}
 
 	// Get state from DB
 	stateDB, err := bc.newStateDB()
 	if err != nil {
-		return fmt.Errorf("failed to open stateDB: %w", err)
+		logger.Error("WriteChainCheckpoint: failed to open stateDB: %v", err)
+		return errors.New("failed to open stateDB")
 	}
 
 	vaultBalance, err := stateDB.GetBalance(GenesisVaultAddress)
 	if err != nil {
-		return fmt.Errorf("failed to get vault balance: %w", err)
+		logger.Error("WriteChainCheckpoint: failed to get vault balance: %v", err)
+		return errors.New("failed to get vault balance")
 	}
 
 	totalSupply := stateDB.GetTotalSupply()
@@ -141,17 +161,46 @@ func (bc *Blockchain) WriteChainCheckpoint() error {
 	}
 
 	// Determine phase
-	phase := string(PhaseDevnet)
-	if bc.IsDistributionComplete() {
-		phase = string(PhaseMainnet)
-	} else if bc.chainParams != nil && bc.chainParams.IsTestnet() {
-		phase = string(PhaseTestnet)
+	// Determine phase - check network type FIRST, not distribution status
+	// Determine phase
+	phase := string(PhaseDevnet) // default
+
+	// Get chain name from chainParams - THIS IS THE SINGLE SOURCE OF TRUTH
+	chainName := "Sphinx Devnet" // fallback default
+	if bc.chainParams != nil {
+		chainName = bc.chainParams.ChainName
 	}
 
-	// Build the new checkpoint structure
+	if bc.chainParams != nil {
+		if bc.chainParams.IsDevnet() {
+			phase = string(PhaseDevnet)
+		} else if bc.chainParams.IsTestnet() {
+			phase = string(PhaseTestnet)
+		} else {
+			phase = string(PhaseMainnet)
+		}
+	} else if bc.IsDistributionComplete() {
+		phase = string(PhaseMainnet)
+	}
+
+	// Get genesis hash - try storage first, then memory
+	var genesisHash string
+	if len(bc.chain) > 0 && bc.chain[0] != nil {
+		genesisHash = bc.chain[0].GetHash()
+	} else {
+		// Try to get genesis from storage
+		if genBlock, err := bc.storage.GetBlockByHeight(0); err == nil && genBlock != nil {
+			genesisHash = genBlock.GetHash()
+		} else {
+			genesisHash = "unknown"
+		}
+	}
+
+	// Build the checkpoint structure
 	checkpoint := &ChainCheckpoint{
 		Phase:       phase,
-		GenesisHash: bc.chain[0].GetHash(),
+		ChainName:   chainName, // Use chainParams.ChainName
+		GenesisHash: genesisHash,
 		Timestamp:   time.Now().UTC().Format(time.RFC3339),
 
 		Supply: struct {
@@ -234,23 +283,21 @@ func (bc *Blockchain) WriteChainCheckpoint() error {
 			Height uint64 `json:"height"`
 			Hash   string `json:"hash"`
 		}{
-			Height: latest.GetHeight(),
-			Hash:   latest.GetHash(),
+			Height: latestBlock.GetHeight(),
+			Hash:   latestBlock.GetHash(),
 		},
 	}
 
-	// ========== FIX: Use the correct path ==========
-	// The storage's GetStateDir() already returns the full state directory path
-	// So we just need to join with the filename
+	// Write to file using the correct path
 	checkpointPath := filepath.Join(bc.storage.GetStateDir(), "chain_checkpoint.json")
-	// ===============================================
 
 	if err := writeCheckpointFile(checkpointPath, checkpoint); err != nil {
-		return fmt.Errorf("failed to write checkpoint: %w", err)
+		logger.Error("WriteChainCheckpoint: failed to write checkpoint: %v", err)
+		return errors.New("failed to write checkpoint")
 	}
 
 	// Log checkpoint info with detailed breakdown
-	logger.Info("✅ CHECKPOINT: %s at height=%d", phase, latest.GetHeight())
+	logger.Info("✅ CHECKPOINT: %s at height=%d", phase, latestBlock.GetHeight())
 	logger.Info("📊 SUPPLY BREAKDOWN:")
 	logger.Info("   Genesis Allocation: %s SPX (%s nSPX)",
 		genesisSPX.String(), genesisSupply.String())
@@ -272,7 +319,8 @@ func (bc *Blockchain) WriteChainCheckpoint() error {
 func (bc *Blockchain) GetRemainingSupplySPX() (*big.Int, error) {
 	stateDB, err := bc.newStateDB()
 	if err != nil {
-		return nil, fmt.Errorf("failed to open stateDB: %w", err)
+		logger.Error("GetRemainingSupplySPX: failed to open stateDB: %v", err)
+		return nil, errors.New("failed to open stateDB")
 	}
 
 	totalSupply := stateDB.GetTotalSupply()
@@ -294,7 +342,8 @@ func (bc *Blockchain) GetRemainingSupplySPX() (*big.Int, error) {
 func (bc *Blockchain) GetMintedSPX() (*big.Int, error) {
 	stateDB, err := bc.newStateDB()
 	if err != nil {
-		return nil, fmt.Errorf("failed to open stateDB: %w", err)
+		logger.Error("GetMintedSPX: failed to open stateDB: %v", err)
+		return nil, errors.New("failed to open stateDB")
 	}
 
 	totalSupply := stateDB.GetTotalSupply()
@@ -306,7 +355,8 @@ func (bc *Blockchain) GetMintedSPX() (*big.Int, error) {
 func (bc *Blockchain) GetSupplyStatus() (map[string]interface{}, error) {
 	stateDB, err := bc.newStateDB()
 	if err != nil {
-		return nil, fmt.Errorf("failed to open stateDB: %w", err)
+		logger.Error("GetSupplyStatus: failed to open stateDB: %v", err)
+		return nil, errors.New("failed to open stateDB")
 	}
 
 	totalSupply := stateDB.GetTotalSupply()
@@ -314,7 +364,8 @@ func (bc *Blockchain) GetSupplyStatus() (map[string]interface{}, error) {
 	rewardsMinted := stateDB.GetRewardsMinted()
 	vaultBalance, err := stateDB.GetBalance(GenesisVaultAddress)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get vault balance: %w", err)
+		logger.Error("GetSupplyStatus: failed to get vault balance: %v", err)
+		return nil, errors.New("failed to get vault balance")
 	}
 
 	maxSupplyNSPX := new(big.Int).Mul(
@@ -358,7 +409,7 @@ func (bc *Blockchain) GetSupplyStatus() (map[string]interface{}, error) {
 		"distributed_nspx":         distributedNSPX.String(),
 		"supply_used_percent":      totalPct,
 		"rewards_percent":          rewardPct,
-		"blocks_mined_rewards":     fmt.Sprintf("%d", bc.GetBlockCount()),
+		"blocks_mined_rewards":     strconv.FormatUint(bc.GetBlockCount(), 10),
 		"is_distribution_complete": bc.IsDistributionComplete(),
 	}, nil
 }
@@ -374,24 +425,28 @@ func calculateSupplyPercent(part, total *big.Int) string {
 	)
 	pct.Mul(pct, big.NewFloat(100))
 	result, _ := pct.Float64()
-	return fmt.Sprintf("%.2f", result)
+	// Using strconv for formatting to avoid fmt
+	return strconv.FormatFloat(result, 'f', 2, 64)
 }
 
 // writeCheckpointFile writes a checkpoint to disk
 func writeCheckpointFile(path string, checkpoint *ChainCheckpoint) error {
 	data, err := json.MarshalIndent(checkpoint, "", "  ")
 	if err != nil {
-		return fmt.Errorf("failed to marshal checkpoint: %w", err)
+		logger.Error("writeCheckpointFile: failed to marshal checkpoint: %v", err)
+		return errors.New("failed to marshal checkpoint")
 	}
 
 	// Ensure directory exists
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("failed to create checkpoint directory: %w", err)
+		logger.Error("writeCheckpointFile: failed to create checkpoint directory: %v", err)
+		return errors.New("failed to create checkpoint directory")
 	}
 
 	if err := os.WriteFile(path, data, 0644); err != nil {
-		return fmt.Errorf("failed to write checkpoint: %w", err)
+		logger.Error("writeCheckpointFile: failed to write checkpoint: %v", err)
+		return errors.New("failed to write checkpoint")
 	}
 
 	return nil
@@ -427,11 +482,13 @@ func (bc *Blockchain) applyTransactions(block *types.Block, stateDB *StateDB) er
 
 		expected, err := stateDB.GetNonce(tx.Sender)
 		if err != nil {
-			return fmt.Errorf("tx[%d] %s: failed to get nonce: %w", i, tx.ID, err)
+			logger.Error("applyTransactions: tx[%d] %s: failed to get nonce: %v", i, tx.ID, err)
+			return errors.New("failed to get nonce")
 		}
 		if tx.Nonce != expected {
-			return fmt.Errorf("tx[%d] %s: bad nonce: got %d want %d",
+			logger.Error("applyTransactions: tx[%d] %s: bad nonce: got %d want %d",
 				i, tx.ID, tx.Nonce, expected)
+			return errors.New("bad nonce")
 		}
 
 		gasFee := tx.GetGasFee()
@@ -439,15 +496,18 @@ func (bc *Blockchain) applyTransactions(block *types.Block, stateDB *StateDB) er
 
 		bal, err := stateDB.GetBalance(tx.Sender)
 		if err != nil {
-			return fmt.Errorf("tx[%d] %s: failed to get balance: %w", i, tx.ID, err)
+			logger.Error("applyTransactions: tx[%d] %s: failed to get balance: %v", i, tx.ID, err)
+			return errors.New("failed to get balance")
 		}
 		if bal.Cmp(totalCost) < 0 {
-			return fmt.Errorf("tx[%d] %s: %s has %s nSPX, needs %s nSPX",
+			logger.Error("applyTransactions: tx[%d] %s: %s has %s nSPX, needs %s nSPX",
 				i, tx.ID, tx.Sender, bal.String(), totalCost.String())
+			return errors.New("insufficient balance")
 		}
 
 		if err := stateDB.SubBalance(tx.Sender, totalCost); err != nil {
-			return fmt.Errorf("tx[%d] SubBalance: %w", i, err)
+			logger.Error("applyTransactions: tx[%d] SubBalance: %v", i, err)
+			return errors.New("failed to subtract balance")
 		}
 		stateDB.AddBalance(tx.Receiver, tx.Amount)
 
@@ -548,18 +608,21 @@ func (bc *Blockchain) mintBlockReward(block *types.Block, stateDB *StateDB) {
 func (bc *Blockchain) ExecuteBlock(block *types.Block) ([]byte, error) {
 	stateDB, err := bc.newStateDB()
 	if err != nil {
-		return nil, fmt.Errorf("ExecuteBlock: %w", err)
+		logger.Error("ExecuteBlock: failed to open stateDB: %v", err)
+		return nil, errors.New("failed to open stateDB")
 	}
 
 	if err := bc.applyTransactions(block, stateDB); err != nil {
-		return nil, fmt.Errorf("ExecuteBlock: applyTransactions: %w", err)
+		logger.Error("ExecuteBlock: applyTransactions failed: %v", err)
+		return nil, errors.New("applyTransactions failed")
 	}
 
 	bc.mintBlockReward(block, stateDB)
 
 	stateRoot, err := stateDB.Commit()
 	if err != nil {
-		return nil, fmt.Errorf("ExecuteBlock: commit: %w", err)
+		logger.Error("ExecuteBlock: commit failed: %v", err)
+		return nil, errors.New("commit failed")
 	}
 	return stateRoot, nil
 }
@@ -569,18 +632,21 @@ func (bc *Blockchain) ExecuteGenesisBlock() error {
 	bc.lock.RLock()
 	if len(bc.chain) == 0 || bc.chain[0] == nil {
 		bc.lock.RUnlock()
-		return fmt.Errorf("ExecuteGenesisBlock: genesis block not in memory")
+		logger.Error("ExecuteGenesisBlock: genesis block not in memory")
+		return errors.New("genesis block not in memory")
 	}
 	genesisBlock := bc.chain[0]
 	bc.lock.RUnlock()
 
 	stateDB, err := bc.newStateDB()
 	if err != nil {
-		return fmt.Errorf("ExecuteGenesisBlock: %w", err)
+		logger.Error("ExecuteGenesisBlock: failed to open stateDB: %v", err)
+		return errors.New("failed to open stateDB")
 	}
 	bal, err := stateDB.GetBalance(GenesisVaultAddress)
 	if err != nil {
-		return fmt.Errorf("ExecuteGenesisBlock: failed to get balance: %w", err)
+		logger.Error("ExecuteGenesisBlock: failed to get balance: %v", err)
+		return errors.New("failed to get balance")
 	}
 	if bal.Sign() > 0 {
 		logger.Info("ExecuteGenesisBlock: vault already funded, skipping")
@@ -588,7 +654,8 @@ func (bc *Blockchain) ExecuteGenesisBlock() error {
 	}
 
 	if _, err := bc.ExecuteBlock(genesisBlock); err != nil {
-		return fmt.Errorf("ExecuteGenesisBlock: %w", err)
+		logger.Error("ExecuteGenesisBlock: ExecuteBlock failed: %v", err)
+		return errors.New("ExecuteBlock failed")
 	}
 
 	logger.Info("✅ ExecuteGenesisBlock: vault %s funded", GenesisVaultAddress)
@@ -599,12 +666,14 @@ func (bc *Blockchain) ExecuteGenesisBlock() error {
 // stakes from the blockchain state after distribution is complete.
 func (bc *Blockchain) UpdateValidatorStakesFromState(validatorIDs []string, validatorSet interface{}) error {
 	if validatorSet == nil {
-		return fmt.Errorf("validatorSet is nil")
+		logger.Error("UpdateValidatorStakesFromState: validatorSet is nil")
+		return errors.New("validatorSet is nil")
 	}
 
 	stateDB, err := bc.newStateDB()
 	if err != nil {
-		return fmt.Errorf("failed to open stateDB: %w", err)
+		logger.Error("UpdateValidatorStakesFromState: failed to open stateDB: %v", err)
+		return errors.New("failed to open stateDB")
 	}
 
 	type stakeUpdater interface {
@@ -613,7 +682,8 @@ func (bc *Blockchain) UpdateValidatorStakesFromState(validatorIDs []string, vali
 
 	updater, ok := validatorSet.(stakeUpdater)
 	if !ok {
-		return fmt.Errorf("validatorSet does not support UpdateStake")
+		logger.Error("UpdateValidatorStakesFromState: validatorSet does not support UpdateStake")
+		return errors.New("validatorSet does not support UpdateStake")
 	}
 
 	for _, vid := range validatorIDs {
@@ -645,17 +715,20 @@ func (bc *Blockchain) GetCheckpointMessage() (*consensus.CheckpointMessage, erro
 	defer bc.lock.RUnlock()
 
 	if len(bc.chain) == 0 {
-		return nil, fmt.Errorf("no blocks in chain")
+		logger.Error("GetCheckpointMessage: no blocks in chain")
+		return nil, errors.New("no blocks in chain")
 	}
 
 	stateDB, err := bc.newStateDB()
 	if err != nil {
-		return nil, fmt.Errorf("failed to open stateDB: %w", err)
+		logger.Error("GetCheckpointMessage: failed to open stateDB: %v", err)
+		return nil, errors.New("failed to open stateDB")
 	}
 
 	vaultBalance, err := stateDB.GetBalance(GenesisVaultAddress)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get vault balance: %w", err)
+		logger.Error("GetCheckpointMessage: failed to get vault balance: %v", err)
+		return nil, errors.New("failed to get vault balance")
 	}
 
 	totalSupply := stateDB.GetTotalSupply()
@@ -674,10 +747,16 @@ func (bc *Blockchain) GetCheckpointMessage() (*consensus.CheckpointMessage, erro
 
 	latest := bc.chain[len(bc.chain)-1]
 	phase := "devnet"
-	if bc.IsDistributionComplete() {
+	if bc.chainParams != nil {
+		if bc.chainParams.IsDevnet() {
+			phase = "devnet"
+		} else if bc.chainParams.IsTestnet() {
+			phase = "testnet"
+		} else if bc.IsDistributionComplete() {
+			phase = "mainnet"
+		}
+	} else if bc.IsDistributionComplete() {
 		phase = "mainnet"
-	} else if bc.chainParams != nil && bc.chainParams.IsTestnet() {
-		phase = "testnet"
 	}
 
 	mintedSPX := new(big.Int).Div(totalSupply, big.NewInt(1e18))
@@ -703,13 +782,15 @@ func (bc *Blockchain) ApplyCheckpointFromPeer(cp *consensus.CheckpointMessage) e
 	defer bc.lock.Unlock()
 
 	if len(bc.chain) == 0 {
-		return fmt.Errorf("no chain to apply checkpoint to")
+		logger.Error("ApplyCheckpointFromPeer: no chain to apply checkpoint to")
+		return errors.New("no chain to apply checkpoint to")
 	}
 
 	// Verify genesis hash matches
 	if cp.GenesisHash != bc.chain[0].GetHash() {
-		return fmt.Errorf("genesis hash mismatch: peer=%s, local=%s",
+		logger.Error("ApplyCheckpointFromPeer: genesis hash mismatch: peer=%s, local=%s",
 			cp.GenesisHash, bc.chain[0].GetHash())
+		return errors.New("genesis hash mismatch")
 	}
 
 	// Check if peer is ahead
@@ -725,7 +806,8 @@ func (bc *Blockchain) ApplyCheckpointFromPeer(cp *consensus.CheckpointMessage) e
 	// Store checkpoint for later sync
 	cpData, err := json.Marshal(cp)
 	if err != nil {
-		return fmt.Errorf("failed to marshal checkpoint: %w", err)
+		logger.Error("ApplyCheckpointFromPeer: failed to marshal checkpoint: %v", err)
+		return errors.New("failed to marshal checkpoint")
 	}
 
 	// Store in database for recovery
@@ -745,12 +827,14 @@ func (bc *Blockchain) ApplyCheckpointFromPeer(cp *consensus.CheckpointMessage) e
 // SyncCheckpoints synchronizes checkpoints with a peer
 func (bc *Blockchain) SyncCheckpoints(peerAddress string) error {
 	if bc.rpcCaller == nil {
-		return fmt.Errorf("RPC caller not set - cannot sync checkpoints")
+		logger.Error("SyncCheckpoints: RPC caller not set - cannot sync checkpoints")
+		return errors.New("RPC caller not set - cannot sync checkpoints")
 	}
 
 	cp, err := bc.rpcCaller.GetCheckpoint(peerAddress)
 	if err != nil {
-		return fmt.Errorf("failed to get checkpoint from peer: %w", err)
+		logger.Error("SyncCheckpoints: failed to get checkpoint from peer: %v", err)
+		return errors.New("failed to get checkpoint from peer")
 	}
 
 	return bc.ApplyCheckpointFromPeer(cp)

@@ -293,31 +293,62 @@ func (sm *StateMachine) syncFinalStates() {
 	rawSignatures := sm.consensus.GetConsensusSignatures()
 	logger.Info("🔄 SMR: Processing %d signatures from consensus", len(rawSignatures))
 
-	// Clear existing final states
 	sm.finalStates = make([]*FinalStateInfo, 0)
 
 	for _, rawSig := range rawSignatures {
-		// CRITICAL FIX: Only include blocks that exist in storage
-		block, err := sm.storage.GetBlockByHash(rawSig.BlockHash)
-		if err != nil || block == nil {
-			logger.Warn("Skipping final state for block %s: block not found in storage (height=%d, type=%s)",
-				rawSig.BlockHash, rawSig.BlockHeight, rawSig.MessageType)
-			continue // Skip this stale signature
+		// ========== FIX: Retry fetching block with backoff ==========
+		var block *types.Block
+		var err error
+
+		// Try up to 10 times with increasing delays
+		for attempt := 0; attempt < 10; attempt++ {
+			block, err = sm.storage.GetBlockByHash(rawSig.BlockHash)
+			if err == nil && block != nil {
+				break
+			}
+			if attempt < 9 {
+				time.Sleep(time.Duration(100*(attempt+1)) * time.Millisecond)
+				logger.Debug("Retry %d/10 for block %s", attempt+1, rawSig.BlockHash[:16])
+			}
 		}
 
-		// Convert ConsensusSignature to FinalStateInfo with proper population
+		// If block still not found, create a placeholder state
+		if err != nil || block == nil {
+			logger.Warn("⚠️ Block %s not in storage, creating placeholder (height=%d, type=%s)",
+				rawSig.BlockHash[:16], rawSig.BlockHeight, rawSig.MessageType)
+
+			// Create placeholder with available info
+			placeholder := &FinalStateInfo{
+				BlockHash:       rawSig.BlockHash,
+				BlockHeight:     rawSig.BlockHeight,
+				MerkleRoot:      "pending_" + rawSig.BlockHash[:8],
+				SignerNodeID:    rawSig.SignerNodeID,
+				Signature:       rawSig.Signature,
+				MessageType:     rawSig.MessageType,
+				View:            rawSig.View,
+				Valid:           rawSig.Valid,
+				Status:          sm.determineFinalStateStatus(rawSig.MessageType, rawSig.Valid),
+				SignatureStatus: sm.mapValidToSignatureStatus(rawSig.Valid),
+				Timestamp:       time.Now().Format(time.RFC3339),
+			}
+
+			sm.finalStates = append(sm.finalStates, placeholder)
+			logger.Info("✅ SMR: Added placeholder final state for block %s", rawSig.BlockHash[:16])
+			continue
+		}
+
+		// Block found - create proper final state
 		finalState := sm.convertToFinalStateInfo(rawSig)
+		if finalState == nil {
+			continue
+		}
 
-		// CRITICAL: Ensure merkle_root and status are NEVER empty
 		finalState = sm.FinalStatePopulated(finalState)
-
-		// CRITICAL FIX: Ensure genesis block has correct GENESIS_ hash
 		finalState = sm.fixGenesisBlockHash(finalState)
 
 		sm.finalStates = append(sm.finalStates, finalState)
-
-		logger.Info("✅ SMR: Final state - block=%s, height=%d, merkle=%s, status=%s, type=%s",
-			finalState.BlockHash, finalState.BlockHeight, finalState.MerkleRoot, finalState.Status, finalState.MessageType)
+		logger.Info("✅ SMR: Final state - block=%s, height=%d, merkle=%s, status=%s",
+			finalState.BlockHash[:16], finalState.BlockHeight, finalState.MerkleRoot, finalState.Status)
 	}
 
 	logger.Info("✅ SMR: Successfully synced %d final states", len(sm.finalStates))
@@ -887,7 +918,7 @@ func (sm *StateMachine) VerifyState(snapshot *StateSnapshot) (bool, error) {
 
 func (sm *StateMachine) replicationLoop() {
 	ticker := time.NewTicker(1 * time.Second)
-	syncTicker := time.NewTicker(10 * time.Second) // Sync with consensus periodically
+	syncTicker := time.NewTicker(2 * time.Second) // Sync with consensus periodically
 	defer ticker.Stop()
 	defer syncTicker.Stop()
 

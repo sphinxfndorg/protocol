@@ -64,13 +64,13 @@ func StartNode(
 		logger.Info("✅ FULL PBFT CONSENSUS — %d validators", totalNodes)
 	}
 
-	/// SECTION 1 — chain identification
+	// SECTION 1 — chain identification
 	chainParams := commit.SphinxChainParams()
 	logger.Info("Chain: %s  ChainID=%d  Symbol=%s", chainParams.ChainName, chainParams.ChainID, chainParams.Symbol)
 
 	// ========== FIX: Force devnet mode ==========
 	networkType = "devnet"
-	logger.Info("Network type: %s (FORCED DEVNET)", networkType)
+	logger.Info("Network type: %s (%s)", networkType, core.GetNetworkDisplayName(networkType))
 	// ===========================================
 
 	// SECTION 2 — shared cryptographic parameters
@@ -573,6 +573,16 @@ func StartNode(
 	}()
 	logger.Info("✅ Consensus engine started AFTER key exchange")
 
+	// ========== NEW: Watch for Block 1 commit and update stakes ==========
+	if totalNodes > 1 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			watchAndUpdateStakes(ctx, bc, cons, currentNodeID, validatorIDs, validatorAddressMap)
+		}()
+	}
+	// ====================================================================
+
 	// SECTION 12 — genesis verification
 	expectedGenesisHash := core.GetGenesisHash()
 	genesis := bc.GetLatestBlock()
@@ -604,7 +614,7 @@ func StartNode(
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		runBlockProductionLoop(ctx, bc, cons, currentNodeID, totalNodes, networkType)
+		runBlockProductionLoop(ctx, bc, cons, currentNodeID, totalNodes, networkType, validatorIDs, validatorAddressMap)
 	}()
 
 	// SECTION 15 — state persistence loop
@@ -641,7 +651,52 @@ func StartNode(
 	return nil
 }
 
-// flushNodeState writes node state to disk
+// ========== NEW: Watch and update stakes after Block 1 ==========
+// ========== NEW: Watch and update stakes after Block 1 ==========
+func watchAndUpdateStakes(
+	ctx context.Context,
+	bc *core.Blockchain,
+	cons *consensus.Consensus,
+	nodeID string,
+	validatorIDs []string,
+	validatorAddressMap map[string]string,
+) {
+	logger.Info("[%s] 🔍 Stake watcher started - waiting for Block 1", nodeID)
+
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			latestBlock := bc.GetLatestBlock()
+			if latestBlock == nil {
+				continue
+			}
+
+			height := latestBlock.GetHeight()
+
+			if height >= 1 {
+				logger.Info("[%s] 📊 Block %d detected - updating validator stakes from state DB", nodeID, height)
+
+				time.Sleep(300 * time.Millisecond)
+
+				// PASS THE PARAMETERS
+				if tryInitPhase2WithRetry(bc, cons, nodeID, validatorIDs, validatorAddressMap) {
+					logger.Info("[%s] ✅ Phase 2 initialized successfully", nodeID)
+					return
+				}
+
+				logger.Error("[%s] ❌ Phase 2 initialization failed - continuing to retry", nodeID)
+			}
+		}
+	}
+}
+
+// ====================================================================
+
 // flushNodeState writes node state to disk
 func flushNodeState(bc *core.Blockchain, nodeID, address string) {
 	latest := bc.GetLatestBlock()

@@ -16,10 +16,18 @@ import (
 	vmachine "github.com/sphinxorg/protocol/src/core/svm/vm"
 	logger "github.com/sphinxorg/protocol/src/log"
 	denom "github.com/sphinxorg/protocol/src/params/denom"
+	"github.com/sphinxorg/protocol/src/pool"
 )
 
 // initializePhase2Stakes reads actual balances from state DB and sets validator stakes
-func initializePhase2Stakes(bc *core.Blockchain, cons *consensus.Consensus, nodeID string) bool {
+// initializePhase2Stakes reads actual balances from state DB and sets validator stakes
+func initializePhase2Stakes(
+	bc *core.Blockchain,
+	cons *consensus.Consensus,
+	nodeID string,
+	validatorIDs []string,
+	validatorAddressMap map[string]string,
+) bool {
 	logger.Info("[%s] 🔓 PHASE 2 INITIALIZATION - Reading stakes from genesis allocations", nodeID)
 
 	vs := cons.GetValidatorSet()
@@ -28,25 +36,49 @@ func initializePhase2Stakes(bc *core.Blockchain, cons *consensus.Consensus, node
 		return false
 	}
 
-	stateDB, err := bc.NewStateDB()
-	if err != nil {
-		logger.Error("[%s] ❌ Failed to open StateDB: %v", nodeID, err)
+	// ========== PRODUCTION FIX: Retry with state DB readiness check ==========
+	var stateDB pool.StateDB
+	var err error
+
+	for attempt := 0; attempt < 10; attempt++ {
+		stateDB, err = bc.NewStateDB()
+		if err != nil {
+			logger.Warn("[%s] Failed to open StateDB (attempt %d/10): %v", nodeID, attempt+1, err)
+			time.Sleep(time.Duration(100*(attempt+1)) * time.Millisecond)
+			continue
+		}
+
+		vaultBalance, err := stateDB.GetBalance(core.GenesisVaultAddress)
+		if err == nil && vaultBalance != nil {
+			if vaultBalance.Sign() == 0 {
+				logger.Info("[%s] ✅ StateDB ready - vault balance: 0 (distribution complete)", nodeID)
+				break
+			}
+			logger.Info("[%s] StateDB has vault balance: %s nSPX (attempt %d/10)",
+				nodeID, vaultBalance.String(), attempt+1)
+		}
+
+		stateDB.Close()
+		stateDB = nil
+
+		backoff := time.Duration(200*(attempt+1)*(attempt+1)) * time.Millisecond
+		if backoff > 5*time.Second {
+			backoff = 5 * time.Second
+		}
+		time.Sleep(backoff)
+	}
+
+	if stateDB == nil {
+		logger.Error("[%s] ❌ Failed to open StateDB after 10 attempts", nodeID)
 		return false
 	}
+	defer stateDB.Close()
+	// ================================================================
 
-	// Map validator ID to genesis allocation address
-	// Map validator ID to genesis allocation address with CORRECT stakes
-	validatorAddressMap := map[string]string{
-		"Node-127.0.0.1:32307": "1000000000000000000000000000000000000001", // Founder - 30M SPX
-		"Node-127.0.0.1:32308": "2000000000000000000000000000000000000001", // CoFounder - 95M SPX
-		"Node-127.0.0.1:32309": "3000000000000000000000000000000000000001", // Development - 200M SPX
-	}
+	// USE THE PASSED validatorIDs INSTEAD OF cons.GetValidators()
+	logger.Info("[%s] Found %d validators to initialize (from passed parameter)", nodeID, len(validatorIDs))
 
-	// Get validators from the consensus engine
-	validators := cons.GetValidators()
-	logger.Info("[%s] Found %d validators to initialize", nodeID, len(validators))
-
-	if len(validators) == 0 {
+	if len(validatorIDs) == 0 {
 		logger.Error("[%s] ❌ No validators found! Cannot initialize Phase 2 stakes.", nodeID)
 		return false
 	}
@@ -55,14 +87,13 @@ func initializePhase2Stakes(bc *core.Blockchain, cons *consensus.Consensus, node
 	totalBalanceSPX := uint64(0)
 	minStakeSPX := vs.GetMinStakeSPX()
 
-	for _, vid := range validators {
+	// USE THE PASSED validatorAddressMap
+	for _, vid := range validatorIDs {
 		var address string
 		var ok bool
 		if address, ok = validatorAddressMap[vid]; !ok {
 			address = vid
 			logger.Warn("[%s] No mapping found for validator %s, using ID as address", nodeID, vid)
-		} else {
-			logger.Info("[%s] Validator %s mapped to genesis address %s", nodeID, vid, address)
 		}
 
 		balanceNSPX, err := stateDB.GetBalance(address)
@@ -92,7 +123,7 @@ func initializePhase2Stakes(bc *core.Blockchain, cons *consensus.Consensus, node
 	}
 
 	logger.Info("[%s] 📊 Total stake from balances: %d SPX (success: %d/%d validators)",
-		nodeID, totalBalanceSPX, successCount, len(validators))
+		nodeID, totalBalanceSPX, successCount, len(validatorIDs))
 
 	totalStake := vs.GetTotalStake()
 	if totalStake.Sign() == 0 {
@@ -107,25 +138,30 @@ func initializePhase2Stakes(bc *core.Blockchain, cons *consensus.Consensus, node
 }
 
 // tryInitPhase2 runs the Phase 2 initialization and advances the consensus view.
-// It is safe to call from both the outer poll loop (followers) and the inner
-// commit-wait loop (leader). Returns true if initialization succeeded.
-func tryInitPhase2(bc *core.Blockchain, cons *consensus.Consensus, nodeID string) bool {
+func tryInitPhase2(
+	bc *core.Blockchain,
+	cons *consensus.Consensus,
+	nodeID string,
+	validatorIDs []string,
+	validatorAddressMap map[string]string,
+) bool {
 	logger.Info("[%s] 🔓 BLOCK 1 COMMITTED — Initializing Phase 2 stakes", nodeID)
 
-	// FIX 3: Small sleep so the StateDB flush from block 1's execution has
-	// time to land before we read balances. Without this, balances may still
-	// read as zero on the committing node.
 	time.Sleep(500 * time.Millisecond)
 
-	if !initializePhase2Stakes(bc, cons, nodeID) {
+	// PASS THE PARAMETERS
+	if !initializePhase2Stakes(bc, cons, nodeID, validatorIDs, validatorAddressMap) {
 		logger.Error("[%s] ❌ Phase 2 initialization failed!", nodeID)
 		return false
 	}
 
-	// FIX 3 (cont): Advance the consensus view so block 2's proposal uses
-	// view 1, not view 0 (which was already used for block 1). Without this,
-	// followers reject the block 2 proposal as a stale/duplicate view.
 	cons.UpdateLeaderStatus()
+
+	if err := bc.WriteChainCheckpoint(); err != nil {
+		logger.Warn("[%s] Failed to write checkpoint after Phase 2: %v", nodeID, err)
+	} else {
+		logger.Info("[%s] ✅ Checkpoint updated after Phase 2 initialization", nodeID)
+	}
 
 	newLeader := cons.GetElectedLeaderID()
 	if newLeader != "" {
@@ -137,6 +173,75 @@ func tryInitPhase2(bc *core.Blockchain, cons *consensus.Consensus, nodeID string
 	return true
 }
 
+// tryInitPhase2WithRetry attempts to initialize Phase 2 with retries
+func tryInitPhase2WithRetry(
+	bc *core.Blockchain,
+	cons *consensus.Consensus,
+	nodeID string,
+	validatorIDs []string,
+	validatorAddressMap map[string]string,
+) bool {
+	logger.Info("[%s] 🔍 Initializing Phase 2 with retry...", nodeID)
+
+	maxAttempts := 15
+	baseBackoff := 200 * time.Millisecond
+	maxBackoff := 10 * time.Second
+
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		backoff := baseBackoff
+		for i := 0; i < attempt && backoff < maxBackoff; i++ {
+			backoff *= 2
+		}
+		if backoff > maxBackoff {
+			backoff = maxBackoff
+		}
+
+		jitterFactor := 0.7 + 0.6*float64(attempt%10)/10.0
+		jitter := time.Duration(float64(backoff) * jitterFactor)
+		if jitter < 100*time.Millisecond {
+			jitter = 100 * time.Millisecond
+		}
+
+		// PASS THE PARAMETERS
+		if tryInitPhase2(bc, cons, nodeID, validatorIDs, validatorAddressMap) {
+			logger.Info("[%s] ✅ Phase 2 initialized on attempt %d", nodeID, attempt+1)
+			return true
+		}
+
+		if attempt < maxAttempts-1 {
+			logger.Warn("[%s] Phase 2 init attempt %d/%d failed, retrying in %v...",
+				nodeID, attempt+1, maxAttempts, jitter)
+			time.Sleep(jitter)
+		}
+	}
+
+	// ========== PRODUCTION FALLBACK: Apply minimum stakes ==========
+	logger.Error("[%s] ❌ Phase 2 initialization failed after %d attempts - applying fallback stakes",
+		nodeID, maxAttempts)
+
+	vs := cons.GetValidatorSet()
+	if vs != nil {
+		minStake := vs.GetMinStakeSPX()
+		// USE THE PASSED validatorIDs
+		for _, vid := range validatorIDs {
+			if err := vs.AddValidator(vid, minStake); err != nil {
+				logger.Warn("[%s] Failed to set fallback stake for %s: %v", nodeID, vid, err)
+			} else {
+				logger.Info("[%s] ✅ Set fallback stake %d SPX for %s", nodeID, minStake, vid)
+			}
+		}
+
+		cons.UpdateLeaderStatus()
+		cons.StartViewChange()
+		logger.Info("[%s] ✅ Fallback stakes applied, view change triggered", nodeID)
+		return true
+	}
+	// ================================================================
+
+	return false
+}
+
+// runBlockProductionLoop runs continuous block production with PBFT consensus
 // runBlockProductionLoop runs continuous block production with PBFT consensus
 func runBlockProductionLoop(
 	ctx context.Context,
@@ -145,6 +250,8 @@ func runBlockProductionLoop(
 	nodeID string,
 	totalNodes int,
 	networkType string,
+	validatorIDs []string, // ADDED
+	validatorAddressMap map[string]string, // ADDED
 ) {
 	const (
 		singleNodeInterval  = 10 * time.Second
@@ -193,7 +300,7 @@ func runBlockProductionLoop(
 		default:
 		}
 
-		// Get fresh chain state
+		// Get fresh chain state - this is the outer poll that runs continuously
 		latestBlock = bc.GetLatestBlock()
 		if latestBlock != nil {
 			chainHeight := latestBlock.GetHeight()
@@ -202,10 +309,10 @@ func runBlockProductionLoop(
 				cons.SetCurrentHeight(currentHeight)
 				logger.Info("[%s] 📊 Chain height updated to %d", nodeID, currentHeight)
 
-				// FIX 2 (follower path): followers detect block 1 here via the
-				// outer poll since they never enter the inner commit-wait loop.
+				// FIX: Detect Block 1 in the outer poll for ALL nodes with retry
 				if currentHeight == 1 && !phase2Initialized {
-					if tryInitPhase2(bc, cons, nodeID) {
+					// PASS THE PARAMETERS
+					if tryInitPhase2WithRetry(bc, cons, nodeID, validatorIDs, validatorAddressMap) {
 						phase2Initialized = true
 					}
 				}
@@ -329,6 +436,8 @@ func runBlockProductionLoop(
 			}
 		}
 
+		// ====================================================================
+
 		cons.HandleProposal(proposal)
 		time.Sleep(100 * time.Millisecond)
 
@@ -339,8 +448,6 @@ func runBlockProductionLoop(
 
 		logger.Info("✅ [%s] Block proposed and broadcast, waiting for consensus...", nodeID)
 
-		// FIX 1: Do NOT use defer for the ticker — it leaks across loop
-		// iterations and only fires when the entire function returns.
 		commitTimeout := time.After(60 * time.Second)
 		commitTicker := time.NewTicker(1 * time.Second)
 
@@ -348,7 +455,7 @@ func runBlockProductionLoop(
 		for !committed {
 			select {
 			case <-ctx.Done():
-				commitTicker.Stop() // FIX 1: explicit stop on early exit
+				commitTicker.Stop()
 				return
 			case <-commitTimeout:
 				logger.Warn("[%s] ⚠️ Timeout waiting for block commitment at height %d", nodeID, currentHeight+1)
@@ -370,13 +477,10 @@ func runBlockProductionLoop(
 
 					logger.Info("[%s] 🎉 Block committed! Height now: %d", nodeID, currentHeight)
 
-					// FIX 2 (leader path): the leader updates currentHeight here
-					// inside the inner loop, so the outer poll's
-					// "chainHeight > currentHeight" check will be false next
-					// iteration and Phase 2 init would be skipped. We must
-					// handle it here for the leader.
+					// FIX: Detect Block 1 in the inner commit loop for leaders with retry
 					if currentHeight == 1 && !phase2Initialized {
-						if tryInitPhase2(bc, cons, nodeID) {
+						// PASS THE PARAMETERS
+						if tryInitPhase2WithRetry(bc, cons, nodeID, validatorIDs, validatorAddressMap) {
 							phase2Initialized = true
 						}
 					}
@@ -385,7 +489,7 @@ func runBlockProductionLoop(
 				}
 			}
 		}
-		commitTicker.Stop() // FIX 1: always stop after inner loop exits
+		commitTicker.Stop()
 
 		if cpErr := bc.WriteChainCheckpoint(); cpErr != nil {
 			logger.Warn("[%s] Failed to write chain checkpoint: %v", nodeID, cpErr)

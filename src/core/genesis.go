@@ -452,6 +452,7 @@ func ApplyGenesisWithCachedBlock(bc *Blockchain, gs *GenesisState, cachedBlock *
 // Call this once inside createGenesisBlock(), after ApplyGenesisWithCachedBlock
 // has stored the block.  It is idempotent: if the first allocation address
 // already has a non-zero balance the function returns immediately.
+// ApplyGenesisState credits every genesis allocation and tracks genesis supply
 func ApplyGenesisState(bc *Blockchain, gs *GenesisState) error {
 	if bc == nil || gs == nil {
 		return fmt.Errorf("ApplyGenesisState: nil argument")
@@ -462,9 +463,8 @@ func ApplyGenesisState(bc *Blockchain, gs *GenesisState) error {
 		return fmt.Errorf("ApplyGenesisState: %w", err)
 	}
 
-	// Idempotency: skip if genesis was already applied.
+	// Idempotency check
 	if len(gs.Allocations) > 0 {
-		// FIX: GetBalance now returns (balance, error)
 		bal, err := stateDB.GetBalance(gs.Allocations[0].Address)
 		if err != nil {
 			return fmt.Errorf("ApplyGenesisState: failed to get balance for %s: %w",
@@ -476,7 +476,7 @@ func ApplyGenesisState(bc *Blockchain, gs *GenesisState) error {
 		}
 	}
 
-	// Credit every allocation.
+	// Credit every allocation
 	totalMinted := new(big.Int)
 	for _, alloc := range gs.Allocations {
 		if alloc.BalanceNSPX == nil || alloc.BalanceNSPX.Sign() <= 0 {
@@ -488,12 +488,17 @@ func ApplyGenesisState(bc *Blockchain, gs *GenesisState) error {
 			alloc.BalanceNSPX.String(), alloc.Address, alloc.Label)
 	}
 
+	// NEW: Set genesis supply in StateDB
+	stateDB.SetGenesisSupply(totalMinted)
+	stateDB.IncrementTotalSupply(totalMinted)
+	// Rewards minted is 0 at genesis
+
 	stateRoot, err := stateDB.Commit()
 	if err != nil {
 		return fmt.Errorf("ApplyGenesisState: commit: %w", err)
 	}
 
-	// Patch the genesis block header with the real state root.
+	// Patch the genesis block header
 	bc.lock.Lock()
 	if len(bc.chain) > 0 && bc.chain[0] != nil {
 		bc.chain[0].Header.StateRoot = stateRoot
@@ -507,6 +512,8 @@ func ApplyGenesisState(bc *Blockchain, gs *GenesisState) error {
 	totalSPX := new(big.Int).Div(totalMinted, big.NewInt(1e18))
 	logger.Info("✅ ApplyGenesisState: %d accounts, %s SPX, state_root=%x",
 		len(gs.Allocations), totalSPX.String(), stateRoot)
+	logger.Info("📊 GENESIS SUPPLY RECORDED: %s nSPX (%s SPX)",
+		totalMinted.String(), totalSPX.String())
 	return nil
 }
 

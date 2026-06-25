@@ -18,9 +18,12 @@ import (
 	"github.com/sphinxorg/protocol/src/pool"
 )
 
+// Add constants for new keys
 const (
-	accountPrefix  = "acct:"
-	totalSupplyKey = "supply:total"
+	accountPrefix    = "acct:"
+	totalSupplyKey   = "supply:total"
+	genesisSupplyKey = "supply:genesis"
+	rewardsMintedKey = "supply:rewards"
 )
 
 // Ensure StateDB implements pool.StateDB
@@ -66,21 +69,72 @@ func (db *StateDB) GetLastNonce(address string) (uint64, error) {
 	return 0, nil // No previous transactions
 }
 
-// NewStateDB creates a StateDB backed by the given *database.DB.
+// NewStateDB - Update to restore reward tracking
 func NewStateDB(db *database.DB) *StateDB {
 	s := &StateDB{
-		db:          db,
-		pending:     make(map[string]*accountEntry),
-		totalSupply: big.NewInt(0),
+		db:            db,
+		pending:       make(map[string]*accountEntry),
+		totalSupply:   big.NewInt(0),
+		genesisSupply: big.NewInt(0),
+		rewardsMinted: big.NewInt(0),
 	}
-	// Restore persisted total supply (stored as decimal string)
+
+	// Restore persisted total supply
 	if data, err := db.Get(totalSupplyKey); err == nil && len(data) > 0 {
 		n, ok := new(big.Int).SetString(string(data), 10)
 		if ok {
 			s.totalSupply.Set(n)
 		}
 	}
+
+	// NEW: Restore genesis supply
+	if data, err := db.Get(genesisSupplyKey); err == nil && len(data) > 0 {
+		n, ok := new(big.Int).SetString(string(data), 10)
+		if ok {
+			s.genesisSupply.Set(n)
+		}
+	}
+
+	// NEW: Restore rewards minted
+	if data, err := db.Get(rewardsMintedKey); err == nil && len(data) > 0 {
+		n, ok := new(big.Int).SetString(string(data), 10)
+		if ok {
+			s.rewardsMinted.Set(n)
+		}
+	}
+
 	return s
+}
+
+// NEW: SetGenesisSupply - Set the genesis allocation amount
+func (s *StateDB) SetGenesisSupply(amount *big.Int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.genesisSupply.Set(amount)
+}
+
+// NEW: GetGenesisSupply - Get the genesis allocation amount
+func (s *StateDB) GetGenesisSupply() *big.Int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return new(big.Int).Set(s.genesisSupply)
+}
+
+// NEW: GetRewardsMinted - Get the total rewards minted so far
+func (s *StateDB) GetRewardsMinted() *big.Int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return new(big.Int).Set(s.rewardsMinted)
+}
+
+// NEW: IncrementRewardsMinted - Add to rewards minted counter
+func (s *StateDB) IncrementRewardsMinted(amount *big.Int) {
+	if amount == nil || amount.Sign() <= 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rewardsMinted.Add(s.rewardsMinted, amount)
 }
 
 // SetBlockchain sets the blockchain reference for mempool access.
@@ -343,7 +397,7 @@ func (s *StateDB) IncrementTotalSupply(amount *big.Int) {
 // Commit
 // ----------------------------------------------------------------------------
 
-// Commit flushes all pending writes to LevelDB and returns the new state root.
+// Commit - Update to persist reward tracking
 func (s *StateDB) Commit() ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -362,8 +416,19 @@ func (s *StateDB) Commit() ([]byte, error) {
 		}
 	}
 
+	// Persist total supply
 	if err := s.db.Put(totalSupplyKey, []byte(s.totalSupply.String())); err != nil {
 		return nil, fmt.Errorf("StateDB.Commit: put total supply: %w", err)
+	}
+
+	// NEW: Persist genesis supply
+	if err := s.db.Put(genesisSupplyKey, []byte(s.genesisSupply.String())); err != nil {
+		return nil, fmt.Errorf("StateDB.Commit: put genesis supply: %w", err)
+	}
+
+	// NEW: Persist rewards minted
+	if err := s.db.Put(rewardsMintedKey, []byte(s.rewardsMinted.String())); err != nil {
+		return nil, fmt.Errorf("StateDB.Commit: put rewards minted: %w", err)
 	}
 
 	s.pending = make(map[string]*accountEntry)
@@ -373,8 +438,8 @@ func (s *StateDB) Commit() ([]byte, error) {
 		return nil, err
 	}
 
-	logger.Info("StateDB committed: state_root=%x total_supply=%s nSPX",
-		stateRoot, s.totalSupply.String())
+	logger.Info("StateDB committed: state_root=%x total_supply=%s nSPX, genesis_supply=%s nSPX, rewards_minted=%s nSPX",
+		stateRoot, s.totalSupply.String(), s.genesisSupply.String(), s.rewardsMinted.String())
 	return stateRoot, nil
 }
 

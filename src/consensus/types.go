@@ -83,6 +83,7 @@ type Attestation struct {
 }
 
 // BlockChain interface for block storage and retrieval
+// BlockChain interface for block storage and retrieval
 type BlockChain interface {
 	GetLatestBlock() Block
 	ValidateBlock(block Block) error
@@ -92,6 +93,10 @@ type BlockChain interface {
 	GetTotalStaked() *big.Int
 	UpdateValidatorStake(validatorID string, delta *big.Int) error
 	GetGenesisTime() time.Time
+
+	// ADD THESE METHODS:
+	GetCheckpointMessage() (*CheckpointMessage, error)
+	ApplyCheckpointFromPeer(cp *CheckpointMessage) error
 }
 
 // NodeManager interface to abstract network functionality
@@ -416,4 +421,19 @@ type StateTransition struct {
 	ParamName      string      `json:"param_name,omitempty"`
 	ParamValue     interface{} `json:"param_value,omitempty"`
 	Timestamp      int64       `json:"timestamp,omitempty"`
+}
+
+// CheckpointMessage contains checkpoint data for peer synchronization
+type CheckpointMessage struct {
+	GenesisHash     string `json:"genesis_hash"`
+	TipHeight       uint64 `json:"tip_height"`
+	TipHash         string `json:"tip_hash"`
+	TotalSupply     string `json:"total_supply"`
+	GenesisSupply   string `json:"genesis_supply"`
+	RewardsMinted   string `json:"rewards_minted"`
+	RemainingSupply string `json:"remaining_supply"`
+	VaultBalance    string `json:"vault_balance"`
+	Timestamp       string `json:"timestamp"`
+	Phase           string `json:"phase"`
+	MintedSPX       string `json:"minted_spx"` // ADD THIS
 }

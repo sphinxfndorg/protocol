@@ -1,10 +1,41 @@
 {
   "phase": "devnet",
-  "genesis_hash": "GENESIS_71387a3f49993a4b23b615cbea5dfb440c741d1dc14d4138c75042bfd879d876",
-  "tip_height": 0,
-  "tip_hash": "GENESIS_71387a3f49993a4b23b615cbea5dfb440c741d1dc14d4138c75042bfd879d876",
-  "vault_balance": "100000000000000000000000000",
-  "total_supply": "100000000000000000000000000",
-  "timestamp": "2026-06-25T11:12:52Z",
-  "distributed_n_spx": "100000000000000000000000000"
+  "genesis_hash": "GENESIS_99e7783afe5451f72ce0e04d40a69aba4b8a798078492167e57797b60bbea61a",
+  "timestamp": "2026-06-25T15:41:19Z",
+  "supply": {
+    "max": {
+      "nspx": "5000000000000000000000000000",
+      "spx": "5000000000"
+    },
+    "genesis": {
+      "nspx": "1240000000000000000000000000",
+      "spx": "1240000000"
+    },
+    "minted": {
+      "nspx": "1240000000000000000000000000",
+      "spx": "1240000000"
+    },
+    "remaining": {
+      "nspx": "3760000000000000000000000000",
+      "spx": "3760000000"
+    }
+  },
+  "vault": {
+    "address": "0000000000000000000000000000000000000001",
+    "balance_nspx": "1240000000000000000000000000",
+    "balance_spx": "1240000000"
+  },
+  "rewards": {
+    "minted_nspx": "0",
+    "minted_spx": "0"
+  },
+  "distribution": {
+    "status": "pending",
+    "total_allocations": 9,
+    "total_allocated_spx": "1240000000"
+  },
+  "tip": {
+    "height": 0,
+    "hash": "GENESIS_99e7783afe5451f72ce0e04d40a69aba4b8a798078492167e57797b60bbea61a"
+  }
 }

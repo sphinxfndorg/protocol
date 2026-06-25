@@ -47,13 +47,23 @@ func isFlag(s string) bool {
 }
 
 func printHelp() {
-	logger.Info(`Sphinx blockchain CLI
+	// Use fmt.Print directly to avoid format string parsing issues
+	// since the help text contains % characters that logger.Info would try to parse
+	fmt.Print(`Sphinx blockchain CLI
 
 SUBCOMMANDS
   node          Start a validator node (mines genesis block, distributes vault funds)
   send-tx       Send a transaction from one address to another
   get-balance   Query the balance of an address
   watch-tx      Poll until a transaction is confirmed
+
+TOKENOMICS OVERVIEW
+  Genesis Supply: 1,240,000,000 SPX (24.8% of 5B max supply)
+  Funding Rounds:
+    👼 Angel Round: 30,000,000 SPX @ $0.06 = $1.8M
+    💎 Private Sale: 70,000,000 SPX @ $0.24 = $16.8M
+    🌍 Public ICO: 100,000,000 SPX @ $0.36 = $36.0M
+    Total Raised: $54.6M (200,000,000 SPX sold, 16.1% of genesis)
 
 HYBRID CONSENSUS INFORMATION
   Blocks 0-1:   VDF-PBFT (no stake required for validators)
@@ -76,7 +86,8 @@ QUICK START
 
 LEGACY COMMANDS
   go run main.go -test-nodes=3     Run PBFT integration test (single process)
-  go run main.go                   Run default two-node network (single process)`)
+  go run main.go                   Run default two-node network (single process)
+`)
 }
 
 // StartPBFTNodeMode is a wrapper for StartDistributedNode to maintain compatibility

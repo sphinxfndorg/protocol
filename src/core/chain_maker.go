@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/sphinxorg/protocol/src/common"
 	types "github.com/sphinxorg/protocol/src/core/transaction"
@@ -30,65 +29,8 @@ const (
 	PhaseMainnet ChainPhase = "mainnet"
 )
 
-// WriteChainCheckpoint serialises the current chain tip and vault state to disk.
-// Call this from the devnet node manager once IsDistributionComplete() == true.
-func (bc *Blockchain) WriteChainCheckpoint() error {
-	if bc.chainParams == nil {
-		return fmt.Errorf("WriteChainCheckpoint: chainParams not initialised")
-	}
-
-	tip := bc.GetLatestBlock()
-	if tip == nil {
-		return fmt.Errorf("WriteChainCheckpoint: no latest block")
-	}
-
-	stateDB, err := bc.newStateDB()
-	if err != nil {
-		return fmt.Errorf("WriteChainCheckpoint: %w", err)
-	}
-
-	// FIX: GetBalance now returns (balance, error)
-	vaultBal, err := stateDB.GetBalance(GenesisVaultAddress)
-	if err != nil {
-		return fmt.Errorf("WriteChainCheckpoint: failed to get vault balance: %w", err)
-	}
-	totalSupply := stateDB.GetTotalSupply()
-
-	// ── FIX: derive phase from actual chain params, not a hardcoded constant ──
-	currentPhase := bc.GetCurrentPhase()
-	// ─────────────────────────────────────────────────────────────────────────
-
-	cp := &ChainCheckpoint{
-		Phase:           currentPhase, // was: PhaseDevnet (hardcoded)
-		GenesisHash:     GetGenesisHash(),
-		TipHeight:       tip.GetHeight(),
-		TipHash:         tip.GetHash(),
-		VaultBalance:    vaultBal.String(),
-		TotalSupply:     totalSupply.String(),
-		Timestamp:       common.GetTimeService().GetCurrentTimeInfo().ISOUTC,
-		DistributedNSPX: TotalAllocatedNSPX().String(),
-	}
-
-	data, err := json.MarshalIndent(cp, "", "  ")
-	if err != nil {
-		return fmt.Errorf("WriteChainCheckpoint: marshal: %w", err)
-	}
-
-	stateDir := bc.storage.GetStateDir()
-	if err := os.MkdirAll(stateDir, 0755); err != nil {
-		return fmt.Errorf("WriteChainCheckpoint: create state directory: %w", err)
-	}
-
-	path := filepath.Join(stateDir, "chain_checkpoint.json")
-	if err := os.WriteFile(path, data, 0644); err != nil {
-		return fmt.Errorf("WriteChainCheckpoint: write: %w", err)
-	}
-
-	logger.Info("✅ WriteChainCheckpoint: %s done at height=%d hash=%s vault=%s",
-		currentPhase, cp.TipHeight, cp.TipHash, cp.VaultBalance)
-	logger.Info("   Checkpoint saved to: %s", path)
-	return nil
-}
+// NOTE: WriteChainCheckpoint is now defined in executor.go
+// DO NOT duplicate it here.
 
 // LoadChainCheckpoint reads the checkpoint written by devnet.
 // Returns nil if no checkpoint exists (clean start).
@@ -143,11 +85,12 @@ func ValidateCheckpointContinuity(cp *ChainCheckpoint) error {
 			cp.GenesisHash, expected,
 		)
 	}
-	if cp.VaultBalance != "0" {
+	// Check vault balance from the nested structure
+	if cp.Vault.BalanceNSPX != "0" {
 		return fmt.Errorf(
 			"chain continuity violation: checkpoint vault balance=%s (want 0) — "+
 				"devnet distribution was not complete when checkpoint was taken",
-			cp.VaultBalance,
+			cp.Vault.BalanceNSPX,
 		)
 	}
 	return nil

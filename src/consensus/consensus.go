@@ -1012,9 +1012,19 @@ func (c *Consensus) processProposal(proposal *Proposal) {
 
 	// Check for stale proposal
 	if proposal.View < c.currentView {
-		logger.Warn("❌ Stale proposal for view %d, current view %d", proposal.View, c.currentView)
-		return
+		// ========== FIX: Don't reject proposals that are only 1 view behind ==========
+		// If we're only 1 view behind, we might have missed the view change message.
+		// Accept the proposal and catch up.
+		if proposal.View == c.currentView-1 {
+			logger.Info("⚠️ Proposal for view %d (current view %d) - catching up", proposal.View, c.currentView)
+			// Accept the proposal - the block height validation will handle the rest
+			// Don't return here - continue processing
+		} else {
+			logger.Warn("❌ Stale proposal for view %d, current view %d", proposal.View, c.currentView)
+			return
+		}
 	}
+	// =================================================================================
 
 	// Handle view advancement if proposal is for a newer view.
 	if proposal.View > c.currentView {
@@ -1941,7 +1951,6 @@ func (c *Consensus) commitBlock(block Block) {
 }
 
 // startViewChange initiates a view change process
-// startViewChange initiates a view change process
 func (c *Consensus) startViewChange() {
 	// Try to acquire view change lock
 	if !c.tryViewChangeLock() {
@@ -1954,15 +1963,21 @@ func (c *Consensus) startViewChange() {
 
 	// Check conditions for view change
 	if c.phase != PhaseIdle {
-		return // Only change view in idle phase
+		logger.Info("View change skipped - not in idle phase (phase=%v)", c.phase)
+		return
 	}
-	// ========== FIX: Reduce rate limit ==========
-	if common.GetTimeService().Now().Sub(c.lastViewChange) < 3*time.Second {
-		return // Rate limit view changes to 3 seconds
+
+	// ========== FIX: Increase rate limit ==========
+	if common.GetTimeService().Now().Sub(c.lastViewChange) < 10*time.Second {
+		logger.Info("View change skipped - rate limited (last view change was %v ago)",
+			time.Since(c.lastViewChange))
+		return
 	}
-	// ===========================================
-	if c.currentHeight > 0 && common.GetTimeService().Now().Sub(c.lastBlockTime) < 10*time.Second {
-		return // Recent block committed, don't change view
+	// ==============================================
+
+	if c.currentHeight > 0 && common.GetTimeService().Now().Sub(c.lastBlockTime) < 15*time.Second {
+		logger.Info("View change skipped - recent block committed")
+		return
 	}
 
 	// Get current validators
@@ -1976,12 +1991,12 @@ func (c *Consensus) startViewChange() {
 	newView := c.currentView + 1
 	logger.Info("🔄 Node %s initiating view change to view %d", c.nodeID, newView)
 
-	// Update consensus state.
+	// Update consensus state
 	c.currentView = newView
 	c.lastViewChange = common.GetTimeService().Now()
 	c.resetConsensusState()
-	// Use view-pinned RANDAO election so the leader we choose matches what
-	// proposal validation will compute.  Fall back to round-robin if no stake.
+
+	// Use view-pinned RANDAO election
 	viewSlot := c.currentView
 	viewEpoch := viewSlot / SlotsPerEpoch
 	seed := c.randao.GetSeed(viewSlot)
@@ -1989,6 +2004,7 @@ func (c *Consensus) startViewChange() {
 		c.electedLeaderID = sel.ID
 		c.electedSlot = viewSlot
 		c.isLeader = (sel.ID == c.nodeID)
+		logger.Info("📊 New leader for view %d: %s (isLeader=%v)", newView, c.electedLeaderID, c.isLeader)
 	} else {
 		c.updateLeaderStatusWithValidators(validators)
 	}

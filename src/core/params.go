@@ -69,13 +69,17 @@ func GetSphinxChainParams() *SphinxChainParameters {
 	// Get base chain parameters from commit package
 	baseParams := commit.SphinxChainParams()
 
+	// Use the canonical genesis timestamp from DefaultGenesisState() to ensure
+	// the genesis block timestamp matches across all environments
+	canonicalGenesisTime := DefaultGenesisState().Timestamp
+
 	// Return complete mainnet configuration with proper type conversions
 	return &SphinxChainParameters{
 		// Network Identification - unique identifiers for the blockchain
 		ChainID:       baseParams.ChainID,               // uint64
 		ChainName:     baseParams.ChainName,             // string
 		Symbol:        baseParams.Symbol,                // string
-		GenesisTime:   baseParams.GenesisTime,           // int64
+		GenesisTime:   canonicalGenesisTime,             // int64 — use canonical genesis timestamp
 		GenesisHash:   genesisHash,                      // Genesis block hash
 		Version:       baseParams.Version,               // string
 		MagicNumber:   baseParams.MagicNumber,           // uint32
@@ -204,8 +208,9 @@ func GetTestnetChainParams() *SphinxChainParameters {
 	params.LedgerName = testnetBase.LedgerName               // string
 	params.MagicNumber = testnetBase.MagicNumber             // uint32
 	params.Symbol = testnetBase.Symbol                       // string
-	params.GenesisTime = testnetBase.GenesisTime             // int64
-	params.Version = testnetBase.Version                     // string
+	// GenesisTime must remain canonical — do NOT override from testnetBase
+	// params.GenesisTime = testnetBase.GenesisTime // REMOVED — use canonical
+	params.Version = testnetBase.Version // string
 
 	// Inherit the devnet genesis hash — testnet continues from the same genesis
 	// block, so nodes that started on devnet can verify the ancestry.
@@ -230,10 +235,11 @@ func GetMainnetChainParams() *SphinxChainParameters {
 	params := GetSphinxChainParams()
 
 	// Ensure mainnet parameters match commit package with proper type conversions
-	params.ChainID = baseParams.ChainID                     // uint64
-	params.ChainName = baseParams.ChainName                 // string
-	params.Symbol = baseParams.Symbol                       // string
-	params.GenesisTime = baseParams.GenesisTime             // int64
+	params.ChainID = baseParams.ChainID     // uint64
+	params.ChainName = baseParams.ChainName // string
+	params.Symbol = baseParams.Symbol       // string
+	// GenesisTime must remain canonical — do NOT override from baseParams
+	// params.GenesisTime = baseParams.GenesisTime // REMOVED — use canonical
 	params.Version = baseParams.Version                     // string
 	params.MagicNumber = baseParams.MagicNumber             // uint32
 	params.DefaultPort = int(baseParams.DefaultPort)        // uint16 -> int

@@ -34,6 +34,7 @@ import (
 	"github.com/sphinxorg/protocol/src/params/commit"
 	denom "github.com/sphinxorg/protocol/src/params/denom"
 	"github.com/sphinxorg/protocol/src/pool"
+	"github.com/sphinxorg/protocol/src/rpc"
 	"github.com/sphinxorg/protocol/src/state"
 	"github.com/syndtr/goleveldb/leveldb"
 )
@@ -44,7 +45,7 @@ func StartNode(
 	nodeConfig network.NodePortConfig,
 	totalNodes, nodeIndex int,
 	vdfParams *consensus.VDFParams,
-	networkType string, // Make sure this parameter exists
+	networkType string,
 ) error {
 
 	logger.Info("=== STARTING NODE %d OF %d ===", nodeIndex+1, totalNodes)
@@ -68,7 +69,6 @@ func StartNode(
 	logger.Info("Chain: %s  ChainID=%d  Symbol=%s", chainParams.ChainName, chainParams.ChainID, chainParams.Symbol)
 
 	// ========== FIX: Force devnet mode ==========
-	// Override networkType to devnet regardless of chainParams
 	networkType = "devnet"
 	logger.Info("Network type: %s (FORCED DEVNET)", networkType)
 	// ===========================================
@@ -128,7 +128,6 @@ func StartNode(
 	}
 
 	// SECTION 5 — blockchain + genesis
-	// SECTION 5 — blockchain + genesis
 	bc, err := core.NewBlockchain(currentAddress, currentNodeID, validatorIDs, networkType)
 	if err != nil {
 		return fmt.Errorf("failed to create blockchain: %w", err)
@@ -136,19 +135,32 @@ func StartNode(
 	bc.SetStorageDB(mainDatabase)
 	bc.SetStateDB(stateDatabase)
 
+	// ========== SET RPC CALLER ==========
+	// Create NodeID from currentNodeID
+	var nodeID rpc.NodeID
+	// Convert string to 32-byte array (truncate if longer, pad if shorter)
+	nodeIDBytes := []byte(currentNodeID)
+	if len(nodeIDBytes) > 32 {
+		nodeIDBytes = nodeIDBytes[:32]
+	}
+	copy(nodeID[:], nodeIDBytes)
+
+	rpcCaller := rpc.NewRPCCaller(nodeID)
+	bc.SetRPCCaller(rpcCaller)
+	logger.Info("✅ RPC Caller set for blockchain")
+	// ==================================
+
 	if err := bc.ExecuteGenesisBlock(); err != nil {
 		logger.Warn("ExecuteGenesisBlock: %v", err)
 	} else {
 		logger.Info("✅ Genesis vault funded")
 	}
 
-	// ========== ADD THIS: Save initial checkpoint after genesis ==========
 	if cpErr := bc.WriteChainCheckpoint(); cpErr != nil {
 		logger.Warn("Failed to write initial checkpoint: %v", cpErr)
 	} else {
 		logger.Info("✅ Initial checkpoint saved after genesis")
 	}
-	// ====================================================================
 
 	// VDF genesis-hash provider
 	if vdfParams == nil {
@@ -301,12 +313,16 @@ func StartNode(
 	logger.Info("=== MAPPING VALIDATOR IDs TO GENESIS ALLOCATION ADDRESSES ===")
 
 	// Map validator ID to genesis allocation address
-	// The validator IDs are Node-127.0.0.1:32307, Node-127.0.0.1:32308, Node-127.0.0.1:32309
 	// These map to the genesis allocation addresses from allocations.go
+	// Based on corrected tokenomics:
+	//   Founder (Lead): 30,000,000 SPX total, 5M sold, 25M vesting
+	//   Co-founders (4): 95,000,000 SPX total, 10M sold, 85M vesting
+	//   Development Fund: 200,000,000 SPX total, 50M sold, 150M kept
+	// Map validator ID to genesis allocation address with CORRECT stakes
 	validatorAddressMap := map[string]string{
-		"Node-127.0.0.1:32307": "1000000000000000000000000000000000000001", // Founder (10M SPX)
-		"Node-127.0.0.1:32308": "2000000000000000000000000000000000000001", // CoFounder (7M SPX)
-		"Node-127.0.0.1:32309": "3000000000000000000000000000000000000001", // Development (30M SPX)
+		"Node-127.0.0.1:32307": "1000000000000000000000000000000000000001", // Founder - 30M SPX
+		"Node-127.0.0.1:32308": "2000000000000000000000000000000000000001", // CoFounder - 95M SPX
+		"Node-127.0.0.1:32309": "3000000000000000000000000000000000000001", // Development - 200M SPX
 	}
 
 	// Open StateDB to read actual balances
@@ -320,18 +336,15 @@ func StartNode(
 			totalBalanceSPX := uint64(0)
 
 			for _, vid := range validatorIDs {
-				// Map validator ID to genesis address
 				var address string
 				var ok bool
 				if address, ok = validatorAddressMap[vid]; !ok {
-					// If no mapping found, use the validator ID as fallback
 					address = vid
 					logger.Warn("No mapping found for validator %s, using ID as address", vid)
 				} else {
 					logger.Info("Validator %s mapped to genesis address %s", vid, address)
 				}
 
-				// Read actual balance from StateDB using the mapped address
 				balanceNSPX, err := stateDB.GetBalance(address)
 				var stakeSPX uint64
 
@@ -339,7 +352,6 @@ func StartNode(
 					logger.Warn("Failed to get balance for address %s (validator %s): %v", address, vid, err)
 					stakeSPX = minStakeSPX
 				} else if balanceNSPX != nil && balanceNSPX.Cmp(big.NewInt(0)) > 0 {
-					// Convert from nSPX to SPX
 					stakeSPX = uint64(new(big.Int).Div(balanceNSPX, big.NewInt(denom.SPX)).Int64())
 					logger.Info("Validator %s (address %s) has balance %d SPX from genesis allocation",
 						vid, address, stakeSPX)
@@ -349,7 +361,6 @@ func StartNode(
 						vid, address, stakeSPX)
 				}
 
-				// Set stake from actual balance using the validator ID (not the address)
 				if err := vs.AddValidator(vid, stakeSPX); err != nil {
 					logger.Warn("Failed to set stake for validator %s: %v", vid, err)
 				} else {
@@ -426,13 +437,11 @@ func StartNode(
 			logger.Warn("Failed to add genesis tx to node %d: %v", nodeIndex, err)
 		}
 	}
-	// ========== FIX: Add genesis transactions with nil check ==========
 	logger.Info("✅ Added %d genesis transactions to node %d mempool", len(genesisTransactions), nodeIndex)
 
 	// First, ensure mempool is initialized
 	if bc.GetMempool() == nil {
 		logger.Warn("⚠️ Mempool is nil! Initializing mempool before adding genesis transactions...")
-		// Initialize mempool with default config
 		mempoolConfig := &pool.MempoolConfig{
 			MaxSize:           10000,
 			MaxBytes:          100 * 1024 * 1024,
@@ -443,17 +452,14 @@ func StartNode(
 			MaxBroadcastSize:  5000,
 			MaxPendingSize:    5000,
 		}
-		// Pass bc as the state provider (implements BlockchainStateProvider)
 		mempool := pool.NewMempool(mempoolConfig, bc)
 		bc.SetMempool(mempool)
 		logger.Info("✅ Mempool initialized with default config")
 	}
 
-	// Now add transactions - but only if mempool exists
 	if bc.GetMempool() != nil {
 		for _, tx := range genesisTransactions {
 			if err := bc.AddTransaction(tx); err != nil {
-				// Don't fail on genesis transaction errors - they're just for mempool seeding
 				logger.Warn("Failed to add genesis tx to node %d: %v", nodeIndex, err)
 			}
 		}
@@ -559,6 +565,12 @@ func StartNode(
 	if err := cons.Start(); err != nil {
 		return fmt.Errorf("failed to start consensus: %w", err)
 	}
+	// After consensus is started, add checkpoint sync loop
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		runCheckpointSyncLoop(ctx, bc, cons, currentNodeID, networkAddresses, nodeIndex)
+	}()
 	logger.Info("✅ Consensus engine started AFTER key exchange")
 
 	// SECTION 12 — genesis verification
@@ -690,6 +702,61 @@ func runStatePersistenceLoop(
 			return
 		case <-ticker.C:
 			flushNodeState(bc, nodeID, address)
+		}
+	}
+}
+
+// runCheckpointSyncLoop periodically syncs checkpoints with peers
+func runCheckpointSyncLoop(
+	ctx context.Context,
+	bc *core.Blockchain,
+	cons *consensus.Consensus,
+	nodeID string,
+	networkAddresses []string,
+	nodeIndex int,
+) {
+	// Sync on startup after a delay to let peers start
+	time.Sleep(3 * time.Second)
+
+	// Initial sync from peers
+	if len(networkAddresses) > 1 {
+		logger.Info("[%s] Syncing checkpoint with peers...", nodeID)
+		for i, addr := range networkAddresses {
+			if i == nodeIndex {
+				continue
+			}
+			if err := bc.SyncCheckpoints(addr); err != nil {
+				logger.Debug("[%s] Failed to sync checkpoint from %s: %v", nodeID, addr, err)
+				continue
+			}
+			logger.Info("[%s] ✅ Synced checkpoint from %s", nodeID, addr)
+			break
+		}
+	}
+
+	// Periodic sync (only leader broadcasts)
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if cons == nil || !cons.IsLeader() {
+				continue
+			}
+
+			logger.Info("[%s] 📊 Broadcasting checkpoint to peers", nodeID)
+			if err := cons.BroadcastCheckpoint(); err != nil {
+				logger.Warn("[%s] Failed to broadcast checkpoint: %v", nodeID, err)
+				continue
+			}
+
+			// Also write local checkpoint
+			if err := bc.WriteChainCheckpoint(); err != nil {
+				logger.Warn("[%s] Failed to write local checkpoint: %v", nodeID, err)
+			}
 		}
 	}
 }

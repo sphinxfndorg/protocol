@@ -60,6 +60,8 @@ func TestDomainConstructors_Labels(t *testing.T) {
 		{NewFoundationAlloc(addr, 1), "Foundation"},
 		{NewCampaignAlloc(addr, 1), "Campaigns"},
 		{NewAirdropAlloc(addr, 1), "Airdrops"},
+		{NewPublicICOPoolAlloc(addr, 1), "PublicICOPool"},
+		{NewReserveAlloc(addr, 1), "Reserve"},
 	}
 	for _, tc := range cases {
 		if tc.alloc.Label != tc.label {
@@ -77,9 +79,9 @@ func TestDomainConstructors_Labels(t *testing.T) {
 
 func TestDefaultGenesisAllocations_Count(t *testing.T) {
 	allocs := DefaultGenesisAllocations()
-	// 7 entries: Founder + CoFounder + Development + Contributors +
-	// Foundation + Campaigns + Airdrops.
-	const want = 7
+	// 9 entries: Founder + CoFounder + Development + Contributors +
+	// Foundation + Campaigns + Airdrops + PublicICOPool + Reserve.
+	const want = 9
 	if len(allocs) != want {
 		t.Errorf("DefaultGenesisAllocations: want %d entries, got %d", want, len(allocs))
 	}
@@ -92,8 +94,8 @@ func TestDefaultGenesisAllocations_TotalSupply(t *testing.T) {
 		total.Add(total, a.BalanceNSPX)
 	}
 
-	// 100,000,000 SPX × 10^18 nSPX/SPX
-	wantNSPX := new(big.Int).Mul(big.NewInt(100_000_000), big.NewInt(1e18))
+	// 1,240,000,000 SPX × 10^18 nSPX/SPX
+	wantNSPX := new(big.Int).Mul(big.NewInt(1_240_000_000), big.NewInt(1e18))
 	if total.Cmp(wantNSPX) != 0 {
 		t.Errorf("total supply: want %s nSPX, got %s nSPX", wantNSPX.String(), total.String())
 	}
@@ -144,13 +146,15 @@ func TestDefaultGenesisAllocations_CategoryTotals(t *testing.T) {
 		label   string
 		wantSPX int64
 	}{
-		{"Founder", 10_000_000},
-		{"CoFounder", 7_000_000},
-		{"Development", 30_000_000},
-		{"Contributors", 20_000_000},
-		{"Foundation", 20_000_000},
-		{"Campaigns", 8_000_000},
-		{"Airdrops", 5_000_000},
+		{"Founder", 30_000_000},
+		{"CoFounder", 95_000_000},
+		{"Development", 200_000_000},
+		{"Contributors", 90_000_000},
+		{"Foundation", 300_000_000},
+		{"Campaigns", 35_000_000},
+		{"Airdrops", 90_000_000},
+		{"PublicICOPool", 200_000_000},
+		{"Reserve", 200_000_000},
 	}
 
 	for _, tc := range cases {
@@ -439,8 +443,8 @@ func TestAllocationSet_TotalSupplyMatchesDefaultAllocations(t *testing.T) {
 		t.Fatalf("NewAllocationSet: %v", err)
 	}
 
-	// Total genesis supply: 100,000,000 SPX
-	want := new(big.Int).Mul(big.NewInt(100_000_000), big.NewInt(1e18))
+	// Total genesis supply: 1,240,000,000 SPX
+	want := new(big.Int).Mul(big.NewInt(1_240_000_000), big.NewInt(1e18))
 	if s.TotalSupplyNSPX().Cmp(want) != 0 {
 		t.Errorf("TotalSupplyNSPX mismatch: want %s, got %s",
 			want.String(), s.TotalSupplyNSPX().String())

@@ -23,7 +23,7 @@ func handleIncomingConn(
 	selfID string,
 	signingService *consensus.SigningService,
 	sthincsParams *parameters.Parameters,
-	_ *consensus.Consensus,
+	cons *consensus.Consensus, // This parameter exists, use it
 	p2pMgr *network.P2PConsensusNodeManager,
 ) {
 	var msg security.Message
@@ -60,6 +60,24 @@ func handleIncomingConn(
 		replyBytes, _ := json.Marshal(reply)
 		replyMsg := security.Message{Type: "key_exchange", Data: replyBytes}
 		json.NewEncoder(conn).Encode(&replyMsg)
+
+	case "checkpoint":
+		// Handle checkpoint message
+		var cp consensus.CheckpointMessage
+		if err := json.Unmarshal(msg.Data, &cp); err != nil {
+			log.Printf("[%s] Failed to unmarshal checkpoint: %v", selfID, err)
+			return
+		}
+
+		logger.Info("[%s] Received checkpoint from peer: height=%d, phase=%s, supply=%s SPX",
+			selfID, cp.TipHeight, cp.Phase, cp.MintedSPX)
+
+		// Pass to consensus handler - use the 'cons' parameter
+		if cons != nil {
+			if err := cons.HandleCheckpointMessage(msg.Data, ""); err != nil {
+				log.Printf("[%s] Failed to handle checkpoint: %v", selfID, err)
+			}
+		}
 
 	case "proposal", "prepare", "vote", "timeout", "randao_sync":
 		// Handle consensus messages directly

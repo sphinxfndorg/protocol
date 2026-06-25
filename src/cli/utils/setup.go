@@ -35,10 +35,11 @@ func initializePhase2Stakes(bc *core.Blockchain, cons *consensus.Consensus, node
 	}
 
 	// Map validator ID to genesis allocation address
+	// Map validator ID to genesis allocation address with CORRECT stakes
 	validatorAddressMap := map[string]string{
-		"Node-127.0.0.1:32307": "1000000000000000000000000000000000000001", // Founder (10M SPX)
-		"Node-127.0.0.1:32308": "2000000000000000000000000000000000000001", // CoFounder (7M SPX)
-		"Node-127.0.0.1:32309": "3000000000000000000000000000000000000001", // Development (30M SPX)
+		"Node-127.0.0.1:32307": "1000000000000000000000000000000000000001", // Founder - 30M SPX
+		"Node-127.0.0.1:32308": "2000000000000000000000000000000000000001", // CoFounder - 95M SPX
+		"Node-127.0.0.1:32309": "3000000000000000000000000000000000000001", // Development - 200M SPX
 	}
 
 	// Get validators from the consensus engine

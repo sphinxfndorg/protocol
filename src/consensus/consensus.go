@@ -2002,12 +2002,36 @@ func (c *Consensus) commitBlock(block Block) {
 	logger.Info("🚀 Node %s attempting to commit block %s at height %d",
 		c.nodeID, block.GetHash(), block.GetHeight())
 
-	// Verify block height
-	currentHeight := c.blockChain.GetLatestBlock().GetHeight()
-	if block.GetHeight() != currentHeight+1 {
-		logger.Warn("❌ Block height mismatch: expected %d, got %d", currentHeight+1, block.GetHeight())
+	// Verify block height against current chain tip
+	currentTip := c.blockChain.GetLatestBlock()
+	if currentTip == nil {
+		logger.Error("No chain tip available, cannot commit block")
 		return
 	}
+	currentHeight := currentTip.GetHeight()
+	blockHeight := block.GetHeight()
+
+	if blockHeight < currentHeight {
+		// Block is behind the current tip – already superseded
+		logger.Info("Block height %d behind current height %d, ignoring", blockHeight, currentHeight)
+		return
+	}
+	if blockHeight == currentHeight {
+		// Same height: check if it's the same block
+		if block.GetHash() == currentTip.GetHash() {
+			logger.Info("Block height %d hash %s already committed, ignoring duplicate", blockHeight, block.GetHash())
+			return
+		} else {
+			// Different block at same height – fork
+			logger.Warn("Fork detected: block height %d hash %s differs from current tip %s",
+				blockHeight, block.GetHash(), currentTip.GetHash())
+			// Optionally trigger a sync or recovery here
+			return
+		}
+	}
+	// Now blockHeight > currentHeight, proceed with normal commit
+	logger.Info("🚀 Node %s attempting to commit block %s at height %d (current tip %d)",
+		c.nodeID, block.GetHash(), blockHeight, currentHeight)
 
 	// Update block metadata using interface method
 	block.SetCommitStatus("committed")

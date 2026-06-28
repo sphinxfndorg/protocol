@@ -5,12 +5,10 @@
 package state
 
 import (
-	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -23,50 +21,6 @@ import (
 	types "github.com/sphinxorg/protocol/src/core/transaction"
 	logger "github.com/sphinxorg/protocol/src/log"
 )
-
-func (s *Storage) chainStatePath() string {
-	return filepath.Join(s.stateDir, "chain_state.json")
-}
-
-func decodeFirstJSON(data []byte, v interface{}) (bool, error) {
-	dec := json.NewDecoder(bytes.NewReader(data))
-	if err := dec.Decode(v); err != nil {
-		return false, err
-	}
-
-	var trailing interface{}
-	err := dec.Decode(&trailing)
-	if err == io.EOF {
-		return false, nil
-	}
-	return true, nil
-}
-
-func (s *Storage) writeChainStateFileLocked(data []byte) error {
-	stateFile := s.chainStatePath()
-	if err := os.MkdirAll(filepath.Dir(stateFile), 0755); err != nil {
-		return fmt.Errorf("failed to create chain state directory: %w", err)
-	}
-
-	tmpFile := fmt.Sprintf("%s.tmp.%d.%d", stateFile, os.Getpid(), time.Now().UnixNano())
-	if err := os.WriteFile(tmpFile, data, 0644); err != nil {
-		return fmt.Errorf("failed to write chain state file: %w", err)
-	}
-	if err := os.Rename(tmpFile, stateFile); err != nil {
-		_ = os.Remove(tmpFile)
-		return fmt.Errorf("failed to rename chain state file: %w", err)
-	}
-	return nil
-}
-
-func (s *Storage) readChainStateFileLocked() ([]byte, error) {
-	stateFile := s.chainStatePath()
-	data, err := os.ReadFile(stateFile)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read chain state file: %w", err)
-	}
-	return data, nil
-}
 
 // GetBlockByHeight returns a block by its height
 func (s *Storage) GetBlockByHeight(height uint64) (*types.Block, error) {
@@ -1653,6 +1607,11 @@ func (s *Storage) storeBlockToDisk(block *types.Block) error {
 	blockHash := block.GetHash()
 	sanitizedHash := s.sanitizeFilename(blockHash)
 	filename := filepath.Join(s.blocksDir, sanitizedHash+".json")
+
+	// Ensure the block directory exists
+	if err := os.MkdirAll(filepath.Dir(filename), 0755); err != nil {
+		return fmt.Errorf("failed to create block directory: %w", err)
+	}
 
 	logger.Info("Storing block to disk: original_hash=%s, sanitized_filename=%s, ParentHash=%x",
 		blockHash, sanitizedHash, block.Header.ParentHash)

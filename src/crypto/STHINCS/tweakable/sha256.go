@@ -9,8 +9,8 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 
-	"github.com/sphinxorg/protocol/src/crypto/STHINCS/address"
-	"github.com/sphinxorg/protocol/src/crypto/STHINCS/util"
+	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/address"
+	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/util"
 )
 
 type Sha256Tweak struct {

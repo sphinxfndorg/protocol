@@ -15,8 +15,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/sphinxorg/protocol/src/accounts/key"
-	"github.com/sphinxorg/protocol/src/core/wallet/crypter"
+	"github.com/sphinxfndorg/protocol/src/accounts/key"
+	"github.com/sphinxfndorg/protocol/src/core/wallet/crypter"
 	"golang.org/x/crypto/argon2"
 )
 

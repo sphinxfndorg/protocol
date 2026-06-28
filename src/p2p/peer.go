@@ -18,9 +18,9 @@ import (
 	"net"
 	"time"
 
-	security "github.com/sphinxorg/protocol/src/handshake"
-	"github.com/sphinxorg/protocol/src/network"
-	"github.com/sphinxorg/protocol/src/transport"
+	security "github.com/sphinxfndorg/protocol/src/handshake"
+	"github.com/sphinxfndorg/protocol/src/network"
+	"github.com/sphinxfndorg/protocol/src/transport"
 	"lukechampine.com/blake3"
 )
 

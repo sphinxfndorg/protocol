@@ -7,7 +7,7 @@ package sign
 import (
 	"errors"
 
-	"github.com/sphinxorg/protocol/src/crypto/STHINCS/sthincs"
+	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/sthincs"
 )
 
 // SIPS-0011 https://github.com/sphinxorg/SIPS/wiki/sips0011

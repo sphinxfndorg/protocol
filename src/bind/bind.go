@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"sync"
 
-	logger "github.com/sphinxorg/protocol/src/log"
-	"github.com/sphinxorg/protocol/src/transport"
+	logger "github.com/sphinxfndorg/protocol/src/log"
+	"github.com/sphinxfndorg/protocol/src/transport"
 )
 
 // BindTCPServers binds TCP servers for the given node configurations.

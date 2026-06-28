@@ -8,9 +8,9 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/sphinxorg/protocol/src/crypto/STHINCS/address"
-	"github.com/sphinxorg/protocol/src/crypto/STHINCS/parameters"
-	"github.com/sphinxorg/protocol/src/crypto/STHINCS/util"
+	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/address"
+	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/parameters"
+	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/util"
 )
 
 // chain computes the value of F iterated 'steps' times starting from X

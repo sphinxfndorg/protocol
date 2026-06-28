@@ -8,11 +8,11 @@ import (
 	"encoding/hex"
 	"fmt"
 
-	params "github.com/sphinxorg/protocol/src/core/sthincs/config"
-	key "github.com/sphinxorg/protocol/src/core/sthincs/key/backend"
+	params "github.com/sphinxfndorg/protocol/src/core/sthincs/config"
+	key "github.com/sphinxfndorg/protocol/src/core/sthincs/key/backend"
 
 	// FIXED: Change from SPHINCSPLUS-golang to STHINCS
-	"github.com/sphinxorg/protocol/src/crypto/STHINCS/sthincs"
+	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/sthincs"
 )
 
 // NewSignWrapper initializes a new SignWrapper.

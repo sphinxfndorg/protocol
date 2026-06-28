@@ -13,10 +13,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sphinxorg/protocol/src/accounts/key"
-	utils "github.com/sphinxorg/protocol/src/accounts/key/utils"
-	"github.com/sphinxorg/protocol/src/core"
-	sphincs "github.com/sphinxorg/protocol/src/core/sthincs/key/backend"
+	"github.com/sphinxfndorg/protocol/src/accounts/key"
+	utils "github.com/sphinxfndorg/protocol/src/accounts/key/utils"
+	"github.com/sphinxfndorg/protocol/src/core"
+	sphincs "github.com/sphinxfndorg/protocol/src/core/sthincs/key/backend"
 )
 
 // StorageManager is a global storage manager instance

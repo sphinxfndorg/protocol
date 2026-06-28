@@ -9,8 +9,8 @@ import (
 	"math/big"
 	"sort"
 
-	logger "github.com/sphinxorg/protocol/src/log"
-	denom "github.com/sphinxorg/protocol/src/params/denom"
+	logger "github.com/sphinxfndorg/protocol/src/log"
+	denom "github.com/sphinxfndorg/protocol/src/params/denom"
 )
 
 // sips0014 https://github.com/sphinxorg/SIPS/blob/main/.github/workflows/sips0014/sips0014.md

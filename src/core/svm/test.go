@@ -8,8 +8,8 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	svm "github.com/sphinxorg/protocol/src/core/svm/opcodes"
-	vmachine "github.com/sphinxorg/protocol/src/core/svm/vm"
+	svm "github.com/sphinxfndorg/protocol/src/core/svm/opcodes"
+	vmachine "github.com/sphinxfndorg/protocol/src/core/svm/vm"
 )
 
 func main() {

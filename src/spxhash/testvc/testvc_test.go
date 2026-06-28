@@ -17,8 +17,8 @@ import (
 	"sync"
 	"testing"
 
-	svm "github.com/sphinxorg/protocol/src/core/svm/opcodes"
-	hash "github.com/sphinxorg/protocol/src/spxhash/hash"
+	svm "github.com/sphinxfndorg/protocol/src/core/svm/opcodes"
+	hash "github.com/sphinxfndorg/protocol/src/spxhash/hash"
 	"golang.org/x/crypto/hkdf"
 )
 

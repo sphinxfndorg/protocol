@@ -8,10 +8,10 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/sphinxorg/protocol/src/crypto/STHINCS/fors"
-	"github.com/sphinxorg/protocol/src/crypto/STHINCS/hypertree"
-	"github.com/sphinxorg/protocol/src/crypto/STHINCS/parameters"
-	"github.com/sphinxorg/protocol/src/crypto/STHINCS/xmss"
+	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/fors"
+	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/hypertree"
+	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/parameters"
+	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/xmss"
 )
 
 // ============================================================================

@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	logger "github.com/sphinxorg/protocol/src/log"
+	logger "github.com/sphinxfndorg/protocol/src/log"
 )
 
 // NewTPSMonitor creates a new TPS monitor

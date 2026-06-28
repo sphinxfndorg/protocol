@@ -4,11 +4,11 @@ import (
 	"crypto/rand"
 	"math"
 
-	"github.com/sphinxorg/protocol/src/crypto/SPHINCSPLUS-golang/address"
-	"github.com/sphinxorg/protocol/src/crypto/SPHINCSPLUS-golang/fors"
-	"github.com/sphinxorg/protocol/src/crypto/SPHINCSPLUS-golang/hypertree"
-	"github.com/sphinxorg/protocol/src/crypto/SPHINCSPLUS-golang/parameters"
-	"github.com/sphinxorg/protocol/src/crypto/SPHINCSPLUS-golang/util"
+	"github.com/sphinxfndorg/protocol/src/crypto/SPHINCSPLUS-golang/address"
+	"github.com/sphinxfndorg/protocol/src/crypto/SPHINCSPLUS-golang/fors"
+	"github.com/sphinxfndorg/protocol/src/crypto/SPHINCSPLUS-golang/hypertree"
+	"github.com/sphinxfndorg/protocol/src/crypto/SPHINCSPLUS-golang/parameters"
+	"github.com/sphinxfndorg/protocol/src/crypto/SPHINCSPLUS-golang/util"
 )
 
 type SPHINCS_PK struct {

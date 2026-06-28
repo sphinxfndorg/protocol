@@ -7,8 +7,8 @@ package usb
 import (
 	"sync"
 
-	"github.com/sphinxorg/protocol/src/accounts/key"
-	"github.com/sphinxorg/protocol/src/core/wallet/crypter"
+	"github.com/sphinxfndorg/protocol/src/accounts/key"
+	"github.com/sphinxfndorg/protocol/src/core/wallet/crypter"
 )
 
 // USBKeyStore represents USB storage for key pairs

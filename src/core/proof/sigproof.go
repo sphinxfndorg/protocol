@@ -9,7 +9,7 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/sphinxorg/protocol/src/common"
+	"github.com/sphinxfndorg/protocol/src/common"
 )
 
 // SIPS-0011 https://github.com/sphinxorg/SIPS/wiki/sips0011

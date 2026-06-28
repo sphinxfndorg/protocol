@@ -5,10 +5,10 @@
 package server
 
 import (
-	"github.com/sphinxorg/protocol/src/http"
-	"github.com/sphinxorg/protocol/src/network"
-	"github.com/sphinxorg/protocol/src/p2p"
-	"github.com/sphinxorg/protocol/src/transport"
+	"github.com/sphinxfndorg/protocol/src/http"
+	"github.com/sphinxfndorg/protocol/src/network"
+	"github.com/sphinxfndorg/protocol/src/p2p"
+	"github.com/sphinxfndorg/protocol/src/transport"
 )
 
 // Server encapsulates TCP, WebSocket, HTTP, and P2P servers.

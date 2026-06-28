@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sphinxorg/protocol/src/crypto/STHINCS/parameters"
-	"github.com/sphinxorg/protocol/src/crypto/STHINCS/sthincs"
+	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/parameters"
+	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/sthincs"
 )
 
 func main() {

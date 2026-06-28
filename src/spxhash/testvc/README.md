@@ -209,7 +209,7 @@ go test -race -v
 
 ## Dependencies
 
-- `github.com/sphinxorg/protocol/src/spxhash/hash` - Main hash implementation
+- `github.com/sphinxfndorg/protocol/src/spxhash/hash` - Main hash implementation
 - `golang.org/x/crypto/hkdf` - HKDF for key derivation
 - `golang.org/x/crypto/sha3` - SHAKE256 support
 

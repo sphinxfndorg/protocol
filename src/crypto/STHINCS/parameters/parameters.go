@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/sphinxorg/protocol/src/crypto/STHINCS/tweakable"
+	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/tweakable"
 )
 
 // ============================================================================

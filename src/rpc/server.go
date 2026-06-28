@@ -11,9 +11,9 @@ import (
 	"net"
 	"time"
 
-	"github.com/sphinxorg/protocol/src/core"
-	sign "github.com/sphinxorg/protocol/src/core/sthincs/sign/backend"
-	security "github.com/sphinxorg/protocol/src/handshake"
+	"github.com/sphinxfndorg/protocol/src/core"
+	sign "github.com/sphinxfndorg/protocol/src/core/sthincs/sign/backend"
+	security "github.com/sphinxfndorg/protocol/src/handshake"
 )
 
 // NewServer creates a new RPC server instance.

@@ -12,8 +12,8 @@ import (
 	"log"
 	"time"
 
-	sthincs "github.com/sphinxorg/protocol/src/crypto/STHINCS/sthincs"
-	keys "github.com/sphinxorg/protocol/src/usi/core/key"
+	sthincs "github.com/sphinxfndorg/protocol/src/crypto/STHINCS/sthincs"
+	keys "github.com/sphinxfndorg/protocol/src/usi/core/key"
 )
 
 // Sign creates a SPHINCS+ signature for `msg` using the decrypted private key.

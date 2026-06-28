@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	logger "github.com/sphinxorg/protocol/src/log"
+	logger "github.com/sphinxfndorg/protocol/src/log"
 	"github.com/syndtr/goleveldb/leveldb"
 	"github.com/syndtr/goleveldb/leveldb/errors"
 	"github.com/syndtr/goleveldb/leveldb/opt"

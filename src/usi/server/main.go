@@ -8,7 +8,7 @@ import (
 	"log"
 	"net/http"
 
-	pubkeydir "github.com/sphinxorg/protocol/src/usi/server/server"
+	pubkeydir "github.com/sphinxfndorg/protocol/src/usi/server/server"
 )
 
 func main() {

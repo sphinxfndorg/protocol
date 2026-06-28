@@ -9,10 +9,10 @@ import (
 	"math/big"
 	"time"
 
-	"github.com/sphinxorg/protocol/src/accounts/key"
-	"github.com/sphinxorg/protocol/src/params/commit"
-	"github.com/sphinxorg/protocol/src/policy"
-	"github.com/sphinxorg/protocol/src/pool"
+	"github.com/sphinxfndorg/protocol/src/accounts/key"
+	"github.com/sphinxfndorg/protocol/src/params/commit"
+	"github.com/sphinxfndorg/protocol/src/policy"
+	"github.com/sphinxfndorg/protocol/src/pool"
 )
 
 // SphinxChainHeader contains only the fields needed for Ledger headers and wallet operations.

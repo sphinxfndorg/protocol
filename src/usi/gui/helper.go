@@ -21,9 +21,9 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
-	keys "github.com/sphinxorg/protocol/src/usi/core/key"
-	"github.com/sphinxorg/protocol/src/usi/core/sign"
-	pubkeydir "github.com/sphinxorg/protocol/src/usi/server/server"
+	keys "github.com/sphinxfndorg/protocol/src/usi/core/key"
+	"github.com/sphinxfndorg/protocol/src/usi/core/sign"
+	pubkeydir "github.com/sphinxfndorg/protocol/src/usi/server/server"
 )
 
 var (

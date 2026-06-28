@@ -10,9 +10,9 @@ import (
 	"path/filepath"
 	"runtime"
 
-	"github.com/sphinxorg/protocol/src/accounts/key"
-	disk "github.com/sphinxorg/protocol/src/accounts/key/disk"
-	usb "github.com/sphinxorg/protocol/src/accounts/key/external"
+	"github.com/sphinxfndorg/protocol/src/accounts/key"
+	disk "github.com/sphinxfndorg/protocol/src/accounts/key/disk"
+	usb "github.com/sphinxfndorg/protocol/src/accounts/key/external"
 )
 
 // NewStorageManager creates a new storage manager

@@ -16,7 +16,7 @@ import (
 	"strings"
 	"unsafe"
 
-	keys "github.com/sphinxorg/protocol/src/usi/core/key"
+	keys "github.com/sphinxfndorg/protocol/src/usi/core/key"
 	"lukechampine.com/blake3"
 )
 

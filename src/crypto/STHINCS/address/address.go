@@ -8,7 +8,7 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"github.com/sphinxorg/protocol/src/crypto/STHINCS/util"
+	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/util"
 )
 
 // Package address implements the ADRS (Address) structure for STHINCS

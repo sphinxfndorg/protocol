@@ -5,7 +5,7 @@
 package main
 
 import (
-	"github.com/sphinxorg/protocol/src/usi/gui"
+	"github.com/sphinxfndorg/protocol/src/usi/gui"
 )
 
 func main() {

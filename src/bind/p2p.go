@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	logger "github.com/sphinxorg/protocol/src/log"
-	"github.com/sphinxorg/protocol/src/p2p"
+	logger "github.com/sphinxfndorg/protocol/src/log"
+	"github.com/sphinxfndorg/protocol/src/p2p"
 )
 
 // startP2PServer starts a P2P server for the given node.

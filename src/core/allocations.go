@@ -10,8 +10,8 @@ import (
 	"fmt"
 	"math/big"
 
-	"github.com/sphinxorg/protocol/src/common"
-	logger "github.com/sphinxorg/protocol/src/log"
+	"github.com/sphinxfndorg/protocol/src/common"
+	logger "github.com/sphinxfndorg/protocol/src/log"
 )
 
 // ----------------------------------------------------------------------------

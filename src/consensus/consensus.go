@@ -14,10 +14,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sphinxorg/protocol/src/common"
-	types "github.com/sphinxorg/protocol/src/core/transaction"
-	logger "github.com/sphinxorg/protocol/src/log"
-	denom "github.com/sphinxorg/protocol/src/params/denom"
+	"github.com/sphinxfndorg/protocol/src/common"
+	types "github.com/sphinxfndorg/protocol/src/core/transaction"
+	logger "github.com/sphinxfndorg/protocol/src/log"
+	denom "github.com/sphinxfndorg/protocol/src/params/denom"
 	"golang.org/x/crypto/sha3"
 )
 

@@ -20,8 +20,8 @@ import (
 
 	"github.com/elliotchance/orderedmap/v2"
 	"github.com/lni/goutils/syncutil"
-	"github.com/sphinxorg/protocol/src/network"
-	"github.com/sphinxorg/protocol/src/rpc"
+	"github.com/sphinxfndorg/protocol/src/network"
+	"github.com/sphinxfndorg/protocol/src/rpc"
 	"go.uber.org/zap"
 )
 

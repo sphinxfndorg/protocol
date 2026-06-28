@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"log"
 
-	spxhash "github.com/sphinxorg/protocol/src/spxhash/hash"
+	spxhash "github.com/sphinxfndorg/protocol/src/spxhash/hash"
 )
 
 func main() {

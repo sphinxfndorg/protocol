@@ -13,11 +13,11 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/sphinxorg/protocol/src/consensus"
-	types "github.com/sphinxorg/protocol/src/core/transaction"
-	logger "github.com/sphinxorg/protocol/src/log"
-	denom "github.com/sphinxorg/protocol/src/params/denom"
-	"github.com/sphinxorg/protocol/src/pool"
+	"github.com/sphinxfndorg/protocol/src/consensus"
+	types "github.com/sphinxfndorg/protocol/src/core/transaction"
+	logger "github.com/sphinxfndorg/protocol/src/log"
+	denom "github.com/sphinxfndorg/protocol/src/params/denom"
+	"github.com/sphinxfndorg/protocol/src/pool"
 )
 
 // maxSupplyNSPX is the hard cap, expressed in nSPX, derived from the

@@ -7,12 +7,12 @@ import (
 	"fmt"
 	"log"
 
-	multisig "github.com/sphinxorg/protocol/src/core/multisig/mps"
+	multisig "github.com/sphinxfndorg/protocol/src/core/multisig/mps"
 )
 
 // REMOVED DEPENDENCY: this file imported
 //
-//	"github.com/sphinxorg/protocol/src/core/wallet/utils"
+//	"github.com/sphinxfndorg/protocol/src/core/wallet/utils"
 //
 // solely to call utils.NewWalletConfig() / walletConfig.Close(). Tracing
 // the rest of the file: walletConfig was never read from or written to
@@ -24,7 +24,7 @@ import (
 // was never actually present here either — `manager.GetStoredSK()` /
 // `GetStoredPK()` already imply multisig has its own storage internally.
 //
-// NOT REVIEWED: github.com/sphinxorg/protocol/src/core/multisig/mps was
+// NOT REVIEWED: github.com/sphinxfndorg/protocol/src/core/multisig/mps was
 // not shared with me — NewMultiSig/SignMessage/AddSig/VerifySignatures/
 // AddSigFromPubKey/GetStoredSK/GetStoredPK are all assumed unchanged from
 // your original file. If that package also imports the deleted

@@ -17,9 +17,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sphinxorg/protocol/src/common"
-	types "github.com/sphinxorg/protocol/src/core/transaction"
-	logger "github.com/sphinxorg/protocol/src/log"
+	"github.com/sphinxfndorg/protocol/src/common"
+	types "github.com/sphinxfndorg/protocol/src/core/transaction"
+	logger "github.com/sphinxfndorg/protocol/src/log"
 )
 
 // GetBlockByHeight returns a block by its height

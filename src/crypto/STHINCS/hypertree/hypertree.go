@@ -8,9 +8,9 @@ import (
 	"crypto/subtle"
 	"fmt"
 
-	"github.com/sphinxorg/protocol/src/crypto/STHINCS/address"
-	"github.com/sphinxorg/protocol/src/crypto/STHINCS/parameters"
-	"github.com/sphinxorg/protocol/src/crypto/STHINCS/xmss"
+	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/address"
+	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/parameters"
+	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/xmss"
 )
 
 // Package hypertree implements the hypertree (XMSST) structure for STHINCS

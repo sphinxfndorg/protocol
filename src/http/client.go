@@ -10,8 +10,8 @@ import (
 	"fmt"
 	"net/http"
 
-	types "github.com/sphinxorg/protocol/src/core/transaction"
-	security "github.com/sphinxorg/protocol/src/handshake"
+	types "github.com/sphinxfndorg/protocol/src/core/transaction"
+	security "github.com/sphinxfndorg/protocol/src/handshake"
 )
 
 // SubmitTransaction sends a transaction via HTTP.

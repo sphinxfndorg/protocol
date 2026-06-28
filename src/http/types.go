@@ -9,9 +9,9 @@ import (
 	"sync"
 
 	"github.com/gin-gonic/gin"
-	"github.com/sphinxorg/protocol/src/core"
-	types "github.com/sphinxorg/protocol/src/core/transaction"
-	security "github.com/sphinxorg/protocol/src/handshake"
+	"github.com/sphinxfndorg/protocol/src/core"
+	types "github.com/sphinxfndorg/protocol/src/core/transaction"
+	security "github.com/sphinxfndorg/protocol/src/handshake"
 )
 
 // Server represents an HTTP server.

@@ -4,7 +4,7 @@
 // go/src/crypto/STHINCS/address/tweakable.go
 package tweakable
 
-import "github.com/sphinxorg/protocol/src/crypto/STHINCS/address"
+import "github.com/sphinxfndorg/protocol/src/crypto/STHINCS/address"
 
 // Package tweakable defines the tweakable hash function interface for SPHINCS+
 //

@@ -9,13 +9,13 @@ import (
 	"log"
 	"net"
 
-	"github.com/sphinxorg/protocol/src/consensus"
-	"github.com/sphinxorg/protocol/src/crypto/STHINCS/parameters"
-	"github.com/sphinxorg/protocol/src/crypto/STHINCS/sthincs"
-	security "github.com/sphinxorg/protocol/src/handshake"
-	logger "github.com/sphinxorg/protocol/src/log"
-	"github.com/sphinxorg/protocol/src/network"
-	rpc "github.com/sphinxorg/protocol/src/rpc" // custom RPC package
+	"github.com/sphinxfndorg/protocol/src/consensus"
+	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/parameters"
+	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/sthincs"
+	security "github.com/sphinxfndorg/protocol/src/handshake"
+	logger "github.com/sphinxfndorg/protocol/src/log"
+	"github.com/sphinxfndorg/protocol/src/network"
+	rpc "github.com/sphinxfndorg/protocol/src/rpc" // custom RPC package
 )
 
 // handleIncomingConn processes a single accepted TCP connection.

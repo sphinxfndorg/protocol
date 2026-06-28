@@ -9,12 +9,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sphinxorg/protocol/src/consensus"
-	database "github.com/sphinxorg/protocol/src/core/state"
-	sign "github.com/sphinxorg/protocol/src/core/sthincs/sign/backend"
-	types "github.com/sphinxorg/protocol/src/core/transaction"
-	"github.com/sphinxorg/protocol/src/pool"
-	storage "github.com/sphinxorg/protocol/src/state"
+	"github.com/sphinxfndorg/protocol/src/consensus"
+	database "github.com/sphinxfndorg/protocol/src/core/state"
+	sign "github.com/sphinxfndorg/protocol/src/core/sthincs/sign/backend"
+	types "github.com/sphinxfndorg/protocol/src/core/transaction"
+	"github.com/sphinxfndorg/protocol/src/pool"
+	storage "github.com/sphinxfndorg/protocol/src/state"
 )
 
 // BlockchainStatus represents the current status of the blockchain

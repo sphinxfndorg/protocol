@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	sign "github.com/sphinxorg/protocol/src/core/sthincs/sign/backend" // ADD THIS
-	types "github.com/sphinxorg/protocol/src/core/transaction"
+	sign "github.com/sphinxfndorg/protocol/src/core/sthincs/sign/backend" // ADD THIS
+	types "github.com/sphinxfndorg/protocol/src/core/transaction"
 )
 
 // TransactionStatus represents the state of a transaction in the pool

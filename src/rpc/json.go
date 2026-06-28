@@ -12,10 +12,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/sphinxorg/protocol/src/consensus"
-	"github.com/sphinxorg/protocol/src/core"
-	types "github.com/sphinxorg/protocol/src/core/transaction"
-	security "github.com/sphinxorg/protocol/src/handshake"
+	"github.com/sphinxfndorg/protocol/src/consensus"
+	"github.com/sphinxfndorg/protocol/src/core"
+	types "github.com/sphinxfndorg/protocol/src/core/transaction"
+	security "github.com/sphinxfndorg/protocol/src/handshake"
 )
 
 // NewJSONRPCHandler creates a new JSON-RPC handler with registered methods.

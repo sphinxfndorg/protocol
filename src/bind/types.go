@@ -5,16 +5,16 @@
 package bind
 
 import (
-	"github.com/sphinxorg/protocol/src/consensus"
-	"github.com/sphinxorg/protocol/src/core"
-	config "github.com/sphinxorg/protocol/src/core/sthincs/config" // Add this import
-	key "github.com/sphinxorg/protocol/src/core/sthincs/key/backend"
-	security "github.com/sphinxorg/protocol/src/handshake"
-	"github.com/sphinxorg/protocol/src/http"
-	"github.com/sphinxorg/protocol/src/network"
-	"github.com/sphinxorg/protocol/src/p2p"
-	"github.com/sphinxorg/protocol/src/rpc"
-	"github.com/sphinxorg/protocol/src/transport"
+	"github.com/sphinxfndorg/protocol/src/consensus"
+	"github.com/sphinxfndorg/protocol/src/core"
+	config "github.com/sphinxfndorg/protocol/src/core/sthincs/config" // Add this import
+	key "github.com/sphinxfndorg/protocol/src/core/sthincs/key/backend"
+	security "github.com/sphinxfndorg/protocol/src/handshake"
+	"github.com/sphinxfndorg/protocol/src/http"
+	"github.com/sphinxfndorg/protocol/src/network"
+	"github.com/sphinxfndorg/protocol/src/p2p"
+	"github.com/sphinxfndorg/protocol/src/rpc"
+	"github.com/sphinxfndorg/protocol/src/transport"
 )
 
 // NodeConfig defines the configuration for a node’s TCP server.

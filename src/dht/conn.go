@@ -20,8 +20,8 @@ import (
 	"os"
 	"time"
 
-	security "github.com/sphinxorg/protocol/src/handshake"
-	"github.com/sphinxorg/protocol/src/rpc"
+	security "github.com/sphinxfndorg/protocol/src/handshake"
+	"github.com/sphinxfndorg/protocol/src/rpc"
 	"go.uber.org/zap"
 	"lukechampine.com/blake3"
 )

@@ -5,7 +5,7 @@
 package tweakable
 
 import (
-	"github.com/sphinxorg/protocol/src/crypto/STHINCS/address"
+	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/address"
 )
 
 // SphinxHashTweak must match the same field structure as Sha256Tweak

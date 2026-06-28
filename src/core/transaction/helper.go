@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"math/big"
 
-	"github.com/sphinxorg/protocol/src/common"
+	"github.com/sphinxfndorg/protocol/src/common"
 )
 
 // Ensure your Block type has these methods to implement consensus.Block

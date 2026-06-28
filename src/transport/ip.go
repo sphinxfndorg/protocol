@@ -11,8 +11,8 @@ import (
 	"net"
 	"time"
 
-	security "github.com/sphinxorg/protocol/src/handshake"
-	"github.com/sphinxorg/protocol/src/network"
+	security "github.com/sphinxfndorg/protocol/src/handshake"
+	"github.com/sphinxfndorg/protocol/src/network"
 )
 
 // ValidateIP checks whether the provided IP and port are valid.

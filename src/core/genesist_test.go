@@ -12,9 +12,9 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/sphinxorg/protocol/src/common"
-	types "github.com/sphinxorg/protocol/src/core/transaction"
-	storage "github.com/sphinxorg/protocol/src/state"
+	"github.com/sphinxfndorg/protocol/src/common"
+	types "github.com/sphinxfndorg/protocol/src/core/transaction"
+	storage "github.com/sphinxfndorg/protocol/src/state"
 )
 
 // ============================================================================

@@ -12,13 +12,13 @@ import (
 	"fmt"
 
 	"github.com/holiman/uint256"
-	key "github.com/sphinxorg/protocol/src/core/sthincs/key/backend"
-	sign "github.com/sphinxorg/protocol/src/core/sthincs/sign/backend"
-	svm "github.com/sphinxorg/protocol/src/core/svm/opcodes"
-	vmachine "github.com/sphinxorg/protocol/src/core/svm/vm"
-	types "github.com/sphinxorg/protocol/src/core/transaction"
-	"github.com/sphinxorg/protocol/src/crypto/STHINCS/sthincs"
-	logger "github.com/sphinxorg/protocol/src/log"
+	key "github.com/sphinxfndorg/protocol/src/core/sthincs/key/backend"
+	sign "github.com/sphinxfndorg/protocol/src/core/sthincs/sign/backend"
+	svm "github.com/sphinxfndorg/protocol/src/core/svm/opcodes"
+	vmachine "github.com/sphinxfndorg/protocol/src/core/svm/vm"
+	types "github.com/sphinxfndorg/protocol/src/core/transaction"
+	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/sthincs"
+	logger "github.com/sphinxfndorg/protocol/src/log"
 )
 
 // SigningService handles all signing and verification operations for consensus messages.

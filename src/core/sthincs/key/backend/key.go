@@ -9,8 +9,8 @@ import (
 	"fmt"
 	"log"
 
-	params "github.com/sphinxorg/protocol/src/core/sthincs/config"
-	"github.com/sphinxorg/protocol/src/crypto/STHINCS/sthincs"
+	params "github.com/sphinxfndorg/protocol/src/core/sthincs/config"
+	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/sthincs"
 )
 
 // NewKeyManager initializes a new KeyManager instance using SPHINCS+ parameters.

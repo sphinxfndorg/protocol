@@ -272,19 +272,7 @@ func (h *JSONRPCHandler) getCheckpoint(params interface{}) (interface{}, error) 
 		return nil, err
 	}
 
-	return map[string]interface{}{
-		"genesis_hash":     cp.GenesisHash,
-		"tip_height":       cp.TipHeight,
-		"tip_hash":         cp.TipHash,
-		"total_supply":     cp.TotalSupply,
-		"genesis_supply":   cp.GenesisSupply,
-		"rewards_minted":   cp.RewardsMinted,
-		"remaining_supply": cp.RemainingSupply,
-		"vault_balance":    cp.VaultBalance,
-		"timestamp":        cp.Timestamp,
-		"phase":            cp.Phase,
-		"minted_spx":       cp.MintedSPX,
-	}, nil
+	return cp, nil
 }
 
 // registerMethods registers all supported RPC methods with their handler functions
@@ -616,13 +604,17 @@ func (t RPCType) String() string {
 
 // getBlockCount returns the current block height
 func (h *JSONRPCHandler) getBlockCount(_ interface{}) (interface{}, error) {
-	return h.server.blockchain.GetBlockCount(), nil
+	latest := h.server.blockchain.GetLatestBlock()
+	if latest == nil {
+		return uint64(0), nil
+	}
+	return latest.GetHeight(), nil
 }
 
 // getBestBlockHash returns the hash of the best (tip) block
 func (h *JSONRPCHandler) getBestBlockHash(_ interface{}) (interface{}, error) {
 	hash := h.server.blockchain.GetBestBlockHash()
-	return fmt.Sprintf("%x", hash), nil
+	return string(hash), nil
 }
 
 // getBlock retrieves a block by its hash

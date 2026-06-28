@@ -24,7 +24,9 @@ import (
 )
 
 // maxMessageSize is the maximum allowed TCP message size in bytes.
-const maxMessageSize = 64 * 1024 // 64 KB
+// Consensus proposals carry serialized blocks and SPHINCS+ signatures, so 64 KB
+// is too small once transaction payloads or attestations are included.
+const maxMessageSize = 4 * 1024 * 1024 // 4 MB
 
 // Global server instance for connection management.
 var globalServer = &TCPServer{

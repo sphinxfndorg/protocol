@@ -17,8 +17,6 @@ import (
 )
 
 // Block interface that your existing types.Block will satisfy
-// go/src/consensus/types.go - Add these methods to the Block interface
-
 type Block interface {
 	GetHeight() uint64
 	GetHash() string
@@ -248,11 +246,12 @@ type Consensus struct {
 	onCommit func(Block) error
 
 	// Context
-	ctx             context.Context
-	cancel          context.CancelFunc
-	lastViewChange  time.Time
-	viewChangeMutex sync.Mutex
-	lastBlockTime   time.Time
+	ctx               context.Context
+	cancel            context.CancelFunc
+	lastViewChange    time.Time
+	viewChangeMutex   sync.Mutex
+	lastBlockTime     time.Time
+	lastRoundActivity time.Time
 
 	// Cache fields
 	merkleRootCache     map[string]string

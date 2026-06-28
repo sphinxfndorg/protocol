@@ -9,7 +9,6 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"math/big"
 	"os"
@@ -881,19 +880,8 @@ func (bc *Blockchain) StartLeaderLoop(ctx context.Context) {
 					continue
 				}
 
-				// Check if we have transactions in mempool
-				hasTxs := bc.mempool.GetTransactionCount() > 0
-				if !hasTxs {
-					// No transactions to include, reset proposing flag
-					leaderMutex.Lock()
-					isProposing = false
-					leaderMutex.Unlock()
-					logger.Debug("Leader: no pending transactions to propose")
-					continue
-				}
-
 				// Log proposal start
-				logger.Info("Leader %s: creating block with %d pending transactions",
+				logger.Info("Leader %s: creating block with %d pending transactions (empty blocks allowed)",
 					bc.consensusEngine.GetNodeID(), bc.mempool.GetTransactionCount())
 
 				// Create and propose block using existing CreateBlock function
@@ -1180,22 +1168,20 @@ func (bc *Blockchain) CreateBlock() (*types.Block, error) {
 
 	// Get pending transactions from mempool
 	pendingTxs := bc.mempool.GetPendingTransactions()
-	if len(pendingTxs) == 0 {
-		return nil, errors.New("no pending transactions in mempool")
-	}
+	selectedTxs := pendingTxs
+	totalSize := uint64(0)
+	if len(pendingTxs) > 0 {
+		logger.Info("Found %d pending transactions in mempool, max block size: %d bytes",
+			len(pendingTxs), bc.chainParams.MaxBlockSize)
 
-	logger.Info("Found %d pending transactions in mempool, max block size: %d bytes",
-		len(pendingTxs), bc.chainParams.MaxBlockSize)
-
-	// Select transactions based on block size constraints
-	selectedTxs, totalSize, err := bc.selectTransactionsForBlock(pendingTxs)
-	if err != nil {
-		return nil, fmt.Errorf("failed to select transactions: %w", err)
-	}
-
-	// Check if any transactions were selected
-	if len(selectedTxs) == 0 {
-		return nil, errors.New("no transactions could be selected for block")
+		// Select transactions based on block size constraints
+		var err error
+		selectedTxs, totalSize, err = bc.selectTransactionsForBlock(pendingTxs)
+		if err != nil {
+			return nil, fmt.Errorf("failed to select transactions: %w", err)
+		}
+	} else {
+		logger.Info("Mempool empty; creating empty block")
 	}
 
 	// Log block creation details
@@ -1203,9 +1189,15 @@ func (bc *Blockchain) CreateBlock() (*types.Block, error) {
 		len(selectedTxs), totalSize, bc.chainParams.MaxBlockSize,
 		float64(totalSize)/float64(bc.chainParams.MaxBlockSize)*100)
 
+	nextHeight := prevBlock.GetHeight() + 1
+	proposerID := ""
+	if bc.consensusEngine != nil {
+		proposerID = bc.consensusEngine.GetNodeID()
+	}
+
 	// Calculate roots for the block
-	txsRoot := bc.calculateTransactionsRoot(selectedTxs) // Merkle root of transactions
-	stateRoot := bc.calculateStateRoot()                 // State root after transactions
+	txsRoot := bc.calculateTransactionsRoot(selectedTxs)                  // Merkle root of transactions
+	stateRoot := bc.previewStateRoot(nextHeight, selectedTxs, proposerID) // State root after transactions
 
 	// Make sure timestamp is in seconds, not nanoseconds
 	currentTimestamp := common.GetCurrentTimestamp()
@@ -1253,7 +1245,7 @@ func (bc *Blockchain) CreateBlock() (*types.Block, error) {
 	// ================================================================
 
 	newHeader := types.NewBlockHeader(
-		prevBlock.GetHeight()+1,      // Height
+		nextHeight,                   // Height
 		parentHashBytes,              // Parent hash
 		bc.GetDifficulty(),           // Difficulty
 		txsRoot,                      // Transaction Merkle root
@@ -1268,6 +1260,7 @@ func (bc *Blockchain) CreateBlock() (*types.Block, error) {
 
 	newBody := types.NewBlockBody(selectedTxs, emptyUncles) // Create block body
 	newBlock := types.NewBlock(newHeader, newBody)          // Create complete block
+	newBlock.Header.ProposerID = proposerID
 
 	// CRITICAL: Increment nonce multiple times until consensus is achieved
 	logger.Info("Starting nonce iteration for consensus: initial nonce=%s", newBlock.Header.Nonce)
@@ -1619,6 +1612,27 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 		return fmt.Errorf("failed to extract underlying block")
 	}
 
+	bc.commitMu.Lock()
+	defer bc.commitMu.Unlock()
+
+	latestBlock := bc.GetLatestBlock()
+	if latestBlock != nil {
+		latestHeight := latestBlock.GetHeight()
+		if latestHeight >= typeBlock.GetHeight() {
+			if latestHeight == typeBlock.GetHeight() && latestBlock.GetHash() == typeBlock.GetHash() {
+				logger.Info("CommitBlock: block height=%d hash=%s already committed; skipping replay",
+					typeBlock.GetHeight(), typeBlock.GetHash())
+				return nil
+			}
+			return fmt.Errorf("CommitBlock: stale/conflicting block at height %d (tip height=%d tip hash=%s block hash=%s)",
+				typeBlock.GetHeight(), latestHeight, latestBlock.GetHash(), typeBlock.GetHash())
+		}
+		if typeBlock.GetHeight() != latestHeight+1 {
+			return fmt.Errorf("CommitBlock: non-contiguous block height %d (tip height=%d)",
+				typeBlock.GetHeight(), latestHeight)
+		}
+	}
+
 	logger.Info("🔵 Processing block height=%d, txCount=%d",
 		typeBlock.GetHeight(), len(typeBlock.Body.TxsList))
 
@@ -1627,30 +1641,6 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 		logger.Error("❌ tpsMonitor is nil! Cannot record TPS metrics")
 		return fmt.Errorf("tpsMonitor not initialized")
 	}
-
-	// Calculate actual block time (time since last block)
-	blockTime := bc.calculateBlockTime(typeBlock)
-	logger.Info("📊 Block time calculated: %v", blockTime)
-
-	// Record block in storage TPS with actual block time
-	bc.storage.RecordBlock(typeBlock, blockTime)
-
-	// Record each transaction individually
-	txCount := uint64(len(typeBlock.Body.TxsList))
-	logger.Info("📊 Recording %d transactions in TPS monitor", txCount)
-
-	for i := uint64(0); i < txCount; i++ {
-		bc.tpsMonitor.RecordTransaction()
-	}
-
-	// Then record the block
-	logger.Info("📊 Recording block in TPS monitor with txCount=%d, blockTime=%v", txCount, blockTime)
-	bc.tpsMonitor.RecordBlock(txCount, blockTime)
-
-	// Verify TPS recording worked
-	stats := bc.tpsMonitor.GetStats()
-	logger.Info("📊 Current TPS stats after recording: blocks_processed=%v, total_txs=%v, avg_txs_per_block=%.2f",
-		stats["blocks_processed"], stats["total_transactions"], stats["avg_transactions_per_block"])
 
 	// Check if blockchain is in running state
 	if bc.GetStatus() != StatusRunning {
@@ -1675,6 +1665,15 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 		return fmt.Errorf("CommitBlock: execution failed: %w", err)
 	}
 	logger.Info("✅ Block executed, stateRoot=%x", stateRoot)
+
+	txIDs := make([]string, len(typeBlock.Body.TxsList))
+	for i, tx := range typeBlock.Body.TxsList {
+		txIDs[i] = tx.ID
+	}
+	if bc.mempool != nil && len(txIDs) > 0 {
+		bc.mempool.RemoveTransactions(txIDs)
+		logger.Info("✅ Removed %d committed transactions from mempool after execution", len(txIDs))
+	}
 
 	// ========== PRODUCTION FIX: Force state DB flush ==========
 	// Get the state DB as concrete *StateDB type (which has Commit method)
@@ -1754,8 +1753,14 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 		}
 	}
 
-	// Stamp the real state root into the block header before storage.
-	typeBlock.Header.StateRoot = stateRoot
+	// The block hash was voted on before CommitBlock. StateRoot participates in
+	// that hash, so mutating it here would make the stored header disagree with
+	// the consensus-approved block hash. Keep the header immutable at commit
+	// time and report any execution-root mismatch for the proposal path to fix.
+	if !bytes.Equal(typeBlock.Header.StateRoot, stateRoot) {
+		logger.Warn("CommitBlock: execution state root differs from proposed header for block %s (proposed=%x executed=%x)",
+			typeBlock.GetHash(), typeBlock.Header.StateRoot, stateRoot)
+	}
 
 	// ========== PRODUCTION FIX: Store block in storage AFTER state flush ==========
 	logger.Info("📝 Storing block at height %d with hash %s to storage",
@@ -1766,6 +1771,22 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 		return fmt.Errorf("failed to store block: %w", err)
 	}
 	logger.Info("✅ Block stored in storage successfully at %s", time.Now().Format("15:04:05.000"))
+
+	// Calculate actual block time and record TPS only after a successful commit.
+	blockTime := bc.calculateBlockTime(typeBlock)
+	logger.Info("📊 Block time calculated: %v", blockTime)
+	bc.storage.RecordBlock(typeBlock, blockTime)
+
+	txCount := uint64(len(typeBlock.Body.TxsList))
+	logger.Info("📊 Recording block in TPS monitor with txCount=%d, blockTime=%v", txCount, blockTime)
+	for i := uint64(0); i < txCount; i++ {
+		bc.tpsMonitor.RecordTransaction()
+	}
+	bc.tpsMonitor.RecordBlock(txCount, blockTime)
+
+	stats := bc.tpsMonitor.GetStats()
+	logger.Info("📊 Current TPS stats after recording: blocks_processed=%v, total_txs=%v, avg_txs_per_block=%.2f",
+		stats["blocks_processed"], stats["total_transactions"], stats["avg_transactions_per_block"])
 
 	// Update in-memory chain AFTER storage
 	bc.lock.Lock()
@@ -1814,14 +1835,6 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 			logger.Info("✅ Chain state saved after block commit with %d signatures", len(signatures))
 		}
 	}
-
-	// Remove committed transactions from mempool
-	txIDs := make([]string, len(typeBlock.Body.TxsList))
-	for i, tx := range typeBlock.Body.TxsList {
-		txIDs[i] = tx.ID
-	}
-	bc.mempool.RemoveTransactions(txIDs)
-	logger.Info("✅ Removed %d transactions from mempool", len(txIDs))
 
 	// Log successful commit with final TPS stats
 	finalStats := bc.tpsMonitor.GetStats()
@@ -2184,9 +2197,18 @@ func (bc *Blockchain) ValidateBlock(block consensus.Block) error {
 		return fmt.Errorf("failed to extract underlying block")
 	}
 
+	// Take a single snapshot of the chain tip for this entire validation pass.
+	// Both parent-hash checks below must agree on the same tip — reading
+	// bc.GetLatestBlock() twice left a window where a concurrent commit
+	// between the two reads could change the tip mid-validation, making a
+	// valid proposal fail the second check with a spurious "invalid parent
+	// hash" (and historically caused a node to reject a valid proposal and
+	// commit a competing block of its own instead).
+	latestTip := bc.GetLatestBlock()
+
 	// Validate ParentHash chain linkage (except for genesis block)
 	if b.Header.Height > 0 {
-		previousBlock := bc.GetLatestBlock() // Get previous block
+		previousBlock := latestTip // Get previous block
 		if previousBlock != nil {
 			expectedParentHash := previousBlock.GetHash() // Expected parent hash
 			currentParentHash := b.GetPrevHash()          // Actual parent hash
@@ -2242,7 +2264,7 @@ func (bc *Blockchain) ValidateBlock(block consensus.Block) error {
 	}
 
 	// 5. Links to previous block using ParentHash
-	previousBlock := bc.GetLatestBlock()
+	previousBlock := latestTip
 	if previousBlock != nil {
 		// Use your existing DecodeBlockHash method that handles genesis hashes
 		parentHashBytes, err := bc.DecodeBlockHash(previousBlock.GetHash())

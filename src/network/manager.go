@@ -1263,6 +1263,9 @@ func (m *P2PConsensusNodeManager) HandleIncomingMessage(msgType string, data []b
 		}
 		return m.consensusEngine.HandleTimeout(&timeout)
 
+	case "checkpoint":
+		return m.consensusEngine.HandleCheckpointMessage(data, fromNode)
+
 	case "randao_sync":
 		var randaoData struct {
 			Mix         [32]byte                                       `json:"mix"`

@@ -313,6 +313,51 @@ func (mp *Mempool) SelectTransactionsForBlock(maxBlockSize, targetBlockSize uint
 	return selected, currentSize
 }
 
+// PruneStaleNonces removes pendingPool transactions whose nonce is now
+// behind the sender's current on-chain nonce. Call this after a block
+// commits so any pendingPool entry that was bypassed — for example by a
+// fee-bump replacement, or any other path that advances a sender's nonce
+// without that exact transaction being the one committed — gets cleared out
+// instead of sitting in pendingPool indefinitely and later being selected
+// into a block with a nonce the chain has already passed.
+func (mp *Mempool) PruneStaleNonces(senders map[string]bool) {
+	if mp.stateProvider == nil || len(senders) == 0 {
+		return
+	}
+	stateDB, err := mp.stateProvider.NewStateDB()
+	if err != nil {
+		logger.Warn("PruneStaleNonces: failed to open stateDB: %v", err)
+		return
+	}
+	defer stateDB.Close()
+
+	mp.lock.Lock()
+	defer mp.lock.Unlock()
+
+	var staleIDs []string
+	for txID, pooledTx := range mp.pendingPool {
+		tx := pooledTx.Transaction
+		if tx == nil || !senders[tx.Sender] {
+			continue
+		}
+		currentNonce, err := stateDB.GetNonce(tx.Sender)
+		if err != nil {
+			logger.Warn("PruneStaleNonces: failed to get nonce for %s: %v", tx.Sender, err)
+			continue
+		}
+		if tx.Nonce < currentNonce {
+			staleIDs = append(staleIDs, txID)
+		}
+	}
+
+	for _, txID := range staleIDs {
+		mp.removeTransactionFromAllPools(txID)
+	}
+	if len(staleIDs) > 0 {
+		logger.Info("PruneStaleNonces: evicted %d stale-nonce transactions from pendingPool", len(staleIDs))
+	}
+}
+
 // RemoveTransactions removes transactions from all pools (e.g., when included in block)
 func (mp *Mempool) RemoveTransactions(txIDs []string) {
 	mp.lock.Lock()

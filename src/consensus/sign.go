@@ -5,6 +5,7 @@
 package consensus
 
 import (
+	"bytes"
 	"crypto"
 	"encoding/hex"
 	"errors"
@@ -698,10 +699,7 @@ func (s *SigningService) GetPublicKeyObject() *sthincs.SPHINCS_PK {
 	return s.publicKey
 }
 
-// SignBlock signs the block header hash.
-// This creates a proposer signature for the entire block,
-// which is stored in the block header for verification by other nodes.
-// SignBlock signs the block header hash.
+// SignBlock signs a freshly finalized block-header signing hash.
 func (s *SigningService) SignBlock(block Block) error {
 	// Try to get the underlying types.Block
 	var tb *types.Block
@@ -722,19 +720,25 @@ func (s *SigningService) SignBlock(block Block) error {
 	if tb == nil {
 		return fmt.Errorf("SignBlock: cannot get *types.Block from %T", block)
 	}
-
-	// Ensure the block hash is finalized before signing
-	if tb.Header == nil || len(tb.Header.SigDataHash) == 0 {
-		tb.FinalizeHash()
+	if tb.Header == nil {
+		return fmt.Errorf("SignBlock: block header is nil")
 	}
 
-	// Sign the RAW block hash (32 bytes)
-	rawHash := tb.Header.SigDataHash
+	// The proposer id is part of the signed block identity even if the current
+	// header hash format does not include it yet. Set it before finalizing and
+	// clear signature state so stale proposal data cannot leak into this block.
+	tb.Header.ProposerID = s.nodeID
+	tb.Header.ProposerSignature = nil
+	tb.Header.SigValid = false
+	tb.FinalizeHash()
+
+	rawHash := append([]byte(nil), tb.Header.SigDataHash...)
 	if len(rawHash) == 0 {
 		return fmt.Errorf("block hash not finalized")
 	}
 
-	logger.Info("🔐 Signing raw block hash: %x", rawHash)
+	logger.Info("🔐 Signing block height=%d hash=%s sig_data_hash=%x proposer=%s",
+		tb.Header.Height, tb.GetHash(), rawHash, s.nodeID)
 
 	signedData, err := s.SignMessage(rawHash)
 	if err != nil {
@@ -742,7 +746,6 @@ func (s *SigningService) SignBlock(block Block) error {
 	}
 
 	tb.Header.ProposerSignature = signedData
-	tb.Header.ProposerID = s.nodeID
 	return nil
 }
 
@@ -787,14 +790,23 @@ func (s *SigningService) VerifyBlockSignature(block Block) (bool, error) {
 		return false, fmt.Errorf("failed to deserialize block signature: %w", err)
 	}
 
-	// Compare with RAW hash (SigDataHash)
-	rawHash := tb.Header.SigDataHash
+	// Recompute the RAW hash from the received unsigned header fields. Do not
+	// trust a cached or disk-loaded SigDataHash when validating a proposal.
+	proposerSignature := append([]byte(nil), tb.Header.ProposerSignature...)
+	sigValid := tb.Header.SigValid
+	tb.Header.ProposerSignature = nil
+	tb.Header.SigValid = false
+	tb.FinalizeHash()
+	rawHash := append([]byte(nil), tb.Header.SigDataHash...)
+	tb.Header.ProposerSignature = proposerSignature
+	tb.Header.SigValid = sigValid
+
 	if len(rawHash) == 0 {
 		return false, fmt.Errorf("block has no raw hash (SigDataHash)")
 	}
 
 	// Verify that the signed data matches the raw block hash
-	if string(signedMsg.Data) != string(rawHash) {
+	if !bytes.Equal(signedMsg.Data, rawHash) {
 		logger.Warn("Signature data mismatch: signed=%x, expected=%x",
 			signedMsg.Data, rawHash)
 		return false, fmt.Errorf("signature data does not match block hash")

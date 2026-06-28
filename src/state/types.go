@@ -76,7 +76,8 @@ type StateMachine struct {
 
 // Storage manages blockchain data persistence
 type Storage struct {
-	mu sync.RWMutex
+	mu           sync.RWMutex
+	chainStateMu sync.RWMutex
 
 	dataDir   string
 	blocksDir string

@@ -5,10 +5,12 @@
 package state
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -21,6 +23,50 @@ import (
 	types "github.com/sphinxorg/protocol/src/core/transaction"
 	logger "github.com/sphinxorg/protocol/src/log"
 )
+
+func (s *Storage) chainStatePath() string {
+	return filepath.Join(s.stateDir, "chain_state.json")
+}
+
+func decodeFirstJSON(data []byte, v interface{}) (bool, error) {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	if err := dec.Decode(v); err != nil {
+		return false, err
+	}
+
+	var trailing interface{}
+	err := dec.Decode(&trailing)
+	if err == io.EOF {
+		return false, nil
+	}
+	return true, nil
+}
+
+func (s *Storage) writeChainStateFileLocked(data []byte) error {
+	stateFile := s.chainStatePath()
+	if err := os.MkdirAll(filepath.Dir(stateFile), 0755); err != nil {
+		return fmt.Errorf("failed to create chain state directory: %w", err)
+	}
+
+	tmpFile := fmt.Sprintf("%s.tmp.%d.%d", stateFile, os.Getpid(), time.Now().UnixNano())
+	if err := os.WriteFile(tmpFile, data, 0644); err != nil {
+		return fmt.Errorf("failed to write chain state file: %w", err)
+	}
+	if err := os.Rename(tmpFile, stateFile); err != nil {
+		_ = os.Remove(tmpFile)
+		return fmt.Errorf("failed to rename chain state file: %w", err)
+	}
+	return nil
+}
+
+func (s *Storage) readChainStateFileLocked() ([]byte, error) {
+	stateFile := s.chainStatePath()
+	data, err := os.ReadFile(stateFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read chain state file: %w", err)
+	}
+	return data, nil
+}
 
 // GetBlockByHeight returns a block by its height
 func (s *Storage) GetBlockByHeight(height uint64) (*types.Block, error) {
@@ -1614,26 +1660,27 @@ func (s *Storage) storeBlockToDisk(block *types.Block) error {
 	// Create a custom serialization structure with ISO timestamp
 	type SerializableBlock struct {
 		Header struct {
-			Hash              string `json:"hash"`                    // This block's hash
-			TxsRoot           string `json:"txs_root"`                // Merkle root of transactions
-			StateRoot         string `json:"state_root"`              // State Merkle root
-			ParentHash        string `json:"parent_hash"`             // Hash of the previous block (chain continuity)
-			UnclesHash        string `json:"uncles_hash"`             // Hash of uncle blocks
-			ExtraData         string `json:"extra_data"`              // Additional block data
-			Miner             string `json:"miner"`                   // Miner address
-			Version           uint64 `json:"version"`                 // Block version
-			NBlock            uint64 `json:"nblock"`                  // Block number/height
-			Height            uint64 `json:"height"`                  // Block height
-			Timestamp         string `json:"timestamp"`               // Block timestamp in ISO RFC format
-			Difficulty        string `json:"difficulty"`              // Mining difficulty
-			Nonce             string `json:"nonce"`                   // Mining nonce
-			GasLimit          string `json:"gas_limit"`               // Gas limit
-			GasUsed           string `json:"gas_used"`                // Gas used
-			ProposerSignature string `json:"proposer_signature"`      // was missing
-			ProposerID        string `json:"proposer_id"`             // was missing
-			SigDataHash       string `json:"sig_data_hash,omitempty"` // ← ADD THIS
-			CommitStatus      string `json:"commit_status"`
-			SigValid          bool   `json:"signature_valid"`
+			Hash                  string `json:"hash"`        // This block's hash
+			TxsRoot               string `json:"txs_root"`    // Merkle root of transactions
+			StateRoot             string `json:"state_root"`  // State Merkle root
+			ParentHash            string `json:"parent_hash"` // Hash of the previous block (chain continuity)
+			UnclesHash            string `json:"uncles_hash"` // Hash of uncle blocks
+			ExtraData             string `json:"extra_data"`  // Additional block data
+			Miner                 string `json:"miner"`       // Miner address
+			Version               uint64 `json:"version"`     // Block version
+			NBlock                uint64 `json:"nblock"`      // Block number/height
+			Height                uint64 `json:"height"`      // Block height
+			Timestamp             string `json:"timestamp"`   // Block timestamp in ISO RFC format
+			Difficulty            string `json:"difficulty"`  // Mining difficulty
+			Nonce                 string `json:"nonce"`       // Mining nonce
+			GasLimit              string `json:"gas_limit"`   // Gas limit
+			GasUsed               string `json:"gas_used"`    // Gas used
+			ProposerSignature     string `json:"proposer_signature"`
+			ProposerSignatureHash string `json:"proposer_signature_hash,omitempty"`
+			ProposerID            string `json:"proposer_id"`
+			SigDataHash           string `json:"sig_data_hash,omitempty"`
+			CommitStatus          string `json:"commit_status"`
+			SigValid              bool   `json:"signature_valid"`
 		} `json:"header"`
 		Body struct {
 			TxsList      []map[string]interface{} `json:"txs_list"`
@@ -1677,9 +1724,12 @@ func (s *Storage) storeBlockToDisk(block *types.Block) error {
 		serializableBlock.Header.Nonce = block.Header.Nonce
 		serializableBlock.Header.GasLimit = block.Header.GasLimit.String()
 		serializableBlock.Header.GasUsed = block.Header.GasUsed.String()
-		// ADD THESE TWO:
 		serializableBlock.Header.ProposerSignature = hex.EncodeToString(block.Header.ProposerSignature)
+		if len(block.Header.ProposerSignature) > 0 {
+			serializableBlock.Header.ProposerSignatureHash = hex.EncodeToString(common.SpxHash(block.Header.ProposerSignature))
+		}
 		serializableBlock.Header.ProposerID = block.Header.ProposerID
+		serializableBlock.Header.SigDataHash = hex.EncodeToString(block.Header.SigDataHash)
 		// Default empty CommitStatus — blocks only reach disk when committed
 		commitStatus := block.Header.CommitStatus
 		if commitStatus == "" {
@@ -1776,25 +1826,27 @@ func (s *Storage) loadBlockFromDisk(hash string) (*types.Block, error) {
 
 	type TempBlock struct {
 		Header struct {
-			Hash              string `json:"hash"`
-			TxsRoot           string `json:"txs_root"`
-			StateRoot         string `json:"state_root"`
-			ParentHash        string `json:"parent_hash"`
-			UnclesHash        string `json:"uncles_hash"`
-			ExtraData         string `json:"extra_data"`
-			Miner             string `json:"miner"`
-			Version           uint64 `json:"version"`
-			NBlock            uint64 `json:"nblock"`
-			Height            uint64 `json:"height"`
-			Timestamp         string `json:"timestamp"`
-			Difficulty        string `json:"difficulty"`
-			Nonce             string `json:"nonce"` // ← Changed from uint64 to string
-			GasLimit          string `json:"gas_limit"`
-			GasUsed           string `json:"gas_used"`
-			ProposerSignature string `json:"proposer_signature"`
-			ProposerID        string `json:"proposer_id"`
-			CommitStatus      string `json:"commit_status"`
-			SigValid          bool   `json:"signature_valid"`
+			Hash                  string `json:"hash"`
+			TxsRoot               string `json:"txs_root"`
+			StateRoot             string `json:"state_root"`
+			ParentHash            string `json:"parent_hash"`
+			UnclesHash            string `json:"uncles_hash"`
+			ExtraData             string `json:"extra_data"`
+			Miner                 string `json:"miner"`
+			Version               uint64 `json:"version"`
+			NBlock                uint64 `json:"nblock"`
+			Height                uint64 `json:"height"`
+			Timestamp             string `json:"timestamp"`
+			Difficulty            string `json:"difficulty"`
+			Nonce                 string `json:"nonce"` // ← Changed from uint64 to string
+			GasLimit              string `json:"gas_limit"`
+			GasUsed               string `json:"gas_used"`
+			ProposerSignature     string `json:"proposer_signature"`
+			ProposerSignatureHash string `json:"proposer_signature_hash,omitempty"`
+			ProposerID            string `json:"proposer_id"`
+			SigDataHash           string `json:"sig_data_hash,omitempty"`
+			CommitStatus          string `json:"commit_status"`
+			SigValid              bool   `json:"signature_valid"`
 		} `json:"header"`
 		Body struct {
 			TxsList      []map[string]interface{} `json:"txs_list"`
@@ -1867,15 +1919,24 @@ func (s *Storage) loadBlockFromDisk(hash string) (*types.Block, error) {
 	if block.Header.CommitStatus == "" {
 		block.Header.CommitStatus = "committed"
 	}
-	block.Header.SigValid = tempBlock.Header.SigValid
-	if !block.Header.SigValid && len(block.Header.ProposerSignature) > 0 {
-		block.Header.SigValid = true
-	}
 	block.Header.ProposerID = tempBlock.Header.ProposerID
+	if tempBlock.Header.SigDataHash != "" {
+		if sigDataHash, err := hex.DecodeString(tempBlock.Header.SigDataHash); err == nil {
+			block.Header.SigDataHash = sigDataHash
+		} else {
+			logger.Warn("Failed to decode sig_data_hash for block %s: %v", hash, err)
+		}
+	}
 	if tempBlock.Header.ProposerSignature != "" {
 		if sig, err := hex.DecodeString(tempBlock.Header.ProposerSignature); err == nil {
 			block.Header.ProposerSignature = sig
+		} else {
+			logger.Warn("Failed to decode proposer_signature for block %s: %v", hash, err)
 		}
+	}
+	block.Header.SigValid = tempBlock.Header.SigValid
+	if !block.Header.SigValid && len(block.Header.ProposerSignature) > 0 {
+		block.Header.SigValid = true
 	}
 
 	// Numeric fields

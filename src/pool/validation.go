@@ -238,36 +238,59 @@ func (mp *Mempool) verifyTransactionSignature(tx *types.Transaction) error {
 }
 
 // verifyTransactionNonce uses SVM to validate transaction nonce.
-// Nonce must be greater than the last used nonce (prevents replay attacks)
+//
+// The chain enforces strict account-nonce semantics: a transaction is only
+// valid if its nonce exactly equals the sender's current state nonce (see
+// executor.go's applyTransactions, which rejects with "bad nonce: got X want
+// Y" on any mismatch, not just on nonces that are too low). This function
+// previously required tx.Nonce > currentNonce (strictly greater), which is
+// off by one against that contract: the correct next nonce for any sender
+// IS the current nonce, not one past it. That mismatch let transactions with
+// nonces ahead of the correct value sit in pendingPool, while the one
+// transaction that would actually be accepted by applyTransactions failed
+// mempool admission. Equality is expressed as (>= AND <=) using the same
+// GT/LT/ISZERO idiom already used elsewhere in this file, since no EQ opcode
+// is available.
 func (mp *Mempool) verifyTransactionNonce(tx *types.Transaction, currentNonce uint64) error {
-	bc := []byte{}
+	// ---- Check tx.Nonce >= currentNonce, i.e. NOT(tx.Nonce < currentNonce) ----
+	bcGTE := []byte{}
+	bcGTE = append(bcGTE, byte(svm.PUSH8))
+	bcGTE = append(bcGTE, uint64ToBytesPool(tx.Nonce)...)
+	bcGTE = append(bcGTE, byte(svm.PUSH8))
+	bcGTE = append(bcGTE, uint64ToBytesPool(currentNonce)...)
+	bcGTE = append(bcGTE, byte(svm.LT))
+	bcGTE = append(bcGTE, byte(svm.ISZERO))
 
-	// Push the transaction's nonce value onto the stack (first)
-	bc = append(bc, byte(svm.PUSH8))
-	bc = append(bc, uint64ToBytesPool(tx.Nonce)...)
-
-	// Push the current/last nonce value onto the stack (second)
-	bc = append(bc, byte(svm.PUSH8))
-	bc = append(bc, uint64ToBytesPool(currentNonce)...)
-
-	// Check if tx.Nonce > currentNonce (GT pushes 1 if true, 0 otherwise)
-	bc = append(bc, byte(svm.GT))
-
-	// Create and run the VM with the bytecode
-	vm := vmachine.NewVM(bc)
-	if err := vm.Run(); err != nil {
+	vmGTE := vmachine.NewVM(bcGTE)
+	if err := vmGTE.Run(); err != nil {
 		return fmt.Errorf("VM nonce validation failed: %w", err)
 	}
-
-	// Get the result (should be 1 if tx.Nonce > currentNonce)
-	result, err := vm.GetResult()
+	resultGTE, err := vmGTE.GetResult()
 	if err != nil {
 		return fmt.Errorf("VM result error: %w", err)
 	}
 
-	// Verify nonce is greater than current nonce
-	if result != 1 {
-		return fmt.Errorf("invalid nonce: %d must be > %d", tx.Nonce, currentNonce)
+	// ---- Check tx.Nonce <= currentNonce, i.e. NOT(tx.Nonce > currentNonce) ----
+	bcLTE := []byte{}
+	bcLTE = append(bcLTE, byte(svm.PUSH8))
+	bcLTE = append(bcLTE, uint64ToBytesPool(tx.Nonce)...)
+	bcLTE = append(bcLTE, byte(svm.PUSH8))
+	bcLTE = append(bcLTE, uint64ToBytesPool(currentNonce)...)
+	bcLTE = append(bcLTE, byte(svm.GT))
+	bcLTE = append(bcLTE, byte(svm.ISZERO))
+
+	vmLTE := vmachine.NewVM(bcLTE)
+	if err := vmLTE.Run(); err != nil {
+		return fmt.Errorf("VM nonce validation failed: %w", err)
+	}
+	resultLTE, err := vmLTE.GetResult()
+	if err != nil {
+		return fmt.Errorf("VM result error: %w", err)
+	}
+
+	// Nonce is valid only if both >= and <= hold, i.e. tx.Nonce == currentNonce.
+	if resultGTE != 1 || resultLTE != 1 {
+		return fmt.Errorf("invalid nonce: %d must equal %d", tx.Nonce, currentNonce)
 	}
 	return nil
 }
@@ -535,7 +558,14 @@ func (mp *Mempool) validateTransaction(pooledTx *PooledTransaction) {
 // Returns an error if any validation check fails
 func (mp *Mempool) performValidation(tx *types.Transaction) error {
 	// Genesis vault transactions are TRUSTED protocol transactions
-	// They don't have SPHINCS+ signatures because they're system-level distributions
+	// They don't have SPHINCS+ signatures because they're system-level distributions.
+	// IMPORTANT: "trusted" only ever meant "skip cryptographic signature
+	// verification". Nonce and replay-protection checks still apply to system
+	// transactions — a stale or duplicate nonce from the vault is exactly as
+	// invalid as one from a regular sender, and skipping the check here was
+	// the reason stale-nonce vault transactions could sit in pendingPool
+	// forever and later get selected into a block with a nonce the chain had
+	// already passed (e.g. "bad nonce: got 0 want 9").
 	if tx.IsSystemTransaction() {
 		logger.Debug("Genesis vault transaction %s is trusted, skipping cryptographic verification", tx.ID)
 
@@ -554,7 +584,15 @@ func (mp *Mempool) performValidation(tx *types.Transaction) error {
 			return errors.New("invalid amount")
 		}
 
-		// No signature verification needed for genesis vault
+		// Verify nonce even for system transactions. No signature verification
+		// needed for genesis vault, but nonce ordering must still hold or stale
+		// vault transactions accumulate in pendingPool with no way to be
+		// invalidated later.
+		currentNonce := mp.getSenderNonce(tx.Sender)
+		if err := mp.verifyTransactionNonce(tx, currentNonce); err != nil {
+			return fmt.Errorf("nonce validation failed: %w", err)
+		}
+
 		return nil
 	}
 

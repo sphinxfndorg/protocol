@@ -17,6 +17,7 @@
     "gas_used": "0",
     "proposer_signature": "",
     "proposer_id": "0000000000000000000000000000000000000001",
+    "sig_data_hash": "99e7783afe5451f72ce0e04d40a69aba4b8a798078492167e57797b60bbea61a",
     "commit_status": "committed",
     "signature_valid": false
   },

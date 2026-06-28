@@ -856,8 +856,14 @@ func (bc *Blockchain) StartLeaderLoop(ctx context.Context) {
 				}
 
 				// Only leader proposes blocks
-				// Check if this node is the current leader
-				if !bc.consensusEngine.IsLeader() {
+				// Check if this node is the current leader.
+				// RefreshLeaderStatus re-derives under c.mu so we get a consistent
+				// snapshot that reflects any view increment that just occurred in
+				// commitBlock. This avoids the stale-c.isLeader read that, combined
+				// with c.lockedBlock not yet cleared, caused processProposal to
+				// reject the leader's own proposal.
+				_, _, isLeader := bc.consensusEngine.RefreshLeaderStatus()
+				if !isLeader {
 					continue
 				}
 
@@ -902,6 +908,22 @@ func (bc *Blockchain) StartLeaderLoop(ctx context.Context) {
 
 				// Convert to consensus.Block using adapter
 				consensusBlock := NewBlockHelper(block)
+
+				// Guard: verify the block we created still extends the current chain tip.
+				// If another commit completed concurrently while CreateBlock was running,
+				// the tip has advanced and this block's parent hash is now stale.
+				// Proposing it would cause processProposal to reject it (height mismatch),
+				// so drop it here and let the next ticker cycle create a fresh block.
+				currentTip := bc.GetLatestBlock()
+				if currentTip != nil && block.GetPrevHash() != currentTip.GetHash() {
+					logger.Warn("Leader: discarding stale proposal (parent=%s, tip=%s) — will retry",
+						block.GetPrevHash()[:16], currentTip.GetHash()[:16])
+					leaderMutex.Lock()
+					isProposing = false
+					leaderMutex.Unlock()
+					continue
+				}
+
 				// Propose block to consensus engine
 				if err := bc.consensusEngine.ProposeBlock(consensusBlock); err != nil {
 					logger.Warn("Leader: failed to propose block: %v", err)

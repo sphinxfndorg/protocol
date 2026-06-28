@@ -292,6 +292,12 @@ type Consensus struct {
 	// a proposal that is still being verified, which would otherwise cause
 	// it to be discarded as stale the moment verification finishes.
 	proposalInFlight bool
+
+	// syncNeededCh receives the next height this node needs to sync from
+	// when processProposal detects a gap (proposal height > localTip+1).
+	// The p2p/smr layer drains this channel and calls FastForward with
+	// each missing block fetched from a peer, in ascending height order.
+	syncNeededCh chan uint64
 }
 
 // SigningService handles cryptographic signing for consensus messages

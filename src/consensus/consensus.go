@@ -179,6 +179,7 @@ func NewConsensus(
 		attestations:         make(map[uint64][]*Attestation),   // Attestations by epoch
 		pendingProposals:     make(map[string]Block),
 		electedLeaderID:      "", // Set by UpdateLeaderStatus
+		syncNeededCh:         make(chan uint64, 4),
 	}
 
 	// Initialize and validate VDF parameters (run once at startup)
@@ -902,8 +903,28 @@ func (c *Consensus) processProposal(proposal *Proposal) {
 
 	expectedHeight := localTipHeight + 1
 	if proposalHeight != expectedHeight {
-		logger.Warn("❌ Proposal height not ready: expected %d from local tip %s, got height %d block %s",
-			expectedHeight, localTip.GetHash(), proposalHeight, proposal.Block.GetHash())
+		if proposalHeight > expectedHeight {
+			// This node is behind the network. Park the proposal in the cache
+			// so it can be replayed once the gap is filled via FastForward,
+			// and signal the sync layer to fetch the missing blocks.
+			gap := proposalHeight - localTipHeight
+			logger.Warn("⏩ Node behind: local tip=%d, proposal height=%d — need %d more block(s), signalling sync",
+				localTipHeight, proposalHeight, gap)
+			c.proposalMutex.Lock()
+			if c.pendingProposals == nil {
+				c.pendingProposals = make(map[string]Block)
+			}
+			c.pendingProposals[proposal.Block.GetHash()] = proposal.Block
+			c.proposalMutex.Unlock()
+			// Non-blocking send: best-effort; the sync goroutine drains this.
+			select {
+			case c.syncNeededCh <- localTipHeight + 1:
+			default:
+			}
+		} else {
+			logger.Warn("❌ Proposal height not ready: expected %d from local tip %s, got height %d block %s",
+				expectedHeight, localTip.GetHash(), proposalHeight, proposal.Block.GetHash())
+		}
 		return
 	}
 	if proposal.Block.GetPrevHash() != localTip.GetHash() {
@@ -995,13 +1016,28 @@ func (c *Consensus) processProposal(proposal *Proposal) {
 
 	// Check for stale proposal
 	if proposal.View < c.currentView {
-		// ========== FIX: Don't reject proposals that are only 1 view behind ==========
-		// If we're only 1 view behind, we might have missed the view change message.
-		// Accept the proposal and catch up.
 		if proposal.View == c.currentView-1 {
 			logger.Info("⚠️ Proposal for view %d (current view %d) - catching up", proposal.View, c.currentView)
-			// Accept the proposal - the block height validation will handle the rest
-			// Don't return here - continue processing
+			// This is a late retransmission from the previous round. If lockedBlock
+			// is still set from that round (commitBlock's second c.mu acquisition
+			// hasn't run yet), the equivocation guard below would fire and reject it.
+			// Since we have already advanced past this view, there is nothing to
+			// equivocate — clear the stale lock so the height/parentHash checks
+			// decide whether this proposal is still actionable.
+			if c.lockedBlock != nil {
+				logger.Info("⚠️ Clearing stale lockedBlock %s from old view %d before catching-up processing",
+					c.lockedBlock.GetHash()[:16], proposal.View)
+				c.lockedBlock = nil
+			}
+			// Re-check tip height: commitBlock may have advanced the chain in the
+			// narrow window between the outer height check and here. Discard if so.
+			recheck := c.blockChain.GetLatestBlock()
+			if recheck != nil && proposal.Block.GetHeight() <= recheck.GetHeight() {
+				logger.Info("⏭ Catching-up proposal for height %d already committed (tip now %d), discarding",
+					proposal.Block.GetHeight(), recheck.GetHeight())
+				return
+			}
+			// Don't return — continue processing; height check will discard if still not ready
 		} else {
 			logger.Warn("❌ Stale proposal for view %d, current view %d", proposal.View, c.currentView)
 			return
@@ -1075,9 +1111,41 @@ func (c *Consensus) processProposal(proposal *Proposal) {
 	// legitimate commit and on legitimate view-advancement above, so this
 	// only blocks genuine same-view equivocation, never normal progress.
 	if c.lockedBlock != nil && c.lockedBlock.GetHash() != proposal.Block.GetHash() {
-		logger.Warn("❌ Rejecting conflicting proposal %s at height %d: already locked on %s — refusing to equivocate",
-			proposal.Block.GetHash()[:16], proposal.Block.GetHeight(), c.lockedBlock.GetHash()[:16])
-		return
+		// Before hard-rejecting, apply two escape hatches that distinguish genuine
+		// equivocation (same view, two different blocks) from stale locks that must
+		// be cleared to allow the chain to continue.
+		chainTip := c.blockChain.GetLatestBlock()
+		lockedHeight := c.lockedBlock.GetHeight()
+
+		// Escape 1: The locked block has already been committed to storage (e.g. by
+		// a concurrent commitBlock goroutine that hasn't re-acquired c.mu yet to
+		// clear lockedBlock). The chain tip has advanced past lockedHeight, so this
+		// new proposal is for a legitimately new height — not equivocation.
+		if chainTip != nil && chainTip.GetHeight() >= lockedHeight {
+			logger.Info("🔓 Clearing stale lockedBlock %s (height=%d, tip=%d) — committed mid-flight, not equivocation",
+				c.lockedBlock.GetHash()[:16], lockedHeight, chainTip.GetHeight())
+			c.lockedBlock = nil
+
+			// Escape 2: The lock was acquired in a previous view (c.preparedView < proposal.View).
+			// This happens when prepare quorum was reached and lockedBlock was set, but commit
+			// quorum was never achieved — causing a view change — and the new view's leader is
+			// now proposing a different block for the same height. Across a view change without
+			// a completed commit, the lock is stale and must be cleared; refusing here would
+			// permanently stall this node since resetConsensusState() in the view-advancement
+			// branch (proposal.View > c.currentView) runs BEFORE this guard.
+			// Note: resetConsensusState() only runs when proposal.View > c.currentView.
+			// If the node is still at the same currentView (e.g. catching-up branch), the
+			// lock may survive; preparedView is the reliable record of the view it was set in.
+		} else if c.preparedView < proposal.View {
+			logger.Info("🔓 Clearing cross-view lockedBlock %s (lockedAtView=%d, proposalView=%d, height=%d) — new view, not equivocation",
+				c.lockedBlock.GetHash()[:16], c.preparedView, proposal.View, lockedHeight)
+			c.lockedBlock = nil
+
+		} else {
+			logger.Warn("❌ Rejecting conflicting proposal %s at height %d: already locked on %s (same view %d) — refusing to equivocate",
+				proposal.Block.GetHash()[:16], proposal.Block.GetHeight(), c.lockedBlock.GetHash()[:16], c.preparedView)
+			return
+		}
 	}
 
 	if c.preparedBlock != nil && c.preparedBlock.GetHash() != proposal.Block.GetHash() {
@@ -1142,6 +1210,27 @@ func (c *Consensus) processProposal(proposal *Proposal) {
 	// transition forever, leaving the node stuck and never broadcasting its
 	// own commit vote. See tryEnterPreparedPhase for full details.
 	c.tryEnterPreparedPhase(proposal.Block.GetHash(), proposal.View)
+
+	// ========== FIX: catch commit quorum that arrived before this proposal ==========
+	// Commit votes can arrive (and reach quorum) before the proposal is processed
+	// locally. processVoteLocked now parks those votes instead of discarding them.
+	// Check here — after preparedBlock is set — whether commit quorum was already
+	// achieved for this block, and if so dispatch the commit asynchronously.
+	// We cannot call commitBlock directly (it calls blockChain.CommitBlock which
+	// does I/O and must run outside c.mu), so we release the lock then commit.
+	blockHash := proposal.Block.GetHash()
+	view := proposal.View
+	if c.phase != PhaseCommitted && c.hasQuorum(blockHash) {
+		blockToCommit := proposal.Block
+		logger.Info("🔄 Commit quorum was already reached for %s before proposal arrived — committing now", blockHash[:16])
+		// Transition to committed phase and lock the block before releasing the mutex.
+		c.phase = PhaseCommitted
+		c.lockedBlock = blockToCommit
+		_ = view // view used in logging above
+		go func() {
+			c.commitBlock(blockToCommit)
+		}()
+	}
 }
 
 // CacheMerkleRoot stores a merkle root in cache for quick access
@@ -1279,10 +1368,16 @@ func (c *Consensus) tryEnterPreparedPhase(blockHash string, view uint64) {
 	if !c.hasPrepareQuorum(blockHash) {
 		return // not yet — still waiting on prepare votes
 	}
-	if c.phase != PhasePrePrepared {
+	if c.phase == PhasePrepared || c.phase == PhaseCommitted {
+		// Already transitioned for this round — nothing to do.
 		logger.Info("⚠️ Quorum reached for %s but already in phase %v, skipping transition", blockHash, c.phase)
 		return
 	}
+	// PhaseIdle and PhasePrePrepared are both valid entry points:
+	// - PhasePrePrepared: normal path, proposal processed before votes
+	// - PhaseIdle: votes arrived before processProposal set the phase (channel
+	//   ordering race), or the leader's own proposal is being processed while
+	//   phase is still PhaseIdle after a fresh post-commit reset.
 	if c.preparedBlock == nil || c.preparedBlock.GetHash() != blockHash {
 		logger.Info("⏳ Prepare quorum reached for %s but proposal not processed locally yet — will retry once it arrives", blockHash)
 		return
@@ -1560,10 +1655,28 @@ func (c *Consensus) processVoteLocked(vote *Vote) Block {
 		} else if c.preparedBlock != nil && c.preparedBlock.GetHash() == vote.BlockHash {
 			blockToCommit = c.preparedBlock
 		} else {
-			logger.Warn("❌ Commit quorum ignored for %s: no locally validated prepared block", vote.BlockHash)
-			delete(c.receivedVotes, vote.BlockHash)
-			delete(c.weightedCommitVotes, vote.BlockHash)
-			return nil
+			// Last-resort: recover from the proposal cache populated in processProposal.
+			// This handles the case where quorum arrives while lockedBlock/preparedBlock
+			// are nil — e.g. the catching-up branch cleared lockedBlock before
+			// tryEnterPreparedPhase ran, or a view-reset wiped preparedBlock mid-round.
+			// The block was fully validated when cached, so it is safe to commit from here.
+			c.proposalMutex.RLock()
+			cached, ok := c.pendingProposals[vote.BlockHash]
+			c.proposalMutex.RUnlock()
+			if ok && cached != nil {
+				logger.Info("🔄 Recovering block %s from proposal cache for commit (lockedBlock/preparedBlock were nil)",
+					vote.BlockHash[:16])
+				blockToCommit = cached
+				// Re-lock so the equivocation guard holds for any straggler proposals.
+				c.lockedBlock = cached
+			} else {
+				// The proposal for this block has not arrived yet (votes raced ahead of
+				// the proposal). Keep accumulated votes in receivedVotes so that when
+				// processProposal later sets preparedBlock, it can detect the already-
+				// reached quorum and trigger the commit via the end-of-proposal quorum check.
+				logger.Info("⏳ Commit quorum for %s reached before proposal — parking votes (will commit once proposal arrives)", vote.BlockHash[:16])
+				return nil
+			}
 		}
 
 		// Move to committed phase if not already there
@@ -1916,6 +2029,34 @@ func (c *Consensus) commitBlock(block Block) {
 		}
 	}
 
+	// FIX: Clear lockedBlock under c.mu BEFORE calling blockChain.CommitBlock.
+	//
+	// Race condition: blockChain.CommitBlock performs storage I/O (state DB
+	// flush, block storage) without holding c.mu. During that window the
+	// StartLeaderLoop ticker can fire, see c.isLeader=true for this view, call
+	// ProposeBlock (which acquires c.mu), and then processProposal will find
+	// c.lockedBlock still set to the block we are in the process of committing.
+	// If blockChain.CommitBlock hasn't yet appended to bc.chain, GetLatestBlock
+	// returns the previous height, so the "stale lock" check
+	// (chainTip.GetHeight() >= lockedBlock.GetHeight()) evaluates to false and
+	// the leader rejects its own proposal, stalling the chain.
+	//
+	// Clearing lockedBlock here (before storage I/O) eliminates the race:
+	// any concurrent processProposal will see lockedBlock==nil and proceed
+	// normally, with the height/parentHash checks acting as the safety net.
+	// preparedBlock is cleared for the same reason.
+	committedHash := block.GetHash()
+	c.mu.Lock()
+	if c.lockedBlock != nil && c.lockedBlock.GetHash() == committedHash {
+		c.lockedBlock = nil
+	}
+	if c.preparedBlock != nil && c.preparedBlock.GetHash() == committedHash {
+		c.preparedBlock = nil
+		c.preparedView = 0
+		c.preparedBlockHash = ""
+	}
+	c.mu.Unlock()
+
 	// Commit block to blockchain
 	if err := c.blockChain.CommitBlock(block); err != nil {
 		logger.Error("❌ Error committing block: %v", err)
@@ -1957,7 +2098,15 @@ func (c *Consensus) commitBlock(block Block) {
 	c.sentPrepareVotes = make(map[string]bool)
 	c.weightedPrepareVotes = make(map[string]*big.Int)
 	c.weightedCommitVotes = make(map[string]*big.Int)
-	c.pendingProposals = make(map[string]Block)
+	// Evict only proposals at or below the committed height.
+	// Proposals for the NEXT height may already be cached (arrived early)
+	// and must survive this commit so FastForward can replay them.
+	committedHeight := block.GetHeight()
+	for hash, b := range c.pendingProposals {
+		if b.GetHeight() <= committedHeight {
+			delete(c.pendingProposals, hash)
+		}
+	}
 
 	// Add self-commit signature while still under caller's c.mu.
 	commitSig := &ConsensusSignature{
@@ -2288,6 +2437,69 @@ func (c *Consensus) broadcastPrepareVote(vote *Vote) error {
 func (c *Consensus) broadcastTimeout(timeout *TimeoutMsg) error {
 	logger.Info("Broadcasting timeout for view %d", timeout.View)
 	return c.nodeManager.BroadcastMessage("timeout", timeout)
+}
+
+// GetSyncNeededCh returns the channel that fires when this node detects it has
+// fallen behind the network. Each value is the next height this node needs.
+// The p2p/smr layer should drain this channel and call FastForward for each
+// missing block fetched from a peer, in ascending height order.
+func (c *Consensus) GetSyncNeededCh() <-chan uint64 {
+	return c.syncNeededCh
+}
+
+// FastForward commits a block that was fetched from a peer during a sync
+// catch-up, bypassing the normal proposal/vote pipeline. The block must be
+// exactly localTip+1; call repeatedly in ascending order to fill a gap.
+// After each commit, any proposal parked in pendingProposals whose height
+// now matches the new expectedHeight is re-queued to proposalCh so normal
+// PBFT processing resumes automatically once the gap is closed.
+func (c *Consensus) FastForward(block Block) error {
+	tip := c.blockChain.GetLatestBlock()
+	if tip == nil {
+		return fmt.Errorf("FastForward: no local tip")
+	}
+	if block.GetHeight() != tip.GetHeight()+1 {
+		return fmt.Errorf("FastForward: expected height %d, got %d",
+			tip.GetHeight()+1, block.GetHeight())
+	}
+	if block.GetPrevHash() != tip.GetHash() {
+		return fmt.Errorf("FastForward: parent mismatch: expected %s, got %s",
+			tip.GetHash(), block.GetPrevHash())
+	}
+
+	logger.Info("⏩ FastForward: committing synced block height=%d hash=%s",
+		block.GetHeight(), block.GetHash())
+	c.commitBlock(block)
+
+	// After the commit, re-queue any parked proposal that is now the next
+	// expected height so the normal PBFT pipeline can resume.
+	newTip := c.blockChain.GetLatestBlock()
+	if newTip == nil {
+		return nil
+	}
+	nextHeight := newTip.GetHeight() + 1
+
+	c.proposalMutex.Lock()
+	defer c.proposalMutex.Unlock()
+	for hash, b := range c.pendingProposals {
+		if b.GetHeight() == nextHeight {
+			logger.Info("⏩ FastForward: re-queuing parked proposal height=%d hash=%s",
+				nextHeight, hash[:16])
+			requeued := &Proposal{
+				Block:      b,
+				View:       c.currentView,
+				ProposerID: "sync-replay",
+			}
+			select {
+			case c.proposalCh <- requeued:
+			default:
+				logger.Warn("⏩ FastForward: proposalCh full, dropping re-queued proposal %s", hash[:16])
+			}
+			delete(c.pendingProposals, hash)
+			break
+		}
+	}
+	return nil
 }
 
 // SetLeader manually sets the leader status (used for testing/debugging)

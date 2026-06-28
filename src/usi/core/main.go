@@ -9,9 +9,9 @@ import (
 	"fmt"
 	"log"
 
-	seed "github.com/sphinxorg/protocol/src/accounts/phrase"
-	keys "github.com/sphinxorg/protocol/src/usi/core/key"
-	"github.com/sphinxorg/protocol/src/usi/core/sign"
+	seed "github.com/sphinxfndorg/protocol/src/accounts/phrase"
+	keys "github.com/sphinxfndorg/protocol/src/usi/core/key"
+	"github.com/sphinxfndorg/protocol/src/usi/core/sign"
 )
 
 func main() {

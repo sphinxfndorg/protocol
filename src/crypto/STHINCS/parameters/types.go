@@ -4,7 +4,7 @@
 // go/src/crypto/STHINCS/address/types.go
 package parameters
 
-import "github.com/sphinxorg/protocol/src/crypto/STHINCS/tweakable"
+import "github.com/sphinxfndorg/protocol/src/crypto/STHINCS/tweakable"
 
 // Parameters contains all SPHINCS+ configuration parameters for a specific security level
 type Parameters struct {

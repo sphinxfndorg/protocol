@@ -17,7 +17,7 @@ import (
 	"github.com/actuallyachraf/go-merkle"
 
 	// FIXED: Change from SPHINCSPLUS-golang to STHINCS
-	"github.com/sphinxorg/protocol/src/crypto/STHINCS/sthincs"
+	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/sthincs"
 )
 
 // PrimeField is the finite field used for STARK computations (q = 3221225473).

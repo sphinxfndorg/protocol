@@ -13,9 +13,9 @@ import (
 	"sync"
 	"time"
 
-	types "github.com/sphinxorg/protocol/src/core/transaction"
-	logger "github.com/sphinxorg/protocol/src/log"
-	denom "github.com/sphinxorg/protocol/src/params/denom"
+	types "github.com/sphinxfndorg/protocol/src/core/transaction"
+	logger "github.com/sphinxfndorg/protocol/src/log"
+	denom "github.com/sphinxfndorg/protocol/src/params/denom"
 )
 
 // Constants for blockchain status, sync modes, etc.

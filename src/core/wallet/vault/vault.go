@@ -26,10 +26,10 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/dialog"
-	"github.com/sphinxorg/protocol/src/accounts/key"
-	utils "github.com/sphinxorg/protocol/src/accounts/key/utils"
-	keys "github.com/sphinxorg/protocol/src/usi/core/key"
-	"github.com/sphinxorg/protocol/src/usi/core/sign"
+	"github.com/sphinxfndorg/protocol/src/accounts/key"
+	utils "github.com/sphinxfndorg/protocol/src/accounts/key/utils"
+	keys "github.com/sphinxfndorg/protocol/src/usi/core/key"
+	"github.com/sphinxfndorg/protocol/src/usi/core/sign"
 )
 
 const (

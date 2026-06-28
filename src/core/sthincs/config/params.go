@@ -8,7 +8,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/sphinxorg/protocol/src/crypto/STHINCS/parameters"
+	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/parameters"
 )
 
 // SIPS0015 https://github.com/sphinxorg/SIPS/blob/main/.github/workflows/sips0015/sips0015.md

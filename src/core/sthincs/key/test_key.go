@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"log"
 
-	key "github.com/sphinxorg/protocol/src/core/sthincs/key/backend"
-	"github.com/sphinxorg/protocol/src/crypto/STHINCS/sthincs"
+	key "github.com/sphinxfndorg/protocol/src/core/sthincs/key/backend"
+	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/sthincs"
 )
 
 func main() {

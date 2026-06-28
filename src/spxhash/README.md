@@ -16,7 +16,7 @@ The captured run completed successfully:
 
 ```text
 PASS
-ok      github.com/sphinxorg/protocol/src/spxhash/testvc    21.007s
+ok      github.com/sphinxfndorg/protocol/src/spxhash/testvc    21.007s
 ```
 
 ## Test Vectors

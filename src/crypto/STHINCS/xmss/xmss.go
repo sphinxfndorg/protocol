@@ -7,10 +7,10 @@ package xmss
 import (
 	"fmt"
 
-	"github.com/sphinxorg/protocol/src/crypto/STHINCS/address"
-	"github.com/sphinxorg/protocol/src/crypto/STHINCS/parameters"
-	"github.com/sphinxorg/protocol/src/crypto/STHINCS/util"
-	"github.com/sphinxorg/protocol/src/crypto/STHINCS/wots"
+	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/address"
+	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/parameters"
+	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/util"
+	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/wots"
 )
 
 // GetWOTSSig returns the WOTS+ signature component

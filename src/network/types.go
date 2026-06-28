@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/holiman/uint256"
-	database "github.com/sphinxorg/protocol/src/core/state"
-	sthincs "github.com/sphinxorg/protocol/src/core/sthincs/key/backend"
+	database "github.com/sphinxfndorg/protocol/src/core/state"
+	sthincs "github.com/sphinxfndorg/protocol/src/core/sthincs/key/backend"
 )
 
 // NodeStatus represents the operational state of a node in the network.

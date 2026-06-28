@@ -4,7 +4,7 @@
 // go/src/common/types.go
 package common
 
-import spxhash "github.com/sphinxorg/protocol/src/spxhash/hash"
+import spxhash "github.com/sphinxfndorg/protocol/src/spxhash/hash"
 
 // Params represents the configuration for SphinxHash.
 type Params struct {

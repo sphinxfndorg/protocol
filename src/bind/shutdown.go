@@ -7,7 +7,7 @@ package bind
 import (
 	"fmt"
 
-	logger "github.com/sphinxorg/protocol/src/log"
+	logger "github.com/sphinxfndorg/protocol/src/log"
 )
 
 // Shutdown gracefully shuts down all server components in the given NodeResources.

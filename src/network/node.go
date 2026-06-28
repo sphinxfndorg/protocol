@@ -11,9 +11,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sphinxorg/protocol/src/common"
-	"github.com/sphinxorg/protocol/src/consensus"
-	database "github.com/sphinxorg/protocol/src/core/state"
+	"github.com/sphinxfndorg/protocol/src/common"
+	"github.com/sphinxfndorg/protocol/src/consensus"
+	database "github.com/sphinxfndorg/protocol/src/core/state"
 )
 
 // Chain identification constants

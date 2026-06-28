@@ -17,11 +17,11 @@ import (
 	"strings"
 	"time"
 
-	key "github.com/sphinxorg/protocol/src/core/sthincs/key/backend"
-	sign "github.com/sphinxorg/protocol/src/core/sthincs/sign/backend"
-	types "github.com/sphinxorg/protocol/src/core/transaction"
-	logger "github.com/sphinxorg/protocol/src/log"
-	"github.com/sphinxorg/protocol/src/policy"
+	key "github.com/sphinxfndorg/protocol/src/core/sthincs/key/backend"
+	sign "github.com/sphinxfndorg/protocol/src/core/sthincs/sign/backend"
+	types "github.com/sphinxfndorg/protocol/src/core/transaction"
+	logger "github.com/sphinxfndorg/protocol/src/log"
+	"github.com/sphinxfndorg/protocol/src/policy"
 )
 
 // SendTransaction sends a transaction via JSON-RPC

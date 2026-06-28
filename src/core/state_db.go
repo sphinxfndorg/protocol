@@ -11,11 +11,11 @@ import (
 	"math/big"
 	"sort"
 
-	"github.com/sphinxorg/protocol/src/common"
-	database "github.com/sphinxorg/protocol/src/core/state"
-	types "github.com/sphinxorg/protocol/src/core/transaction"
-	logger "github.com/sphinxorg/protocol/src/log"
-	"github.com/sphinxorg/protocol/src/pool"
+	"github.com/sphinxfndorg/protocol/src/common"
+	database "github.com/sphinxfndorg/protocol/src/core/state"
+	types "github.com/sphinxfndorg/protocol/src/core/transaction"
+	logger "github.com/sphinxfndorg/protocol/src/log"
+	"github.com/sphinxfndorg/protocol/src/pool"
 )
 
 // Add constants for new keys

@@ -10,10 +10,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sphinxorg/protocol/src/core/hashtree"
-	key "github.com/sphinxorg/protocol/src/core/sthincs/key/backend"
-	sign "github.com/sphinxorg/protocol/src/core/sthincs/sign/backend"
-	"github.com/sphinxorg/protocol/src/crypto/STHINCS/sthincs"
+	"github.com/sphinxfndorg/protocol/src/core/hashtree"
+	key "github.com/sphinxfndorg/protocol/src/core/sthincs/key/backend"
+	sign "github.com/sphinxfndorg/protocol/src/core/sthincs/sign/backend"
+	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/sthincs"
 )
 
 // Block interface that your existing types.Block will satisfy

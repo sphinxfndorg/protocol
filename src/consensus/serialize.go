@@ -10,7 +10,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/sphinxorg/protocol/src/core/hashtree"
+	"github.com/sphinxfndorg/protocol/src/core/hashtree"
 	// This is correct
 )
 

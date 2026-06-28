@@ -12,10 +12,10 @@ import (
 	"sort"
 	"time"
 
-	"github.com/sphinxorg/protocol/src/common"
-	sign "github.com/sphinxorg/protocol/src/core/sthincs/sign/backend"
-	types "github.com/sphinxorg/protocol/src/core/transaction"
-	logger "github.com/sphinxorg/protocol/src/log"
+	"github.com/sphinxfndorg/protocol/src/common"
+	sign "github.com/sphinxfndorg/protocol/src/core/sthincs/sign/backend"
+	types "github.com/sphinxfndorg/protocol/src/core/transaction"
+	logger "github.com/sphinxfndorg/protocol/src/log"
 )
 
 // NewMempool creates a new comprehensive mempool instance

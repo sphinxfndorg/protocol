@@ -1,8 +1,8 @@
-module github.com/sphinxorg/protocol
+module github.com/sphinxfndorg/protocol
 
 go 1.25.0
 
-replace github.com/sphinxorg/protocol/src/crypto/SPHINCSPLUS-golang => ./src/crypto/SPHINCSPLUS-golang
+replace github.com/sphinxfndorg/protocol/src/crypto/SPHINCSPLUS-golang => ./src/crypto/SPHINCSPLUS-golang
 
 require (
 	fyne.io/fyne/v2 v2.7.1

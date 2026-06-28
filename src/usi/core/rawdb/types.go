@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sphinxorg/protocol/src/usi/core/types"
+	"github.com/sphinxfndorg/protocol/src/usi/core/types"
 	"github.com/syndtr/goleveldb/leveldb"
 )
 

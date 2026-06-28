@@ -7,9 +7,9 @@ package fors
 import (
 	"fmt"
 
-	"github.com/sphinxorg/protocol/src/crypto/STHINCS/address"
-	"github.com/sphinxorg/protocol/src/crypto/STHINCS/parameters"
-	"github.com/sphinxorg/protocol/src/crypto/STHINCS/util"
+	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/address"
+	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/parameters"
+	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/util"
 )
 
 // GetSK returns the private key value (leaf) at given index

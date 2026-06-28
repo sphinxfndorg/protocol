@@ -19,9 +19,9 @@ import (
 	"log"
 	"os"
 
-	keys "github.com/sphinxorg/protocol/src/usi/core/key"
-	"github.com/sphinxorg/protocol/src/usi/core/sign"
-	pubkeydir "github.com/sphinxorg/protocol/src/usi/server/server"
+	keys "github.com/sphinxfndorg/protocol/src/usi/core/key"
+	"github.com/sphinxfndorg/protocol/src/usi/core/sign"
+	pubkeydir "github.com/sphinxfndorg/protocol/src/usi/server/server"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -9,9 +9,9 @@ import (
 	"errors"
 	"math/big"
 
-	"github.com/sphinxorg/protocol/src/consensus"
-	types "github.com/sphinxorg/protocol/src/core/transaction"
-	"github.com/sphinxorg/protocol/src/network"
+	"github.com/sphinxfndorg/protocol/src/consensus"
+	types "github.com/sphinxfndorg/protocol/src/core/transaction"
+	"github.com/sphinxfndorg/protocol/src/network"
 )
 
 // ValidateMessage ensures the message conforms to expected structure and type rules.

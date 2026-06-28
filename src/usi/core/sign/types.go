@@ -4,7 +4,7 @@
 // go/src/usi/core/sign/types.go
 package sign
 
-import "github.com/sphinxorg/protocol/src/usi/core/types"
+import "github.com/sphinxfndorg/protocol/src/usi/core/types"
 
 // Re-export Meta from types package for backward compatibility
 type Meta = types.Meta

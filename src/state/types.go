@@ -9,10 +9,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sphinxorg/protocol/src/consensus"
-	database "github.com/sphinxorg/protocol/src/core/state"
-	types "github.com/sphinxorg/protocol/src/core/transaction"
-	"github.com/sphinxorg/protocol/src/pool"
+	"github.com/sphinxfndorg/protocol/src/consensus"
+	database "github.com/sphinxfndorg/protocol/src/core/state"
+	types "github.com/sphinxfndorg/protocol/src/core/transaction"
+	"github.com/sphinxfndorg/protocol/src/pool"
 )
 
 type OperationType int

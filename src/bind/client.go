@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sphinxorg/protocol/src/rpc"
+	"github.com/sphinxfndorg/protocol/src/rpc"
 	"golang.org/x/crypto/sha3"
 )
 

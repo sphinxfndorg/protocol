@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"math/big"
 
-	params "github.com/sphinxorg/protocol/src/params/denom"
+	params "github.com/sphinxfndorg/protocol/src/params/denom"
 )
 
 const (

@@ -7,8 +7,8 @@ package sign
 import (
 	"sync"
 
-	params "github.com/sphinxorg/protocol/src/core/sthincs/config"
-	key "github.com/sphinxorg/protocol/src/core/sthincs/key/backend"
+	params "github.com/sphinxfndorg/protocol/src/core/sthincs/config"
+	key "github.com/sphinxfndorg/protocol/src/core/sthincs/key/backend"
 	"github.com/syndtr/goleveldb/leveldb"
 )
 

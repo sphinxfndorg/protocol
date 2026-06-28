@@ -7,10 +7,10 @@ package bind
 import (
 	"sync"
 
-	security "github.com/sphinxorg/protocol/src/handshake"
-	logger "github.com/sphinxorg/protocol/src/log"
-	"github.com/sphinxorg/protocol/src/rpc"
-	"github.com/sphinxorg/protocol/src/transport"
+	security "github.com/sphinxfndorg/protocol/src/handshake"
+	logger "github.com/sphinxfndorg/protocol/src/log"
+	"github.com/sphinxfndorg/protocol/src/rpc"
+	"github.com/sphinxfndorg/protocol/src/transport"
 )
 
 // startWebSocketServer starts a WebSocket server for the given node.

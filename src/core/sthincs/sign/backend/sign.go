@@ -13,12 +13,12 @@ import (
 	"sync"
 
 	"github.com/holiman/uint256"
-	"github.com/sphinxorg/protocol/src/common"
-	"github.com/sphinxorg/protocol/src/core/hashtree"
-	sigproof "github.com/sphinxorg/protocol/src/core/proof"
-	params "github.com/sphinxorg/protocol/src/core/sthincs/config"
-	key "github.com/sphinxorg/protocol/src/core/sthincs/key/backend"
-	"github.com/sphinxorg/protocol/src/crypto/STHINCS/sthincs"
+	"github.com/sphinxfndorg/protocol/src/common"
+	"github.com/sphinxfndorg/protocol/src/core/hashtree"
+	sigproof "github.com/sphinxfndorg/protocol/src/core/proof"
+	params "github.com/sphinxfndorg/protocol/src/core/sthincs/config"
+	key "github.com/sphinxfndorg/protocol/src/core/sthincs/key/backend"
+	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/sthincs"
 	"github.com/syndtr/goleveldb/leveldb"
 )
 

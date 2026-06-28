@@ -7,8 +7,8 @@ package utils
 import (
 	"encoding/json"
 
-	"github.com/sphinxorg/protocol/src/params/commit"
-	params "github.com/sphinxorg/protocol/src/params/denom"
+	"github.com/sphinxfndorg/protocol/src/params/commit"
+	params "github.com/sphinxfndorg/protocol/src/params/denom"
 )
 
 // Config holds CLI configuration parameters.

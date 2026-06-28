@@ -14,13 +14,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sphinxorg/protocol/src/accounts/key"
-	utils "github.com/sphinxorg/protocol/src/accounts/key/utils"
-	seed "github.com/sphinxorg/protocol/src/accounts/phrase"
-	"github.com/sphinxorg/protocol/src/core"
-	sphincs "github.com/sphinxorg/protocol/src/core/sthincs/key/backend"
-	"github.com/sphinxorg/protocol/src/core/wallet/vault"
-	keys "github.com/sphinxorg/protocol/src/usi/core/key"
+	"github.com/sphinxfndorg/protocol/src/accounts/key"
+	utils "github.com/sphinxfndorg/protocol/src/accounts/key/utils"
+	seed "github.com/sphinxfndorg/protocol/src/accounts/phrase"
+	"github.com/sphinxfndorg/protocol/src/core"
+	sphincs "github.com/sphinxfndorg/protocol/src/core/sthincs/key/backend"
+	"github.com/sphinxfndorg/protocol/src/core/wallet/vault"
+	keys "github.com/sphinxfndorg/protocol/src/usi/core/key"
 	"golang.org/x/term"
 )
 

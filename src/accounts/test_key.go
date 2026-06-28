@@ -7,13 +7,13 @@ import (
 	"fmt"
 	"log"
 
-	seed "github.com/sphinxorg/protocol/src/accounts/phrase"
+	seed "github.com/sphinxfndorg/protocol/src/accounts/phrase"
 )
 
 // REMOVED DEPENDENCY: this file used to import
 //
-//	auth "github.com/sphinxorg/protocol/src/core/wallet/auth"
-//	utils "github.com/sphinxorg/protocol/src/core/wallet/utils"
+//	auth "github.com/sphinxfndorg/protocol/src/core/wallet/auth"
+//	utils "github.com/sphinxfndorg/protocol/src/core/wallet/utils"
 //
 // Both packages are deleted. See seed.go for the replacement primitives
 // (computeFingerprint / VerifyFingerprint) that this file now calls instead

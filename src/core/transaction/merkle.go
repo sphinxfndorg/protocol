@@ -10,7 +10,7 @@ import (
 	"encoding/hex"
 	"fmt"
 
-	"github.com/sphinxorg/protocol/src/common"
+	"github.com/sphinxfndorg/protocol/src/common"
 )
 
 // NewMerkleNode creates a new Merkle node

@@ -13,9 +13,9 @@ import (
 	"fmt"
 	"unicode/utf8"
 
-	sips3 "github.com/sphinxorg/protocol/src/accounts/mnemonic"
-	"github.com/sphinxorg/protocol/src/common"
-	key "github.com/sphinxorg/protocol/src/core/sthincs/key/backend"
+	sips3 "github.com/sphinxfndorg/protocol/src/accounts/mnemonic"
+	"github.com/sphinxfndorg/protocol/src/common"
+	key "github.com/sphinxfndorg/protocol/src/core/sthincs/key/backend"
 	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/sha3"
 )

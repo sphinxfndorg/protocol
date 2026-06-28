@@ -3,7 +3,7 @@
 
 package vm
 
-import svm "github.com/sphinxorg/protocol/src/core/svm/opcodes"
+import svm "github.com/sphinxfndorg/protocol/src/core/svm/opcodes"
 
 // VM represents the virtual machine for executing SVM bytecode
 // The VM executes opcodes sequentially, managing a stack and memory

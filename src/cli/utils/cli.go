@@ -10,11 +10,11 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/sphinxorg/protocol/src/bind"
-	"github.com/sphinxorg/protocol/src/consensus"
-	"github.com/sphinxorg/protocol/src/core"
-	logger "github.com/sphinxorg/protocol/src/log"
-	"github.com/sphinxorg/protocol/src/network"
+	"github.com/sphinxfndorg/protocol/src/bind"
+	"github.com/sphinxfndorg/protocol/src/consensus"
+	"github.com/sphinxfndorg/protocol/src/core"
+	logger "github.com/sphinxfndorg/protocol/src/log"
+	"github.com/sphinxfndorg/protocol/src/network"
 )
 
 // Execute is the main entry point for the Sphinx blockchain CLI.

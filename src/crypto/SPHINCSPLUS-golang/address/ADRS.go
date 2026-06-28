@@ -3,7 +3,7 @@ package address
 import (
 	"encoding/binary"
 
-	"github.com/sphinxorg/protocol/src/crypto/SPHINCSPLUS-golang/util"
+	"github.com/sphinxfndorg/protocol/src/crypto/SPHINCSPLUS-golang/util"
 )
 
 const (

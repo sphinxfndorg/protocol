@@ -10,11 +10,11 @@ import (
 	"net"
 	"time"
 
-	"github.com/sphinxorg/protocol/src/consensus"
-	"github.com/sphinxorg/protocol/src/crypto/STHINCS/parameters"
-	"github.com/sphinxorg/protocol/src/crypto/STHINCS/sthincs"
-	security "github.com/sphinxorg/protocol/src/handshake"
-	logger "github.com/sphinxorg/protocol/src/log"
+	"github.com/sphinxfndorg/protocol/src/consensus"
+	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/parameters"
+	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/sthincs"
+	security "github.com/sphinxfndorg/protocol/src/handshake"
+	logger "github.com/sphinxfndorg/protocol/src/log"
 )
 
 // exchangeKeyWithPeerSync performs synchronous key exchange with a single peer

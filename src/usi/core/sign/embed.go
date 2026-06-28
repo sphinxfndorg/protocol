@@ -31,8 +31,8 @@ import (
 	"github.com/jung-kurt/gofpdf"
 	"github.com/pdfcpu/pdfcpu/pkg/api"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
-	rawdata "github.com/sphinxorg/protocol/src/usi/core/rawdb"
-	pubkeydir "github.com/sphinxorg/protocol/src/usi/server/server"
+	rawdata "github.com/sphinxfndorg/protocol/src/usi/core/rawdb"
+	pubkeydir "github.com/sphinxfndorg/protocol/src/usi/server/server"
 )
 
 // magicMarker is appended to binary/text files that use the footer embed method.

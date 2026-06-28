@@ -8,7 +8,7 @@ import (
 	"log"
 	"os"
 
-	cli "github.com/sphinxorg/protocol/src/cli/utils"
+	cli "github.com/sphinxfndorg/protocol/src/cli/utils"
 )
 
 func main() {

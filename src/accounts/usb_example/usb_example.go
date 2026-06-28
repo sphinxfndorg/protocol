@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"log"
 
-	utils "github.com/sphinxorg/protocol/src/accounts/key/utils"
+	utils "github.com/sphinxfndorg/protocol/src/accounts/key/utils"
 )
 
 // CONTEXT: this is a separate demo from test_encrypt.go. test_encrypt.go

@@ -15,12 +15,12 @@ import (
 	"strings"
 	"time"
 
-	seed "github.com/sphinxorg/protocol/src/accounts/phrase"
-	"github.com/sphinxorg/protocol/src/core"
-	vault "github.com/sphinxorg/protocol/src/core/wallet/vault"
-	keys "github.com/sphinxorg/protocol/src/usi/core/key"
-	"github.com/sphinxorg/protocol/src/usi/core/sign"
-	pubkeydir "github.com/sphinxorg/protocol/src/usi/server/server"
+	seed "github.com/sphinxfndorg/protocol/src/accounts/phrase"
+	"github.com/sphinxfndorg/protocol/src/core"
+	vault "github.com/sphinxfndorg/protocol/src/core/wallet/vault"
+	keys "github.com/sphinxfndorg/protocol/src/usi/core/key"
+	"github.com/sphinxfndorg/protocol/src/usi/core/sign"
+	pubkeydir "github.com/sphinxfndorg/protocol/src/usi/server/server"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"

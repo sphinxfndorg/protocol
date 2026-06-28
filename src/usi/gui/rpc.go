@@ -16,11 +16,11 @@ import (
 	"math/big"
 	"time"
 
-	key "github.com/sphinxorg/protocol/src/core/sthincs/key/backend"
-	types "github.com/sphinxorg/protocol/src/core/transaction"
-	"github.com/sphinxorg/protocol/src/crypto/STHINCS/sthincs"
-	"github.com/sphinxorg/protocol/src/rpc"
-	keys "github.com/sphinxorg/protocol/src/usi/core/key"
+	key "github.com/sphinxfndorg/protocol/src/core/sthincs/key/backend"
+	types "github.com/sphinxfndorg/protocol/src/core/transaction"
+	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/sthincs"
+	"github.com/sphinxfndorg/protocol/src/rpc"
+	keys "github.com/sphinxfndorg/protocol/src/usi/core/key"
 )
 
 // NewWalletClient creates a new wallet RPC client

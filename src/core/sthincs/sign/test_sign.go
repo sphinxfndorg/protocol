@@ -12,14 +12,14 @@ import (
 	"time"
 
 	"github.com/holiman/uint256"
-	"github.com/sphinxorg/protocol/src/common"
-	"github.com/sphinxorg/protocol/src/core/hashtree"
-	sigproof "github.com/sphinxorg/protocol/src/core/proof"
-	key "github.com/sphinxorg/protocol/src/core/sthincs/key/backend"
-	sign "github.com/sphinxorg/protocol/src/core/sthincs/sign/backend"
-	svm "github.com/sphinxorg/protocol/src/core/svm/opcodes"
-	vmachine "github.com/sphinxorg/protocol/src/core/svm/vm"
-	"github.com/sphinxorg/protocol/src/crypto/STHINCS/sthincs"
+	"github.com/sphinxfndorg/protocol/src/common"
+	"github.com/sphinxfndorg/protocol/src/core/hashtree"
+	sigproof "github.com/sphinxfndorg/protocol/src/core/proof"
+	key "github.com/sphinxfndorg/protocol/src/core/sthincs/key/backend"
+	sign "github.com/sphinxfndorg/protocol/src/core/sthincs/sign/backend"
+	svm "github.com/sphinxfndorg/protocol/src/core/svm/opcodes"
+	vmachine "github.com/sphinxfndorg/protocol/src/core/svm/vm"
+	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/sthincs"
 
 	"github.com/syndtr/goleveldb/leveldb"
 )

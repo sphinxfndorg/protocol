@@ -13,8 +13,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	security "github.com/sphinxorg/protocol/src/handshake"
-	"github.com/sphinxorg/protocol/src/rpc"
+	security "github.com/sphinxfndorg/protocol/src/handshake"
+	"github.com/sphinxfndorg/protocol/src/rpc"
 )
 
 // NewWebSocketServer initializes and returns a new WebSocketServer struct.

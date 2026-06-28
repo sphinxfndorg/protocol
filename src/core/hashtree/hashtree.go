@@ -11,7 +11,7 @@ import (
 	"syscall"
 
 	"github.com/holiman/uint256"
-	"github.com/sphinxorg/protocol/src/common"
+	"github.com/sphinxfndorg/protocol/src/common"
 	"github.com/syndtr/goleveldb/leveldb"
 )
 

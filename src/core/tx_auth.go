@@ -8,8 +8,8 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	key "github.com/sphinxorg/protocol/src/core/sthincs/key/backend"
-	types "github.com/sphinxorg/protocol/src/core/transaction"
+	key "github.com/sphinxfndorg/protocol/src/core/sthincs/key/backend"
+	types "github.com/sphinxfndorg/protocol/src/core/transaction"
 )
 
 func transactionAuthTimestamp(tx *types.Transaction) []byte {

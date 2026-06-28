@@ -9,7 +9,7 @@ import (
 	"math/big"
 	"sync"
 
-	logger "github.com/sphinxorg/protocol/src/log"
+	logger "github.com/sphinxfndorg/protocol/src/log"
 	"golang.org/x/crypto/sha3"
 )
 

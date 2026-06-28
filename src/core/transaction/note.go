@@ -11,7 +11,7 @@ import (
 	"math/big"
 	"time"
 
-	"github.com/sphinxorg/protocol/src/common"
+	"github.com/sphinxfndorg/protocol/src/common"
 )
 
 // NewNote creates a new Note instance using centralized time service

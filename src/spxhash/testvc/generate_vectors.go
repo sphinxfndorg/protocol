@@ -13,7 +13,7 @@ import (
 	"fmt"
 	"io"
 
-	hash "github.com/sphinxorg/protocol/src/spxhash/hash"
+	hash "github.com/sphinxfndorg/protocol/src/spxhash/hash"
 	"golang.org/x/crypto/hkdf"
 )
 

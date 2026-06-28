@@ -11,9 +11,9 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/sphinxorg/protocol/src/core"
-	sign "github.com/sphinxorg/protocol/src/core/sthincs/sign/backend"
-	security "github.com/sphinxorg/protocol/src/handshake"
+	"github.com/sphinxfndorg/protocol/src/core"
+	sign "github.com/sphinxfndorg/protocol/src/core/sthincs/sign/backend"
+	security "github.com/sphinxfndorg/protocol/src/handshake"
 )
 
 // NodeID represents a unique 256-bit node identifier.

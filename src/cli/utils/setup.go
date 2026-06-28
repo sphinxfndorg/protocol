@@ -11,13 +11,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sphinxorg/protocol/src/consensus"
-	"github.com/sphinxorg/protocol/src/core"
-	svm "github.com/sphinxorg/protocol/src/core/svm/opcodes"
-	vmachine "github.com/sphinxorg/protocol/src/core/svm/vm"
-	logger "github.com/sphinxorg/protocol/src/log"
-	denom "github.com/sphinxorg/protocol/src/params/denom"
-	"github.com/sphinxorg/protocol/src/pool"
+	"github.com/sphinxfndorg/protocol/src/consensus"
+	"github.com/sphinxfndorg/protocol/src/core"
+	svm "github.com/sphinxfndorg/protocol/src/core/svm/opcodes"
+	vmachine "github.com/sphinxfndorg/protocol/src/core/svm/vm"
+	logger "github.com/sphinxfndorg/protocol/src/log"
+	denom "github.com/sphinxfndorg/protocol/src/params/denom"
+	"github.com/sphinxfndorg/protocol/src/pool"
 )
 
 type phase2InitState struct {

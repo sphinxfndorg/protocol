@@ -18,16 +18,16 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sphinxorg/protocol/src/common"
-	"github.com/sphinxorg/protocol/src/consensus"
-	"github.com/sphinxorg/protocol/src/pool"
+	"github.com/sphinxfndorg/protocol/src/common"
+	"github.com/sphinxfndorg/protocol/src/consensus"
+	"github.com/sphinxfndorg/protocol/src/pool"
 
-	sign "github.com/sphinxorg/protocol/src/core/sthincs/sign/backend"
-	svm "github.com/sphinxorg/protocol/src/core/svm/opcodes"
-	"github.com/sphinxorg/protocol/src/core/svm/vm"
-	types "github.com/sphinxorg/protocol/src/core/transaction"
-	logger "github.com/sphinxorg/protocol/src/log"
-	storage "github.com/sphinxorg/protocol/src/state"
+	sign "github.com/sphinxfndorg/protocol/src/core/sthincs/sign/backend"
+	svm "github.com/sphinxfndorg/protocol/src/core/svm/opcodes"
+	"github.com/sphinxfndorg/protocol/src/core/svm/vm"
+	types "github.com/sphinxfndorg/protocol/src/core/transaction"
+	logger "github.com/sphinxfndorg/protocol/src/log"
+	storage "github.com/sphinxfndorg/protocol/src/state"
 )
 
 // NewBlockchain creates a blockchain with state machine replication

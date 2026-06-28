@@ -18,9 +18,9 @@ import (
 	"sync"
 	"time"
 
-	security "github.com/sphinxorg/protocol/src/handshake"
-	"github.com/sphinxorg/protocol/src/network"
-	"github.com/sphinxorg/protocol/src/rpc"
+	security "github.com/sphinxfndorg/protocol/src/handshake"
+	"github.com/sphinxfndorg/protocol/src/network"
+	"github.com/sphinxfndorg/protocol/src/rpc"
 )
 
 // maxMessageSize is the maximum allowed TCP message size in bytes.

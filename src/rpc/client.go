@@ -9,7 +9,7 @@ import (
 	"net"
 	"time"
 
-	security "github.com/sphinxorg/protocol/src/handshake"
+	security "github.com/sphinxfndorg/protocol/src/handshake"
 )
 
 // CallRPC sends an RPC request to a peer, supporting both JSON and binary formats.

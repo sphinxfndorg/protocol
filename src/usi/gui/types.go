@@ -8,7 +8,7 @@ import (
 	"math/big"
 	"time"
 
-	"github.com/sphinxorg/protocol/src/rpc"
+	"github.com/sphinxfndorg/protocol/src/rpc"
 )
 
 // WalletClient wraps the RPC client for wallet operations

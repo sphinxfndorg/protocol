@@ -9,11 +9,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sphinxorg/protocol/src/consensus"
-	"github.com/sphinxorg/protocol/src/core"
-	sign "github.com/sphinxorg/protocol/src/core/sthincs/sign/backend"
-	security "github.com/sphinxorg/protocol/src/handshake"
-	"github.com/sphinxorg/protocol/src/network"
+	"github.com/sphinxfndorg/protocol/src/consensus"
+	"github.com/sphinxfndorg/protocol/src/core"
+	sign "github.com/sphinxfndorg/protocol/src/core/sthincs/sign/backend"
+	security "github.com/sphinxfndorg/protocol/src/handshake"
+	"github.com/sphinxfndorg/protocol/src/network"
 	"github.com/syndtr/goleveldb/leveldb"
 )
 

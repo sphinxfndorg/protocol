@@ -4,7 +4,7 @@
 // go/src/core/sphincs/key/backend/types.go
 package key
 
-import params "github.com/sphinxorg/protocol/src/core/sthincs/config"
+import params "github.com/sphinxfndorg/protocol/src/core/sthincs/config"
 
 // SPHINCS_SK represents a SPHINCS private key structure.
 type SPHINCS_SK struct {

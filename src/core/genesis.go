@@ -13,9 +13,9 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/sphinxorg/protocol/src/common"
-	types "github.com/sphinxorg/protocol/src/core/transaction"
-	logger "github.com/sphinxorg/protocol/src/log"
+	"github.com/sphinxfndorg/protocol/src/common"
+	types "github.com/sphinxfndorg/protocol/src/core/transaction"
+	logger "github.com/sphinxfndorg/protocol/src/log"
 )
 
 // NewGenesisValidatorStake converts a whole-SPX amount to the nSPX big.Int

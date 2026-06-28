@@ -67,7 +67,7 @@ go version
 Once Go is set up, clone the repository to your local machine.
 
 ```bash
-git clone https://github.com/sphinxorg/protocol.git
+git clone https://github.com/sphinxfndorg/protocol.git
 ```
 
 ```bash

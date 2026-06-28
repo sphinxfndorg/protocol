@@ -145,11 +145,11 @@ go/src/usi/gui/gui.go
 Main dependencies used by the GUI include:
 
 - `fyne.io/fyne/v2` for the desktop interface
-- `github.com/sphinxorg/protocol/src/accounts/phrase` for passphrase generation
-- `github.com/sphinxorg/protocol/src/usi/core/key` for key generation and loading
-- `github.com/sphinxorg/protocol/src/usi/core/crypter/vault` for vault encryption/decryption
-- `github.com/sphinxorg/protocol/src/usi/core/sign` for signing and verification
-- `github.com/sphinxorg/protocol/src/usi/server/server` for public fingerprint handling
+- `github.com/sphinxfndorg/protocol/src/accounts/phrase` for passphrase generation
+- `github.com/sphinxfndorg/protocol/src/usi/core/key` for key generation and loading
+- `github.com/sphinxfndorg/protocol/src/usi/core/crypter/vault` for vault encryption/decryption
+- `github.com/sphinxfndorg/protocol/src/usi/core/sign` for signing and verification
+- `github.com/sphinxfndorg/protocol/src/usi/server/server` for public fingerprint handling
 
 ## Running the Application
 

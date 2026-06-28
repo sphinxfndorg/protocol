@@ -9,6 +9,7 @@ import (
 	"errors"
 	"math/big"
 
+	"github.com/sphinxorg/protocol/src/consensus"
 	types "github.com/sphinxorg/protocol/src/core/transaction"
 	"github.com/sphinxorg/protocol/src/network"
 )
@@ -47,6 +48,11 @@ func (m *Message) ValidateMessage() error {
 		}
 		if data["jsonrpc"] != "2.0" {
 			return errors.New("invalid JSON-RPC version")
+		}
+
+	case "rpc":
+		if len(m.Data) == 0 {
+			return errors.New("invalid RPC data: empty payload")
 		}
 
 	case "ping", "pong":
@@ -96,6 +102,29 @@ func (m *Message) ValidateMessage() error {
 		}
 		if nodeID == "" {
 			return errors.New("invalid verack data: empty node ID")
+		}
+
+	case "proposal":
+		var proposal consensus.Proposal
+		if err := json.Unmarshal(m.Data, &proposal); err != nil {
+			return errors.New("invalid proposal data")
+		}
+
+	case "prepare", "vote":
+		var vote consensus.Vote
+		if err := json.Unmarshal(m.Data, &vote); err != nil {
+			return errors.New("invalid vote data")
+		}
+
+	case "timeout":
+		var timeout consensus.TimeoutMsg
+		if err := json.Unmarshal(m.Data, &timeout); err != nil {
+			return errors.New("invalid timeout data")
+		}
+
+	case "checkpoint", "randao_sync":
+		if len(m.Data) == 0 {
+			return errors.New("invalid consensus data: empty payload")
 		}
 
 	default:

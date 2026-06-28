@@ -113,8 +113,13 @@ func CallRPC(address, method string, params interface{}, nodeID NodeID, ttl uint
 		return nil, err
 	}
 
-	// Wrap in security.Message
-	secMsg := &security.Message{Type: "rpc", Data: data}
+	// Wrap binary RPC data as a JSON byte string. json.RawMessage must contain
+	// valid JSON, not arbitrary binary bytes.
+	rpcPayload, err := json.Marshal(data)
+	if err != nil {
+		return nil, err
+	}
+	secMsg := &security.Message{Type: "rpc", Data: rpcPayload}
 	encodedData, err := secMsg.Encode()
 	if err != nil {
 		return nil, err
@@ -136,9 +141,12 @@ func CallRPC(address, method string, params interface{}, nodeID NodeID, ttl uint
 		return nil, ErrInvalidMessageFormat
 	}
 
-	// Extract and deserialize the RPC Message
-	// respMsg.Data is already json.RawMessage ([]byte), use it directly
-	dataBytes := respMsg.Data
+	// Extract and deserialize the RPC Message. Binary RPC payloads are carried
+	// as JSON byte strings inside security.Message.Data.
+	var dataBytes []byte
+	if err := json.Unmarshal(respMsg.Data, &dataBytes); err != nil {
+		dataBytes = respMsg.Data
+	}
 	if len(dataBytes) == 0 {
 		return nil, ErrInvalidMessageFormat
 	}

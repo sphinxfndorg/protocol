@@ -53,7 +53,7 @@ func (vs *ValidatorSet) AddValidator(id string, stakeSPX uint64) error {
 
 	// If below minimum, use minimum
 	if stakeNSPX.Cmp(vs.minStakeAmount) < 0 {
-		minStakeSPX := vs.GetMinStakeSPX()
+		minStakeSPX := new(big.Int).Div(vs.minStakeAmount, big.NewInt(denom.SPX)).Uint64()
 		logger.Warn("Stake %d SPX below minimum %d SPX, using minimum", stakeSPX, minStakeSPX)
 		stakeSPX = minStakeSPX
 		stakeNSPX = new(big.Int).Mul(
@@ -165,8 +165,6 @@ func (c *Consensus) GetValidatorSet() *ValidatorSet {
 	if c == nil {
 		return nil
 	}
-	c.mu.RLock()
-	defer c.mu.RUnlock()
 	return c.validatorSet
 }
 
@@ -251,7 +249,7 @@ func (vs *ValidatorSet) UpdateStake(id string, stakeSPX uint64) error {
 
 	// Validate minimum stake
 	if stakeNSPX.Cmp(vs.minStakeAmount) < 0 {
-		minStakeSPX := vs.GetMinStakeSPX()
+		minStakeSPX := new(big.Int).Div(vs.minStakeAmount, big.NewInt(denom.SPX)).Uint64()
 		return fmt.Errorf("stake %d SPX below minimum %d SPX", stakeSPX, minStakeSPX)
 	}
 
@@ -281,16 +279,16 @@ func (vs *ValidatorSet) SetStakeFromBalance(validatorID string, balanceNSPX *big
 
 	// Convert balance to SPX for stake
 	stakeSPX := new(big.Int).Div(balanceNSPX, big.NewInt(denom.SPX))
+	minStakeSPX := new(big.Int).Div(vs.minStakeAmount, big.NewInt(denom.SPX)).Uint64()
 	if stakeSPX.Sign() == 0 {
 		// If balance is less than 1 SPX, use minimum stake
-		stakeSPX = new(big.Int).Set(vs.minStakeAmount)
+		stakeSPX = new(big.Int).SetUint64(minStakeSPX)
 		logger.Warn("Validator %s balance %s nSPX is less than 1 SPX, using minimum stake",
 			validatorID, balanceNSPX.String())
 	}
 
 	// Get stake amount in SPX as uint64
 	stakeSPXUint := stakeSPX.Uint64()
-	minStakeSPX := vs.GetMinStakeSPX()
 
 	// Ensure minimum stake
 	if stakeSPXUint < minStakeSPX {
@@ -341,20 +339,21 @@ func (c *Consensus) BroadcastCheckpoint() error {
 		return fmt.Errorf("failed to get checkpoint: %w", err)
 	}
 
-	data, err := json.Marshal(cp)
-	if err != nil {
-		return fmt.Errorf("failed to marshal checkpoint: %w", err)
-	}
-
 	// Broadcast to all peers
-	return c.nodeManager.BroadcastMessage("checkpoint", data)
+	return c.nodeManager.BroadcastMessage("checkpoint", cp)
 }
 
 // HandleCheckpointMessage processes a checkpoint message from a peer
 func (c *Consensus) HandleCheckpointMessage(data []byte, fromNodeID string) error {
 	var cp CheckpointMessage
 	if err := json.Unmarshal(data, &cp); err != nil {
-		return fmt.Errorf("failed to unmarshal checkpoint: %w", err)
+		var encoded string
+		if stringErr := json.Unmarshal(data, &encoded); stringErr != nil {
+			return fmt.Errorf("failed to unmarshal checkpoint: %w", err)
+		}
+		if err := json.Unmarshal([]byte(encoded), &cp); err != nil {
+			return fmt.Errorf("failed to unmarshal string-wrapped checkpoint: %w", err)
+		}
 	}
 
 	logger.Info("Received checkpoint from %s: height=%d, phase=%s, supply=%s SPX",

@@ -471,11 +471,17 @@ func (bc *Blockchain) calculateTransactionsRoot(txs []*types.Transaction) []byte
 // calculateStateRoot calculates the state root after applying transactions
 // Returns: State root as bytes
 func (bc *Blockchain) calculateStateRoot() []byte {
-	// FIX: Return a meaningful state root instead of placeholder
-	// Create state data with current timestamp
-	stateData := []byte(fmt.Sprintf("state-root-%d", time.Now().UnixNano()))
-	// Hash the state data to create root
-	return common.SpxHash(stateData)
+	stateDB, err := bc.newStateDB()
+	if err != nil {
+		logger.Warn("calculateStateRoot: failed to open state DB: %v", err)
+		return common.SpxHash([]byte{})
+	}
+	root, err := stateDB.computeStateRoot()
+	if err != nil {
+		logger.Warn("calculateStateRoot: failed to compute state root: %v", err)
+		return common.SpxHash([]byte{})
+	}
+	return root
 }
 
 // GetCachedMerkleRoot retrieves a cached Merkle root for a block

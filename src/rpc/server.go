@@ -6,6 +6,7 @@
 package rpc
 
 import (
+	"encoding/json"
 	"log"
 	"net"
 	"time"
@@ -28,8 +29,11 @@ func NewServer(messageCh chan *security.Message, blockchain *core.Blockchain, sp
 		sphincsManager: sphincsManager,
 	}
 	server.handler = NewJSONRPCHandler(server)
+	// Start garbage collection always (it runs in a separate goroutine)
 	server.StartGarbageCollection()
-	go server.handleMessages()
+	if messageCh != nil {
+		go server.handleMessages()
+	}
 	return server
 }
 
@@ -38,8 +42,9 @@ func (s *Server) handleMessages() {
 	for msg := range s.messageCh {
 		log.Printf("rpc.Server: Received message on messageCh: Type=%s, Data=%v, ChannelLen=%d", msg.Type, msg.Data, len(s.messageCh))
 		if msg.Type == "rpc" {
-			// msg.Data is already json.RawMessage ([]byte), use it directly
-			dataBytes := msg.Data
+			// Binary RPC payloads are carried as JSON byte strings inside
+			// security.Message.Data.
+			dataBytes := unwrapRPCPayload(msg.Data)
 			if len(dataBytes) == 0 {
 				log.Printf("rpc.Server: Empty RPC data")
 				continue
@@ -77,7 +82,11 @@ func (s *Server) sendResponse(address string, respData []byte) error {
 		return err
 	}
 	defer conn.Close()
-	secMsg := &security.Message{Type: "rpc", Data: respData}
+	payload, err := json.Marshal(respData)
+	if err != nil {
+		return err
+	}
+	secMsg := &security.Message{Type: "rpc", Data: payload}
 	encodedData, err := secMsg.Encode()
 	if err != nil {
 		return err
@@ -94,8 +103,9 @@ func (s *Server) HandleRequest(data []byte) ([]byte, error) {
 	// Try decoding as security.Message
 	secMsg, err := security.DecodeMessage(data)
 	if err == nil && secMsg.Type == "rpc" {
-		// secMsg.Data is already json.RawMessage ([]byte), use it directly
-		dataBytes := secMsg.Data
+		// Binary RPC payloads are carried as JSON byte strings inside
+		// security.Message.Data.
+		dataBytes := unwrapRPCPayload(secMsg.Data)
 		if len(dataBytes) == 0 {
 			log.Printf("rpc.Server: Empty RPC data in security.Message")
 			return s.handler.errorResponse(nil, ErrCodeInvalidRequest, "Invalid RPC data format")
@@ -123,6 +133,14 @@ func (s *Server) HandleRequest(data []byte) ([]byte, error) {
 	// Fallback to direct JSON/binary processing
 	log.Printf("rpc.Server: Attempting direct JSON/binary processing: %s", string(data))
 	return s.handler.ProcessRequest(data)
+}
+
+func unwrapRPCPayload(data []byte) []byte {
+	var payload []byte
+	if err := json.Unmarshal(data, &payload); err == nil {
+		return payload
+	}
+	return data
 }
 
 // StartGarbageCollection starts a goroutine to periodically clean up expired queries and key-value entries.

@@ -31,9 +31,10 @@ var _ pool.StateDB = (*StateDB)(nil)
 
 // Close implements pool.StateDB - closes the underlying database connection
 func (db *StateDB) Close() error {
-	if db.db != nil {
-		return db.db.Close()
-	}
+	// StateDB is a lightweight wrapper around Blockchain's shared LevelDB
+	// handle. Callers create short-lived wrappers during mempool validation,
+	// checkpoint writes, and Phase 2 stake initialization; closing one wrapper
+	// must not close the process-wide database.
 	return nil
 }
 
@@ -450,17 +451,42 @@ func (s *StateDB) computeStateRoot() ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("computeStateRoot: %w", err)
 	}
-	if len(keys) == 0 {
+	keySet := make(map[string]struct{}, len(keys)+len(s.pending))
+	for _, k := range keys {
+		keySet[k] = struct{}{}
+	}
+	for address := range s.pending {
+		keySet[accountPrefix+address] = struct{}{}
+	}
+
+	if len(keySet) == 0 {
 		return common.SpxHash([]byte("empty-state")), nil
 	}
 
+	keys = keys[:0]
+	for k := range keySet {
+		keys = append(keys, k)
+	}
 	sort.Strings(keys)
 
 	leaves := make([][]byte, 0, len(keys))
 	for _, k := range keys {
-		data, err := s.db.Get(k)
-		if err != nil {
-			continue
+		var data []byte
+		address := k[len(accountPrefix):]
+		if e, ok := s.pending[address]; ok {
+			rec := accountRecord{
+				Balance: e.balance.String(),
+				Nonce:   e.nonce,
+			}
+			data, err = json.Marshal(rec)
+			if err != nil {
+				return nil, fmt.Errorf("computeStateRoot: marshal pending %s: %w", k, err)
+			}
+		} else {
+			data, err = s.db.Get(k)
+			if err != nil {
+				continue
+			}
 		}
 		leaves = append(leaves, common.SpxHash(append([]byte(k), data...)))
 	}

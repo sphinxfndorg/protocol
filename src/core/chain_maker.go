@@ -5,6 +5,7 @@
 package core
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -129,8 +130,10 @@ func (bc *Blockchain) ApplyCheckpointBlocks(blocks []*types.Block) error {
 		if err != nil {
 			return fmt.Errorf("ApplyCheckpointBlocks: execute block %d: %w", block.GetHeight(), err)
 		}
-		block.Header.StateRoot = stateRoot
-		block.FinalizeHash()
+		if !bytes.Equal(block.Header.StateRoot, stateRoot) {
+			logger.Warn("ApplyCheckpointBlocks: execution state root differs from checkpoint block %d (header=%x executed=%x)",
+				block.GetHeight(), block.Header.StateRoot, stateRoot)
+		}
 
 		if err := bc.storage.StoreBlock(block); err != nil {
 			return fmt.Errorf("ApplyCheckpointBlocks: store block %d: %w", block.GetHeight(), err)

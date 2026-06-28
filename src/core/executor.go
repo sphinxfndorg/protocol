@@ -627,6 +627,36 @@ func (bc *Blockchain) ExecuteBlock(block *types.Block) ([]byte, error) {
 	return stateRoot, nil
 }
 
+func (bc *Blockchain) previewStateRoot(height uint64, txs []*types.Transaction, proposerID string) []byte {
+	stateDB, err := bc.newStateDB()
+	if err != nil {
+		logger.Warn("previewStateRoot: failed to open stateDB: %v", err)
+		return bc.calculateStateRoot()
+	}
+
+	block := &types.Block{
+		Header: &types.BlockHeader{
+			Height:     height,
+			Block:      height,
+			ProposerID: proposerID,
+		},
+		Body: types.BlockBody{TxsList: txs},
+	}
+
+	if err := bc.applyTransactions(block, stateDB); err != nil {
+		logger.Warn("previewStateRoot: applyTransactions failed: %v", err)
+		return bc.calculateStateRoot()
+	}
+	bc.mintBlockReward(block, stateDB)
+
+	root, err := stateDB.computeStateRoot()
+	if err != nil {
+		logger.Warn("previewStateRoot: computeStateRoot failed: %v", err)
+		return bc.calculateStateRoot()
+	}
+	return root
+}
+
 // ExecuteGenesisBlock runs ExecuteBlock on block 0.
 func (bc *Blockchain) ExecuteGenesisBlock() error {
 	bc.lock.RLock()

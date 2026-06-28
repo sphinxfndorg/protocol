@@ -1,30 +1,114 @@
 {
-  "current_tps": 0.6210145527264785,
-  "average_tps": 2.7,
-  "peak_tps": 3.6,
-  "total_transactions": 27,
-  "blocks_processed": 2,
-  "last_updated": "2026-06-26T02:26:40.734333+07:00",
+  "current_tps": 0.4289459814040287,
+  "average_tps": 0.4,
+  "peak_tps": 1.8,
+  "total_transactions": 18,
+  "blocks_processed": 9,
+  "last_updated": "2026-06-28T21:43:54.503963+07:00",
   "current_window_count": 0,
-  "window_start_time": "2026-06-26T02:24:00.697986+07:00",
+  "window_start_time": "2026-06-28T21:39:35.276589+07:00",
   "window_duration_seconds": 5,
   "tps_history": [
     {
-      "timestamp": "2026-06-26T02:24:22.190939+07:00",
+      "timestamp": "2026-06-28T21:40:03.25813+07:00",
       "tps": 1.8,
       "block_height": 1
+    },
+    {
+      "timestamp": "2026-06-28T21:40:23.427765+07:00",
+      "tps": 0,
+      "block_height": 2
+    },
+    {
+      "timestamp": "2026-06-28T21:40:42.462087+07:00",
+      "tps": 0,
+      "block_height": 3
+    },
+    {
+      "timestamp": "2026-06-28T21:41:04.1168+07:00",
+      "tps": 0,
+      "block_height": 4
+    },
+    {
+      "timestamp": "2026-06-28T21:41:33.035516+07:00",
+      "tps": 0,
+      "block_height": 5
+    },
+    {
+      "timestamp": "2026-06-28T21:41:55.586674+07:00",
+      "tps": 0,
+      "block_height": 6
+    },
+    {
+      "timestamp": "2026-06-28T21:42:27.806963+07:00",
+      "tps": 0,
+      "block_height": 7
+    },
+    {
+      "timestamp": "2026-06-28T21:42:58.782781+07:00",
+      "tps": 0,
+      "block_height": 8
     }
   ],
   "transactions_per_block": [
     {
       "block_height": 1,
-      "block_hash": "8f9e89e8c76869464a38d27911819432dc959c40160a5dfbe3f48545d4d5b64c",
+      "block_hash": "ab57e60d0a81808925b468d46bb7fbd4743ba6c759deca6cb5bbae47ad9efa3a",
       "tx_count": 9,
-      "block_time": "2026-06-26T02:24:08+07:00",
+      "block_time": "2026-06-28T21:39:43+07:00",
       "block_size_bytes": 2384
+    },
+    {
+      "block_height": 2,
+      "block_hash": "0b4787555789c679c27b43d96c73705fcc35db603879c4670dbdae7a14954554",
+      "tx_count": 0,
+      "block_time": "2026-06-28T21:40:09+07:00",
+      "block_size_bytes": 80
+    },
+    {
+      "block_height": 3,
+      "block_hash": "ddd745816a8309a387c389b78c0c646af36a60db1b1af920b0dc40506fe1fa00",
+      "tx_count": 0,
+      "block_time": "2026-06-28T21:40:30+07:00",
+      "block_size_bytes": 80
+    },
+    {
+      "block_height": 4,
+      "block_hash": "ef2578289199ced4a671e6d00479998737d7f67d3f59250234149fa8b7df9aee",
+      "tx_count": 0,
+      "block_time": "2026-06-28T21:40:49+07:00",
+      "block_size_bytes": 80
+    },
+    {
+      "block_height": 5,
+      "block_hash": "bda231e8283aee9f33b1410c6b45c6fb0ec4ebefffaa3dcf9ffec01e4cf2b9a6",
+      "tx_count": 0,
+      "block_time": "2026-06-28T21:41:16+07:00",
+      "block_size_bytes": 80
+    },
+    {
+      "block_height": 6,
+      "block_hash": "1fd2000b3dac1a275e6ed836e6473891ea425780e21f2cc01897f053c6977edf",
+      "tx_count": 0,
+      "block_time": "2026-06-28T21:41:41+07:00",
+      "block_size_bytes": 80
+    },
+    {
+      "block_height": 7,
+      "block_hash": "267af6efea8a3c09900dae0ff486c4007a09d0e7f08d79e7e40303b080586377",
+      "tx_count": 0,
+      "block_time": "2026-06-28T21:42:03+07:00",
+      "block_size_bytes": 80
+    },
+    {
+      "block_height": 8,
+      "block_hash": "6f8ff0ef5d5f74b3c0a4e93598d4f1ed6c9835a7a02aa90b1caf30f3f12d5b15",
+      "tx_count": 0,
+      "block_time": "2026-06-28T21:42:38+07:00",
+      "block_size_bytes": 80
     }
   ],
-  "avg_transactions_per_block": 9,
+  "avg_transactions_per_block": 2,
   "max_transactions_per_block": 9,
-  "min_transactions_per_block": 9
+  "min_transactions_per_block": 0
 }

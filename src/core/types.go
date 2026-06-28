@@ -119,6 +119,7 @@ type Blockchain struct {
 	txIndex         map[string]*types.Transaction
 	pendingTx       []*types.Transaction
 	lock            sync.RWMutex
+	commitMu        sync.Mutex
 	status          BlockchainStatus
 	syncMode        SyncMode
 	consensusEngine *consensus.Consensus

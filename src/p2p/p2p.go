@@ -393,6 +393,30 @@ func (s *Server) handleMessages() {
 				}
 			}
 
+		case "prepare":
+			var vote consensus.Vote
+			if err := json.Unmarshal(msg.Data, &vote); err != nil {
+				log.Printf("Failed to unmarshal prepare vote: %v", err)
+				continue
+			}
+			if s.consensus != nil {
+				if err := s.consensus.HandlePrepareVote(&vote); err != nil {
+					log.Printf("Failed to handle consensus prepare vote: %v", err)
+				}
+			}
+
+		case "timeout":
+			var timeout consensus.TimeoutMsg
+			if err := json.Unmarshal(msg.Data, &timeout); err != nil {
+				log.Printf("Failed to unmarshal timeout: %v", err)
+				continue
+			}
+			if s.consensus != nil {
+				if err := s.consensus.HandleTimeout(&timeout); err != nil {
+					log.Printf("Failed to handle consensus timeout: %v", err)
+				}
+			}
+
 		case "ping":
 			var pingData network.PingData
 			if err := json.Unmarshal(msg.Data, &pingData); err != nil {

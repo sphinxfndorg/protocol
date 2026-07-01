@@ -5,6 +5,8 @@
 package bind
 
 import (
+	"sync"
+
 	"github.com/sphinxfndorg/protocol/src/consensus"
 	"github.com/sphinxfndorg/protocol/src/core"
 	config "github.com/sphinxfndorg/protocol/src/core/sthincs/config" // Add this import
@@ -52,4 +54,42 @@ type NodeResources struct {
 	TCPServer            *transport.TCPServer
 	WebSocketServer      *transport.WebSocketServer
 	HTTPServer           *http.Server
+}
+
+// knownPeerInfo describes a single peer entry as gossiped during a
+// peer-exchange (PEX) round.
+type knownPeerInfo struct {
+	NodeID  string `json:"node_id"`
+	Address string `json:"address"`
+}
+
+// peerKeyExchangeMsg is the payload sent over the wire during the
+// post-connect public-key handshake.
+//
+// RewardAddress is the SPIF wallet address the peer claims stake against.
+// It is NOT trusted on its own — the recipient looks up the address's real
+// on-chain balance via SetStakeFromBalance before granting any validator
+// weight. Sending a bogus or empty address just means the peer registers
+// as a known network peer with zero stake; it does not grant validator
+// status. This is what makes peer admission permissionless-safe: showing
+// up on the wire is enough to be gossiped to, but never enough to vote.
+type peerKeyExchangeMsg struct {
+	NodeID        string `json:"node_id"`
+	PublicKey     []byte `json:"public_key"`
+	RewardAddress string `json:"reward_address,omitempty"`
+}
+
+// peerExchangeMsg is the payload sent over the wire when a node asks a peer
+// "who else do you know about?"
+type peerExchangeMsg struct {
+	NodeID  string          `json:"node_id"`
+	Address string          `json:"address"`
+	Peers   []knownPeerInfo `json:"peers"`
+}
+
+// phase2InitState tracks Phase 2 initialization state.
+type phase2InitState struct {
+	mu          sync.Mutex
+	running     bool
+	initialized bool
 }

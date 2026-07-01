@@ -192,26 +192,26 @@ func NewReserveAlloc(address string, spx int64) *GenesisAllocation {
 //     Partners milestone, Managers 2yr)
 //   - SPHINX Foundation: Multi-sig wallet (5-of-9), quarterly transparency reports
 //   - Community Airdrops: No vesting, 12-month gradual release
-//
-// These addresses are placeholder hex strings. Replace them with the actual
-// multisig or keystore addresses before mainnet launch.
 func DefaultGenesisAllocations() []*GenesisAllocation {
 	return []*GenesisAllocation{
 		// ── Founder (Lead) ─────────────────────────────────────────────────
 		// 30,000,000 SPX total · 5,000,000 sold in Angel Round.
 		// 25,000,000 SPX remaining — 4-year vesting, 12-month cliff.
-		NewFounderAlloc("1000000000000000000000000000000000000001", 30_000_000),
+		// ✅ REAL ADDRESS #1
+		NewFounderAlloc("SPIF F6F6 66A0 F07B B9F1 B9C3 6C0B C497 DEF7 89AC A6B4 A756 4F88 A627 7FCB BFD9 09F8", 30_000_000),
 
 		// ── Co-founders (4) ───────────────────────────────────────────────
 		// 95,000,000 SPX total · 10,000,000 sold in Angel Round.
 		// 85,000,000 SPX remaining — 4-year vesting, 12-month cliff.
-		NewCoFounderAlloc("2000000000000000000000000000000000000001", 95_000_000),
+		// ✅ REAL ADDRESS #2
+		NewCoFounderAlloc("SPIF 42D1 A449 30C6 1EE4 8B85 8E88 E393 BAA1 72D9 5DFF DE0D 5AE4 2B70 E60B 8C71 C2DB", 95_000_000),
 
 		// ── Development Fund ───────────────────────────────────────────────
 		// 200,000,000 SPX total · 50,000,000 sold (25%):
 		//   Angel: 10M · Private: 30M · Public ICO: 10M.
 		// 150,000,000 SPX remaining — module-based (10,000/module).
-		NewDevelopmentAlloc("3000000000000000000000000000000000000001", 200_000_000),
+		// ✅ REAL ADDRESS #3
+		NewDevelopmentAlloc("SPIF 929F C03E 6D4D D81B F082 5217 A977 EC0B EF78 AAED A28C 4C59 6820 1DEF E1A9 3D8D", 200_000_000),
 
 		// ── Contributors ───────────────────────────────────────────────────
 		// 90,000,000 SPX total · 15,000,000 sold (16.7%):
@@ -219,34 +219,40 @@ func DefaultGenesisAllocations() []*GenesisAllocation {
 		// 75,000,000 SPX remaining — milestone-based vesting.
 		// Roles: Legal (10M/2yr) · Advisors (15M/2yr) · CSO (15M/3yr)
 		//        Partners (25M/milestone) · Managers (25M/2yr)
-		NewContributorAlloc("4000000000000000000000000000000000000001", 90_000_000),
+		// ✅ REAL ADDRESS #4
+		NewContributorAlloc("SPIF CA35 9B93 E914 7459 00FC 4EA8 7E44 E4EB 4862 94C9 4031 1940 CEC5 3C37 0CBD 0B7C", 90_000_000),
 
 		// ── SPHINX Foundation ──────────────────────────────────────────────
 		// 300,000,000 SPX · 0% sold — fully kept for ecosystem.
 		// Grants: 120M · Liquidity: 60M · R&D: 50M
 		// Partnerships: 30M · Emergency: 20M · Buybacks: 20M (optional)
+		// ⚠️ REPLACE with real address when available
 		NewFoundationAlloc("5000000000000000000000000000000000000001", 300_000_000),
 
 		// ── Campaigns ──────────────────────────────────────────────────────
 		// 35,000,000 SPX total · 20,000,000 sold in Private Sale (57%).
 		// 15,000,000 SPX remaining — future marketing and partnerships.
+		// ⚠️ REPLACE with real address when available
 		NewCampaignAlloc("6000000000000000000000000000000000000001", 35_000_000),
 
 		// ── Community Airdrops ─────────────────────────────────────────────
 		// 90,000,000 SPX · 0% sold — fully kept.
 		// Phases: Genesis (20M) · Adoption (20M) · Staking (25M) · Engagement (25M)
 		// No vesting · Sybil resistance · 12-month release.
+		// ⚠️ REPLACE with real address when available
 		NewAirdropAlloc("7000000000000000000000000000000000000001", 90_000_000),
 
 		// ── Public ICO Pool ───────────────────────────────────────────────
 		// 200,000,000 SPX total · 100,000,000 sold (50%):
 		//   Private: 10M · Public ICO: 90M.
 		// 100,000,000 SPX remaining — future public sales.
+		// ⚠️ REPLACE with real address when available
 		NewPublicICOPoolAlloc("8000000000000000000000000000000000000001", 200_000_000),
 
 		// ── Reserve / Unsold ───────────────────────────────────────────────
 		// 200,000,000 SPX · 0% sold.
 		// Reserved for future ecosystem needs, emergencies, and strategic initiatives.
+		// ⚠️ REPLACE with real address when available
 		NewReserveAlloc("9000000000000000000000000000000000000001", 200_000_000),
 	}
 }
@@ -309,20 +315,16 @@ func (a *GenesisAllocation) validate() error {
 	if a == nil {
 		return fmt.Errorf("allocation is nil")
 	}
-	if len(a.Address) != 40 {
-		return fmt.Errorf("address must be 40 hex characters, got %d", len(a.Address))
-	}
-	addrBytes, err := hex.DecodeString(a.Address)
+
+	// Normalise the address using the common SPIF utility
+	normalized, err := common.NormalizeSPIFAddress(a.Address)
 	if err != nil {
-		return fmt.Errorf("address is not valid hex: %w", err)
+		return err
 	}
-	if len(addrBytes) != 20 {
-		return fmt.Errorf("address decodes to %d bytes, want 20", len(addrBytes))
-	}
-	if a.BalanceNSPX == nil {
-		return fmt.Errorf("balance_nspx is nil")
-	}
-	if a.BalanceNSPX.Sign() < 0 {
+	// Store the cleaned hex (without "SPIF")
+	a.Address = normalized
+
+	if a.BalanceNSPX == nil || a.BalanceNSPX.Sign() < 0 {
 		return fmt.Errorf("balance_nspx must be non-negative")
 	}
 	return nil

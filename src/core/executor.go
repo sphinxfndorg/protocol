@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/sphinxfndorg/protocol/src/consensus"
@@ -32,6 +33,19 @@ var maxSupplyNSPX = new(big.Int).Mul(
 
 // Ensure Blockchain implements pool.BlockchainStateProvider
 var _ pool.BlockchainStateProvider = (*Blockchain)(nil)
+
+// rewardMapMu guards validatorRewardMap independently of bc.lock.
+//
+// This is deliberately a package-level lock rather than a bc.lock field,
+// so the fix doesn't require editing wherever `type Blockchain struct` is
+// declared. ValidatorRewardAddress is reached from CreateBlock's call chain
+// (CreateBlock -> previewStateRoot -> mintBlockReward -> ValidatorRewardAddress)
+// while CreateBlock still holds bc.lock.Lock(). sync.RWMutex is not
+// reentrant, so RLock()'ing bc.lock again on the same goroutine would
+// self-deadlock the leader's proposal goroutine forever. Each node runs as
+// its own process with its own Blockchain instance, so a package-level
+// mutex here is equivalent to a per-instance one.
+var rewardMapMu sync.RWMutex
 
 // newStateDB opens the StateDB for this blockchain node.
 // This is the internal version that returns *StateDB for internal use.
@@ -512,7 +526,12 @@ func (bc *Blockchain) applyTransactions(block *types.Block, stateDB *StateDB) er
 		stateDB.AddBalance(tx.Receiver, tx.Amount)
 
 		if proposerID != "" && gasFee.Sign() > 0 {
-			stateDB.AddBalance(proposerID, gasFee)
+			// Map nodeID → SPIF reward address for gas fees too
+			gasAddr := bc.ValidatorRewardAddress(proposerID)
+			if gasAddr == "" {
+				gasAddr = proposerID
+			}
+			stateDB.AddBalance(gasAddr, gasFee)
 		}
 
 		stateDB.IncrementNonce(tx.Sender)
@@ -581,8 +600,14 @@ func (bc *Blockchain) mintBlockReward(block *types.Block, stateDB *StateDB) {
 		reward = remaining
 	}
 
-	// Apply reward
-	stateDB.AddBalance(proposerID, reward)
+	// Map nodeID → SPIF reward address so rewards go to a real wallet
+	rewardAddr := bc.ValidatorRewardAddress(proposerID)
+	if rewardAddr == "" {
+		rewardAddr = proposerID
+	}
+
+	// Apply reward to the reward address (SPIF address if mapped, else nodeID)
+	stateDB.AddBalance(rewardAddr, reward)
 	stateDB.IncrementTotalSupply(reward)
 
 	// NEW: Track rewards minted separately
@@ -874,6 +899,41 @@ func (bc *Blockchain) SyncCheckpoints(peerAddress string) error {
 type RPCCaller interface {
 	GetCheckpoint(peerAddress string) (*consensus.CheckpointMessage, error)
 	GetSupplyStatus(peerAddress string) (map[string]interface{}, error)
+}
+
+// ValidatorRewardAddress maps a node ID to its SPIF reward address.
+// Returns empty string if no mapping is registered.
+//
+// NOTE: this uses bc.rewardMapMu, a mutex dedicated to validatorRewardMap —
+// deliberately NOT bc.lock. This function is reached from CreateBlock's
+// call chain (CreateBlock -> previewStateRoot -> mintBlockReward ->
+// ValidatorRewardAddress) while CreateBlock is still holding bc.lock.Lock().
+// sync.RWMutex is not reentrant, so RLock()'ing bc.lock here would
+// self-deadlock the leader's proposal goroutine forever. Keeping this map
+// under its own lock avoids that without having to reason about every
+// call site that might already hold bc.lock.
+func (bc *Blockchain) ValidatorRewardAddress(nodeID string) string {
+	rewardMapMu.RLock()
+	defer rewardMapMu.RUnlock()
+	if bc.validatorRewardMap == nil {
+		return ""
+	}
+	return bc.validatorRewardMap[nodeID]
+}
+
+// SetValidatorRewardAddress registers a SPIF reward address for a validator.
+// Once set, block rewards and gas fees for this validator will be credited
+// to the SPIF address instead of the node ID.
+func (bc *Blockchain) SetValidatorRewardAddress(nodeID, spifAddr string) {
+	rewardMapMu.Lock()
+	defer rewardMapMu.Unlock()
+	if bc.validatorRewardMap == nil {
+		bc.validatorRewardMap = make(map[string]string)
+	}
+	if spifAddr != "" && nodeID != "" {
+		bc.validatorRewardMap[nodeID] = spifAddr
+		logger.Info("✅ Validator reward mapping: %s → %s", nodeID, spifAddr)
+	}
 }
 
 // SetRPCCaller sets the RPC caller for the blockchain

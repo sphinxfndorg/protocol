@@ -12,175 +12,115 @@ import (
 	"math/big"
 	"strconv"
 	"strings"
-
-	"golang.org/x/crypto/sha3"
 )
 
-// Address manipulates a given contract address by adding or removing the "0x" prefix.
-// If the input starts with "0x", it removes the prefix; otherwise, it adds "0x".
-func Address(hash []byte) (string, error) {
-	if len(hash) != 32 {
-		return "", fmt.Errorf("invalid hash length: expected 32 bytes, got %d", len(hash))
+// ─────────────────────────────────────────────────────────────────────────────
+// SPIF Address Utilities (post-quantum SPHINCS+ addresses)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// NormalizeSPIFAddress strips the "SPIF" prefix, all spaces, and hyphens,
+// then validates that the remaining string is valid hex of length 40 or 64.
+// Returns the cleaned hex string (without "SPIF") or an error.
+func NormalizeSPIFAddress(addr string) (string, error) {
+	raw := strings.TrimSpace(addr)
+	if strings.HasPrefix(raw, "SPIF") {
+		raw = strings.TrimPrefix(raw, "SPIF")
+		raw = strings.ReplaceAll(raw, " ", "")
+		raw = strings.ReplaceAll(raw, "-", "")
 	}
-
-	// Convert the hash to a hexadecimal string
-	hexAddress := hex.EncodeToString(hash)
-
-	// Take the last 20 bytes (40 hex characters)
-	trimmedHexAddress := hexAddress[len(hexAddress)-40:]
-
-	// Compute the checksum using the SHAKE256 function
-	checksumAddress := applyChecksum(trimmedHexAddress)
-
-	// Add the "0x" prefix if it doesn't exist; otherwise, remove it
-	if strings.HasPrefix(checksumAddress, "0x") {
-		// Remove the "0x" prefix
-		return checksumAddress[2:], nil
+	if len(raw) != 40 && len(raw) != 64 {
+		return "", fmt.Errorf("address must be 40 or 64 hex characters, got %d", len(raw))
 	}
-
-	// Add the "0x" prefix
-	return fmt.Sprintf("0x%s", checksumAddress), nil
+	if _, err := hex.DecodeString(raw); err != nil {
+		return "", fmt.Errorf("address is not valid hex: %w", err)
+	}
+	return raw, nil
 }
 
-// applyChecksum applies a checksum to a given address string using SHAKE256.
-func applyChecksum(address string) string {
-	// Convert the address to lowercase
-	lowerAddress := strings.ToLower(address)
+// ValidateSPIFAddress returns true if the given string is a valid SPIF address.
+// It accepts formats with or without "SPIF" prefix and with spaces/hyphens.
+func ValidateSPIFAddress(addr string) bool {
+	_, err := NormalizeSPIFAddress(addr)
+	return err == nil
+}
 
-	// Compute the SHAKE256 hash of the lowercase address
-	hasher := sha3.NewShake256()
-	hasher.Write([]byte(lowerAddress))
+// FormatSPIFAddress takes a raw hex string (40 or 64 chars) and formats it as:
+//
+//	"SPIF XXXX XXXX XXXX ..." (groups of 4 hex characters).
+//
+// If the input already has a "SPIF" prefix or spaces, it normalises first.
+// Returns the formatted string or an error if invalid.
+func FormatSPIFAddress(addr string) (string, error) {
+	raw, err := NormalizeSPIFAddress(addr)
+	if err != nil {
+		return "", err
+	}
 
-	// Get 32 bytes (64 hex characters) of output from SHAKE256
-	hash := make([]byte, 32)
-	hasher.Read(hash)
-	hashHex := hex.EncodeToString(hash)
-
-	// Apply checksum: uppercase if corresponding hash hex character is >= 8
-	var checksumAddress strings.Builder
-	for i, char := range lowerAddress {
-		if char >= '0' && char <= '9' {
-			checksumAddress.WriteRune(char) // Keep numbers as-is
-		} else {
-			if hashHex[i] >= '8' {
-				checksumAddress.WriteRune(rune(char - 32)) // Convert to uppercase
-			} else {
-				checksumAddress.WriteRune(char) // Keep lowercase
-			}
+	var groups []string
+	for i := 0; i < len(raw); i += 4 {
+		end := i + 4
+		if end > len(raw) {
+			end = len(raw)
 		}
+		groups = append(groups, raw[i:end])
 	}
-
-	return checksumAddress.String()
+	return "SPIF " + strings.Join(groups, " "), nil
 }
 
-// ValidateAddress checks if an address is valid and matches the SHAKE256-based checksum.
-func ValidateAddress(address string) (bool, error) {
-	// Ensure the address starts with "0x"
-	if !strings.HasPrefix(address, "0x") {
-		return false, fmt.Errorf("address must start with '0x'")
+// MustFormatSPIFAddress is like FormatSPIFAddress but panics on error.
+// Useful for tests or where the input is known to be valid.
+func MustFormatSPIFAddress(addr string) string {
+	s, err := FormatSPIFAddress(addr)
+	if err != nil {
+		panic(err)
 	}
-
-	// Remove "0x" prefix for validation
-	trimmedAddress := address[2:]
-
-	// Check the length
-	if len(trimmedAddress) != 40 {
-		return false, fmt.Errorf("invalid address length: expected 40 characters, got %d", len(trimmedAddress))
-	}
-
-	// Compare the checksum
-	expected := applyChecksum(trimmedAddress)
-	if trimmedAddress != expected {
-		return false, fmt.Errorf("checksum mismatch: expected %s, got %s", expected, trimmedAddress)
-	}
-
-	return true, nil
+	return s
 }
 
-// Bytes2Hex converts bytes to hexadecimal string
+// ─────────────────────────────────────────────────────────────────────────────
+// Generic Hex Utilities (non-EVM specific)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Bytes2Hex converts bytes to hexadecimal string.
 func Bytes2Hex(b []byte) string {
 	return hex.EncodeToString(b)
 }
 
-// Hex2Bytes converts hexadecimal string to bytes
+// Hex2Bytes converts hexadecimal string to bytes.
 func Hex2Bytes(s string) ([]byte, error) {
 	return hex.DecodeString(s)
 }
 
-// FormatNonce formats a uint64 nonce as a 16-character hex string (Ethereum compatible)
-func FormatNonce(nonce uint64) string {
-	return fmt.Sprintf("%016x", nonce)
-}
-
-// FormatNonce32 formats a nonce as a 32-character hex string (64-bit)
-func FormatNonce32(nonce uint64) string {
-	return fmt.Sprintf("%032x", nonce)
-}
-
-// ParseNonce converts a hex nonce string back to uint64
-func ParseNonce(nonceStr string) (uint64, error) {
-	return strconv.ParseUint(nonceStr, 16, 64)
-}
-
-// GenerateRandomNonce generates a cryptographically secure random nonce
-func GenerateRandomNonce() string {
-	// Generate 8 random bytes (64 bits) for nonce
-	randomBytes := make([]byte, 8)
-	_, err := rand.Read(randomBytes)
-	if err != nil {
-		// Fallback to timestamp-based randomness if crypto rand fails
-		fallbackNonce := GetCurrentTimestamp()
-		randomBytes = make([]byte, 8)
-		binary.BigEndian.PutUint64(randomBytes, uint64(fallbackNonce))
+// IsValidHexString checks if a string is valid hexadecimal.
+func IsValidHexString(s string) bool {
+	if len(s)%2 != 0 {
+		return false
 	}
-
-	// Convert to 16-character hex string (like Ethereum)
-	return FormatNonce(binary.BigEndian.Uint64(randomBytes))
+	_, err := hex.DecodeString(s)
+	return err == nil
 }
 
-// GenerateRandomNonceUint64 generates a random uint64 nonce
-func GenerateRandomNonceUint64() uint64 {
-	var nonce uint64
-	binary.Read(rand.Reader, binary.BigEndian, &nonce)
-	return nonce
-}
-
-// ValidateNonceFormat validates if a nonce string is properly formatted
-func ValidateNonceFormat(nonce string) error {
-	if len(nonce) != 16 {
-		return fmt.Errorf("nonce must be 16 characters long, got %d", len(nonce))
-	}
-
-	// Check if it's valid hex
-	_, err := hex.DecodeString(nonce)
-	if err != nil {
-		return fmt.Errorf("nonce must be valid hex: %w", err)
-	}
-
-	return nil
-}
-
-// FormatHash formats a byte slice as a 64-character hex hash string
+// FormatHash formats a byte slice as a 64-character hex hash string.
 func FormatHash(hash []byte) string {
 	return fmt.Sprintf("%064x", hash)
 }
 
-// FormatAddress formats an address as a 40-character hex string
+// FormatAddress formats a byte slice as a 40-character hex address string.
+// This is generic and can be used for any 20-byte address representation.
 func FormatAddress(address []byte) string {
 	return fmt.Sprintf("%040x", address)
 }
 
-// FormatBigInt formats a big.Int as a hex string with optional padding
+// FormatBigInt formats a big.Int as a hex string with optional padding.
 func FormatBigInt(value *big.Int, padToLength int) string {
 	hexStr := fmt.Sprintf("%x", value)
 	if padToLength > 0 && len(hexStr) < padToLength {
-		// Pad with leading zeros
 		return strings.Repeat("0", padToLength-len(hexStr)) + hexStr
 	}
 	return hexStr
 }
 
-// ParseBigInt parses a hex string into a big.Int
+// ParseBigInt parses a hex string into a big.Int.
 func ParseBigInt(hexStr string) (*big.Int, error) {
 	value := new(big.Int)
 	_, success := value.SetString(hexStr, 16)
@@ -190,38 +130,80 @@ func ParseBigInt(hexStr string) (*big.Int, error) {
 	return value, nil
 }
 
-// BytesToHexWithPrefix converts bytes to hex with "0x" prefix
+// BytesToHexWithPrefix converts bytes to hex with "0x" prefix.
+// This is kept for compatibility with EVM-style RPC calls if needed.
 func BytesToHexWithPrefix(b []byte) string {
 	return "0x" + hex.EncodeToString(b)
 }
 
-// HexToBytesWithoutPrefix converts hex string (with or without prefix) to bytes
+// HexToBytesWithoutPrefix converts hex string (with or without prefix) to bytes.
 func HexToBytesWithoutPrefix(hexStr string) ([]byte, error) {
-	// Remove "0x" prefix if present
 	cleanHex := strings.TrimPrefix(hexStr, "0x")
 	return hex.DecodeString(cleanHex)
 }
 
-// IsValidHexString checks if a string is valid hexadecimal
-func IsValidHexString(s string) bool {
-	if len(s)%2 != 0 {
-		return false
-	}
-	_, err := hex.DecodeString(s)
-	return err == nil
+// ─────────────────────────────────────────────────────────────────────────────
+// Nonce Utilities (used for block headers and transactions)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// FormatNonce formats a uint64 nonce as a 16-character hex string.
+func FormatNonce(nonce uint64) string {
+	return fmt.Sprintf("%016x", nonce)
 }
 
-// ZeroNonce returns the zero nonce (all zeros)
+// FormatNonce32 formats a nonce as a 32-character hex string.
+func FormatNonce32(nonce uint64) string {
+	return fmt.Sprintf("%032x", nonce)
+}
+
+// ParseNonce converts a hex nonce string back to uint64.
+func ParseNonce(nonceStr string) (uint64, error) {
+	return strconv.ParseUint(nonceStr, 16, 64)
+}
+
+// GenerateRandomNonce generates a cryptographically secure random nonce.
+func GenerateRandomNonce() string {
+	randomBytes := make([]byte, 8)
+	_, err := rand.Read(randomBytes)
+	if err != nil {
+		// Fallback to timestamp-based randomness if crypto rand fails.
+		fallbackNonce := GetCurrentTimestamp()
+		randomBytes = make([]byte, 8)
+		binary.BigEndian.PutUint64(randomBytes, uint64(fallbackNonce))
+	}
+	return FormatNonce(binary.BigEndian.Uint64(randomBytes))
+}
+
+// GenerateRandomNonceUint64 generates a random uint64 nonce.
+func GenerateRandomNonceUint64() uint64 {
+	var nonce uint64
+	binary.Read(rand.Reader, binary.BigEndian, &nonce)
+	return nonce
+}
+
+// ValidateNonceFormat validates if a nonce string is properly formatted.
+func ValidateNonceFormat(nonce string) error {
+	if len(nonce) != 16 {
+		return fmt.Errorf("nonce must be 16 characters long, got %d", len(nonce))
+	}
+	_, err := hex.DecodeString(nonce)
+	if err != nil {
+		return fmt.Errorf("nonce must be valid hex: %w", err)
+	}
+	return nil
+}
+
+// ZeroNonce returns the zero nonce (all zeros).
 func ZeroNonce() string {
 	return "0000000000000000"
 }
 
-// MaxNonce returns the maximum possible nonce value
+// MaxNonce returns the maximum possible nonce value.
 func MaxNonce() string {
 	return "ffffffffffffffff"
 }
 
-// NonceToBytes converts a nonce string to bytes
+// NonceToBytes converts a nonce string to bytes.
 func NonceToBytes(nonce string) ([]byte, error) {
 	if err := ValidateNonceFormat(nonce); err != nil {
 		return nil, err
@@ -229,7 +211,7 @@ func NonceToBytes(nonce string) ([]byte, error) {
 	return hex.DecodeString(nonce)
 }
 
-// BytesToNonce converts bytes to a nonce string
+// BytesToNonce converts bytes to a nonce string.
 func BytesToNonce(b []byte) (string, error) {
 	if len(b) != 8 {
 		return "", fmt.Errorf("nonce bytes must be 8 bytes long, got %d", len(b))

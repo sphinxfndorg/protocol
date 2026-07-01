@@ -5,6 +5,7 @@
 package types
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math/big"
@@ -82,12 +83,10 @@ func CreateContract(note *Note, amountInSPX float64, accountSet *AccountSet, add
 }
 
 // CreateAddress generates a unique contract address using sender, recipient, and nonce.
+// Returns the raw 64-character hex hash (full 32 bytes) for internal use.
+// To obtain a human-readable SPIF address, call common.FormatSPIFAddress() on the result.
 func (v *Validator) CreateAddress(nonce int64) (string, error) {
 	contractData := fmt.Sprintf("%s-%s-%d", v.senderAddress, v.recipientAddress, nonce)
-	hash := common.SpxHash([]byte(contractData))
-	address, err := common.Address(hash)
-	if err != nil {
-		return "", err
-	}
-	return address, nil
+	hash := common.SpxHash([]byte(contractData)) // 32 bytes
+	return hex.EncodeToString(hash), nil
 }

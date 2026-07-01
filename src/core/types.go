@@ -137,6 +137,11 @@ type Blockchain struct {
 	svmFailures     []map[string]interface{} // Tracks SVM failures for monitoring
 
 	rpcCaller RPCCaller // Add this field
+
+	// validatorRewardMap maps node IDs (e.g. "Node-127.0.0.1:30303") to their
+	// SPIF reward addresses.  Block rewards and gas fees are credited to the
+	// SPIF address so validators can actually spend them.
+	validatorRewardMap map[string]string
 }
 
 // GenesisState holds the complete genesis configuration used to bootstrap a node.

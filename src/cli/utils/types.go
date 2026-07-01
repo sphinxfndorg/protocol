@@ -14,16 +14,17 @@ import (
 // Config holds CLI configuration parameters.
 // This struct is used to store all command-line flag values for node configuration
 type Config struct {
-	configFile string // Path to JSON configuration file
-	numNodes   int    // Number of nodes to initialize in the network
-	roles      string // Comma-separated list of node roles (validator, sender, receiver, none)
-	tcpAddr    string // TCP address for P2P communication (e.g., "127.0.0.1:30303")
-	udpPort    string // UDP port for node discovery (e.g., "30304")
-	httpPort   string // HTTP port for JSON-RPC API (e.g., "127.0.0.1:8545")
-	wsPort     string // WebSocket port for real-time subscriptions (e.g., "127.0.0.1:8600")
-	seedNodes  string // Comma-separated list of seed node UDP addresses for network bootstrap
-	dataDir    string // Directory path for LevelDB storage (default: "data")
-	nodeIndex  int    // Index of the node to run when managing multiple nodes (0 to numNodes-1)
+	configFile    string // Path to JSON configuration file
+	numNodes      int    // Number of nodes to initialize in the network
+	roles         string // Comma-separated list of node roles (validator, sender, receiver, none)
+	tcpAddr       string // TCP address for P2P communication (e.g., "127.0.0.1:30303")
+	udpPort       string // UDP port for node discovery (e.g., "30304")
+	httpPort      string // HTTP port for JSON-RPC API (e.g., "127.0.0.1:8545")
+	wsPort        string // WebSocket port for real-time subscriptions (e.g., "127.0.0.1:8600")
+	seedNodes     string // Comma-separated list of seed node UDP addresses for network bootstrap
+	dataDir       string // Directory path for LevelDB storage (default: "data")
+	nodeIndex     int    // Index of the node to run when managing multiple nodes (0 to numNodes-1)
+	rewardAddress string // SPIF wallet address to stake and receive block rewards from
 }
 
 // TestConfig holds the parameters that the test harness uses.
@@ -80,6 +81,26 @@ type NodeChainInfoJSON struct {
 type peerKeyExchangeMsg struct {
 	NodeID    string `json:"node_id"`
 	PublicKey []byte `json:"public_key"`
+}
+
+// knownPeerInfo describes a single peer entry as gossiped during a
+// peer-exchange (PEX) round. It carries just enough for the recipient to
+// dial in and run its own key_exchange handshake.
+type knownPeerInfo struct {
+	NodeID  string `json:"node_id"`
+	Address string `json:"address"` // host:port, dialable TCP address
+}
+
+// peerExchangeMsg is the payload sent over the wire when a node asks a peer
+// (typically a seed) "who else do you know about?" — and the payload a peer
+// sends back in reply. Requesting and replying both use this same shape:
+// a request carries the asker's own NodeID/Address (so it can be added to
+// the responder's peer list too) and an empty/nil Peers slice; a reply
+// carries the responder's NodeID/Address plus its known peer list.
+type peerExchangeMsg struct {
+	NodeID  string          `json:"node_id"`
+	Address string          `json:"address"`
+	Peers   []knownPeerInfo `json:"peers"`
 }
 
 // JSONRPCRequest represents a standard JSON-RPC 2.0 request

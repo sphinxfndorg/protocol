@@ -51,7 +51,8 @@ func Run() {
 	}
 
 	// Add this line:
-	walletClient := NewWalletClient("")
+	// Use the HTTP JSON-RPC port of the node (default 8545)
+	walletClient := NewWalletClient("") // will read from env or default
 
 	themeToggle := widget.NewCheck("Dark Theme", func(on bool) {
 		if on {

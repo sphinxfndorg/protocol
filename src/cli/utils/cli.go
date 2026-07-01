@@ -7,6 +7,7 @@ package utils
 import (
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"strconv"
 
@@ -52,7 +53,7 @@ func printHelp() {
 	fmt.Print(`Sphinx blockchain CLI
 
 SUBCOMMANDS
-  node          Start a validator node (mines genesis block, distributes vault funds)
+  node          Start a validator node
   send-tx       Send a transaction from one address to another
   get-balance   Query the balance of an address
   watch-tx      Poll until a transaction is confirmed
@@ -69,17 +70,61 @@ HYBRID CONSENSUS INFORMATION
   Blocks 0-1:   VDF-PBFT (no stake required for validators)
   Blocks 2+:    VDF+Stake PBFT (validators must have minimum stake)
 
-QUICK START
-  # Terminal 1 – Validator Node (First node - creates genesis block & distributes funds)
-  go run main.go node --role=validator --tcp-addr=127.0.0.1:30303 \
-      --udp-port=30304 --http-port=127.0.0.1:8545 --datadir=data/validator --pbft
+REAL-DEVICE QUICK START (ETH/BTC style — no pre-agreed node count)
+  Each machine runs independently; peer discovery is via --seeds.
 
-  # Terminal 2 – Second Validator Node
+  # Node 1 (bootnode / first validator)
+  go run main.go node --role=validator \
+      --tcp-addr=<PUBLIC_IP_1>:30303 \
+      --http-port=<PUBLIC_IP_1>:8545 \
+      --datadir=data --pbft
+
+  # Node 2 — joins by pointing at Node 1
+  go run main.go node --role=validator \
+      --tcp-addr=<PUBLIC_IP_2>:30303 \
+      --http-port=<PUBLIC_IP_2>:8545 \
+      --seeds=<PUBLIC_IP_1>:30303 \
+      --datadir=data --pbft
+
+  # Node 3+ — same pattern; any known node can be used as seed
+  go run main.go node --role=validator \
+      --tcp-addr=<PUBLIC_IP_3>:30303 \
+      --seeds=<PUBLIC_IP_1>:30303,<PUBLIC_IP_2>:30303 \
+      --datadir=data --pbft
+
+  PBFT activates automatically once ≥ 3 validators are connected.
+  No --nodes or --node-index required.
+
+EIP-1459 DNS DISCOVERY (cryptographically authenticated bootstrap)
+  Instead of plain IP seeds, you can use enrtree:// URLs. The node list
+  is published as a signed Merkle tree in DNS TXT records. Clients verify
+  the SPHINCS+ signature against the public key embedded in the URL, so
+  even a compromised DNS server cannot inject fake peers.
+
+  # Using a DNS discovery tree as the only seed
+  go run main.go node --role=validator \
+      --tcp-addr=<PUBLIC_IP>:30303 \
+      --seeds=enrtree://<PUBKEY_HEX>@nodes.sphinx.network \
+      --datadir=data --pbft
+
+  # Mixing DNS trees with plain seeds (DNS resolved first, then PEX)
+  go run main.go node --role=validator \
+      --tcp-addr=<PUBLIC_IP>:30303 \
+      --seeds=enrtree://<PUBKEY_HEX>@nodes.sphinx.network,1.2.3.4:30303 \
+      --datadir=data --pbft
+
+SAME-BOX / DEV QUICK START (all nodes on one machine)
+  # Terminal 1 — first validator (creates genesis block)
+  go run main.go node --role=validator --tcp-addr=127.0.0.1:30303 \
+      --udp-port=30304 --http-port=127.0.0.1:8545 --datadir=data/validator \
+      --nodes=3 --pbft
+
+  # Terminal 2
   go run main.go node --role=validator --tcp-addr=127.0.0.1:30304 \
       --udp-port=30305 --http-port=127.0.0.1:8546 --datadir=data/validator2 \
       --node-index=1 --nodes=3 --pbft
 
-  # Terminal 3 – Third Validator Node
+  # Terminal 3
   go run main.go node --role=validator --tcp-addr=127.0.0.1:30305 \
       --udp-port=30306 --http-port=127.0.0.1:8547 --datadir=data/validator3 \
       --node-index=2 --nodes=3 --pbft
@@ -91,8 +136,8 @@ LEGACY COMMANDS
 }
 
 // StartPBFTNodeMode is a wrapper for StartDistributedNode to maintain compatibility
-func StartPBFTNodeMode(dataDir string, nodeConfig network.NodePortConfig, totalNodes, nodeIndex int, vdfParams *consensus.VDFParams) error {
-	return StartNode(dataDir, nodeConfig, totalNodes, nodeIndex, vdfParams, "devnet")
+func StartPBFTNodeMode(dataDir string, nodeConfig network.NodePortConfig, totalNodes, nodeIndex int, vdfParams *consensus.VDFParams, rewardAddress string) error {
+	return bind.StartNode(dataDir, nodeConfig, totalNodes, nodeIndex, vdfParams, "devnet", "", rewardAddress)
 }
 
 // runNodeCmd handles the "node" subcommand
@@ -104,15 +149,16 @@ func runNodeCmd(args []string) error {
 	udpPort := fs.String("udp-port", "30304", "UDP port for peer discovery")
 	httpPort := fs.String("http-port", "127.0.0.1:8545", "HTTP JSON-RPC listen address")
 	wsPort := fs.String("ws-port", "127.0.0.1:8600", "WebSocket listen address")
-	seeds := fs.String("seeds", "", "Comma-separated seed node UDP addresses")
+	seeds := fs.String("seeds", "", "Comma-separated seed node UDP addresses or enrtree:// DNS discovery URLs")
 	dataDir := fs.String("datadir", "data", "Directory for LevelDB storage")
-	nodeIndex := fs.Int("node-index", 0, "Node index when sharing a config file")
+	nodeIndex := fs.Int("node-index", 0, "Node index within this machine's port range (same-box harness only; ignored in real-device mode)")
 	configFile := fs.String("config", "", "Path to JSON node-config file (optional)")
-	numNodes := fs.Int("nodes", 1, "Total nodes in the network (used for config generation)")
-	pbftMode := fs.Bool("pbft", false, "Enable PBFT consensus mode (requires at least 3 nodes total)")
+	numNodes := fs.Int("nodes", 1, "Total nodes in the network (same-box harness only; real-device mode discovers validators dynamically)")
+	pbftMode := fs.Bool("pbft", false, "Enable PBFT consensus mode")
 	mode := fs.String("mode", "development", "Run mode: development, production")
 	maxPeers := fs.Int("max-peers", 50, "Maximum peer connections (production mode)")
 	networkFlag := fs.String("network", "devnet", "Network type: devnet, testnet, mainnet")
+	rewardAddress := fs.String("reward-address", "", "SPIF wallet address to stake and receive block rewards from (required for real validator participation; peers verify its on-chain balance before granting validator status — see help for details)")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -180,9 +226,26 @@ func runNodeCmd(args []string) error {
 	logger.Infof("Starting node role=%s tcp=%s udp=%s rpc=%s seeds=%q data=%s pbft=%v mode=%s network=%s",
 		*role, nodeConfig.TCPAddr, nodeConfig.UDPPort, nodeConfig.HTTPPort, *seeds, *dataDir, *pbftMode, *mode, *networkFlag)
 
-	// Check PBFT requirements
-	if *pbftMode && *numNodes < 3 {
-		return fmt.Errorf("PBFT mode requires at least 3 total nodes (--nodes=3), got %d", *numNodes)
+	// In real-device mode (non-loopback --tcp-addr) the validator count is
+	// discovered dynamically — we don't require --nodes=3.  The same-box
+	// harness still needs it because there's no PEX to learn about peers.
+	isRealDevice := false
+	if *tcpAddr != "" {
+		if host, _, err := net.SplitHostPort(*tcpAddr); err == nil {
+			if ip := net.ParseIP(host); ip != nil && !ip.IsLoopback() {
+				isRealDevice = true
+			} else if host != "" && host != "localhost" && net.ParseIP(host) == nil {
+				isRealDevice = true // hostname, assume non-loopback
+			}
+		}
+	}
+
+	if *pbftMode && !isRealDevice && *numNodes < 3 {
+		return fmt.Errorf("same-box PBFT mode requires at least 3 total nodes (--nodes=3), got %d", *numNodes)
+	}
+	if *pbftMode && isRealDevice && *numNodes > 1 {
+		logger.Info("ℹ️  Real-device mode: --nodes=%d ignored; validator count derived from peer discovery", *numNodes)
+		*numNodes = 1 // normalise so same-box harness arrays aren't synthesised
 	}
 
 	var vdfParams *consensus.VDFParams
@@ -233,7 +296,7 @@ func runNodeCmd(args []string) error {
 
 		logger.Info("Node will continue running - press Ctrl+C to stop")
 
-		return StartNode(*dataDir, nodeConfig, *numNodes, *nodeIndex, vdfParams, *networkFlag)
+		return bind.StartNode(*dataDir, nodeConfig, *numNodes, *nodeIndex, vdfParams, *networkFlag, *seeds, *rewardAddress)
 	}
 
 	// Single node mode
@@ -244,7 +307,7 @@ func runNodeCmd(args []string) error {
 	logger.Info("  2. Total 3+ nodes will enable PBFT consensus")
 	logger.Info("Node will continue running - press Ctrl+C to stop")
 
-	return StartNode(*dataDir, nodeConfig, *numNodes, *nodeIndex, nil, *networkFlag)
+	return bind.StartNode(*dataDir, nodeConfig, *numNodes, *nodeIndex, nil, *networkFlag, *seeds, *rewardAddress)
 }
 
 // runSendTxCmd handles the "send-tx" subcommand
@@ -335,9 +398,10 @@ func legacyExecute() error {
 	flag.StringVar(&cfg.udpPort, "udp-port", "", "UDP port for discovery (e.g., 30304)")
 	flag.StringVar(&cfg.httpPort, "http-port", "", "HTTP port for API (e.g., 127.0.0.1:8545)")
 	flag.StringVar(&cfg.wsPort, "ws-port", "", "WebSocket port (e.g., 127.0.0.1:8600)")
-	flag.StringVar(&cfg.seedNodes, "seeds", "", "Comma-separated seed node UDP addresses")
+	flag.StringVar(&cfg.seedNodes, "seeds", "", "Comma-separated seed node UDP addresses or enrtree:// DNS discovery URLs")
 	flag.StringVar(&cfg.dataDir, "datadir", "data", "Directory for LevelDB storage")
 	flag.IntVar(&cfg.nodeIndex, "node-index", 0, "Index of the node to run")
+	flag.StringVar(&cfg.rewardAddress, "reward-address", "", "SPIF wallet address to stake and receive block rewards from")
 	flag.IntVar(&testCfg.NumNodes, "test-nodes", 0,
 		"Run the PBFT integration test with N validator nodes (0 = disabled)")
 
@@ -388,5 +452,5 @@ func legacyExecute() error {
 		nodeConfig = configs[cfg.nodeIndex]
 	}
 
-	return StartNode(cfg.dataDir, nodeConfig, cfg.numNodes, cfg.nodeIndex, nil, "devnet")
+	return bind.StartNode(cfg.dataDir, nodeConfig, cfg.numNodes, cfg.nodeIndex, nil, "devnet", cfg.seedNodes, cfg.rewardAddress)
 }

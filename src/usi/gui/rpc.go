@@ -14,8 +14,10 @@ import (
 	"fmt"
 	"log"
 	"math/big"
+	"os"
 	"time"
 
+	"github.com/sphinxfndorg/protocol/src/common"
 	key "github.com/sphinxfndorg/protocol/src/core/sthincs/key/backend"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
 	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/sthincs"
@@ -23,25 +25,47 @@ import (
 	keys "github.com/sphinxfndorg/protocol/src/usi/core/key"
 )
 
+const (
+	// GasPriceSPX defines the gas price in nSPX per gas unit.
+	// 1 gSPX = 1,000,000,000 nSPX (same magnitude as 1 Gwei in Ethereum).
+	// This is a reasonable default gas price for Sphinx transactions.
+	GasPriceSPX = 1_000_000_000 // 1 gSPX in nSPX
+)
+
 // NewWalletClient creates a new wallet RPC client
 func NewWalletClient(nodeAddr string) *WalletClient {
 	if nodeAddr == "" {
-		nodeAddr = "127.0.0.1:32307" // Use validator TCP port
+		// Fallback to environment variable, then default
+		if envAddr := os.Getenv("SPHINX_RPC_ADDR"); envAddr != "" {
+			nodeAddr = envAddr
+		} else {
+			nodeAddr = "127.0.0.1:30303"
+		}
 	}
-
+	// No scheme – just the raw host:port
 	var nodeID rpc.NodeID
 	if sessionRawFingerprint != "" {
-		// Convert hex string to bytes (truncate/pad to 32 bytes)
 		rawBytes, err := hex.DecodeString(sessionRawFingerprint)
 		if err == nil {
 			copy(nodeID[:], rawBytes)
 		}
 	}
-
 	return &WalletClient{
 		nodeAddr: nodeAddr,
 		nodeID:   nodeID,
 	}
+}
+
+// normaliseAddress converts a SPIF formatted address to raw hex.
+func normaliseAddress(addr string) (string, error) {
+	if addr == "" {
+		return "", errors.New("empty address")
+	}
+	raw, err := common.NormalizeSPIFAddress(addr)
+	if err != nil {
+		return "", fmt.Errorf("invalid address format: %w", err)
+	}
+	return raw, nil
 }
 
 // GetBalance fetches balance for an address
@@ -53,17 +77,23 @@ func (c *WalletClient) GetBalance(address string) (*BalanceResponse, error) {
 		return nil, errors.New("no address provided")
 	}
 
-	log.Printf("[WalletRPC] GetBalance: fetching for %s", address[:16]+"...")
+	// Normalise to raw hex
+	rawAddress, err := normaliseAddress(address)
+	if err != nil {
+		return nil, err
+	}
 
-	params := []interface{}{address}
+	log.Printf("[WalletRPC] GetBalance: fetching for %s", rawAddress[:16]+"...")
+
+	params := []interface{}{rawAddress}
 	resp, err := rpc.CallRPC(c.nodeAddr, "getbalance", params, c.nodeID, 60)
 	if err != nil {
 		log.Printf("[WalletRPC] RPC call failed: %v", err)
-		return c.getMockBalance(address)
+		return nil, fmt.Errorf("RPC call failed: %w", err)
 	}
 
 	if len(resp.Values) == 0 {
-		return c.getMockBalance(address)
+		return nil, errors.New("empty response from RPC")
 	}
 
 	var result struct {
@@ -73,7 +103,7 @@ func (c *WalletClient) GetBalance(address string) (*BalanceResponse, error) {
 		Unlocked string `json:"unlocked"`
 	}
 	if err := json.Unmarshal(resp.Values[0], &result); err != nil {
-		return c.getMockBalance(address)
+		return nil, fmt.Errorf("parse response: %w", err)
 	}
 
 	balance := new(big.Int)
@@ -93,20 +123,23 @@ func (c *WalletClient) GetBalance(address string) (*BalanceResponse, error) {
 	}, nil
 }
 
-// getMockBalance returns mock balance for offline mode
-func (c *WalletClient) getMockBalance(address string) (*BalanceResponse, error) {
-	// Generate deterministic mock balance based on address
-	// 1 SPX = 1e18 nSPX, so 1e18 represents 1 SPX
-	mockBalance := big.NewInt(1e18) // 1 SPX in nSPX units
-	return &BalanceResponse{
-		Address:  address,
-		Balance:  mockBalance,
-		Pending:  big.NewInt(0),
-		Unlocked: mockBalance,
-	}, nil
+// getCurrentNonce uses raw hex address.
+func (c *WalletClient) getCurrentNonce(address string) (uint64, error) {
+	rawAddress, err := normaliseAddress(address)
+	if err != nil {
+		return 0, err
+	}
+	resp, err := rpc.CallRPC(c.nodeAddr, "getnonce", []interface{}{rawAddress}, c.nodeID, 60)
+	if err != nil {
+		return 0, err
+	}
+	var nonce uint64
+	if err := json.Unmarshal(resp.Values[0], &nonce); err != nil {
+		return 0, err
+	}
+	return nonce + 1, nil // Increment for new transaction
 }
 
-// SendTransaction sends funds to a recipient
 // SendTransaction sends funds to a recipient
 func (c *WalletClient) SendTransaction(toAddress string, amount *big.Int, memo string) (string, error) {
 	if sessionPassphrase == "" {
@@ -119,8 +152,20 @@ func (c *WalletClient) SendTransaction(toAddress string, amount *big.Int, memo s
 		return "", errors.New("invalid amount")
 	}
 
+	// Normalise recipient address to raw hex
+	rawTo, err := normaliseAddress(toAddress)
+	if err != nil {
+		return "", fmt.Errorf("invalid recipient address: %w", err)
+	}
+
+	// Normalise sender address (ours) – use sessionFingerprint
+	rawSender, err := normaliseAddress(sessionFingerprint)
+	if err != nil {
+		return "", fmt.Errorf("invalid sender address: %w", err)
+	}
+
 	log.Printf("[WalletRPC] SendTransaction: sending %s to %s",
-		amount.String(), toAddress[:16]+"...")
+		amount.String(), rawTo[:16]+"...")
 
 	// ─── 1. Load key pair from local device ──────────────────────
 	kp, skBytes, err := keys.LoadKeyFromDisk(sessionPassphrase)
@@ -145,13 +190,16 @@ func (c *WalletClient) SendTransaction(toAddress string, amount *big.Int, memo s
 	}
 
 	// ─── 3. Build and sign transaction locally ──────────────────
+	// Gas price: 1 gSPX = 1,000,000,000 nSPX per gas unit
+	gasPrice := big.NewInt(GasPriceSPX)
+
 	tx := &types.Transaction{
 		ID:         "",
-		Sender:     sessionFingerprint,
-		Receiver:   toAddress,
+		Sender:     rawSender,
+		Receiver:   rawTo,
 		Amount:     amount,
-		GasLimit:   big.NewInt(21000),
-		GasPrice:   big.NewInt(1000000000), // ← 1 Gwei (1,000,000,000)
+		GasLimit:   big.NewInt(21000), // Standard gas limit for a transfer
+		GasPrice:   gasPrice,          // 1 gSPX per gas unit
 		Nonce:      nonce,
 		Timestamp:  time.Now().Unix(),
 		Signature:  []byte{},
@@ -197,16 +245,6 @@ func (c *WalletClient) SendTransaction(toAddress string, amount *big.Int, memo s
 	return result.TxID, nil
 }
 
-func (c *WalletClient) getCurrentNonce(address string) (uint64, error) {
-	resp, err := rpc.CallRPC(c.nodeAddr, "getnonce", []interface{}{address}, c.nodeID, 60)
-	if err != nil {
-		return 0, err
-	}
-	var nonce uint64
-	json.Unmarshal(resp.Values[0], &nonce)
-	return nonce + 1, nil // Increment for new transaction
-}
-
 // signTransactionLocally signs a transaction using SPHINCS+
 func signTransactionLocally(tx *types.Transaction, skBytes, pkBytes []byte) error {
 	if tx == nil {
@@ -216,7 +254,6 @@ func signTransactionLocally(tx *types.Transaction, skBytes, pkBytes []byte) erro
 		tx.ID = tx.Hash()
 	}
 
-	// Initialize SPHINCS+ key manager
 	km, err := key.NewKeyManager()
 	if err != nil {
 		return fmt.Errorf("failed to initialize key manager: %w", err)
@@ -226,7 +263,6 @@ func signTransactionLocally(tx *types.Transaction, skBytes, pkBytes []byte) erro
 		return fmt.Errorf("failed to deserialize key pair: %w", err)
 	}
 
-	// Get SPHINCS+ parameters
 	params := km.GetSPHINCSParameters()
 	if params == nil || params.Params == nil {
 		return fmt.Errorf("SPHINCS+ parameters not initialized")
@@ -246,7 +282,6 @@ func signTransactionLocally(tx *types.Transaction, skBytes, pkBytes []byte) erro
 	msg = append(msg, nonceBytes...)
 	msg = append(msg, []byte(tx.ID)...)
 
-	// Create signature object
 	sigObj, err := sthincs.Spx_sign(params.Params, []byte(tx.ID), privateKey)
 	if err != nil {
 		return fmt.Errorf("failed to sign: %w", err)
@@ -260,7 +295,6 @@ func signTransactionLocally(tx *types.Transaction, skBytes, pkBytes []byte) erro
 		return fmt.Errorf("failed to serialize signature: %w", err)
 	}
 
-	// Store signature hash for replay detection
 	sigHash := sha3.Sum256(sigBytes)
 
 	tx.Signature = sigBytes
@@ -291,40 +325,27 @@ func (c *WalletClient) GetTransactionHistory(address string, limit int) ([]Trans
 		limit = 20
 	}
 
-	log.Printf("[WalletRPC] GetTransactionHistory: fetching for %s", address[:16]+"...")
+	rawAddress, err := normaliseAddress(address)
+	if err != nil {
+		return nil, err
+	}
 
-	params := []interface{}{address, limit}
+	log.Printf("[WalletRPC] GetTransactionHistory: fetching for %s", rawAddress[:16]+"...")
+
+	params := []interface{}{rawAddress, limit}
 	resp, err := rpc.CallRPC(c.nodeAddr, "gettransactionhistory", params, c.nodeID, 60)
 	if err != nil {
-		return c.getMockTransactionHistory(address, limit)
+		return nil, fmt.Errorf("RPC call failed: %w", err)
 	}
 
 	if len(resp.Values) == 0 {
-		return c.getMockTransactionHistory(address, limit)
+		return []TransactionResponse{}, nil
 	}
 
 	var txs []TransactionResponse
 	if err := json.Unmarshal(resp.Values[0], &txs); err != nil {
-		return c.getMockTransactionHistory(address, limit)
+		return nil, fmt.Errorf("parse response: %w", err)
 	}
 
-	return txs, nil
-}
-
-// getMockTransactionHistory returns mock transactions
-func (c *WalletClient) getMockTransactionHistory(address string, limit int) ([]TransactionResponse, error) {
-	txs := make([]TransactionResponse, 0, limit)
-	for i := 0; i < limit && i < 10; i++ {
-		amount := big.NewInt(int64(i+1) * 1000)
-		txs = append(txs, TransactionResponse{
-			TxID:      fmt.Sprintf("mock-tx-%d-%d", i, time.Now().UnixNano()),
-			Sender:    address,
-			Receiver:  fmt.Sprintf("recipient-%d", i),
-			Amount:    amount,
-			Fee:       big.NewInt(10),
-			Timestamp: time.Now().Add(-time.Duration(i) * time.Hour),
-			Status:    "confirmed",
-		})
-	}
 	return txs, nil
 }

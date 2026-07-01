@@ -6,6 +6,7 @@ package keys
 
 import (
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -246,7 +247,12 @@ func saveKeyToDisk(kp *KeyPair) error {
 	if err := os.MkdirAll(GetKeyDir(), 0700); err != nil {
 		return fmt.Errorf("create key dir: %w", err)
 	}
-	if err := os.WriteFile(indexPath, []byte(storedKeyPair.ID), 0600); err != nil {
+	f, err := os.OpenFile(indexPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		return fmt.Errorf("open key index: %w", err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString(storedKeyPair.ID + "\n"); err != nil {
 		return fmt.Errorf("write key index: %w", err)
 	}
 
@@ -254,100 +260,112 @@ func saveKeyToDisk(kp *KeyPair) error {
 	return nil
 }
 
-// LoadKeyFromDisk loads and decrypts the key pair using StorageManager.
+// LoadKeyFromDisk loads and decrypts a key pair using StorageManager.
+//
+// There is no separate "which account" selector upstream of this (the GUI's
+// login screen only collects a passphrase — see helper.go's
+// validatePassphraseDialog and gui.go's login/unlock buttons). With multiple
+// registered keys on disk, each having its own passphrase, the passphrase
+// itself IS the selector. This tries every stored (non-KEM-only) key ID and
+// returns the first one this passphrase actually decrypts AND verifies
+// against. Previously this picked a single fixed "main" key ID up front and
+// only ever tried the passphrase against that one key — so only whichever
+// key happened to be selected could ever log in, and every other key's
+// correct passphrase was reported as wrong.
 func LoadKeyFromDisk(passphrase string) (*KeyPair, []byte, error) {
-	log.Println("Loading keypair from disk")
+	log.Println("[INFO] LoadKeyFromDisk: loading keypair from disk")
 
-	// Get all key IDs from storage
 	keyIDs, err := ListKeys()
 	if err != nil {
 		return nil, nil, fmt.Errorf("list keys: %w", err)
 	}
-
 	if len(keyIDs) == 0 {
 		return nil, nil, fmt.Errorf("no keys found in storage")
 	}
 
-	// Load the first key found (filter out any "kem_" keys if present)
-	var mainKeyID string
+	const sphincsPrivateKeySize = 64
+	var lastErr error
+	var failedKeys []string
+
 	for _, id := range keyIDs {
-		// Skip any KEM-only keys (they start with "kem_")
 		if len(id) > 4 && id[:4] == "kem_" {
 			continue
 		}
-		mainKeyID = id
-		break
-	}
+		log.Printf("[DEBUG] LoadKeyFromDisk: trying key ID %s", id)
 
-	if mainKeyID == "" {
-		mainKeyID = keyIDs[0] // Fallback
-	}
+		loadedKeyPair, err := diskStorage.GetKey(id)
+		if err != nil {
+			log.Printf("[WARN] LoadKeyFromDisk: GetKey(%s) failed: %v", id, err)
+			lastErr = fmt.Errorf("load key pair %s: %w", id, err)
+			failedKeys = append(failedKeys, id)
+			continue
+		}
 
-	loadedKeyPair, err := diskStorage.GetKey(mainKeyID)
-	if err != nil {
-		return nil, nil, fmt.Errorf("load key pair: %w", err)
-	}
+		combinedSK, err := diskStorage.DecryptKey(loadedKeyPair, passphrase)
+		if err != nil {
+			log.Printf("[WARN] LoadKeyFromDisk: DecryptKey(%s) failed: %v", id, err)
+			lastErr = fmt.Errorf("decryption failed for %s: %w", id, err)
+			failedKeys = append(failedKeys, id)
+			continue
+		}
+		log.Printf("[DEBUG] LoadKeyFromDisk: DecryptKey(%s) succeeded, combined size %d bytes", id, len(combinedSK))
 
-	// Decrypt the combined secret key (SPHINCS+ + KEM)
-	combinedSK, err := diskStorage.DecryptKey(loadedKeyPair, passphrase)
-	if err != nil {
-		return nil, nil, fmt.Errorf("decryption failed: %w", err)
-	}
+		if len(combinedSK) < sphincsPrivateKeySize {
+			log.Printf("[WARN] LoadKeyFromDisk: combined key too short for %s: got %d, need %d", id, len(combinedSK), sphincsPrivateKeySize)
+			lastErr = fmt.Errorf("combined key too short for %s", id)
+			failedKeys = append(failedKeys, id)
+			zeroBytes(combinedSK)
+			continue
+		}
 
-	// Extract SPHINCS+ private key (first 64 bytes for SPHINCS+)
-	// SPHINCS+ private key is always 64 bytes
-	const sphincsPrivateKeySize = 64
+		skBytes := combinedSK[:sphincsPrivateKeySize]
+		kemPrivBytes := combinedSK[sphincsPrivateKeySize:]
 
-	if len(combinedSK) < sphincsPrivateKeySize {
-		return nil, nil, fmt.Errorf("combined key too short: got %d bytes, need at least %d",
-			len(combinedSK), sphincsPrivateKeySize)
-	}
+		ok, err := keyManager.VerifyPubKey(skBytes, loadedKeyPair.PublicKey)
+		if err != nil || !ok {
+			log.Printf("[WARN] LoadKeyFromDisk: VerifyPubKey(%s) failed: err=%v, ok=%v", id, err, ok)
+			lastErr = fmt.Errorf("public key verification failed for %s", id)
+			failedKeys = append(failedKeys, id)
+			zeroBytes(skBytes)
+			zeroBytes(kemPrivBytes)
+			continue
+		}
+		log.Printf("[INFO] LoadKeyFromDisk: verification passed for %s", id)
 
-	skBytes := combinedSK[:sphincsPrivateKeySize]
+		kp := &KeyPair{
+			PublicKey:     loadedKeyPair.PublicKey,
+			PrivateKey:    loadedKeyPair.EncryptedSK,
+			Path:          id,
+			KEMPrivateKey: kemPrivBytes,
+		}
 
-	// Extract KEM private key (remaining bytes)
-	kemPrivBytes := combinedSK[sphincsPrivateKeySize:]
-
-	kp := &KeyPair{
-		PublicKey:     loadedKeyPair.PublicKey,
-		PrivateKey:    loadedKeyPair.EncryptedSK,
-		Path:          mainKeyID,
-		KEMPrivateKey: kemPrivBytes,
-	}
-
-	// Load KEM public key from metadata
-	if loadedKeyPair.Metadata != nil {
-		if kemPubB64, ok := loadedKeyPair.Metadata["kem_public"].(string); ok {
-			kemPub, err := base64.StdEncoding.DecodeString(kemPubB64)
-			if err == nil {
-				kp.KEMPublicKey = kemPub
-				log.Printf("KEM public key loaded from metadata (%d bytes)", len(kemPub))
+		if loadedKeyPair.Metadata != nil {
+			if kemPubB64, ok := loadedKeyPair.Metadata["kem_public"].(string); ok {
+				kemPub, err := base64.StdEncoding.DecodeString(kemPubB64)
+				if err == nil {
+					kp.KEMPublicKey = kemPub
+					log.Printf("[DEBUG] LoadKeyFromDisk: KEM public key loaded from %s", id)
+				}
+			}
+			if _, ok := loadedKeyPair.Metadata["ledger"]; ok { // ✅ use _ instead of ledger
+				log.Printf("[DEBUG] LoadKeyFromDisk: Ledger headers loaded from %s", id)
 			}
 		}
 
-		// Log Ledger headers if present
-		if ledger, ok := loadedKeyPair.Metadata["ledger"]; ok {
-			log.Printf("Ledger headers loaded from metadata: %+v", ledger)
-		}
+		kp.OrgCode = "SPIF"
+		kp.Address = GetPublicKeyFingerprint(kp)
+
+		log.Printf("[SUCCESS] LoadKeyFromDisk: successfully loaded key %s", id)
+		return kp, skBytes, nil
 	}
 
-	// Verify the SPHINCS+ private key matches the stored public key
-	ok, err := keyManager.VerifyPubKey(skBytes, loadedKeyPair.PublicKey)
-	if err != nil {
-		return nil, nil, fmt.Errorf("verify public key: %w", err)
+	// Build a comprehensive error message
+	errMsg := fmt.Sprintf("no stored key matched this passphrase. Attempted keys: %v", failedKeys)
+	if lastErr != nil {
+		errMsg += fmt.Sprintf("; last error: %v", lastErr)
 	}
-	if !ok {
-		return nil, nil, fmt.Errorf("decrypted secret key does not match the stored public key")
-	}
-
-	// Generate address from public key
-	kp.OrgCode = "SPIF"
-	kp.Address = GetPublicKeyFingerprint(kp)
-
-	log.Printf("Keypair loaded successfully (SPHINCS+: %d bytes, KEM: %d bytes)",
-		len(skBytes), len(kemPrivBytes))
-
-	return kp, skBytes, nil
+	log.Printf("[ERROR] LoadKeyFromDisk: %s", errMsg)
+	return nil, nil, errors.New(errMsg)
 }
 
 // GetKeyByID loads a specific key by its ID (matches test_encrypt.go pattern)
@@ -408,25 +426,33 @@ func GetKeyByID(keyID, passphrase string) (*KeyPair, []byte, error) {
 // ListKeys lists all stored key IDs
 // This follows the StorageManager pattern
 func ListKeys() ([]string, error) {
-	// Read the key ID written by saveKeyToDisk at registration time.
 	indexPath := filepath.Join(GetKeyDir(), "keyindex")
 	data, err := os.ReadFile(indexPath)
 	if err == nil {
-		id := string(data)
-		if id != "" {
-			// Verify the key actually exists in storage before returning.
-			if _, err := diskStorage.GetKey(id); err == nil {
-				// Check if this is a KEM-only key (should skip)
-				if len(id) > 4 && id[:4] == "kem_" {
-					// It's a KEM key, look for the main key
-					return findMainKey(), nil
-				}
-				return []string{id}, nil
+		var ids []string
+		for _, line := range strings.Split(string(data), "\n") {
+			id := strings.TrimSpace(line)
+			if id == "" {
+				continue
 			}
+			if len(id) > 4 && id[:4] == "kem_" {
+				log.Printf("[DEBUG] ListKeys: skipping KEM-only ID %s", id)
+				continue
+			}
+			if _, err := diskStorage.GetKey(id); err == nil {
+				ids = append(ids, id)
+			} else {
+				log.Printf("[WARN] ListKeys: diskStorage.GetKey(%s) failed, skipping: %v", id, err)
+			}
+		}
+		if len(ids) > 0 {
+			log.Printf("[INFO] ListKeys: found %d keys via keyindex", len(ids))
+			return ids, nil
 		}
 	}
 
-	// Fallback: find main key from all keys
+	// Fallback to scanning disk store
+	log.Printf("[INFO] ListKeys: keyindex empty or not found, scanning disk store")
 	return findMainKey(), nil
 }
 

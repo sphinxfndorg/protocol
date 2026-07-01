@@ -2,16 +2,23 @@
 // MIT License https://opensource.org/license/mit
 
 // go/src/bind/nodes.go
+//
+// Production node startup. The legacy same-box devnet harness that used to
+// live in this file (StartValidatorNode, StartLocalCluster, LaunchNetwork,
+// StartSingleNodeInternal, RunMultipleNodesInternal, SetupNodes) has moved
+// to legacy_devnet.go — it predates StartNode and is only reachable via
+// cli.go's legacyExecute() path. This file now contains just StartNode and
+// its directly-used helpers.
 package bind
 
 import (
-	"encoding/hex"
+	"context"
 	"fmt"
-	"log"
 	"math/big"
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -20,389 +27,53 @@ import (
 	"github.com/sphinxfndorg/protocol/src/common"
 	"github.com/sphinxfndorg/protocol/src/consensus"
 	"github.com/sphinxfndorg/protocol/src/core"
+	database "github.com/sphinxfndorg/protocol/src/core/state"
 	config "github.com/sphinxfndorg/protocol/src/core/sthincs/config"
 	key "github.com/sphinxfndorg/protocol/src/core/sthincs/key/backend"
 	sign "github.com/sphinxfndorg/protocol/src/core/sthincs/sign/backend"
+	svm "github.com/sphinxfndorg/protocol/src/core/svm/opcodes"
+	types "github.com/sphinxfndorg/protocol/src/core/transaction"
+	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/sthincs"
 	security "github.com/sphinxfndorg/protocol/src/handshake"
 	"github.com/sphinxfndorg/protocol/src/http"
 	logger "github.com/sphinxfndorg/protocol/src/log"
 	"github.com/sphinxfndorg/protocol/src/network"
-	"github.com/sphinxfndorg/protocol/src/p2p"
+	dnsdiscovery "github.com/sphinxfndorg/protocol/src/p2p/seed"
+	"github.com/sphinxfndorg/protocol/src/params/commit"
 	"github.com/sphinxfndorg/protocol/src/pool"
 	"github.com/sphinxfndorg/protocol/src/rpc"
-	"github.com/sphinxfndorg/protocol/src/transport"
 	"github.com/syndtr/goleveldb/leveldb"
 )
 
-// StartValidatorNode was StartSingleNode.
-// Used by Charlie (validator node).
-func StartValidatorNode(nodeConfig network.NodePortConfig, dataDir string) error {
-	return StartSingleNodeInternal(nodeConfig, dataDir)
+// ConnectionPool manages persistent TCP connections for consensus messages
+type ConnectionPool struct {
+	connections map[string]net.Conn
+	mu          *sync.Mutex
 }
 
-// StartLocalCluster was RunTwoNodes.
-// Used to start multiple local test nodes (Alice, Bob, Charlie, etc.).
-func StartLocalCluster() error {
-	return RunMultipleNodesInternal()
-}
-
-// LaunchNetwork dynamically picks which to start.
-//
-//	mode = "validator" → Charlie single-node
-//	mode = "cluster"   → local 3-node testnet
-//
-// go/src/bind/nodes.go
-// Change the LaunchNetwork function:
-func LaunchNetwork(mode string) error {
-	switch mode {
-	case "validator":
-		node := network.NodePortConfig{
-			Name:      "Validator-Charlie",
-			TCPAddr:   "127.0.0.1:32307",
-			UDPPort:   "32418",
-			HTTPPort:  "127.0.0.1:8645",
-			WSPort:    "127.0.0.1:8700",
-			Role:      network.RoleValidator,
-			SeedNodes: []string{},
-		}
-		// CHANGE THIS LINE:
-		// dataDir := common.DataDir  // OLD - doesn't work
-		dataDir := common.GetDataDir() // NEW - use function
-		return StartValidatorNode(node, dataDir)
-	case "cluster":
-		return StartLocalCluster()
-	default:
-		log.Printf("Unknown mode: %s. Use 'validator' or 'cluster'.", mode)
-		os.Exit(1)
-	}
-	return nil
-}
-
-// StartSingleNode starts a single node with the given configuration
-// go/src/bind/nodes.go - Add this after resources are created
-
-func StartSingleNodeInternal(nodeConfig network.NodePortConfig, dataDir string) error {
-	// Set the global data directory for common package
-	if dataDir != "" {
-		common.SetDataDir(dataDir)
+// isClosed checks if a TCP connection is closed
+func isClosed(conn net.Conn) bool {
+	if conn == nil {
+		return true
 	}
 
-	nodeDataDir := common.GetNodeDataDir(nodeConfig.Name)
-	if err := os.MkdirAll(nodeDataDir, 0755); err != nil {
-		return fmt.Errorf("failed to create data directory %s: %v", nodeDataDir, err)
-	}
+	// Try to read 1 byte with zero timeout to check if connection is alive
+	conn.SetReadDeadline(time.Now().Add(1 * time.Millisecond))
+	buf := make([]byte, 1)
+	_, err := conn.Read(buf)
+	conn.SetReadDeadline(time.Time{})
 
-	keyManager, err := key.NewKeyManager()
 	if err != nil {
-		return fmt.Errorf("failed to initialize KeyManager: %v", err)
+		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			// Timeout is expected, connection is alive
+			return false
+		}
+		// Any other error means connection is closed
+		return true
 	}
 
-	sphincsParams, err := config.NewSTHINCSParameters()
-	if err != nil {
-		return fmt.Errorf("failed to initialize STHINCSParameters: %v", err)
-	}
-
-	// Create SPHINCS manager for this node
-	sphincsMgr := sign.NewSTHINCSManager(nil, keyManager, sphincsParams)
-	if sphincsMgr == nil {
-		return fmt.Errorf("failed to initialize STHINCSManager for %s", nodeConfig.Name)
-	}
-
-	setupConfig := NodeSetupConfig{
-		Name:          nodeConfig.Name,
-		Address:       nodeConfig.TCPAddr,
-		UDPPort:       nodeConfig.UDPPort,
-		HTTPPort:      nodeConfig.HTTPPort,
-		WSPort:        nodeConfig.WSPort,
-		Role:          nodeConfig.Role,
-		SeedNodes:     nodeConfig.SeedNodes,
-		KeyManager:    keyManager,
-		SphincsParams: sphincsParams,
-	}
-
-	var wg sync.WaitGroup
-	resources, err := SetupNodes([]NodeSetupConfig{setupConfig}, &wg)
-	if err != nil {
-		return fmt.Errorf("failed to set up node %s: %v", nodeConfig.Name, err)
-	}
-	if len(resources) != 1 {
-		return fmt.Errorf("expected 1 node resource, got %d", len(resources))
-	}
-
-	// ========== START CONSENSUS ENGINE FOR VALIDATOR ==========
-	// If this is a validator node, start the consensus engine to mine blocks
-	if nodeConfig.Role == network.RoleValidator {
-		logger.Info("Starting consensus engine for validator node...")
-
-		// Get the blockchain and create consensus engine
-		blockchain := resources[0].Blockchain
-
-		// Create signing service
-		signingService := consensus.NewSigningService(nil, keyManager, nodeConfig.Name)
-
-		// Create node manager for consensus
-		nodeMgr := network.NewCallNodeManager()
-		nodeMgr.AddPeer(nodeConfig.Name)
-
-		// Get min stake amount from chain params
-		coreChainParams := core.GetSphinxChainParams()
-		minStakeAmount := coreChainParams.ConsensusConfig.MinStakeAmount
-
-		// Create consensus engine
-		consensusEngine := consensus.NewConsensus(
-			nodeConfig.Name,
-			nodeMgr,
-			blockchain,
-			signingService,
-			nil,
-			minStakeAmount,
-		)
-
-		// Add self as validator
-		stakeSPX := new(big.Int).Div(minStakeAmount, big.NewInt(1e18)).Uint64()
-		validatorSet := consensusEngine.GetValidatorSet()
-		if validatorSet != nil {
-			validatorSet.AddValidator(nodeConfig.Name, stakeSPX)
-		}
-
-		// Start consensus
-		if err := consensusEngine.Start(); err != nil {
-			logger.Errorf("Failed to start consensus: %v", err)
-		} else {
-			logger.Info("✅ Consensus engine started successfully")
-		}
-
-		// Store consensus engine in blockchain
-		blockchain.SetConsensusEngine(consensusEngine)
-		blockchain.SetConsensus(consensusEngine)
-	}
-	// ==========================================================
-
-	// Set SPHINCS manager on mempool for transaction validation
-	if mempool := resources[0].Blockchain.GetMempool(); mempool != nil {
-		mempool.SetSTHINCSManager(sphincsMgr) // use sphincsMgr (singular)
-		logger.Infof("Set STHINCS manager on mempool for %s", nodeConfig.Name)
-	}
-
-	// Start peer discovery after setup
-	go func() {
-		if err := resources[0].P2PServer.DiscoverPeers(); err != nil {
-			log.Printf("DiscoverPeers failed for %s: %v", nodeConfig.Name, err)
-		}
-	}()
-
-	log.Printf("Node %s started with role %s on TCP %s, UDP %s, HTTP %s, WebSocket %s",
-		nodeConfig.Name, nodeConfig.Role, nodeConfig.TCPAddr, nodeConfig.UDPPort, nodeConfig.HTTPPort, nodeConfig.WSPort)
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh
-	log.Printf("Shutting down node %s...", nodeConfig.Name)
-
-	if err := Shutdown([]NodeResources{resources[0]}); err != nil {
-		log.Printf("Failed to shut down node %s: %v", nodeConfig.Name, err)
-	}
-	wg.Wait()
-	return nil
-}
-
-// RunTwoNodes starts three nodes with default configurations using the bind package.
-func RunMultipleNodesInternal() error {
-	// Initialize wait group
-	var wg sync.WaitGroup
-
-	// Initialize used ports map to avoid conflicts
-	usedPorts := make(map[int]bool)
-
-	// Define base ports
-	const baseTCPPort = 32307
-	const baseUDPPort = 32418
-	const baseHTTPPort = 8645
-	const baseWSPort = 8700
-
-	configs := make([]network.NodePortConfig, 3)
-	dbs := make([]*leveldb.DB, 3)
-	// FIXED: Change from *sign.SphincsManager to *sign.STHINCSManager
-	sphincsMgrs := make([]*sign.STHINCSManager, 3)
-
-	// Initialize LevelDB and SphincsManager for each node
-	for i := 0; i < 3; i++ {
-		nodeName := fmt.Sprintf("Node-%d", i)
-
-		// CHANGED: Use common functions for standardized paths
-		dataDir := common.GetNodeDataDir(nodeName)
-		if err := os.MkdirAll(dataDir, 0755); err != nil {
-			return fmt.Errorf("failed to create data directory %s: %v", dataDir, err)
-		}
-
-		// CHANGED: Use common.GetLevelDBPath
-		db, err := leveldb.OpenFile(common.GetLevelDBPath(nodeName), nil)
-		if err != nil {
-			return fmt.Errorf("failed to open LevelDB at %s: %v", dataDir, err)
-		}
-		dbs[i] = db
-
-		keyManager, err := key.NewKeyManager()
-		if err != nil {
-			return fmt.Errorf("failed to initialize KeyManager for Node-%d: %v", i, err)
-		}
-
-		sphincsParams, err := config.NewSTHINCSParameters()
-		if err != nil {
-			return fmt.Errorf("failed to initialize STHINCSParameters for Node-%d: %v", i, err)
-		}
-
-		// FIXED: NewSTHINCSManager returns *sign.STHINCSManager
-		sphincsMgr := sign.NewSTHINCSManager(db, keyManager, sphincsParams)
-		if sphincsMgr == nil {
-			return fmt.Errorf("failed to initialize STHINCSManager for Node-%d", i)
-		}
-		sphincsMgrs[i] = sphincsMgr
-
-		// Find free TCP port
-		tcpPort, err := network.FindFreePort(baseTCPPort+i*2, "tcp")
-		if err != nil {
-			return fmt.Errorf("failed to find free TCP port for Node-%d: %v", i, err)
-		}
-		usedPorts[tcpPort] = true
-		tcpAddr := fmt.Sprintf("127.0.0.1:%d", tcpPort)
-
-		// Find free UDP port
-		udpPort, err := network.FindFreePort(baseUDPPort+i*2, "udp")
-		if err != nil {
-			return fmt.Errorf("failed to find free UDP port for Node-%d: %v", i, err)
-		}
-		usedPorts[udpPort] = true
-		udpPortStr := fmt.Sprintf("%d", udpPort)
-
-		// Find free HTTP port
-		httpPort, err := network.FindFreePort(baseHTTPPort+i, "tcp")
-		if err != nil {
-			return fmt.Errorf("failed to find free HTTP port for Node-%d: %v", i, err)
-		}
-		usedPorts[httpPort] = true
-		httpAddr := fmt.Sprintf("127.0.0.1:%d", httpPort)
-
-		// Find free WebSocket port
-		wsPort, err := network.FindFreePort(baseWSPort+i, "tcp")
-		if err != nil {
-			return fmt.Errorf("failed to find free WebSocket port for Node-%d: %v", i, err)
-		}
-		usedPorts[wsPort] = true
-		wsAddr := fmt.Sprintf("127.0.0.1:%d", wsPort)
-
-		configs[i] = network.NodePortConfig{
-			ID:        nodeName,
-			Name:      nodeName,
-			TCPAddr:   tcpAddr,
-			UDPPort:   udpPortStr,
-			HTTPPort:  httpAddr,
-			WSPort:    wsAddr,
-			Role:      network.RoleNone,
-			SeedNodes: []string{}, // Initialize empty; seeds will be set later
-		}
-		// Store initial config
-		network.UpdateNodeConfig(configs[i])
-	}
-
-	// Convert []network.NodePortConfig to []NodeSetupConfig
-	setupConfigs := make([]NodeSetupConfig, len(configs))
-	for i, config := range configs {
-		setupConfigs[i] = NodeSetupConfig{
-			Name:      config.Name,
-			Address:   config.TCPAddr,
-			UDPPort:   config.UDPPort,
-			HTTPPort:  config.HTTPPort,
-			WSPort:    config.WSPort,
-			Role:      config.Role,
-			SeedNodes: config.SeedNodes,
-		}
-	}
-
-	resources, err := SetupNodes(setupConfigs, &wg)
-	if err != nil {
-		return fmt.Errorf("failed to set up nodes: %v", err)
-	}
-
-	// Wait briefly to ensure P2P servers are initialized
-	time.Sleep(2 * time.Second)
-	for i := 0; i < 3; i++ {
-		log.Printf("Checking P2P server for Node-%d: TCP=%s, UDP=%s", i, resources[i].P2PServer.LocalNode().Address, resources[i].P2PServer.LocalNode().UDPPort)
-	}
-
-	// Set SphincsManager for each P2PServer and MEMPOOL
-	for i := 0; i < 3; i++ {
-		// FIXED: sphincsMgrs[i] is now *sign.STHINCSManager, which matches SetSphincsMgr parameter type
-		resources[i].P2PServer.SetSphincsMgr(sphincsMgrs[i])
-		resources[i].Blockchain.SetSTHINCSManager(sphincsMgrs[i])
-
-		// ADD THIS LINE - Set SPHINCS manager on mempool for transaction validation
-		if mempool := resources[i].Blockchain.GetMempool(); mempool != nil {
-			mempool.SetSTHINCSManager(sphincsMgrs[i])
-			logger.Infof("Set STHINCS manager on mempool for Node-%d", i)
-		}
-	}
-
-	// Update seed nodes with actual UDP ports BEFORE calling DiscoverPeers
-	for i, config := range configs {
-		actualUDPPort := resources[i].P2PServer.LocalNode().UDPPort
-		config.UDPPort = actualUDPPort
-		seedNodes := []string{}
-		for j := 0; j < 3; j++ {
-			if j != i {
-				seedConfig, exists := network.GetNodeConfig(fmt.Sprintf("Node-%d", j))
-				if exists && seedConfig.UDPPort != "" {
-					seedAddr := fmt.Sprintf("127.0.0.1:%s", seedConfig.UDPPort)
-					// Validate seed node address
-					if _, err := net.ResolveUDPAddr("udp", seedAddr); err != nil {
-						log.Printf("Invalid seed node address for Node-%d: %s, error: %v", j, seedAddr, err)
-						continue
-					}
-					seedNodes = append(seedNodes, seedAddr)
-				}
-			}
-		}
-		if len(seedNodes) == 0 {
-			log.Printf("Warning: No valid seed nodes for Node-%d", i)
-		}
-		config.SeedNodes = seedNodes
-		network.UpdateNodeConfig(config)
-		resources[i].P2PServer.UpdateSeedNodes(config.SeedNodes)
-		log.Printf("Updated seed nodes for Node-%d: %v", i, seedNodes)
-	}
-
-	// NOW call DiscoverPeers for each node
-	for i := 0; i < 3; i++ {
-		go func(idx int) {
-			log.Printf("Starting DiscoverPeers for Node-%d", idx)
-			if err := resources[idx].P2PServer.DiscoverPeers(); err != nil {
-				log.Printf("DiscoverPeers failed for Node-%d: %v", idx, err)
-			} else {
-				log.Printf("DiscoverPeers completed successfully for Node-%d", idx)
-			}
-		}(i)
-	}
-
-	// Clear global configs and close databases on shutdown
-	defer func() {
-		network.ClearNodeConfigs()
-		for i, db := range dbs {
-			if err := db.Close(); err != nil {
-				log.Printf("Failed to close LevelDB for Node-%d: %v", i, err)
-			}
-		}
-	}()
-
-	// Handle shutdown
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh
-	log.Println("Shutting down servers...")
-	if err := Shutdown(resources); err != nil {
-		log.Printf("Failed to shut down servers: %v", err)
-	}
-	wg.Wait()
-	return nil
+	// Successfully read data, connection is alive
+	return false
 }
 
 // ParseRoles converts a comma-separated roles string into a slice of NodeRole.
@@ -428,314 +99,877 @@ func ParseRoles(rolesStr string, numNodes int) []network.NodeRole {
 	return result
 }
 
-// SetupNodes initializes and starts all servers for the given node configurations.
-// SetupNodes initializes and starts all servers for the given node configurations.
-func SetupNodes(configs []NodeSetupConfig, wg *sync.WaitGroup) ([]NodeResources, error) {
-	messageChans := make([]chan *security.Message, len(configs))
-	blockchains := make([]*core.Blockchain, len(configs))
-	rpcServers := make([]*rpc.Server, len(configs))
-	p2pServers := make([]*p2p.Server, len(configs))
-	tcpServers := make([]*transport.TCPServer, len(configs))
-	wsServers := make([]*transport.WebSocketServer, len(configs))
-	httpServers := make([]*http.Server, len(configs))
-	publicKeys := make(map[string]string)
-	readyCh := make(chan struct{}, len(configs)*3)
-	tcpReadyCh := make(chan struct{}, len(configs))
-	p2pErrorCh := make(chan error, len(configs))
-	udpReadyCh := make(chan struct{}, len(configs))
-	dbs := make([]*leveldb.DB, len(configs))
-	closed := make([]bool, len(configs))
+// ============================================================================
+// Production node startup (previously in cli/utils/nodes.go)
+// ============================================================================
 
-	// DEFINE sphincsMgrs HERE - outside the loop so it's available
-	sphincsMgrs := make([]*sign.STHINCSManager, len(configs))
+// StartNode starts a fully-featured validator node.
+//
+// totalNodes / nodeIndex are the same-box devnet / --test-nodes harness
+// parameters.  On a real-device network (usingRealAddress=true) they are
+// irrelevant: the validator set is built dynamically from what the node
+// discovers through --seeds + PEX, exactly like ETH/BTC.  Pass totalNodes=1
+// and nodeIndex=0 for any single real-device node; the runtime will grow the
+// validator set as peers are discovered.
+//
+// rewardAddress is this node's own SPIF wallet address. It is broadcast to
+// peers during key exchange (so THEY can verify OUR balance before staking
+// us) and is also used locally to self-stake from our own genesis/earned
+// balance. It is optional: an empty value just means this node starts with
+// no stake and relies on receiving some (e.g. genesis allocation processed
+// after startup, or funds sent to it) before it can be admitted as a
+// validator by peers. It is never a substitute for balance verification —
+// see stakeValidatorFromRewardAddress in helpers.go.
+func StartNode(
+	dataDir string,
+	nodeConfig network.NodePortConfig,
+	totalNodes, nodeIndex int,
+	vdfParams *consensus.VDFParams,
+	networkType string,
+	seeds string,
+	rewardAddress string,
+) error {
 
-	// FIX: Create SPHINCS managers using package-level function, not config method
-	// FIX: Use 'cfg' instead of 'config' to avoid shadowing the package import
-	for i, cfg := range configs {
-		keyManager, err := key.NewKeyManager()
+	logger.Info("=== STARTING NODE ===")
+
+	isProduction := totalNodes > 100
+
+	switch {
+	case totalNodes == 1:
+		logger.Info("⚠️  SINGLE NODE / REAL-DEVICE MODE — peers discovered dynamically via --seeds")
+	case totalNodes == 2:
+		logger.Warn("⚠️  2-NODE CLUSTER — PBFT requires ≥ 3 validators")
+	case isProduction:
+		logger.Info("🚀 PRODUCTION MODE — Large network with %d nodes (using optimized peer connections)", totalNodes)
+	default:
+		logger.Info("✅ FULL PBFT CONSENSUS (same-box) — %d validators", totalNodes)
+	}
+
+	// SECTION 1 — chain identification
+	chainParams := commit.SphinxChainParams()
+	logger.Info("Chain: %s  ChainID=%d  Symbol=%s", chainParams.ChainName, chainParams.ChainID, chainParams.Symbol)
+
+	networkType = "devnet"
+	logger.Info("Network type: %s (%s)", networkType, core.GetNetworkDisplayName(networkType))
+
+	// SECTION 2 — shared cryptographic parameters
+	sharedKeyManager, err := key.NewKeyManager()
+	if err != nil {
+		return fmt.Errorf("failed to create shared key manager: %w", err)
+	}
+
+	sharedSphincsParams, err := config.NewSTHINCSParameters()
+	if err != nil {
+		return fmt.Errorf("failed to create shared STHINCS parameters: %w", err)
+	}
+	sthincsParams := sharedSphincsParams.Params
+	logger.Info("✅ Shared STHINCS parameters created")
+
+	// SECTION 3 — node identity
+	usingRealAddress := false
+	if nodeConfig.TCPAddr != "" {
+		host, _, splitErr := net.SplitHostPort(nodeConfig.TCPAddr)
+		if splitErr != nil {
+			host = nodeConfig.TCPAddr
+		}
+		if !isLoopbackHost(host) {
+			usingRealAddress = true
+		}
+	}
+
+	synthCount := totalNodes
+	if usingRealAddress {
+		synthCount = 1
+		nodeIndex = 0
+	}
+
+	validatorIDs := make([]string, synthCount)
+	networkAddresses := make([]string, synthCount)
+	for i := 0; i < synthCount; i++ {
+		addr := fmt.Sprintf("127.0.0.1:%d", 32307+i)
+		networkAddresses[i] = addr
+		validatorIDs[i] = fmt.Sprintf("Node-%s", addr)
+	}
+
+	var currentAddress, currentNodeID string
+	if usingRealAddress {
+		currentAddress = nodeConfig.TCPAddr
+		currentNodeID = fmt.Sprintf("Node-%s", currentAddress)
+		networkAddresses[0] = currentAddress
+		validatorIDs[0] = currentNodeID
+	} else {
+		if nodeIndex < 0 || nodeIndex >= synthCount {
+			nodeIndex = 0
+		}
+		currentAddress = networkAddresses[nodeIndex]
+		currentNodeID = validatorIDs[nodeIndex]
+	}
+
+	logger.Info("Node identity: %s at %s (real-device=%v)", currentNodeID, currentAddress, usingRealAddress)
+
+	// SECTION 4 — database initialization
+	if err := common.EnsureNodeDirs(currentAddress); err != nil {
+		return fmt.Errorf("failed to create node directories: %w", err)
+	}
+
+	mainDBPath := common.GetLevelDBPath(currentAddress)
+	db, err := leveldb.OpenFile(mainDBPath, nil)
+	if err != nil {
+		return fmt.Errorf("failed to open main LevelDB: %w", err)
+	}
+	defer db.Close()
+
+	stateDBPath := common.GetStateDBPath(currentAddress)
+	stateLevelDB, err := leveldb.OpenFile(stateDBPath, nil)
+	if err != nil {
+		return fmt.Errorf("failed to open state DB: %w", err)
+	}
+	defer stateLevelDB.Close()
+
+	mainDatabase, err := database.NewLevelDB(mainDBPath)
+	if err != nil {
+		return fmt.Errorf("failed to create main database: %w", err)
+	}
+	stateDatabase, err := database.NewLevelDB(stateDBPath)
+	if err != nil {
+		return fmt.Errorf("failed to create state database: %w", err)
+	}
+
+	// SECTION 5 — blockchain + genesis
+	bc, err := core.NewBlockchain(currentAddress, currentNodeID, validatorIDs, networkType)
+	if err != nil {
+		return fmt.Errorf("failed to create blockchain: %w", err)
+	}
+	bc.SetStorageDB(mainDatabase)
+	bc.SetStateDB(stateDatabase)
+
+	var nodeID rpc.NodeID
+	nodeIDBytes := []byte(currentNodeID)
+	if len(nodeIDBytes) > 32 {
+		nodeIDBytes = nodeIDBytes[:32]
+	}
+	copy(nodeID[:], nodeIDBytes)
+
+	rpcCaller := rpc.NewRPCCaller(nodeID)
+	bc.SetRPCCaller(rpcCaller)
+	logger.Info("✅ RPC Caller set for blockchain")
+
+	if err := bc.ExecuteGenesisBlock(); err != nil {
+		logger.Warn("ExecuteGenesisBlock: %v", err)
+	} else {
+		logger.Info("✅ Genesis vault funded")
+	}
+
+	if cpErr := bc.WriteChainCheckpoint(); cpErr != nil {
+		logger.Warn("Failed to write initial checkpoint: %v", cpErr)
+	} else {
+		logger.Info("✅ Initial checkpoint saved after genesis")
+	}
+
+	// VDF genesis-hash provider
+	if vdfParams == nil {
+		logger.Info("No VDF parameters supplied — deriving real parameters from genesis hash")
+
+		expectedGenesisHash := core.GetGenesisHash()
+		rawGenesisHash := expectedGenesisHash
+		if len(rawGenesisHash) > 8 && rawGenesisHash[:8] == "GENESIS_" {
+			rawGenesisHash = rawGenesisHash[8:]
+		}
+
+		consensus.InitVDFFromGenesis(func() (string, error) {
+			return rawGenesisHash, nil
+		})
+
+		derived, err := consensus.LoadCanonicalVDFParams()
 		if err != nil {
-			return nil, fmt.Errorf("failed to initialize KeyManager: %v", err)
+			return fmt.Errorf("failed to derive VDF parameters from genesis hash: %w", err)
+		}
+		vdfParams = &derived
+	}
+
+	if vdfParams.Discriminant == nil || vdfParams.T == 0 {
+		return fmt.Errorf("VDF parameters are invalid (nil discriminant or zero iterations) — refusing to start with a weak or placeholder VDF")
+	}
+
+	logger.Info("✅ VDF parameters ready: Discriminant=%d bits, T=%d", vdfParams.Discriminant.BitLen(), vdfParams.T)
+	if err := consensus.SetCanonicalVDFParameters(vdfParams); err != nil {
+		return fmt.Errorf("failed to set canonical VDF parameters: %w", err)
+	}
+
+	// SECTION 6 — signing service
+	sphincsMgr := sign.NewSTHINCSManager(db, sharedKeyManager, sharedSphincsParams)
+	signingService := consensus.NewSigningService(sphincsMgr, sharedKeyManager, currentNodeID)
+
+	if selfPK := signingService.GetPublicKeyObject(); selfPK != nil {
+		signingService.RegisterPublicKey(currentNodeID, selfPK)
+		logger.Info("✅ Self public key registered")
+	}
+
+	pkBytes, err := signingService.GetPublicKey()
+	if err != nil {
+		return fmt.Errorf("cannot serialize self public key: %w", err)
+	}
+	logger.Info("✅ Self public key size: %d bytes", len(pkBytes))
+
+	rpcServer := rpc.NewServer(nil, bc, sphincsMgr)
+	logger.Info("✅ RPC server created (synchronous mode)")
+
+	// SECTION 7 — network node manager
+	var dhtInstance network.DHT = nil
+	nodeMgr := network.NewNodeManager(16, dhtInstance, mainDatabase)
+
+	tcpPort := "30303"
+	if nodeConfig.TCPAddr != "" {
+		_, portStr, err := net.SplitHostPort(nodeConfig.TCPAddr)
+		if err == nil && portStr != "" {
+			tcpPort = portStr
+		} else {
+			tcpPort = nodeConfig.TCPAddr
+		}
+	} else {
+		tcpPort = fmt.Sprintf("%d", 32307+nodeIndex)
+	}
+
+	udpPort := nodeConfig.UDPPort
+	if udpPort == "" {
+		udpPort = fmt.Sprintf("%d", 32308+nodeIndex)
+	}
+
+	localHost, _, err := net.SplitHostPort(currentAddress)
+	if err != nil || localHost == "" {
+		localHost = "127.0.0.1"
+	}
+
+	if err := nodeMgr.CreateLocalNode(
+		currentAddress,
+		localHost,
+		tcpPort,
+		udpPort,
+		network.RoleValidator,
+	); err != nil {
+		return fmt.Errorf("failed to create local node: %w", err)
+	}
+
+	if !usingRealAddress {
+		for j := 0; j < synthCount; j++ {
+			if j == nodeIndex {
+				continue
+			}
+			peerNode := network.NewNode(
+				networkAddresses[j],
+				"127.0.0.1",
+				fmt.Sprintf("%d", 32307+j),
+				fmt.Sprintf("%d", 32308+j),
+				false,
+				network.RoleValidator,
+				mainDatabase,
+			)
+			if peerNode != nil {
+				nodeMgr.AddNode(peerNode)
+				logger.Info("Registered same-box peer: %s", networkAddresses[j])
+			}
+		}
+	} else {
+		logger.Info("Real-device mode — skipping same-box static peer list; peers discovered via --seeds + PEX")
+	}
+
+	// SECTION 8 — consensus node manager
+	var consensusNodeMgr consensus.NodeManager
+	var p2pMgr *network.P2PConsensusNodeManager
+
+	if synthCount == 1 && !usingRealAddress {
+		callMgr := network.NewCallNodeManager()
+		callMgr.AddPeer(currentNodeID)
+		consensusNodeMgr = callMgr
+		logger.Info("📦 Solo mode — local consensus manager")
+	} else {
+		p2pMgr = network.NewP2PConsensusNodeManager(nodeMgr, currentNodeID)
+
+		for i, addr := range networkAddresses {
+			if i == nodeIndex {
+				continue
+			}
+			p2pMgr.AddPeer(validatorIDs[i], addr)
+			logger.Info("Added peer %s at %s to P2P consensus manager", validatorIDs[i], addr)
 		}
 
-		// FIX: Now 'config' refers to the package import, not the loop variable
-		sphincsParams, err := config.NewSTHINCSParameters()
+		// Connection pool for persistent TCP connections
+		connPool := &ConnectionPool{
+			connections: make(map[string]net.Conn),
+			mu:          &sync.Mutex{},
+		}
+
+		p2pMgr.SetSendMessageFunc(func(nodeAddress, msgType string, data []byte) error {
+			connPool.mu.Lock()
+			conn, exists := connPool.connections[nodeAddress]
+			connPool.mu.Unlock()
+
+			if !exists || isClosed(conn) {
+				newConn, err := net.DialTimeout("tcp", nodeAddress, 5*time.Second)
+				if err != nil {
+					return fmt.Errorf("failed to connect to %s: %v", nodeAddress, err)
+				}
+
+				connPool.mu.Lock()
+				connPool.connections[nodeAddress] = newConn
+				connPool.mu.Unlock()
+				conn = newConn
+			}
+
+			msg := &security.Message{
+				Type: msgType,
+				Data: data,
+			}
+
+			encodedMsg, err := msg.Encode()
+			if err != nil {
+				return err
+			}
+
+			if _, err := conn.Write(encodedMsg); err != nil {
+				connPool.mu.Lock()
+				delete(connPool.connections, nodeAddress)
+				connPool.mu.Unlock()
+				conn.Close()
+				return fmt.Errorf("failed to write message to %s: %v", nodeAddress, err)
+			}
+
+			return nil
+		})
+
+		consensusNodeMgr = p2pMgr
+		logger.Info("🌐 P2P consensus manager ready (%d pre-configured peer(s))", len(networkAddresses)-1)
+	}
+
+	// SECTION 9 — consensus engine
+	coreChainParams := core.GetSphinxChainParams()
+	minStakeAmount := coreChainParams.ConsensusConfig.MinStakeAmount
+
+	cons := consensus.NewConsensus(
+		currentNodeID,
+		consensusNodeMgr,
+		bc,
+		signingService,
+		nil,
+		minStakeAmount,
+	)
+	if cons == nil {
+		return fmt.Errorf("failed to create consensus engine (VDF initialization likely failed)")
+	}
+
+	if p2pMgr != nil {
+		p2pMgr.SetConsensusEngine(cons)
+	}
+
+	if vs := cons.GetValidatorSet(); vs != nil {
+		minSPX := new(big.Int).Div(minStakeAmount, big.NewInt(1e18)).Uint64()
+		if err := vs.AddValidator(currentNodeID, minSPX); err != nil {
+			logger.Warn("Failed to add self validator: %v", err)
+		} else {
+			logger.Info("✅ Self validator registered")
+		}
+	}
+
+	// ========== Self-stake from operator-supplied reward address ==========
+	// There is no hardcoded validator↔address table here anymore. On a real
+	// permissionless network we don't know who else is running a node or
+	// what address they'll claim — that only ever gets decided at runtime,
+	// per-peer, after a verified balance check (see registerDiscoveredPeer
+	// below and stakeValidatorFromRewardAddress in helpers.go).
+	//
+	// The only stake this function seeds directly is our OWN, from the
+	// reward address the operator passed in. If that address has a real,
+	// sufficient balance, we stake from it; otherwise we self-bootstrap at
+	// minimum stake so a brand-new solo node can produce its own genesis
+	// block. That minimum-stake fallback applies only to our own node ID —
+	// it is never extended to a remote peer.
+	//
+	// validatorAddressMap below feeds the Phase 2 re-verification pass that
+	// runs after Block 1 commits (watchAndUpdateStakes / initializePhase2Stakes
+	// in helpers.go). It only ever contains addresses we actually have — our
+	// own reward address — never a hardcoded table of other nodes' wallets.
+	// Same-box devnet peers simply have no entry, which is fine:
+	// initializePhase2Stakes already treats a missing mapping as "use
+	// minimum stake", which is the correct behavior for trusted local test
+	// peers and is documented there.
+	validatorAddressMap := map[string]string{}
+	if rewardAddress != "" {
+		validatorAddressMap[currentNodeID] = rewardAddress
+	}
+
+	logger.Info("=== SELF-STAKE FROM REWARD ADDRESS ===")
+	if rewardAddress != "" {
+		selfRewardAddr := rewardAddress
+		if normalized, err := common.NormalizeSPIFAddress(rewardAddress); err == nil {
+			selfRewardAddr = normalized
+		}
+		bc.SetValidatorRewardAddress(currentNodeID, selfRewardAddr)
+		logger.Info("[%s] Block rewards / gas fees will route to %s", currentNodeID, selfRewardAddr)
+
+		if !stakeValidatorFromRewardAddress(bc, cons, currentNodeID, currentNodeID, rewardAddress) {
+			logger.Info("[%s] Reward address %s has no verifiable/sufficient balance yet — self-bootstrapping at minimum stake", currentNodeID, rewardAddress)
+			if vs := cons.GetValidatorSet(); vs != nil {
+				minSPX := vs.GetMinStakeSPX()
+				if err := vs.AddValidator(currentNodeID, minSPX); err != nil {
+					logger.Warn("[%s] Failed to self-bootstrap minimum stake: %v", currentNodeID, err)
+				}
+			}
+		}
+	} else {
+		logger.Info("[%s] No --reward-address supplied — self-bootstrapping at minimum stake (no peer ever receives this fallback, only our own node)", currentNodeID)
+	}
+
+	// Same-box devnet harness (usingRealAddress == false): the other
+	// synthetic validatorIDs in this process are our own test peers, not
+	// external actors, so seeding them at minimum stake is safe — it's
+	// exactly equivalent to running N trusted local validators by hand.
+	if !usingRealAddress {
+		if vs := cons.GetValidatorSet(); vs != nil {
+			minSPX := vs.GetMinStakeSPX()
+			for _, vid := range validatorIDs {
+				if vid == currentNodeID {
+					continue
+				}
+				if err := vs.AddValidator(vid, minSPX); err != nil {
+					logger.Warn("[%s] Failed to seed same-box peer stake for %s: %v", currentNodeID, vid, err)
+				}
+			}
+		}
+	}
+
+	bc.SetConsensusEngine(cons)
+	bc.SetConsensus(cons)
+	cons.SetTimeout(10 * time.Second)
+
+	// StartLeaderLoop is intentionally NOT started here.
+	//
+	// It duplicates runBlockProductionLoop (SECTION 14 below): both poll
+	// isLeader on their own ticker and, when true, independently call
+	// bc.CreateBlock() — which re-mines a fresh nonce/timestamp (and
+	// therefore a different hash) on every call — then independently
+	// propose. Running both meant the SAME leader node could mint two
+	// different candidate blocks for the same height seconds apart
+	// (observed directly: a node finalizing two distinct block-1 hashes
+	// while leader in the same view), which is self-equivocation, not a
+	// downstream locking bug. runBlockProductionLoop is the complete,
+	// view-aware path (VM verification, header signing, proper
+	// consensus.Proposal with View/SlotNumber/ElectedLeaderID) so it owns
+	// block production; StartLeaderLoop (core/blockchain.go) is kept
+	// around unused rather than deleted in case something else depends on
+	// the method existing, but must not be launched from here.
+
+	network.RegisterConsensus(currentNodeID, cons)
+	logger.Info("✅ Consensus engine registered")
+
+	// SECTION 10 — VM verifier
+	svm.SetSphincsVerifier(
+		func(b []byte) (interface{}, error) { return sthincs.DeserializePK(sthincsParams, b) },
+		func(b []byte) (interface{}, error) { return sthincs.DeserializeSignature(sthincsParams, b) },
+		func(msg []byte, sig, pk interface{}) bool {
+			return sthincs.Spx_verify(
+				sthincsParams,
+				msg,
+				sig.(*sthincs.SPHINCS_SIG),
+				pk.(*sthincs.SPHINCS_PK),
+			)
+		},
+	)
+	logger.Info("✅ VM SPHINCS+ verifier registered")
+
+	// ========== Add genesis transactions to ALL nodes ==========
+	allocs := core.DefaultGenesisAllocations()
+	genesisTransactions := make([]*types.Transaction, 0, len(allocs))
+	senderNonces := make(map[string]uint64)
+
+	logger.Info("=== CREATING GENESIS DISTRIBUTION TRANSACTIONS ===")
+	for i, alloc := range allocs {
+		note := &types.Note{
+			From:       core.GenesisVaultAddress,
+			To:         alloc.Address,
+			Fee:        0,
+			AmountNSPX: new(big.Int).Set(alloc.BalanceNSPX),
+			Storage:    fmt.Sprintf("genesis-dist-%d-%s", i, alloc.Label),
+			ReturnData: []byte(fmt.Sprintf("Genesis distribution to %s", alloc.Address)),
+		}
+		nonce := senderNonces[note.From]
+		tx := note.ToTxs(nonce, big.NewInt(0), big.NewInt(0))
+		if note.From == core.GenesisVaultAddress {
+			tx.Signature = []byte{}
+			tx.SignatureHash = make([]byte, 32)
+			tx.PublicKey = []byte{}
+		}
+		senderNonces[note.From]++
+		genesisTransactions = append(genesisTransactions, tx)
+		logger.Info("✅ Created genesis distribution: %s -> %s (%s SPX)",
+			core.GenesisVaultAddress, alloc.Address, alloc.Label)
+	}
+	logger.Info("Total genesis transactions created: %d", len(genesisTransactions))
+
+	if bc.GetMempool() == nil {
+		logger.Warn("⚠️ Mempool is nil! Initializing mempool before adding genesis transactions...")
+		mempoolConfig := &pool.MempoolConfig{
+			MaxSize:           10000,
+			MaxBytes:          100 * 1024 * 1024,
+			MaxTxSize:         100 * 1024,
+			BlockGasLimit:     big.NewInt(10000000),
+			ValidationTimeout: 30 * time.Second,
+			ExpiryTime:        24 * time.Hour,
+			MaxBroadcastSize:  5000,
+			MaxPendingSize:    5000,
+		}
+		mempool := pool.NewMempool(mempoolConfig, bc)
+		bc.SetMempool(mempool)
+		logger.Info("✅ Mempool initialized with default config")
+	}
+
+	if bc.GetMempool() != nil {
+		for _, tx := range genesisTransactions {
+			if err := bc.AddTransaction(tx); err != nil {
+				logger.Warn("Failed to add genesis tx to node %d: %v", nodeIndex, err)
+			}
+		}
+		logger.Info("✅ Added %d genesis transactions to node %d mempool", len(genesisTransactions), nodeIndex)
+	} else {
+		logger.Warn("⚠️ Mempool still nil after initialization, skipping genesis transaction broadcast")
+	}
+
+	// peerRegistry
+	var peerRegistryMu sync.Mutex
+	peerRegistry := make(map[string]string)
+
+	registerDiscoveredPeer := func(peerNodeID, peerAddr string) {
+		if peerNodeID == "" || peerAddr == "" || peerAddr == currentAddress {
+			return
+		}
+		peerRegistryMu.Lock()
+		_, already := peerRegistry[peerNodeID]
+		peerRegistry[peerNodeID] = peerAddr
+		peerRegistryMu.Unlock()
+		if already {
+			return
+		}
+
+		logger.Info("🌐 Discovered new peer %s at %s — registering (network peer only, no stake)", peerNodeID, peerAddr)
+
+		host, port, err := net.SplitHostPort(peerAddr)
 		if err != nil {
-			return nil, fmt.Errorf("failed to initialize STHINCSParameters: %v", err)
+			logger.Warn("Discovered peer %s has unparseable address %s: %v", peerNodeID, peerAddr, err)
+			host, port = peerAddr, ""
 		}
-
-		sphincsMgrs[i] = sign.NewSTHINCSManager(nil, keyManager, sphincsParams)
-		if sphincsMgrs[i] == nil {
-			return nil, fmt.Errorf("failed to initialize STHINCSManager for %s", cfg.Name)
+		if peerNode := network.NewNode(peerAddr, host, port, "", false, network.RoleValidator, mainDatabase); peerNode != nil {
+			nodeMgr.AddNode(peerNode)
 		}
+		if p2pMgr != nil {
+			p2pMgr.AddPeer(peerNodeID, peerAddr)
+		}
+		// NOTE: no vs.AddValidator call here. Being reachable on the wire
+		// makes a node a known gossip/relay peer, nothing more. Validator
+		// status is granted exclusively by registerPeerStakeClaim below,
+		// once — and only once — the peer's claimed reward address has a
+		// verified on-chain balance meeting the minimum stake.
 	}
 
-	// Extract all validator addresses for the state machine
-	allValidators := make([]string, len(configs))
-	for i, cfg := range configs {
-		allValidators[i] = cfg.Name
+	// registerPeerStakeClaim is invoked when a peer's key-exchange reply
+	// carries a reward address (see helpers.go). It is the ONLY function in
+	// this file allowed to grant validator status to a remote peer, and it
+	// only does so after stakeValidatorFromRewardAddress independently
+	// verifies that address's balance — the claim itself is never trusted.
+	registerPeerStakeClaim := func(peerNodeID, rewardAddress string) {
+		if peerNodeID == "" || rewardAddress == "" {
+			return
+		}
+		stakeValidatorFromRewardAddress(bc, cons, currentNodeID, peerNodeID, rewardAddress)
 	}
 
-	// Initialize resources and TCP server configs
-	tcpConfigs := make([]NodeConfig, len(configs))
-	for i, cfg := range configs {
-		parts := strings.Split(cfg.Address, ":")
-		if len(parts) != 2 {
-			logger.Errorf("Invalid address format for %s: %s", cfg.Name, cfg.Address)
-			return nil, fmt.Errorf("invalid address format for %s: %s", cfg.Name, cfg.Address)
+	getKnownPeers := func() []knownPeerInfo {
+		peerRegistryMu.Lock()
+		defer peerRegistryMu.Unlock()
+		out := make([]knownPeerInfo, 0, len(peerRegistry))
+		for nodeID, addr := range peerRegistry {
+			out = append(out, knownPeerInfo{NodeID: nodeID, Address: addr})
 		}
-		ip, port := parts[0], parts[1]
-		if err := transport.ValidateIP(ip, port); err != nil {
-			logger.Errorf("Invalid IP or port for %s: %v", cfg.Name, err)
-			return nil, fmt.Errorf("invalid IP or port for %s: %v", cfg.Name, err)
-		}
-
-		logger.Infof("Initializing blockchain for %s", cfg.Name)
-		dataDir := common.GetBlockchainDataDir(cfg.Name)
-		networkType := "devnet"
-		blockchain, err := core.NewBlockchain(dataDir, cfg.Name, allValidators, networkType)
-		if err != nil {
-			logger.Errorf("Failed to initialize blockchain for %s: %v", cfg.Name, err)
-			return nil, fmt.Errorf("failed to initialize blockchain for %s: %w", cfg.Name, err)
-		}
-		blockchains[i] = blockchain
-		logger.Infof("Genesis block created for %s, hash: %x", cfg.Name, blockchains[i].GetBestBlockHash())
-
-		mempool := pool.NewMempool(nil, blockchains[i])
-		blockchains[i].SetMempool(mempool)
-
-		mempool.SetSTHINCSManager(sphincsMgrs[i])
-		logger.Infof("Set STHINCS manager on mempool for %s", cfg.Name)
-
-		messageChans[i] = make(chan *security.Message, 1000)
-		rpcServers[i] = rpc.NewServer(messageChans[i], blockchains[i], sphincsMgrs[i])
-
-		tcpConfigs[i] = NodeConfig{
-			Address:   cfg.Address,
-			Name:      cfg.Name,
-			MessageCh: messageChans[i],
-			RPCServer: rpcServers[i],
-			ReadyCh:   tcpReadyCh,
-		}
-
-		db, err := leveldb.OpenFile(common.GetLevelDBPath(cfg.Name), nil)
-		if err != nil {
-			logger.Errorf("Failed to open LevelDB for %s: %v", cfg.Name, err)
-			return nil, fmt.Errorf("failed to open LevelDB for %s: %w", cfg.Name, err)
-		}
-		dbs[i] = db
-
-		nodeConfig := network.NodePortConfig{
-			ID:        cfg.Name,
-			Name:      cfg.Name,
-			TCPAddr:   cfg.Address,
-			UDPPort:   cfg.UDPPort,
-			HTTPPort:  cfg.HTTPPort,
-			WSPort:    cfg.WSPort,
-			Role:      cfg.Role,
-			SeedNodes: cfg.SeedNodes,
-		}
-		p2pServers[i] = p2p.NewServer(nodeConfig, blockchains[i], db)
-		localNode := p2pServers[i].LocalNode()
-		localNode.ID = cfg.Name
-		localNode.UpdateRole(cfg.Role)
-		logger.Infof("Node %s initialized with ID %s and role %s", cfg.Name, localNode.ID, cfg.Role)
-
-		if len(localNode.PublicKey) == 0 || len(localNode.PrivateKey) == 0 {
-			logger.Errorf("Key generation failed for %s", cfg.Name)
-			return nil, fmt.Errorf("key generation failed for %s", cfg.Name)
-		}
-
-		pubHex := hex.EncodeToString(localNode.PublicKey)
-		logger.Infof("Node %s public key: %s", cfg.Name, pubHex)
-		if _, exists := publicKeys[pubHex]; exists {
-			logger.Errorf("Duplicate public key detected for %s: %s", cfg.Name, pubHex)
-			return nil, fmt.Errorf("duplicate public key detected for %s: %s", cfg.Name, pubHex)
-		}
-		publicKeys[pubHex] = cfg.Name
-
-		tcpServers[i] = transport.NewTCPServer(cfg.Address, messageChans[i], rpcServers[i], tcpReadyCh)
-		wsServers[i] = transport.NewWebSocketServer(cfg.WSPort, messageChans[i], rpcServers[i])
-		httpServers[i] = http.NewServer(cfg.HTTPPort, messageChans[i], blockchains[i], readyCh)
+		return out
 	}
 
-	// Bind TCP servers
-	if err := BindTCPServers(tcpConfigs, wg); err != nil {
-		logger.Errorf("Failed to bind TCP servers: %v", err)
-		return nil, err
-	}
-
-	// Wait for TCP servers to be ready
-	logger.Infof("Waiting for %d TCP servers to be ready", len(configs))
-	for i := 0; i < len(configs); i++ {
-		select {
-		case <-tcpReadyCh:
-			logger.Infof("TCP server %d of %d ready", i+1, len(configs))
-		case <-time.After(10 * time.Second):
-			logger.Errorf("Timeout waiting for TCP server %d to be ready after 10s", i+1)
-			return nil, fmt.Errorf("timeout waiting for TCP server %d to be ready after 10s", i+1)
+	for i, addr := range networkAddresses {
+		if i == nodeIndex {
+			continue
 		}
-	}
-	close(tcpReadyCh)
-	logger.Infof("All TCP servers are ready")
-
-	// Start P2P servers and wait for UDP listeners to be ready
-	p2pReadyCh := make(chan struct{}, len(configs))
-	for i, config := range configs {
-		startP2PServer(config.Name, p2pServers[i], p2pReadyCh, p2pErrorCh, udpReadyCh, wg)
+		peerRegistryMu.Lock()
+		peerRegistry[validatorIDs[i]] = addr
+		peerRegistryMu.Unlock()
 	}
 
-	// Wait for all P2P servers to be ready or fail
-	logger.Infof("Waiting for %d P2P servers to be ready", len(configs))
-	for i := 0; i < len(configs); i++ {
-		select {
-		case <-p2pReadyCh:
-			logger.Infof("P2P server %d of %d ready", i+1, len(configs))
-		case err := <-p2pErrorCh:
-			logger.Errorf("P2P server %d failed: %v", i+1, err)
-			// Cleanup resources before returning
-			for i, db := range dbs {
-				if db != nil {
-					db.Close()
-					dbs[i] = nil
+	// SECTION 11 — TCP listener
+	ctx, cancelCtx := context.WithCancel(context.Background())
+	defer cancelCtx()
+
+	tcpListener, err := net.Listen("tcp", currentAddress)
+	if err != nil {
+		return fmt.Errorf("failed to bind TCP listener: %w", err)
+	}
+	logger.Info("✅ TCP listener bound on %s", currentAddress)
+
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer tcpListener.Close()
+
+		for {
+			conn, err := tcpListener.Accept()
+			if err != nil {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					logger.Error("TCP accept error: %v", err)
+					return
 				}
 			}
-			for i, srv := range tcpServers {
-				if srv != nil {
-					srv.Stop()
-					tcpServers[i] = nil
-				}
-			}
-			for i, srv := range p2pServers {
-				if srv != nil && !closed[i] {
-					srv.Close()
-					closed[i] = true
-					p2pServers[i] = nil
-				}
-			}
-			return nil, fmt.Errorf("P2P server %d failed: %v", i+1, err)
-		case <-time.After(10 * time.Second):
-			logger.Errorf("Timeout waiting for P2P server %d to be ready", i+1)
-			// Cleanup resources before returning
-			for i, db := range dbs {
-				if db != nil {
-					db.Close()
-					dbs[i] = nil
-				}
-			}
-			for i, srv := range tcpServers {
-				if srv != nil {
-					srv.Stop()
-					tcpServers[i] = nil
-				}
-			}
-			for i, srv := range p2pServers {
-				if srv != nil && !closed[i] {
-					srv.Close()
-					closed[i] = true
-					p2pServers[i] = nil
-				}
-			}
-			return nil, fmt.Errorf("timeout waiting for P2P server %d to be ready", i+1)
+
+			wg.Add(1)
+			go func(c net.Conn) {
+				defer wg.Done()
+				defer c.Close()
+				handleIncomingConn(c, currentNodeID, currentAddress, rewardAddress, signingService, sthincsParams, cons, p2pMgr, rpcServer, getKnownPeers, registerDiscoveredPeer, registerPeerStakeClaim)
+			}(conn)
 		}
-	}
-	close(p2pReadyCh)
+	}()
+	logger.Info("✅ TCP inbound listener running")
 
-	// Wait for UDP listeners to be ready
-	logger.Infof("Waiting for %d UDP listeners to be ready", len(configs))
-	for i := 0; i < len(configs); i++ {
-		select {
-		case <-udpReadyCh:
-			logger.Infof("UDP listener %d of %d ready", i+1, len(configs))
-		case <-time.After(5 * time.Second):
-			logger.Errorf("Timeout waiting for UDP listener %d to be ready", i+1)
-			// Cleanup resources before returning
-			for i, db := range dbs {
-				if db != nil {
-					db.Close()
-					dbs[i] = nil
-				}
-			}
-			for i, srv := range tcpServers {
-				if srv != nil {
-					srv.Stop()
-					tcpServers[i] = nil
-				}
-			}
-			for i, srv := range p2pServers {
-				if srv != nil && !closed[i] {
-					srv.Close()
-					closed[i] = true
-					p2pServers[i] = nil
-				}
-			}
-			return nil, fmt.Errorf("timeout waiting for UDP listener %d to be ready", i+1)
-		}
-	}
-	close(udpReadyCh)
+	// SECTION 11b — dynamic peer discovery via --seeds with DNS support
+	//
+	// The hardcoded default enrtree:// URL only makes sense for real-device
+	// nodes (totalNodes==1) and production clusters (totalNodes>100) — those
+	// are the modes where peers actually need to be discovered dynamically.
+	// Same-box devnet runs (2..100 nodes on one machine) already register
+	// every peer statically a few sections above, so defaulting to DNS there
+	// just burns a lookup against a placeholder domain and logs a scary WARN
+	// for a path that was never going to contribute any peers.
+	noSeedsProvided := seeds == "" || strings.TrimSpace(seeds) == ""
+	useDefaultDNSTree := totalNodes == 1 || isProduction
 
-	// Start peer discovery for all P2P servers
-	for i, config := range configs {
-		go func(name string, server *p2p.Server) {
-			if err := server.DiscoverPeers(); err != nil {
-				logger.Errorf("Peer discovery failed for %s: %v", name, err)
+	if noSeedsProvided && useDefaultDNSTree {
+		logger.Info("No --seeds provided; using default DNS discovery tree: %s", dnsdiscovery.DefaultENRTreeURL)
+		seeds = dnsdiscovery.DefaultENRTreeURL
+	} else if noSeedsProvided {
+		logger.Info("Same-box devnet mode (%d nodes) — skipping default DNS discovery tree; relying on statically-registered peers", totalNodes)
+	}
+
+	if seeds != "" && strings.TrimSpace(seeds) != "" {
+		plainSeeds, dnsResolver := dnsdiscovery.FilterDNSTrees(seeds)
+
+		if dnsResolver.HasTrees() {
+			logger.Info("🌐 Resolving DNS discovery trees for peer bootstrap...")
+			ctxDNS, cancelDNS := context.WithTimeout(context.Background(), 30*time.Second)
+			dnsPeers, err := dnsResolver.ResolvePeers(ctxDNS)
+			cancelDNS()
+
+			if err != nil {
+				if len(plainSeeds) > 0 {
+					logger.Warn("DNS discovery failed: %v (falling back to %d plain seed address(es))", err, len(plainSeeds))
+				} else {
+					logger.Warn("DNS discovery failed: %v (no plain seeds configured; relying on statically-registered peers)", err)
+				}
+			} else if len(dnsPeers) > 0 {
+				logger.Info("🌱 DNS discovery returned %d peer(s) — registering them", len(dnsPeers))
+				for _, peer := range dnsPeers {
+					if peer.Address != "" && peer.Address != currentAddress {
+						registerDiscoveredPeer(peer.NodeID, peer.Address)
+					}
+				}
 			} else {
-				logger.Infof("Peer discovery completed for %s", name)
+				logger.Info("DNS discovery returned no peers (tree may be empty)")
 			}
-		}(config.Name, p2pServers[i])
+		}
+
+		if len(plainSeeds) > 0 {
+			logger.Info("🌱 Discovering peers via %d plain seed address(es)", len(plainSeeds))
+			discoverAndRegisterPeers(
+				plainSeeds,
+				currentNodeID,
+				currentAddress,
+				rewardAddress,
+				signingService,
+				sthincsParams,
+				2,
+				registerDiscoveredPeer,
+				registerPeerStakeClaim,
+			)
+		} else if !dnsResolver.HasTrees() {
+			logger.Info("No --seeds configured; relying on statically-registered peers only")
+		}
+	} else {
+		logger.Info("No --seeds configured; relying on statically-registered peers only")
 	}
 
-	// Start HTTP and WebSocket servers
-	for i, config := range configs {
-		startHTTPServer(config.Name, config.HTTPPort, messageChans[i], blockchains[i], readyCh, wg)
-		startWebSocketServer(config.Name, config.WSPort, messageChans[i], rpcServers[i], readyCh, wg)
+	effectivePeerCount := func() int {
+		peerRegistryMu.Lock()
+		defer peerRegistryMu.Unlock()
+		return len(peerRegistry)
 	}
 
-	// Wait for HTTP and WebSocket servers to be ready
-	logger.Infof("Waiting for %d servers to be ready", len(configs)*2)
-	for i := 0; i < len(configs)*2; i++ {
-		select {
-		case <-readyCh:
-			logger.Infof("Server %d of %d ready", i+1, len(configs)*2)
-		case <-time.After(10 * time.Second):
-			logger.Errorf("Timeout waiting for server %d to be ready after 10s", i+1)
-			// Cleanup resources before returning
-			for i, db := range dbs {
-				if db != nil {
-					db.Close()
-					dbs[i] = nil
-				}
+	if effectivePeerCount() > 0 {
+		logger.Info("Waiting for other nodes to be ready (3 seconds)...")
+		time.Sleep(3 * time.Second)
+	}
+
+	if effectivePeerCount() > 0 {
+		logger.Info("=== EXCHANGING PUBLIC KEYS (SYNC) BEFORE CONSENSUS ===")
+		for _, addr := range networkAddresses {
+			if addr == currentAddress {
+				continue
 			}
-			for i, srv := range tcpServers {
-				if srv != nil {
-					srv.Stop()
-					tcpServers[i] = nil
-				}
+			logger.Info("Exchanging keys with same-box peer: %s", addr)
+			if kx, err := exchangeKeyWithPeerSync(addr, currentNodeID, rewardAddress, signingService, sthincsParams); err != nil {
+				logger.Warn("Failed to exchange keys with %s: %v", addr, err)
+			} else if kx.RewardAddress != "" {
+				registerPeerStakeClaim(kx.NodeID, kx.RewardAddress)
 			}
-			for i, srv := range p2pServers {
-				if srv != nil && !closed[i] {
-					srv.Close()
-					closed[i] = true
-					p2pServers[i] = nil
-				}
+		}
+		peerRegistryMu.Lock()
+		var discoveredAddrs []string
+		for _, addr := range peerRegistry {
+			discoveredAddrs = append(discoveredAddrs, addr)
+		}
+		peerRegistryMu.Unlock()
+		for _, addr := range discoveredAddrs {
+			logger.Info("Exchanging keys with discovered peer: %s", addr)
+			if kx, err := exchangeKeyWithPeerSync(addr, currentNodeID, rewardAddress, signingService, sthincsParams); err != nil {
+				logger.Warn("Failed to exchange keys with %s: %v", addr, err)
+			} else if kx.RewardAddress != "" {
+				registerPeerStakeClaim(kx.NodeID, kx.RewardAddress)
 			}
-			return nil, fmt.Errorf("timeout waiting for server %d to be ready after 10s", i+1)
+		}
+		logger.Info("✅ Key exchange completed with all known peers")
+	}
+
+	logger.Info("=== VERIFYING KEY SERIALIZATION ROUND-TRIP ===")
+	pkBytes, err = signingService.GetPublicKey()
+	if err != nil {
+		return fmt.Errorf("cannot get self public key: %w", err)
+	}
+	if _, err := sthincs.DeserializePK(sthincsParams, pkBytes); err != nil {
+		return fmt.Errorf("self public key serialization failed: %v", err)
+	}
+	logger.Info("✅ Key serialization verified")
+
+	logger.Info("✅ Self-stake and key exchange complete; remaining validator admission happens per-peer as reward addresses are verified")
+
+	if effectivePeerCount() > 0 && nodeIndex == 0 {
+		logger.Info("Waiting for genesis transactions to propagate (2 seconds)...")
+		time.Sleep(2 * time.Second)
+	}
+
+	if err := cons.Start(); err != nil {
+		return fmt.Errorf("failed to start consensus: %w", err)
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		runCheckpointSyncLoop(ctx, bc, cons, currentNodeID, networkAddresses, nodeIndex)
+	}()
+	logger.Info("✅ Consensus engine started AFTER key exchange")
+
+	phase2State := &phase2InitState{}
+
+	if effectivePeerCount() > 0 || !usingRealAddress && synthCount > 1 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			watchAndUpdateStakes(ctx, bc, cons, currentNodeID, validatorIDs, validatorAddressMap, phase2State)
+		}()
+	}
+
+	// SECTION 12 — genesis verification
+	expectedGenesisHash := core.GetGenesisHash()
+	genesis := bc.GetLatestBlock()
+	if genesis == nil || genesis.GetHeight() != 0 {
+		return fmt.Errorf("genesis block not initialized")
+	}
+	logger.Info("✅ Genesis hash verified: %s", expectedGenesisHash)
+
+	// SECTION 13 — HTTP server
+	httpPort := 8545 + nodeIndex
+	if nodeConfig.HTTPPort != "" {
+		if port, err := strconv.Atoi(nodeConfig.HTTPPort); err == nil {
+			httpPort = port
 		}
 	}
-	logger.Infof("All servers are ready")
 
-	resources := make([]NodeResources, len(configs))
-	for i := range configs {
-		resources[i] = NodeResources{
-			Blockchain:      blockchains[i],
-			MessageCh:       messageChans[i],
-			RPCServer:       rpcServers[i],
-			P2PServer:       p2pServers[i],
-			PublicKey:       hex.EncodeToString(p2pServers[i].LocalNode().PublicKey),
-			TCPServer:       tcpServers[i],
-			WebSocketServer: wsServers[i],
-			HTTPServer:      httpServers[i],
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		msgCh := make(chan *security.Message, 100)
+		httpSrv := http.NewServer(fmt.Sprintf(":%d", httpPort), msgCh, bc, nil)
+		logger.Info("JSON-RPC listening on http://127.0.0.1:%d", httpPort)
+		if err := httpSrv.Start(); err != nil {
+			logger.Error("HTTP server error: %v", err)
 		}
+	}()
+
+	// SECTION 14 — block production loop
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		runBlockProductionLoop(ctx, bc, cons, currentNodeID, totalNodes, networkType, validatorIDs, validatorAddressMap, phase2State, effectivePeerCount)
+	}()
+
+	// SECTION 15 — state persistence loop
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		runStatePersistenceLoop(ctx, bc, currentNodeID, currentAddress)
+	}()
+
+	logger.Info("=== NODE RUNNING ===")
+	logger.Info("Node ID: %s", currentNodeID)
+	logger.Info("TCP: %s", currentAddress)
+	logger.Info("HTTP: http://127.0.0.1:%d", httpPort)
+
+	knownPeers := effectivePeerCount()
+	switch {
+	case knownPeers == 0:
+		logger.Info("Mode: SOLO (no peers yet — waiting for connections)")
+	case knownPeers < 2:
+		logger.Warn("Mode: INSUFFICIENT PEERS (%d known, PBFT needs ≥ 2 more)", knownPeers)
+	default:
+		logger.Info("Mode: PBFT (%d known peer(s))", knownPeers)
 	}
 
-	return resources, nil
+	if knownPeers >= 2 {
+		logger.Info("✅ PBFT CONSENSUS ACTIVE with %d known validators", knownPeers+1)
+	} else if usingRealAddress {
+		logger.Info("ℹ️  Real-device mode: consensus activates as peers join via --seeds discovery")
+	}
+
+	logger.Info("Press Ctrl+C to stop")
+
+	// SECTION 16 — graceful shutdown
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	<-sigCh
+
+	logger.Info("Shutdown signal received — stopping node %d…", nodeIndex+1)
+	cons.Stop()
+	cancelCtx()
+	wg.Wait()
+	flushNodeState(bc, currentNodeID, currentAddress)
+
+	logger.Info("✅ Node %d stopped cleanly", nodeIndex+1)
+	return nil
+}
+
+// isLoopbackHost reports whether host refers to this same machine.
+func isLoopbackHost(host string) bool {
+	if host == "" || host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback()
 }

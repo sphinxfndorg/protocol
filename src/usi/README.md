@@ -1,6 +1,6 @@
 # USI Software
 
-USI Software (Universal Sovereign Identity) is a desktop identity, encryption, signature, and wallet application for the SPIF (Sphinx Fingerprint) identity system. It provides a graphical interface for creating a sovereign cryptographic identity, protecting folders as encrypted vaults, signing documents, verifying signatures, and managing a SPIF wallet address.
+USI Software (Universal Sovereign Identity) is a desktop identity, encryption, signature, and wallet application for the SPIF (Sphinx Fingerprint) identity system. It provides a graphical interface for creating a sovereign cryptographic identity, protecting folders as encrypted vaults, minting data with a cryptographic signature, verifying that data, and managing a SPIF wallet address.
 
 The application is built in Go with the Fyne GUI toolkit.
 
@@ -16,26 +16,27 @@ The application is built in Go with the Fyne GUI toolkit.
   - Unlocks the session using the user's passphrase.
   - Keeps the passphrase required for sensitive operations.
 
-- **Folder encryption**
+- **Folder encryption (Message)**
   - Encrypts folders into `.vault` files.
   - Uses AES-256-GCM for encryption.
   - Uses Argon2id for passphrase-based key derivation.
   - Supports optional embedded secure messages.
   - Supports recipient fingerprints for shared vault access.
 
-- **Vault decryption**
+- **Vault decryption (Inbox)**
   - Opens `.vault` files and restores the original folder.
   - Checks whether the current identity is authorized to decrypt shared vaults.
   - Recovers embedded messages when present.
   - Shows sender and organization information when available.
 
-- **Document signing**
+- **Document signing (Mint Data)**
   - Signs files using the user's cryptographic identity.
   - Uses SPHINCS+ signatures with SHAKE-256 hashing.
   - Stores signature metadata in a `.usimeta` sidecar file.
+  - Auto-mints an on-chain NFT anchor for the signed data.
   - Prevents re-signing already signed documents to preserve integrity.
 
-- **Signature verification**
+- **Signature verification (Verify Data)**
   - Verifies whether a file is authentic and untampered.
   - Reads the `.usimeta` sidecar file from the same folder.
   - Displays signer, organization, timestamp, and verification status.
@@ -94,26 +95,26 @@ The dashboard summarizes:
 - Cryptographic identity parameters
 - Recent activity history
 
-### Encrypt
+### Message
 
-The encrypt screen allows the user to select a folder and lock it into a `.vault` file. The user may optionally provide:
+The Message screen allows the user to select a folder and lock it into a `.vault` file. The user may optionally provide:
 
 - Recipient fingerprints, comma-separated
 - An embedded secure message
 
 When recipients are provided, USI resolves their public keys from the key directory before encrypting the vault.
 
-### Decrypt
+### Inbox
 
-The decrypt screen allows the user to choose a `.vault` file, inspect vault information, confirm authorization, and restore the folder. If the vault contains an embedded message, the message is shown after successful decryption.
+The Inbox screen allows the user to choose a `.vault` file, inspect vault information, confirm authorization, and restore the folder. If the vault contains an embedded message, the message is shown after successful decryption.
 
-### Sign
+### Mint Data
 
-The sign screen allows the user to select any regular file and attach a cryptographic signature. The signature is stored as a `.usimeta` sidecar file.
+The Mint Data screen allows the user to select any regular file and attach a cryptographic signature. The signature is stored as a `.usimeta` sidecar file, and the signed data is automatically minted as an on-chain NFT anchor.
 
-### Verify
+### Verify Data
 
-The verify screen checks a file against its `.usimeta` sidecar metadata. It reports whether the signature is valid and displays signer information when available.
+The Verify Data screen checks a file against its `.usimeta` sidecar metadata. It reports whether the signature is valid and displays signer information when available.
 
 ### My Keys
 
@@ -170,6 +171,7 @@ Depending on the actual module layout, the entry command may differ. If the GUI 
 - Sensitive operations ask the user to confirm their passphrase.
 - Activity is tracked in-memory and displayed on the dashboard.
 - Wallet operations are currently placeholders and should be connected to a real wallet backend.
+- The sidebar navigation labels are Dashboard, Message, Inbox, Mint Data, Verify Data, Wallet, and My Keys; internally these map to the encrypt, decrypt, sign, and verify screens/functions respectively.
 
 ## Security Notes
 

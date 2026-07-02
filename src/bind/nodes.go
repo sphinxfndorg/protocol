@@ -46,7 +46,7 @@ import (
 )
 
 // ConnectionPool manages persistent TCP connections for consensus messages
-type ConnectionPool struct {
+type ConnPool struct {
 	connections map[string]net.Conn
 	mu          *sync.Mutex
 }
@@ -394,7 +394,7 @@ func StartNode(
 		}
 
 		// Connection pool for persistent TCP connections
-		connPool := &ConnectionPool{
+		connPool := &ConnPool{
 			connections: make(map[string]net.Conn),
 			mu:          &sync.Mutex{},
 		}

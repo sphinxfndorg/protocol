@@ -6,12 +6,11 @@ package rpc
 
 // Standard JSON-RPC error codes.
 const (
-	ErrCodeParseError             = -32700     // Invalid JSON
-	ErrCodeInvalidRequest         = -32600     // Not a valid JSON-RPC request
-	ErrCodeMethodNotFound         = -32601     // Method does not exist
-	ErrCodeInvalidParams          = -32602     // Invalid parameters
-	ErrCodeInternalError          = -32603     // Internal server error
-	RPCGetCheckpoint      RPCType = iota + 100 // Add after existing
+	ErrCodeParseError     = -32700 // Invalid JSON
+	ErrCodeInvalidRequest = -32600 // Not a valid JSON-RPC request
+	ErrCodeMethodNotFound = -32601 // Method does not exist
+	ErrCodeInvalidParams  = -32602 // Invalid parameters
+	ErrCodeInternalError  = -32603 // Internal server error
 )
 
 // RPC message types.
@@ -41,4 +40,8 @@ const (
 	RPCGetBalance
 	RPCGetTransactionHistory
 	RPCGetSupplyStatus
+	RPCGetCheckpoint
+	RPCStoreArtifact
+	RPCGetArtifact
+	RPCGetNonce
 )

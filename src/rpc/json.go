@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"time"
 
+	"golang.org/x/crypto/sha3"
+
 	"github.com/sphinxfndorg/protocol/src/consensus"
 	"github.com/sphinxfndorg/protocol/src/core"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
@@ -306,6 +308,11 @@ func (h *JSONRPCHandler) registerMethods() {
 	h.methods["gettransactionhistory"] = h.getTransactionHistory
 	h.methods["getsupplystatus"] = h.getSupplyStatus
 	h.methods["getcheckpoint"] = h.getCheckpoint
+
+	// Mint/NFT storage methods
+	h.methods["storeartifact"] = h.storeArtifact
+	h.methods["getartifact"] = h.getArtifact
+	h.methods["getnonce"] = h.getNonce
 }
 
 // ProcessRequest processes a JSON-RPC request or batch of requests.
@@ -852,6 +859,113 @@ func (h *JSONRPCHandler) parseParams(params interface{}, target interface{}) err
 		return fmt.Errorf("invalid parameters: %v", err)
 	}
 	return json.Unmarshal(data, target)
+}
+
+// storeArtifact persists a StorageArtifact keyed by MintID in the node's KV store.
+func (h *JSONRPCHandler) storeArtifact(params interface{}) (interface{}, error) {
+	var paramsArray []string
+	if err := h.parseParams(params, &paramsArray); err != nil {
+		return nil, err
+	}
+	if len(paramsArray) < 1 || paramsArray[0] == "" {
+		return nil, errors.New("missing artifact JSON parameter")
+	}
+
+	// Parse artifact JSON
+	var artifact struct {
+		MintID        string `json:"mint_id"`
+		Subject       string `json:"subject"`
+		CID           string `json:"cid"`
+		CIDHashHex    string `json:"cid_hash_hex"`
+		PayloadHash   string `json:"payload_hash"`
+		ReceiptHash   string `json:"receipt_hash"`
+		AnchorTagType string `json:"anchor_tag_type"`
+	}
+	if err := json.Unmarshal([]byte(paramsArray[0]), &artifact); err != nil {
+		return nil, fmt.Errorf("invalid artifact JSON: %w", err)
+	}
+	if artifact.MintID == "" {
+		return nil, errors.New("artifact must have a mint_id")
+	}
+
+	// Store in the node's KV store with 12-hour TTL (uint16 max is 65535 seconds)
+	mintIDKey := sha3Key("artifact:" + artifact.MintID)
+	artifactData, _ := json.Marshal(artifact)
+	h.server.store.Put(mintIDKey, artifactData, 43200) // 12 hours
+
+	// Also store under CIDHashHex for lookup by content
+	if artifact.CIDHashHex != "" {
+		cidHashKey := sha3Key("cidhash:" + artifact.CIDHashHex)
+		h.server.store.Put(cidHashKey, []byte(artifact.MintID), 43200)
+	}
+
+	return map[string]string{
+		"status":  "stored",
+		"mint_id": artifact.MintID,
+	}, nil
+}
+
+// getArtifact retrieves a stored StorageArtifact by MintID.
+func (h *JSONRPCHandler) getArtifact(params interface{}) (interface{}, error) {
+	var paramsArray []string
+	if err := h.parseParams(params, &paramsArray); err != nil {
+		return nil, err
+	}
+	if len(paramsArray) < 1 || paramsArray[0] == "" {
+		return nil, errors.New("missing mint_id parameter")
+	}
+	mintID := paramsArray[0]
+
+	mintIDKey := sha3Key("artifact:" + mintID)
+	values, ok := h.server.store.Get(mintIDKey)
+	if !ok || len(values) == 0 {
+		return map[string]interface{}{
+			"found":   false,
+			"mint_id": mintID,
+		}, nil
+	}
+
+	var artifact interface{}
+	if err := json.Unmarshal(values[0], &artifact); err != nil {
+		return nil, fmt.Errorf("parse stored artifact: %w", err)
+	}
+	return artifact, nil
+}
+
+// getNonce returns the next nonce for an address.
+func (h *JSONRPCHandler) getNonce(params interface{}) (interface{}, error) {
+	var paramsArray []string
+	if err := h.parseParams(params, &paramsArray); err != nil {
+		return nil, err
+	}
+	if len(paramsArray) < 1 || paramsArray[0] == "" {
+		return nil, errors.New("missing address parameter")
+	}
+	address := paramsArray[0]
+
+	// Query the state DB for the current nonce
+	stateDB, err := h.server.blockchain.NewStateDB()
+	if err != nil {
+		// Fallback to 0 if state DB is unavailable
+		return uint64(0), nil
+	}
+	defer stateDB.Close()
+
+	nonce, err := stateDB.GetNonce(address)
+	if err != nil {
+		return uint64(0), nil
+	}
+	return nonce, nil
+}
+
+// sha3Key creates a deterministic 32-byte key from a string using SHA3-256.
+func sha3Key(input string) Key {
+	// Use golang.org/x/crypto/sha3 imported in anchor.go style
+	// but we need to inline it since this package doesn't import it directly
+	h := sha3.Sum256([]byte(input))
+	var k Key
+	copy(k[:], h[:])
+	return k
 }
 
 // RPCCallerImpl implements core.RPCCaller

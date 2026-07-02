@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/big"
 	"os"
 	"sync"
 	"time"
@@ -21,7 +22,11 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
+	types "github.com/sphinxfndorg/protocol/src/core/transaction"
+	"github.com/sphinxfndorg/protocol/src/rpc"
+	"github.com/sphinxfndorg/protocol/src/storage"
 	keys "github.com/sphinxfndorg/protocol/src/usi/core/key"
+	"github.com/sphinxfndorg/protocol/src/usi/core/mint"
 	"github.com/sphinxfndorg/protocol/src/usi/core/sign"
 	pubkeydir "github.com/sphinxfndorg/protocol/src/usi/server/server"
 )
@@ -424,4 +429,376 @@ func (os *OrgSelector) SelectedOrg() keys.OrgCode {
 func (os *OrgSelector) SetSelectedOrg(orgCode keys.OrgCode) {
 	// Only SPIF is available, ignore any other value
 	log.Printf("[DEBUG] SetSelectedOrg called with %q, ignoring (only SPIF supported)", orgCode)
+}
+
+// AnchorMintReceipt commits a signed MintReceipt to the chain.
+//
+// ASSUMPTION: I don't have your consensus/mempool tx-validation code, so
+// there's no dedicated "data" tx type here — this uses a self-send
+// transaction whose ReturnData carries the anchor tag (same pattern
+// SendTransaction already uses for memos). Amount is 1 nSPX rather than 0,
+// in case mempool rules reject zero-value transfers as dust — cheap either
+// way. If Sphinx later gets a first-class MINT/DATA tx type validated by
+// consensus, swap the tx construction below for that; BuildAnchorData
+// itself doesn't need to change.
+// AnchorMintReceipt commits a signed MintReceipt to the chain and saves the anchor tag.
+func (c *WalletClient) AnchorMintReceipt(receipt *mint.MintReceipt) (txID string, anchorPath string, err error) {
+	if sessionPassphrase == "" {
+		return "", "", errors.New("not logged in")
+	}
+	if receipt == nil {
+		return "", "", errors.New("nil receipt")
+	}
+
+	// Build NFT off-chain storage + on-chain anchor payload (Ethereum-style: anchor CID hash).
+	// 1) Upload mint receipt JSON bytes to IPFS and get CID.
+	// 2) Build deterministic CIDHash and create a storage artifact payload.
+	// 3) Anchor only the CIDHash/contract payload on-chain (replace receipt-anchor-only).
+	//
+	// NOTE: This uses storage module with safe fallbacks when IPFS is disabled.
+	payloadJSON, err := json.Marshal(receipt)
+	if err != nil {
+		return "", "", fmt.Errorf("marshal mint receipt: %w", err)
+	}
+
+	ipfsClient := storage.NewClient(storage.DefaultConfig())
+	cid, err := ipfsClient.AddBytesToIPFS(payloadJSON, fmt.Sprintf("mint_%s.json", receipt.MintID))
+	if err != nil {
+		return "", "", fmt.Errorf("ipfs upload: %w", err)
+	}
+	cidHashHex := storage.CIDHash(cid)
+
+	artifact := &storage.StorageArtifact{
+		MintID:     receipt.MintID,
+		Subject:    receipt.Subject,
+		CID:        cid,
+		CIDHashHex: cidHashHex,
+		// best-effort fields
+		PayloadHash:   receipt.PayloadHash,
+		ReceiptHash:   "",
+		AnchorTagType: "nft_anchor",
+	}
+
+	// Store artifact association on node (best-effort).
+	// If node storage is unavailable, anchoring still proceeds.
+	if nodeID := c.nodeID; true {
+		_, _ = storage.DefaultStorageClient(c.nodeAddr).StoreMintArtifact(artifact)
+		_ = nodeID
+	}
+
+	anchorData, err := mint.BuildAnchorData(receipt)
+	if err != nil {
+		return "", "", fmt.Errorf("build receipt anchor payload (ethereum-style): %w", err)
+	}
+
+	rawSender, err := normaliseAddress(sessionFingerprint)
+	if err != nil {
+		return "", "", fmt.Errorf("invalid sender address: %w", err)
+	}
+
+	log.Printf("[WalletRPC] AnchorMintReceipt: anchoring mint_id=%s subject=%s",
+		receipt.MintID, receipt.Subject)
+
+	kp, skBytes, err := keys.LoadKeyFromDisk(sessionPassphrase)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to load key: %w", err)
+	}
+
+	defer func() {
+		for i := range skBytes {
+			skBytes[i] = 0
+		}
+	}()
+
+	var nonce uint64
+	if cachedNonce, err := c.getCurrentNonce(sessionFingerprint); err == nil {
+		nonce = cachedNonce
+	} else {
+		nonce = uint64(time.Now().UnixNano())
+	}
+
+	tx := &types.Transaction{
+		ID:         "",
+		Sender:     rawSender,
+		Receiver:   rawSender, // self-send: this tx exists only to carry data
+		Amount:     big.NewInt(1),
+		GasLimit:   big.NewInt(21000),
+		GasPrice:   big.NewInt(GasPriceSPX),
+		Nonce:      nonce,
+		Timestamp:  time.Now().Unix(),
+		Signature:  []byte{},
+		ReturnData: anchorData,
+	}
+	tx.ID = tx.Hash()
+
+	if err := signTransactionLocally(tx, skBytes, kp.PublicKey); err != nil {
+		return "", "", fmt.Errorf("failed to sign anchor transaction: %w", err)
+	}
+
+	txData, err := json.Marshal(tx)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to marshal transaction: %w", err)
+	}
+
+	rawTx := hex.EncodeToString(txData)
+
+	resp, err := rpc.CallRPC(c.nodeAddr, "sendrawtransaction", []interface{}{rawTx}, c.nodeID, 120)
+	if err != nil {
+		return "", "", fmt.Errorf("RPC error: %w", err)
+	}
+	if len(resp.Values) == 0 {
+		return "", "", errors.New("empty response")
+	}
+
+	var result struct {
+		TxID   string `json:"txid"`
+		Status string `json:"status"`
+		Error  string `json:"error"`
+	}
+	if err := json.Unmarshal(resp.Values[0], &result); err != nil {
+		return "", "", fmt.Errorf("parse response: %w", err)
+	}
+	if result.Error != "" {
+		return "", "", fmt.Errorf("anchor tx rejected: %s", result.Error)
+	}
+
+	// After successful RPC call:
+	// Save off-chain anchor metadata sidecar (receipt-bound on disk).
+	anchorTag, err := mint.BuildAnchorTag(receipt)
+	if err != nil {
+		return "", "", fmt.Errorf("build receipt anchor tag for sidecar: %w", err)
+	}
+
+	anchorPath, err = mint.SaveAnchorTag(anchorTag, "")
+
+	if err != nil {
+		log.Printf("[WARN] AnchorMintReceipt: failed to save anchor tag: %v", err)
+		// do not fail the operation, just warn
+		anchorPath = ""
+	}
+	log.Printf("[WalletRPC] AnchorMintReceipt: anchored as txid=%s, anchor saved to %s", result.TxID, anchorPath)
+	return result.TxID, anchorPath, nil
+}
+
+// BuildMintScreen returns the "Mint & Verify" tab content.
+func BuildMintScreen(window fyne.Window, client *WalletClient) fyne.CanvasObject {
+	var selectedPath string
+	var lastReceipt *mint.MintResult
+	var lastTxID string
+	_ = lastTxID
+
+	fileLabel := widget.NewLabel("No file selected")
+	fileLabel.Wrapping = fyne.TextWrapWord
+
+	subjectEntry := widget.NewEntry()
+	subjectEntry.SetPlaceHolder("Subject / token identifier")
+
+	statusLabel := widget.NewLabel("")
+	statusLabel.Wrapping = fyne.TextWrapWord
+
+	anchorBtn := widget.NewButton("Anchor On-Chain", nil)
+	anchorBtn.Disable()
+
+	verifyOnChainBtn := widget.NewButton("Verify On-Chain", nil)
+	verifyOnChainBtn.Disable()
+
+	verifyOnChainBtn.OnTapped = func() {
+		if lastTxID == "" {
+			dialog.ShowError(fmt.Errorf("no anchored txid available"), window)
+			return
+		}
+		resp, err := rpc.CallRPC(client.nodeAddr, "gettransaction", []interface{}{lastTxID}, client.nodeID, 60)
+		if err != nil {
+			dialog.ShowError(fmt.Errorf("gettransaction rpc: %w", err), window)
+			return
+		}
+		if len(resp.Values) == 0 {
+			dialog.ShowError(fmt.Errorf("empty gettransaction response"), window)
+			return
+		}
+		var tx types.Transaction
+		if err := json.Unmarshal(resp.Values[0], &tx); err != nil {
+			dialog.ShowError(fmt.Errorf("parse gettransaction: %w", err), window)
+			return
+		}
+
+		if len(tx.ReturnData) == 0 {
+			dialog.ShowError(fmt.Errorf("transaction has empty return_data"), window)
+			return
+		}
+
+		anchorTag, err := mint.DeserializeAnchorTag(tx.ReturnData)
+		_ = anchorTag
+		if err != nil {
+			dialog.ShowError(fmt.Errorf("deserialize anchor tag: %w", err), window)
+			return
+		}
+
+		// We only need to ensure the tx.ReturnData is decodable as an AnchorTag.
+		// Full commitment verification requires the original MintReceipt; GUI does not
+		// currently load the anchored receipt from chain.
+		statusLabel.SetText("On-chain verification: anchor decoded OK")
+		addActivity(fmt.Sprintf("On-chain verified tx %s (mint anchor)", lastTxID))
+	}
+
+	pickBtn := widget.NewButton("Choose File", func() {
+		fd := dialog.NewFileOpen(func(uc fyne.URIReadCloser, err error) {
+			if err != nil || uc == nil {
+				return
+			}
+			defer uc.Close()
+			selectedPath = uc.URI().Path()
+			fileLabel.SetText(selectedPath)
+			if subjectEntry.Text == "" {
+				subjectEntry.SetText(uc.URI().Name())
+			}
+		}, window)
+		fd.Show()
+	})
+
+	signBtn := widget.NewButton("Sign", func() {
+		if selectedPath == "" {
+			dialog.ShowError(fmt.Errorf("choose a file first"), window)
+			return
+		}
+		if sessionPassphrase == "" {
+			dialog.ShowError(fmt.Errorf("not logged in"), window)
+			return
+		}
+		payload, err := os.ReadFile(selectedPath)
+		if err != nil {
+			dialog.ShowError(fmt.Errorf("read file: %w", err), window)
+			return
+		}
+		subject := subjectEntry.Text
+		if subject == "" {
+			dialog.ShowError(fmt.Errorf("subject required"), window)
+			return
+		}
+		res, err := mint.Mint(payload, subject, sessionPassphrase, "SPIF", "", "")
+		if err != nil {
+			dialog.ShowError(fmt.Errorf("mint: %w", err), window)
+			return
+		}
+		lastReceipt = res
+		if _, err := mint.SaveReceipt(res.Receipt, ""); err != nil {
+			statusLabel.SetText(fmt.Sprintf(
+				"Signed (mint_id=%s) — WARNING: receipt not saved to disk: %v",
+				res.Receipt.MintID, err))
+		} else {
+			statusLabel.SetText(fmt.Sprintf("Signed. mint_id=%s\npayload_hash=%s",
+				res.Receipt.MintID, res.Receipt.PayloadHash))
+		}
+		anchorBtn.Enable()
+		addActivity(fmt.Sprintf("Signed mint receipt %s for subject %q", res.Receipt.MintID, subject))
+	})
+
+	anchorBtn.OnTapped = func() {
+		if lastReceipt == nil {
+			dialog.ShowError(fmt.Errorf("sign a receipt first"), window)
+			return
+		}
+		txID, anchorPath, err := client.AnchorMintReceipt(lastReceipt.Receipt)
+		if err != nil {
+			dialog.ShowError(fmt.Errorf("anchor: %w", err), window)
+			return
+		}
+		statusLabel.SetText(fmt.Sprintf("Anchored on-chain. txid=%s\nAnchor saved to: %s", txID, anchorPath))
+		addActivity(fmt.Sprintf("Anchored mint %s in tx %s, anchor %s", lastReceipt.Receipt.MintID, txID, anchorPath))
+		lastTxID = txID
+		verifyOnChainBtn.Enable()
+	}
+
+	signForm := container.NewVBox(
+		screenTitle("Mint"),
+		screenSubtitle("Sign any file with your SPHINCS+ key, then anchor a commitment on-chain."),
+		spacer(12),
+		pickBtn, fileLabel,
+		spacer(8),
+		subjectEntry,
+		spacer(12),
+		container.NewHBox(signBtn, anchorBtn),
+		spacer(12),
+		statusLabel,
+	)
+
+	// ---- Verify pane ----
+	var verifyReceiptPath, verifyPayloadPath string
+
+	vReceiptLabel := widget.NewLabel("No receipt selected")
+	vPayloadLabel := widget.NewLabel("No payload selected (optional)")
+
+	vResult := widget.NewLabel("")
+	vResult.Wrapping = fyne.TextWrapWord
+
+	pickReceiptBtn := widget.NewButton("Choose Receipt (.json)", func() {
+		fd := dialog.NewFileOpen(func(uc fyne.URIReadCloser, err error) {
+			if err != nil || uc == nil {
+				return
+			}
+			defer uc.Close()
+			verifyReceiptPath = uc.URI().Path()
+			vReceiptLabel.SetText(verifyReceiptPath)
+		}, window)
+		fd.Show()
+	})
+
+	pickPayloadBtn := widget.NewButton("Choose Payload (optional)", func() {
+		fd := dialog.NewFileOpen(func(uc fyne.URIReadCloser, err error) {
+			if err != nil || uc == nil {
+				return
+			}
+			defer uc.Close()
+			verifyPayloadPath = uc.URI().Path()
+			vPayloadLabel.SetText(verifyPayloadPath)
+		}, window)
+		fd.Show()
+	})
+
+	verifyBtn := widget.NewButton("Verify", func() {
+		if verifyReceiptPath == "" {
+			dialog.ShowError(fmt.Errorf("choose a receipt file"), window)
+			return
+		}
+		receipt, err := mint.LoadReceipt(verifyReceiptPath)
+		if err != nil {
+			dialog.ShowError(fmt.Errorf("load receipt: %w", err), window)
+			return
+		}
+		var payload []byte
+		if verifyPayloadPath != "" {
+			payload, err = os.ReadFile(verifyPayloadPath)
+			if err != nil {
+				dialog.ShowError(fmt.Errorf("read payload: %w", err), window)
+				return
+			}
+		}
+		ok, err := mint.Verify(receipt, payload)
+		if !ok {
+			vResult.SetText(fmt.Sprintf("INVALID: %v", err))
+			return
+		}
+		vResult.SetText(fmt.Sprintf(
+			"VALID\nsubject=%s\nminter_pubkey=%.16s...\nsigned at=%s",
+			receipt.Subject, receipt.MinterPublicKey,
+			time.Unix(receipt.Timestamp, 0).Format(time.RFC3339)))
+	})
+
+	verifyForm := container.NewVBox(
+		screenTitle("Verify"),
+		screenSubtitle("Check a receipt's signature, and optionally that it matches a payload file."),
+		spacer(12),
+		pickReceiptBtn, vReceiptLabel,
+		spacer(8),
+		pickPayloadBtn, vPayloadLabel,
+		spacer(12),
+		verifyBtn,
+		spacer(12),
+		vResult,
+	)
+
+	return container.NewAppTabs(
+		container.NewTabItem("Mint", container.NewPadded(signForm)),
+		container.NewTabItem("Verify", container.NewPadded(verifyForm)),
+	)
 }

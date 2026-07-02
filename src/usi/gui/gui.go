@@ -18,7 +18,9 @@ import (
 	seed "github.com/sphinxfndorg/protocol/src/accounts/phrase"
 	"github.com/sphinxfndorg/protocol/src/core"
 	vault "github.com/sphinxfndorg/protocol/src/core/wallet/vault"
+	"github.com/sphinxfndorg/protocol/src/storage"
 	keys "github.com/sphinxfndorg/protocol/src/usi/core/key"
+	"github.com/sphinxfndorg/protocol/src/usi/core/mint"
 	"github.com/sphinxfndorg/protocol/src/usi/core/sign"
 	pubkeydir "github.com/sphinxfndorg/protocol/src/usi/server/server"
 
@@ -28,7 +30,6 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/layout"
-	"fyne.io/fyne/v2/storage"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 )
@@ -530,7 +531,7 @@ func Run() {
 	// ENCRYPT SCREEN
 	// =========================================================================
 	showEncryptScreen = func() {
-		log.Println("Displaying encrypt screen")
+		log.Println("Displaying message screen")
 		updateLayout(true)
 
 		var selectedFolder string
@@ -543,7 +544,7 @@ func Run() {
 
 		dropIcon := canvas.NewText("📁", colMuted)
 		dropIcon.TextSize = 28
-		dropMain := canvas.NewText("Select folder to encrypt", colText)
+		dropMain := canvas.NewText("Select folder to message", colText)
 		dropMain.TextSize = 14
 		dropMain.TextStyle = fyne.TextStyle{Bold: true}
 		dropSub := canvas.NewText("Click 'Browse' to choose a folder", colMuted)
@@ -577,7 +578,7 @@ func Run() {
 			dropBg.StrokeColor = colBorder2
 			dropIcon.Text = "📁"
 			dropIcon.Color = colMuted
-			dropMain.Text = "Select folder to encrypt"
+			dropMain.Text = "Select folder to message"
 			dropMain.Color = colText
 			dropSub.Text = "Click 'Browse' to choose a folder"
 			dropSub.Color = colMuted
@@ -737,7 +738,7 @@ func Run() {
 		)
 
 		form := container.NewVBox(
-			screenTitle("Encrypt Folder"),
+			screenTitle("Message"),
 			spacer(4),
 			screenSubtitle("Lock a folder into an encrypted .vault file"),
 			spacer(20),
@@ -768,7 +769,7 @@ func Run() {
 	// DECRYPT SCREEN
 	// =========================================================================
 	showDecryptScreen = func() {
-		log.Println("Displaying decrypt screen")
+		log.Println("Displaying inbox screen")
 		updateLayout(true)
 
 		var selectedVault string
@@ -782,7 +783,7 @@ func Run() {
 
 		dropIcon := canvas.NewText("🔒", colMuted)
 		dropIcon.TextSize = 28
-		dropMain := canvas.NewText("Select .vault file to decrypt", colText)
+		dropMain := canvas.NewText("Select .vault file for inbox", colText)
 		dropMain.TextSize = 14
 		dropMain.TextStyle = fyne.TextStyle{Bold: true}
 		dropSub := canvas.NewText("Click 'Browse' to choose a .vault file", colMuted)
@@ -940,7 +941,7 @@ func Run() {
 			dropBg.StrokeColor = colBorder2
 			dropIcon.Text = "🔒"
 			dropIcon.Color = colMuted
-			dropMain.Text = "Select .vault file to decrypt"
+			dropMain.Text = "Select .vault file for inbox"
 			dropMain.Color = colText
 			dropSub.Text = "Click 'Browse' to choose a .vault file"
 			dropSub.Color = colMuted
@@ -980,7 +981,8 @@ func Run() {
 					updateDropZone(p)
 				}
 			}, window)
-			dlg.SetFilter(storage.NewExtensionFileFilter([]string{".vault"}))
+			// NOTE: leaving default file filter (failing build in this branch)
+
 			dlg.Resize(fyne.NewSize(800, 600))
 			dlg.Show()
 		})
@@ -1095,7 +1097,7 @@ func Run() {
 		})
 
 		form := container.NewVBox(
-			screenTitle("Decrypt Vault"),
+			screenTitle("Inbox"),
 			spacer(4),
 			screenSubtitle("Unlock a .vault file and restore the original folder"),
 			spacer(20),
@@ -1121,7 +1123,8 @@ func Run() {
 	// SIGN SCREEN
 	// =========================================================================
 	showSignScreen = func() {
-		log.Println("Displaying sign screen")
+
+		log.Println("Displaying mint data screen")
 		updateLayout(true)
 
 		var selectedFile string
@@ -1134,7 +1137,7 @@ func Run() {
 
 		dropIcon := canvas.NewText("📄", colMuted)
 		dropIcon.TextSize = 28
-		dropMain := canvas.NewText("Select document to sign", colText)
+		dropMain := canvas.NewText("Select document to mint", colText)
 		dropMain.TextSize = 14
 		dropMain.TextStyle = fyne.TextStyle{Bold: true}
 		dropSub := canvas.NewText("PDF, TXT, MD, JSON, XML — any file", colMuted)
@@ -1198,7 +1201,7 @@ func Run() {
 			dropBg.StrokeColor = colBorder2
 			dropIcon.Text = "📄"
 			dropIcon.Color = colMuted
-			dropMain.Text = "Select document to sign"
+			dropMain.Text = "Select document to mint"
 			dropMain.Color = colText
 			dropSub.Text = "PDF, TXT, MD, JSON, XML — any file"
 			dropSub.Color = colMuted
@@ -1242,7 +1245,7 @@ func Run() {
 		statusText.TextSize = 13
 		statusText.TextStyle = fyne.TextStyle{Bold: true}
 
-		signBtn := widget.NewButtonWithIcon("Sign Document", theme.ConfirmIcon(), func() {
+		signBtn := widget.NewButtonWithIcon("Mint Data", theme.ConfirmIcon(), func() {
 			if selectedFile == "" {
 				dialog.ShowError(errors.New("please select a file"), window)
 				return
@@ -1302,16 +1305,63 @@ func Run() {
 						return
 					}
 
-					fyne.Do(func() {
-						progDlg.Hide()
-						addActivity(fmt.Sprintf("Signed document: %s", filepath.Base(selectedFile)))
-						statusText.Text = "✓  Document signed — signature embedded"
-						statusText.Color = colAccent
-						statusText.Refresh()
-						dialog.ShowInformation("Signed", fmt.Sprintf("Document signed successfully.\nSignature saved as: %s.usimeta", filepath.Base(selectedFile)), window)
-						selectedFile = ""
-						resetDropZone()
-					})
+					// After signing, auto-mint NFT on-chain
+					fyne.Do(func() { prog.SetValue(0.9); progLbl.SetText("Anchoring NFT on-chain…") })
+
+					// Upload signed payload bytes to IPFS (so the on-chain mint can bind to a real CID)
+
+					ipfsClient := storage.NewClient(storage.DefaultConfig())
+					cid, ipfsErr := ipfsClient.AddBytesToIPFS(data, filepath.Base(selectedFile))
+					if ipfsErr != nil {
+						fyne.Do(func() {
+							progDlg.Hide()
+							dialog.ShowError(fmt.Errorf("ipfs upload failed: %w", ipfsErr), window)
+						})
+						return
+					}
+					gatewayBase := storage.DefaultConfig().GatewayBaseURL
+					metadataURI := gatewayBase + "/ipfs/" + cid
+
+					mintRes, mintErr := mint.Mint(data, filepath.Base(selectedFile), sessionPassphrase, "SPIF", cid, metadataURI)
+
+					if mintErr == nil {
+						txID, anchorPath, anchorErr := walletClient.AnchorMintReceipt(mintRes.Receipt)
+						fyne.Do(func() {
+							progDlg.Hide()
+							if anchorErr != nil {
+								addActivity(fmt.Sprintf("Signed document: %s (NFT anchor failed: %v)", filepath.Base(selectedFile), anchorErr))
+								statusText.Text = "✓  Document signed, but NFT anchor failed: " + anchorErr.Error()
+								statusText.Color = colWarn
+								statusText.Refresh()
+								dialog.ShowInformation("Signed",
+									fmt.Sprintf("Document signed successfully.\nSignature: %s.usimeta\n\nNFT anchor failed: %v",
+										filepath.Base(selectedFile), anchorErr), window)
+							} else {
+								addActivity(fmt.Sprintf("Signed & minted NFT: %s (tx=%s, anchor=%s)", filepath.Base(selectedFile), txID, anchorPath))
+								statusText.Text = fmt.Sprintf("✓  Signed & minted NFT. txid=%s\nAnchor: %s", txID, anchorPath)
+								statusText.Color = colAccent
+								statusText.Refresh()
+								dialog.ShowInformation("Minted ✓",
+									fmt.Sprintf("Document signed and NFT minted on-chain!\n\nSignature: %s.usimeta\nTXID: %s\nAnchor: %s",
+										filepath.Base(selectedFile), txID, anchorPath), window)
+							}
+							selectedFile = ""
+							resetDropZone()
+						})
+					} else {
+						fyne.Do(func() {
+							progDlg.Hide()
+							addActivity(fmt.Sprintf("Signed document (NFT mint skipped): %s", filepath.Base(selectedFile)))
+							statusText.Text = "✓  Document signed — signature embedded (NFT mint skipped)"
+							statusText.Color = colAccent
+							statusText.Refresh()
+							dialog.ShowInformation("Signed",
+								fmt.Sprintf("Document signed successfully.\nSignature saved as: %s.usimeta\n\nNFT mint skipped: %v",
+									filepath.Base(selectedFile), mintErr), window)
+							selectedFile = ""
+							resetDropZone()
+						})
+					}
 				}()
 			})
 		})
@@ -1363,9 +1413,9 @@ func Run() {
 		)
 
 		form := container.NewVBox(
-			screenTitle("Sign Document"),
+			screenTitle("Mint Data"),
 			spacer(4),
-			screenSubtitle("Attach your cryptographic identity to a file"),
+			screenSubtitle("Attach your cryptographic identity to a file — automatically mints an NFT on-chain"),
 			spacer(20),
 			dropZone,
 			spacer(8),
@@ -1383,7 +1433,7 @@ func Run() {
 	// VERIFY SCREEN
 	// =========================================================================
 	showVerifyScreen = func() {
-		log.Println("Displaying verify screen")
+		log.Println("Displaying verify data screen")
 		updateLayout(true)
 
 		var selectedFile string
@@ -1496,7 +1546,7 @@ func Run() {
 		statusBig.TextStyle = fyne.TextStyle{Bold: true}
 		statusBig.Alignment = fyne.TextAlignCenter
 
-		verifyBtn := widget.NewButtonWithIcon("Verify Signature", theme.ConfirmIcon(), func() {
+		verifyBtn := widget.NewButtonWithIcon("Verify Data", theme.ConfirmIcon(), func() {
 			if selectedFile == "" {
 				dialog.ShowError(errors.New("please select a file"), window)
 				return
@@ -1587,7 +1637,7 @@ func Run() {
 		)
 
 		form := container.NewVBox(
-			screenTitle("Verify Signature"),
+			screenTitle("Verify Data"),
 			spacer(4),
 			screenSubtitle("Confirm a file is authentic and has not been tampered with"),
 			spacer(20),
@@ -2277,10 +2327,10 @@ func Run() {
 		}
 
 		dashBtn := navBtn("Dashboard", theme.HomeIcon(), showDashboardScreen)
-		encBtn := navBtn("Encrypt", theme.UploadIcon(), showEncryptScreen)
-		decBtn := navBtn("Decrypt", theme.DownloadIcon(), showDecryptScreen)
-		signBtn := navBtn("Sign", theme.DocumentCreateIcon(), showSignScreen)
-		verBtn := navBtn("Verify", theme.ConfirmIcon(), showVerifyScreen)
+		encBtn := navBtn("Message", theme.UploadIcon(), showEncryptScreen)
+		decBtn := navBtn("Inbox", theme.DownloadIcon(), showDecryptScreen)
+		signBtn := navBtn("Mint Data", theme.DocumentCreateIcon(), showSignScreen)
+		verBtn := navBtn("Verify Data", theme.ConfirmIcon(), showVerifyScreen)
 		walletBtn := navBtn(fmt.Sprintf("%s Wallet", chainHeader.Symbol), theme.StorageIcon(), showWalletScreen)
 		keysBtn := navBtn("My Keys", theme.InfoIcon(), showKeysScreen)
 

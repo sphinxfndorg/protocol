@@ -542,6 +542,12 @@ func (h *JSONRPCHandler) mapRPCTypeToMethod(rpcType RPCType) (string, error) {
 		return "getsupplystatus", nil
 	case RPCGetCheckpoint:
 		return "getcheckpoint", nil
+	case RPCStoreArtifact:
+		return "storeartifact", nil
+	case RPCGetArtifact:
+		return "getartifact", nil
+	case RPCGetNonce:
+		return "getnonce", nil
 	default:
 		return "", ErrUnsupportedRPCType
 	}
@@ -602,6 +608,12 @@ func (t RPCType) String() string {
 		return "getsupplystatus"
 	case RPCGetCheckpoint:
 		return "getcheckpoint"
+	case RPCStoreArtifact:
+		return "storeartifact"
+	case RPCGetArtifact:
+		return "getartifact"
+	case RPCGetNonce:
+		return "getnonce"
 	default:
 		return "unknown"
 	}

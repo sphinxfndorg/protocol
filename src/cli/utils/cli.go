@@ -31,6 +31,8 @@ func Execute() error {
 			return runGetBalanceCmd(os.Args[2:])
 		case "watch-tx":
 			return runWatchTxCmd(os.Args[2:])
+		case "ipfs":
+			return runIPFSCmd(os.Args[2:])
 		case "help", "--help", "-h":
 			printHelp()
 			return nil
@@ -57,6 +59,7 @@ SUBCOMMANDS
   send-tx       Send a transaction from one address to another
   get-balance   Query the balance of an address
   watch-tx      Poll until a transaction is confirmed
+  ipfs          IPFS + on-chain NFT mint and verify
 
 TOKENOMICS OVERVIEW
   Genesis Supply: 1,240,000,000 SPX (24.8% of 5B max supply)
@@ -453,4 +456,115 @@ func legacyExecute() error {
 	}
 
 	return bind.StartNode(cfg.dataDir, nodeConfig, cfg.numNodes, cfg.nodeIndex, nil, "devnet", cfg.seedNodes, cfg.rewardAddress)
+}
+
+// runIPFSCmd handles the "ipfs" subcommand with mint/verify sub-subcommands.
+func runIPFSCmd(args []string) error {
+	if len(args) < 1 {
+		return fmt.Errorf("ipfs subcommand requires 'mint' or 'verify'")
+	}
+
+	switch args[0] {
+	case "mint":
+		return runIPFSMintCmd(args[1:])
+	case "verify":
+		return runIPFSVerifyCmd(args[1:])
+	default:
+		return fmt.Errorf("unknown ipfs subcommand %q — use 'mint' or 'verify'", args[0])
+	}
+}
+
+// runIPFSMintCmd handles "ipfs mint" — upload content to IPFS and anchor on Sphinx.
+func runIPFSMintCmd(args []string) error {
+	fs := flag.NewFlagSet("ipfs mint", flag.ExitOnError)
+
+	rpcURL := fs.String("rpc", "http://127.0.0.1:8545", "Sphinx node JSON-RPC endpoint")
+	subject := fs.String("subject", "", "Subject/creator of the NFT (required)")
+	name := fs.String("name", "", "NFT name (required)")
+	description := fs.String("description", "", "NFT description")
+	imageURL := fs.String("image", "", "Image URL (IPFS URI or HTTP)")
+	externalURL := fs.String("external-url", "", "External URL for the NFT")
+	contentFile := fs.String("content-file", "", "Path to raw content file to upload")
+	ipfsAddr := fs.String("ipfs-addr", "http://127.0.0.1:5001", "IPFS API address")
+	gatewayURL := fs.String("gateway", "http://127.0.0.1:8080", "IPFS gateway base URL")
+	disableIPFS := fs.Bool("disable-ipfs", false, "Disable real IPFS and use fallback mode")
+	mintID := fs.String("mint-id", "", "Mint ID (auto-generated if empty)")
+	from := fs.String("from", "", "Sender address for the on-chain transaction (required)")
+	keyFile := fs.String("key", "", "Path to private key file for signing (required)")
+	gasLimit := fs.String("gas-limit", "50000", "Gas limit for the anchor transaction")
+	gasPrice := fs.String("gas-price", "1", "Gas price in gSPX")
+	wait := fs.Bool("wait", true, "Wait for transaction confirmation")
+
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *subject == "" {
+		return fmt.Errorf("--subject is required")
+	}
+	if *name == "" && *contentFile == "" {
+		return fmt.Errorf("either --name (for metadata) or --content-file (for raw content) is required")
+	}
+	if *from == "" {
+		return fmt.Errorf("--from (sender address) is required for the on-chain anchor transaction")
+	}
+	if *keyFile == "" {
+		return fmt.Errorf("--key (private key file) is required for signing the on-chain transaction")
+	}
+
+	var content []byte
+	if *contentFile != "" {
+		var err error
+		content, err = os.ReadFile(*contentFile)
+		if err != nil {
+			return fmt.Errorf("read content file: %w", err)
+		}
+	}
+
+	_, err := RunMint(MintOptions{
+		RPCURL:         *rpcURL,
+		Subject:        *subject,
+		Name:           *name,
+		Description:    *description,
+		Image:          *imageURL,
+		ExternalURL:    *externalURL,
+		Content:        content,
+		ContentFile:    *contentFile,
+		IPFSAddr:       *ipfsAddr,
+		GatewayBaseURL: *gatewayURL,
+		DisableIPFS:    *disableIPFS,
+		MintID:         *mintID,
+		From:           *from,
+		KeyFile:        *keyFile,
+		GasLimit:       *gasLimit,
+		GasPrice:       *gasPrice,
+		Wait:           *wait,
+	})
+	return err
+}
+
+// runIPFSVerifyCmd handles "ipfs verify" — verify a minted NFT on Sphinx + IPFS.
+func runIPFSVerifyCmd(args []string) error {
+	fs := flag.NewFlagSet("ipfs verify", flag.ExitOnError)
+
+	rpcURL := fs.String("rpc", "http://127.0.0.1:8545", "Sphinx node JSON-RPC endpoint")
+	mintID := fs.String("mint-id", "", "Mint ID to verify")
+	txID := fs.String("txid", "", "Transaction ID (on-chain anchor) to verify")
+	gatewayURL := fs.String("gateway", "", "IPFS gateway base URL (defaults to https://ipfs.io)")
+	skipFetch := fs.Bool("skip-fetch", false, "Skip fetching content from IPFS gateway")
+
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *mintID == "" && *txID == "" {
+		return fmt.Errorf("either --mint-id or --txid is required")
+	}
+
+	_, err := RunVerify(VerifyOptions{
+		RPCURL:           *rpcURL,
+		MintID:           *mintID,
+		TxID:             *txID,
+		GatewayBaseURL:   *gatewayURL,
+		SkipContentFetch: *skipFetch,
+	})
+	return err
 }

@@ -76,33 +76,6 @@ type NodeChainInfoJSON struct {
 	Timestamp string `json:"timestamp"`
 }
 
-// peerKeyExchangeMsg is the payload sent over the wire during the
-// post-connect public-key handshake.
-type peerKeyExchangeMsg struct {
-	NodeID    string `json:"node_id"`
-	PublicKey []byte `json:"public_key"`
-}
-
-// knownPeerInfo describes a single peer entry as gossiped during a
-// peer-exchange (PEX) round. It carries just enough for the recipient to
-// dial in and run its own key_exchange handshake.
-type knownPeerInfo struct {
-	NodeID  string `json:"node_id"`
-	Address string `json:"address"` // host:port, dialable TCP address
-}
-
-// peerExchangeMsg is the payload sent over the wire when a node asks a peer
-// (typically a seed) "who else do you know about?" — and the payload a peer
-// sends back in reply. Requesting and replying both use this same shape:
-// a request carries the asker's own NodeID/Address (so it can be added to
-// the responder's peer list too) and an empty/nil Peers slice; a reply
-// carries the responder's NodeID/Address plus its known peer list.
-type peerExchangeMsg struct {
-	NodeID  string          `json:"node_id"`
-	Address string          `json:"address"`
-	Peers   []knownPeerInfo `json:"peers"`
-}
-
 // JSONRPCRequest represents a standard JSON-RPC 2.0 request
 type JSONRPCRequest struct {
 	JSONRPC string        `json:"jsonrpc"`

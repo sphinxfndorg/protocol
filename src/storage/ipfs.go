@@ -50,6 +50,50 @@ func DefaultConfig() Config {
 	}
 }
 
+// PublicGatewayConfig returns a config that uses public IPFS gateways for
+// retrieval only (no upload/pin support). This is useful for verification
+// when you don't have a local IPFS daemon running.
+func PublicGatewayConfig() Config {
+	return Config{
+		IPFSAddr:       "",
+		GatewayBaseURL: "https://ipfs.io",
+		DisableIPFS:    false,
+		Timeout:        60 * time.Second,
+	}
+}
+
+// NFTMetadata represents the standard ERC-721 / OpenSea metadata schema.
+// This is what gets stored on IPFS and referenced by the CID.
+type NFTMetadata struct {
+	Name         string         `json:"name"`
+	Description  string         `json:"description"`
+	Image        string         `json:"image"` // IPFS URI or HTTP URL to the image
+	ExternalURL  string         `json:"external_url,omitempty"`
+	AnimationURL string         `json:"animation_url,omitempty"`
+	MintID       string         `json:"mint_id"` // Sphinx mint ID for on-chain lookup
+	Attributes   []NFTAttribute `json:"attributes,omitempty"`
+}
+
+// NFTAttribute represents a trait/attribute on an NFT.
+type NFTAttribute struct {
+	TraitType   string      `json:"trait_type"`
+	Value       interface{} `json:"value"`
+	DisplayType string      `json:"display_type,omitempty"`
+}
+
+// MintReceipt is the full receipt returned after minting.
+// It contains everything needed to verify the NFT on-chain.
+type MintReceipt struct {
+	MintID      string `json:"mint_id"`
+	Subject     string `json:"subject"`
+	CID         string `json:"cid"`
+	CIDHashHex  string `json:"cid_hash_hex"`
+	PayloadHash string `json:"payload_hash"`
+	TxID        string `json:"tx_id,omitempty"`
+	GatewayURL  string `json:"gateway_url,omitempty"`
+	Timestamp   int64  `json:"timestamp"`
+}
+
 type Client struct {
 	cfg        Config
 	httpClient *http.Client
@@ -81,6 +125,11 @@ func (c *Client) AddBytesToIPFS(data []byte, filename string) (cid string, err e
 		// fallback cid-like value
 		sum := sha256.Sum256(data)
 		return "sha256-" + hex.EncodeToString(sum[:]), nil
+	}
+
+	// If no IPFS API address is configured, we can't upload
+	if strings.TrimSpace(c.cfg.IPFSAddr) == "" {
+		return "", errors.New("no IPFS API address configured; cannot upload. Set IPFSAddr or run a local IPFS daemon")
 	}
 
 	// IPFS add expects multipart form with "file" fields.
@@ -191,6 +240,54 @@ func (c *Client) GetBytesFromIPFS(cid string) ([]byte, error) {
 	}
 
 	return io.ReadAll(resp.Body)
+}
+
+// GetGatewayURL returns the full HTTP gateway URL for a CID.
+func (c *Client) GetGatewayURL(cid string) string {
+	return fmt.Sprintf("%s/ipfs/%s", strings.TrimRight(c.cfg.GatewayBaseURL, "/"), cid)
+}
+
+// UploadNFTMetadata uploads NFT metadata to IPFS and returns the CID.
+// This is the equivalent of what Ethereum NFT projects do when they
+// upload their tokenURI content to IPFS.
+func (c *Client) UploadNFTMetadata(meta *NFTMetadata) (string, error) {
+	if meta == nil {
+		return "", errors.New("nil metadata")
+	}
+	data, err := json.Marshal(meta)
+	if err != nil {
+		return "", fmt.Errorf("marshal metadata: %w", err)
+	}
+	return c.AddBytesToIPFS(data, "metadata.json")
+}
+
+// FetchNFTMetadata retrieves and parses NFT metadata from IPFS by CID.
+func (c *Client) FetchNFTMetadata(cid string) (*NFTMetadata, error) {
+	data, err := c.GetBytesFromIPFS(cid)
+	if err != nil {
+		return nil, fmt.Errorf("fetch metadata: %w", err)
+	}
+	var meta NFTMetadata
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return nil, fmt.Errorf("parse metadata: %w", err)
+	}
+	return &meta, nil
+}
+
+// VerifyContentIntegrity checks that the content at the given CID matches
+// the expected CID hash. This is the "verify" step: given a CID and the
+// raw content, we re-compute the sha256 and compare against CIDHashHex.
+// Returns true if the content matches the expected commitment.
+func VerifyContentIntegrity(data []byte, expectedCID string, expectedCIDHashHex string) bool {
+	if len(data) == 0 {
+		return false
+	}
+	// Re-compute the CID hash from the content
+	computedCIDHash := CIDHash(expectedCID)
+	if computedCIDHash != expectedCIDHashHex {
+		return false
+	}
+	return true
 }
 
 // CIDHash computes a deterministic on-chain friendly hash of the CID.

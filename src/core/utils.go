@@ -449,109 +449,9 @@ func isHexString(s string) bool {
 	return true
 }
 
-// calculateTransactionsRoot calculates the Merkle root of transactions
-// Parameters:
-//   - txs: Slice of transactions
-//
-// Returns: Merkle root as bytes
-func (bc *Blockchain) calculateTransactionsRoot(txs []*types.Transaction) []byte {
-	// Check if there are no transactions
-	if len(txs) == 0 {
-		// Use the dedicated method for empty transactions
-		return bc.calculateEmptyTransactionsRoot()
-	}
-
-	// Create temporary block for root calculation
-	tempBlock := &types.Block{
-		Body: types.BlockBody{TxsList: txs},
-	}
-	return tempBlock.CalculateTxsRoot() // Calculate and return root
-}
-
-// calculateStateRoot calculates the state root after applying transactions
-// Returns: State root as bytes
-func (bc *Blockchain) calculateStateRoot() []byte {
-	stateDB, err := bc.newStateDB()
-	if err != nil {
-		logger.Warn("calculateStateRoot: failed to open state DB: %v", err)
-		return common.SpxHash([]byte{})
-	}
-	root, err := stateDB.computeStateRoot()
-	if err != nil {
-		logger.Warn("calculateStateRoot: failed to compute state root: %v", err)
-		return common.SpxHash([]byte{})
-	}
-	return root
-}
-
-// GetCachedMerkleRoot retrieves a cached Merkle root for a block
-// Parameters:
-//   - blockHash: Hash of the block
-//
-// Returns: Cached Merkle root or empty string if not found
-func (bc *Blockchain) GetCachedMerkleRoot(blockHash string) string {
-	bc.lock.RLock() // Read lock for thread safety
-	defer bc.lock.RUnlock()
-
-	// Check if cache exists and contains the block
-	if bc.merkleRootCache != nil {
-		if root, exists := bc.merkleRootCache[blockHash]; exists {
-			return root // Return cached root
-		}
-	}
-	return "" // Not found
-}
-
-// getTransactionGas returns the gas consumption of a transaction
-// Parameters:
-//   - tx: Transaction to get gas for
-//
-// Returns: Gas amount as big.Int
-func (bc *Blockchain) getTransactionGas(tx *types.Transaction) *big.Int {
-	// Use the transaction's gas limit if available
-	if tx.GasLimit != nil && tx.GasLimit.Cmp(big.NewInt(0)) > 0 {
-		return tx.GasLimit
-	}
-
-	// Calculate gas based on transaction complexity
-	baseGas := big.NewInt(21000) // Base transaction gas (similar to Ethereum)
-
-	// Add gas for signature verification
-	sigGas := big.NewInt(int64(len(tx.Signature)) * 100) // 100 gas per signature byte
-	baseGas.Add(baseGas, sigGas)
-
-	// Add gas for value transfer if amount is significant
-	if tx.Amount != nil && tx.Amount.Cmp(big.NewInt(0)) > 0 {
-		valueGas := big.NewInt(9000) // Additional gas for value transfer
-		baseGas.Add(baseGas, valueGas)
-	}
-
-	return baseGas
-}
-
-// checkConsensusRequirements uses existing validation functions
-// Determines if a block meets the basic requirements for consensus
-// Parameters:
-//   - block: Block to check
-//
-// Returns: true if block meets consensus requirements
-func (bc *Blockchain) checkConsensusRequirements(block *types.Block) bool {
-	// Use existing block validation
-	if err := block.Validate(); err != nil {
-		logger.Debug("Block validation failed: %v", err)
-		return false
-	}
-
-	// Use existing hash format validation
-	if err := block.ValidateHashFormat(); err != nil {
-		logger.Debug("Hash format validation failed: %v", err)
-		return false
-	}
-
-	// For PBFT, we consider the block valid if it passes basic validation
-	// Actual consensus will be determined by voting
-	return true
-}
+// calculateTransactionsRoot is now defined in block_producer.go
+// getTransactionGas is now defined in block_producer.go
+// checkConsensusRequirements is now defined in block_producer.go
 
 // StatusString returns a human-readable string for BlockchainStatus
 // Parameters:
@@ -1033,28 +933,7 @@ func (bc *Blockchain) DebugStorage() error {
 	return nil
 }
 
-// calculateBlockTime calculates the actual time between blocks
-// Parameters:
-//   - block: Current block
-//
-// Returns: Time duration since last block
-func (bc *Blockchain) calculateBlockTime(block *types.Block) time.Duration {
-	latest := bc.GetLatestBlock()
-	if latest == nil {
-		return 5 * time.Second
-	}
-	currentTime := block.Header.Timestamp
-	prevTime := latest.GetTimestamp()
-	timeDiff := currentTime - prevTime
-
-	// Cap to reasonable range: 1s–300s. Anything outside means
-	// the genesis/prev timestamp is wrong (0, stale, or nanoseconds).
-	if timeDiff <= 0 || timeDiff > 300 {
-		logger.Warn("Block time out of range (%ds), capping to 5s", timeDiff)
-		return 5 * time.Second
-	}
-	return time.Duration(timeDiff) * time.Second
-}
+// calculateBlockTime is now defined in block_producer.go
 
 // GetMerkleRoot returns the merkle root as a string
 func (b *BlockHelper) GetMerkleRoot() string {

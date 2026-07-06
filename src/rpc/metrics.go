@@ -33,5 +33,29 @@ func NewMetrics() *Metrics {
 			},
 			[]string{"method"},
 		),
+
+		// Ops/RPC hardening: additional Prometheus metrics
+		SyncProgress: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "rpc_sync_progress_percent",
+				Help: "Sync progress percentage (0-100)",
+			},
+			[]string{"node_id"},
+		),
+		ConsensusLatency: prometheus.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Name:    "rpc_consensus_latency_seconds",
+				Help:    "Consensus round latency in seconds",
+				Buckets: []float64{0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0},
+			},
+			[]string{"node_id", "phase"},
+		),
+		MempoolEvictions: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "rpc_mempool_evictions_total",
+				Help: "Total number of mempool evictions",
+			},
+			[]string{"reason"},
+		),
 	}
 }

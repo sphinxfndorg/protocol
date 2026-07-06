@@ -220,9 +220,22 @@ func (mp *Mempool) processBroadcastTransaction(tx *types.Transaction) {
 
 // generateTransactionID creates a unique ID for the transaction
 func (mp *Mempool) generateTransactionID(tx *types.Transaction) string {
-	data := fmt.Sprintf("%s%s%s%s%s%v%d",
-		tx.Sender, tx.Receiver, tx.Amount.String(),
-		tx.GasLimit.String(), tx.GasPrice.String(), tx.Nonce, time.Now().UnixNano())
+	// Transaction IDs must be deterministic across all nodes.
+	// IMPORTANT: DO NOT include wall-clock time (or any other non-deterministic
+	// value) in the txid hash input.
+	//
+	// If users need uniqueness beyond deterministic fields, they must supply
+	// it explicitly as part of the transaction content (e.g., a salt field
+	// that is included in the transaction signature).
+	data := fmt.Sprintf("%d|%s|%s|%s|%s|%s|%d",
+		tx.ChainID,
+		tx.Sender,
+		tx.Receiver,
+		tx.Amount.String(),
+		tx.GasLimit.String(),
+		tx.GasPrice.String(),
+		tx.Nonce,
+	)
 	return hex.EncodeToString(common.SpxHash([]byte(data)))
 }
 
@@ -280,12 +293,14 @@ func (mp *Mempool) SelectTransactionsForBlock(maxBlockSize, targetBlockSize uint
 		}
 	}
 
-	// Sort by priority (descending) and then by timestamp (ascending)
+	// Sort by priority (descending) only; all tie-breaking must be fully deterministic
+	// across nodes (no wall-clock fields like FirstSeen).
 	sort.Slice(pendingList, func(i, j int) bool {
 		if pendingList[i].Priority != pendingList[j].Priority {
 			return pendingList[i].Priority > pendingList[j].Priority
 		}
-		return pendingList[i].FirstSeen.Before(pendingList[j].FirstSeen)
+		// Deterministic tie-breaker: tx.ID
+		return pendingList[i].Transaction.ID < pendingList[j].Transaction.ID
 	})
 
 	var selected []*types.Transaction

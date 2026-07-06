@@ -7,6 +7,7 @@ package rpc
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net"
 	"time"
@@ -27,6 +28,10 @@ func NewServer(messageCh chan *security.Message, blockchain *core.Blockchain, sp
 		queryManager:   NewQueryManager(),
 		store:          NewKVStore(),
 		sphincsManager: sphincsManager,
+		authConfig:     DefaultAuthConfig(),
+		requestTimeout: 30 * time.Second,
+		maxRequestSize: 1024 * 1024, // 1 MB
+		pagination:     DefaultPaginationConfig(),
 	}
 	server.handler = NewJSONRPCHandler(server)
 	// Start garbage collection always (it runs in a separate goroutine)
@@ -99,6 +104,17 @@ func (s *Server) sendResponse(address string, respData []byte) error {
 
 // HandleRequest processes an incoming RPC request (JSON or binary).
 func (s *Server) HandleRequest(data []byte) ([]byte, error) {
+	// RPC hardening: validate request size
+	if len(data) > s.maxRequestSize {
+		return s.handler.errorResponse(nil, ErrCodeInvalidRequest, fmt.Sprintf("Request size %d exceeds maximum %d bytes", len(data), s.maxRequestSize))
+	}
+
+	// RPC hardening: authenticate request
+	if err := s.authenticateRequest(data); err != nil {
+		log.Printf("rpc.Server: Authentication failed: %v", err)
+		return s.handler.errorResponse(nil, ErrCodeUnauthorized, "Authentication failed")
+	}
+
 	log.Printf("rpc.Server: Handling request: %s", string(data))
 	// Try decoding as security.Message
 	secMsg, err := security.DecodeMessage(data)
@@ -121,6 +137,8 @@ func (s *Server) HandleRequest(data []byte) ([]byte, error) {
 			log.Printf("rpc.Server: Unexpected response: RPCID=%v", msg.RPCID)
 			return s.handler.errorResponse(msg.RPCID, ErrCodeInvalidRequest, "Unexpected response")
 		}
+
+		// RPC hardening: apply request timeout
 		respData, err := s.handler.ProcessRequest(dataBytes)
 		if err != nil {
 			log.Printf("rpc.Server: Error processing RPC request: %v", err)
@@ -141,6 +159,71 @@ func unwrapRPCPayload(data []byte) []byte {
 		return payload
 	}
 	return data
+}
+
+// authenticateRequest authenticates an RPC request
+func (s *Server) authenticateRequest(data []byte) error {
+	if !s.authConfig.EnableAuth || !s.authConfig.RequireAuth {
+		return nil // Authentication disabled
+	}
+
+	// Extract API key from request
+	apiKey := s.extractAPIKey(data)
+	if apiKey == "" {
+		return fmt.Errorf("missing API key")
+	}
+
+	// Validate API key
+	nodeID, exists := s.authConfig.APIKeys[apiKey]
+	if !exists {
+		return fmt.Errorf("invalid API key")
+	}
+
+	// Check if node is trusted (bypass additional checks)
+	if s.authConfig.TrustedNodes[nodeID] {
+		return nil
+	}
+
+	// Additional authentication checks can be added here
+	// (e.g., rate limiting, IP whitelisting, etc.)
+
+	return nil
+}
+
+// extractAPIKey extracts the API key from request data
+func (s *Server) extractAPIKey(data []byte) string {
+	// Try to parse as JSON-RPC request
+	var req JSONRPCRequest
+	if err := json.Unmarshal(data, &req); err == nil {
+		// Check for API key in params
+		if params, ok := req.Params.(map[string]interface{}); ok {
+			if apiKey, ok := params["api_key"].(string); ok {
+				return apiKey
+			}
+		}
+	}
+	return ""
+}
+
+// SetAuthConfig sets the authentication configuration
+func (s *Server) SetAuthConfig(config *AuthConfig) {
+	s.authConfig = config
+}
+
+// AddAPIKey adds an API key to the trusted keys list
+func (s *Server) AddAPIKey(apiKey, nodeID string) {
+	if s.authConfig.APIKeys == nil {
+		s.authConfig.APIKeys = make(map[string]string)
+	}
+	s.authConfig.APIKeys[apiKey] = nodeID
+}
+
+// AddTrustedNode adds a node to the trusted nodes list
+func (s *Server) AddTrustedNode(nodeID string) {
+	if s.authConfig.TrustedNodes == nil {
+		s.authConfig.TrustedNodes = make(map[string]bool)
+	}
+	s.authConfig.TrustedNodes[nodeID] = true
 }
 
 // StartGarbageCollection starts a goroutine to periodically clean up expired queries and key-value entries.

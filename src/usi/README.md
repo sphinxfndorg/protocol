@@ -126,12 +126,7 @@ The wallet screen shows a SPIF address, balance, send/receive actions, and trans
 
 ## Local Key Storage
 
-USI stores key material locally under the configured key directory. The GUI displays paths such as:
-
-```text
-~/.usi/keys/private.key
-~/.usi/keys/public.key
-```
+Read: https://github.com/sphinxfndorg/protocol/tree/main/src/core/wallet
 
 The exact key directory is provided by the `keys.KeyDir` value in the core key package.
 

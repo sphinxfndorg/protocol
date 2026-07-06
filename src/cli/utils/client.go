@@ -98,6 +98,7 @@ func buildSignedTransaction(opts SendTxOptions, amount *big.Int, nonce uint64) (
 		GasPrice:  gasPrice,
 		Nonce:     nonce,
 		Timestamp: time.Now().Unix(),
+		ChainID:   7331, // Sphinx Mainnet chain ID (EIP-155 replay protection)
 	}
 	tx.ID = tx.Hash()
 

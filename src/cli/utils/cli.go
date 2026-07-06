@@ -5,13 +5,18 @@
 package utils
 
 import (
+	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/sphinxfndorg/protocol/src/bind"
+	"github.com/sphinxfndorg/protocol/src/common"
 	"github.com/sphinxfndorg/protocol/src/consensus"
 	"github.com/sphinxfndorg/protocol/src/core"
 	logger "github.com/sphinxfndorg/protocol/src/log"
@@ -33,6 +38,8 @@ func Execute() error {
 			return runWatchTxCmd(os.Args[2:])
 		case "ipfs":
 			return runIPFSCmd(os.Args[2:])
+		case "wallet":
+			return runWalletCmd(os.Args[2:])
 		case "help", "--help", "-h":
 			printHelp()
 			return nil
@@ -60,6 +67,7 @@ SUBCOMMANDS
   get-balance   Query the balance of an address
   watch-tx      Poll until a transaction is confirmed
   ipfs          IPFS + on-chain NFT mint and verify
+  wallet        Manage SPIF wallets (init, list)
 
 TOKENOMICS OVERVIEW
   Genesis Supply: 1,240,000,000 SPX (24.8% of 5B max supply)
@@ -456,6 +464,243 @@ func legacyExecute() error {
 	}
 
 	return bind.StartNode(cfg.dataDir, nodeConfig, cfg.numNodes, cfg.nodeIndex, nil, "devnet", cfg.seedNodes, cfg.rewardAddress)
+}
+
+// runWalletCmd handles the "wallet" subcommand
+func runWalletCmd(args []string) error {
+	if len(args) < 1 {
+		return fmt.Errorf("wallet subcommand requires 'init' or 'list'")
+	}
+
+	switch args[0] {
+	case "init":
+		return runWalletInitCmd(args[1:])
+	case "list":
+		return runWalletListCmd(args[1:])
+	case "send":
+		return runWalletSendCmd(args[1:])
+	default:
+		return fmt.Errorf("unknown wallet subcommand %q — use 'init', 'list', or 'send'", args[0])
+	}
+}
+
+// runWalletInitCmd handles "wallet init"
+func runWalletInitCmd(args []string) error {
+	fs := flag.NewFlagSet("wallet init", flag.ExitOnError)
+
+	passphrase := fs.String("passphrase", "", "Passphrase to encrypt the wallet (required)")
+	network := fs.String("network", "mainnet", "Network: mainnet, testnet, devnet")
+	label := fs.String("label", "", "Human-readable label for the wallet")
+	dataDir := fs.String("datadir", "", "Directory for wallet data (default: ~/.sphinx/wallet)")
+
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *passphrase == "" {
+		return fmt.Errorf("--passphrase is required")
+	}
+
+	info, err := InitWallet(WalletConfig{
+		Passphrase: *passphrase,
+		Network:    *network,
+		Label:      *label,
+		DataDir:    *dataDir,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to initialize wallet: %w", err)
+	}
+
+	fmt.Printf("\n✅ Wallet initialized successfully!\n\n")
+	fmt.Printf("Address:        %s\n", info.Address)
+	fmt.Printf("Public Key:     %s...\n", info.PublicKeyHex[:32])
+	fmt.Printf("Network:        %s (ChainID: %d)\n", info.Network, info.ChainID)
+	fmt.Printf("Key File:       %s\n", info.KeyFile)
+	fmt.Printf("Created:        %s\n\n", info.CreatedAt)
+	fmt.Printf("Next steps:\n")
+	fmt.Printf("  1. Fund this address with SPX tokens\n")
+	fmt.Printf("  2. Send transactions: sphinx-cli send-tx --from %s --to <RECIPIENT> --amount <AMOUNT> --key %s\n", info.Address, info.KeyFile)
+	fmt.Printf("  3. Run a validator: sphinx-cli node --role=validator --reward-address=%s\n\n", info.Address)
+
+	return nil
+}
+
+// runWalletListCmd handles "wallet list"
+func runWalletListCmd(args []string) error {
+	dataDir := ""
+	if len(args) > 0 && !isFlag(args[0]) {
+		dataDir = args[0]
+	}
+
+	wallets, err := ListWallets(dataDir)
+	if err != nil {
+		return fmt.Errorf("failed to list wallets: %w", err)
+	}
+
+	if len(wallets) == 0 {
+		fmt.Println("No wallets found. Create one with: sphinx-cli wallet init")
+		return nil
+	}
+
+	fmt.Printf("\nFound %d wallet(s):\n\n", len(wallets))
+	for i, w := range wallets {
+		fmt.Printf("%d. Address:      %s\n", i+1, w.Address)
+		fmt.Printf("   Public Key:   %s...\n", w.PublicKeyHex[:32])
+		fmt.Printf("   Network:      %s\n", w.Network)
+		fmt.Printf("   Key File:     %s\n", w.KeyFile)
+		fmt.Printf("   Fingerprint:  %s\n\n", w.Fingerprint)
+	}
+	return nil
+}
+
+// runWalletSendCmd handles "wallet send" — send SPX using key file
+// This finds the key file for the sender address and uses it to sign the transaction
+func runWalletSendCmd(args []string) error {
+	fs := flag.NewFlagSet("wallet send", flag.ExitOnError)
+
+	rpcURL := fs.String("rpc", "http://127.0.0.1:8545", "JSON-RPC endpoint")
+	from := fs.String("from", "", "Sender SPIF address (required)")
+	to := fs.String("to", "", "Recipient SPIF address (required)")
+	amount := fs.String("amount", "", "Amount in SPX (required)")
+	dataDir := fs.String("datadir", "", "Wallet data directory (default: ~/.sphinx/wallet)")
+	wait := fs.Bool("wait", true, "Wait for transaction confirmation")
+
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *from == "" || *to == "" || *amount == "" {
+		return fmt.Errorf("--from, --to, and --amount are required")
+	}
+
+	// Validate addresses using common/hexutil.go
+	if !common.ValidateSPIFAddress(*from) {
+		return fmt.Errorf("invalid sender SPIF address: %s", *from)
+	}
+	if !common.ValidateSPIFAddress(*to) {
+		return fmt.Errorf("invalid recipient SPIF address: %s", *to)
+	}
+
+	// Determine wallet directory
+	walletDir := *dataDir
+	if walletDir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("cannot determine home directory: %w", err)
+		}
+		walletDir = filepath.Join(home, ".sphinx", "wallet")
+	}
+
+	fmt.Printf("Sending %s SPX from %s to %s...\n", *amount, *from, *to)
+
+	// Find the key file for this address
+	keyFile, err := findKeyFileForAddress(walletDir, *from)
+	if err != nil {
+		return fmt.Errorf("failed to find key file for address %s: %w", *from, err)
+	}
+
+	// Load the private key from the key file
+	// Note: The key file contains the encrypted private key as hex
+	// For full vault integration with passphrase decryption, use the USI GUI pattern
+	skBytes, err := loadKeyFromKeyFile(keyFile)
+	if err != nil {
+		return fmt.Errorf("failed to load key: %w", err)
+	}
+
+	// Use the existing send-tx path with the loaded key
+	// Write key to temp file for send-tx path
+	tmpKeyFile, err := writeTempKeyFile(skBytes, *from)
+	if err != nil {
+		return fmt.Errorf("failed to create temp key file: %w", err)
+	}
+	defer os.Remove(tmpKeyFile)
+
+	return SendTransaction(SendTxOptions{
+		RPCURL:   *rpcURL,
+		From:     *from,
+		To:       *to,
+		Amount:   *amount,
+		GasLimit: "21000",
+		GasPrice: "1",
+		Nonce:    0, // auto-fetch
+		KeyFile:  tmpKeyFile,
+		Wait:     *wait,
+	})
+}
+
+// loadKeyFromKeyFile loads a SPHINCS+ private key from a key file
+// The key file contains the private key as hex-encoded string
+func loadKeyFromKeyFile(keyFile string) ([]byte, error) {
+	// Read the key file
+	data, err := os.ReadFile(keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read key file: %w", err)
+	}
+
+	// Parse the key file
+	var keyFileData struct {
+		PrivateKey string `json:"private_key"`
+		PublicKey  string `json:"public_key"`
+	}
+	if err := json.Unmarshal(data, &keyFileData); err != nil {
+		return nil, fmt.Errorf("failed to parse key file: %w", err)
+	}
+
+	// Decode the private key (it's stored as hex in the key file)
+	skBytes, err := hex.DecodeString(keyFileData.PrivateKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode private key: %w", err)
+	}
+
+	return skBytes, nil
+}
+
+// writeTempKeyFile writes a temporary key file for use with SendTransaction
+func writeTempKeyFile(skBytes []byte, address string) (string, error) {
+	tmpDir := os.TempDir()
+	tmpFile := filepath.Join(tmpDir, fmt.Sprintf("sphinx-key-%s.json", address[:16]))
+
+	keyData := map[string]string{
+		"private_key": hex.EncodeToString(skBytes),
+		"address":     address,
+	}
+
+	data, err := json.Marshal(keyData)
+	if err != nil {
+		return "", err
+	}
+
+	if err := os.WriteFile(tmpFile, data, 0600); err != nil {
+		return "", err
+	}
+
+	return tmpFile, nil
+}
+
+// findKeyFileForAddress finds the .key.json file for a given SPIF address
+func findKeyFileForAddress(dataDir, address string) (string, error) {
+	entries, err := os.ReadDir(dataDir)
+	if err != nil {
+		return "", err
+	}
+
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), ".key.json") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dataDir, entry.Name()))
+		if err != nil {
+			continue
+		}
+		var info struct {
+			Address string `json:"address"`
+		}
+		if err := json.Unmarshal(data, &info); err != nil {
+			continue
+		}
+		if info.Address == address {
+			return filepath.Join(dataDir, entry.Name()), nil
+		}
+	}
+	return "", fmt.Errorf("no key file found for address %s in %s", address, dataDir)
 }
 
 // runIPFSCmd handles the "ipfs" subcommand with mint/verify sub-subcommands.

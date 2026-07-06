@@ -291,11 +291,19 @@ func (sm *StateMachine) syncFinalStates() {
 	defer sm.stateMutex.Unlock()
 
 	rawSignatures := sm.consensus.GetConsensusSignatures()
-	logger.Info("🔄 SMR: Processing %d signatures from consensus", len(rawSignatures))
+
+	// Type assert to get the actual slice
+	sigs, ok := rawSignatures.([]*consensus.ConsensusSignature)
+	if !ok {
+		logger.Error("Invalid signature type returned from consensus")
+		return
+	}
+
+	logger.Info("🔄 SMR: Processing %d signatures from consensus", len(sigs))
 
 	sm.finalStates = make([]*FinalStateInfo, 0)
 
-	for _, rawSig := range rawSignatures {
+	for _, rawSig := range sigs {
 		// ========== FIX: Retry fetching block with backoff ==========
 		var block *types.Block
 		var err error

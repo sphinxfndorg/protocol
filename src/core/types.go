@@ -9,7 +9,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sphinxfndorg/protocol/src/consensus"
 	database "github.com/sphinxfndorg/protocol/src/core/state"
 	sign "github.com/sphinxfndorg/protocol/src/core/sthincs/sign/backend"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
@@ -29,7 +28,25 @@ type BlockImportResult int
 // CacheType represents different types of caches used in the blockchain
 type CacheType int
 
-// BlockAdapter wraps types.Block to implement consensus.Block interface
+// BlockInterface defines the interface for blocks (used by consensus)
+type BlockInterface interface {
+	GetHeight() uint64
+	GetHash() string
+	GetPrevHash() string
+	GetParentHash() string
+	GetTimestamp() int64
+	Validate() error
+	GetDifficulty() *big.Int
+	GetCurrentNonce() (uint64, error)
+	GetUnderlyingBlock() interface{}
+	SetCommitStatus(status string)
+	SetSigValid(valid bool)
+	GetCommitStatus() string
+	GetSigValid() bool
+	GetTxsRoot() []byte
+}
+
+// BlockHelper wraps types.Block to implement consensus.Block interface
 type BlockHelper struct {
 	block *types.Block
 }
@@ -43,6 +60,33 @@ type ChainParamsProvider interface {
 // Mock implementation for storage package to use
 type MockChainParamsProvider struct {
 	params *SphinxChainParameters
+}
+
+// ConsensusSignatureData defines the data structure for consensus signatures
+// This is used by core package to interact with consensus without creating import cycle
+type ConsensusSignatureData struct {
+	BlockHash    string
+	BlockHeight  uint64
+	SignerNodeID string
+	Signature    string
+	MessageType  string
+	View         uint64
+	Timestamp    string
+	Valid        bool
+	MerkleRoot   string
+	Status       string
+}
+
+// ConsensusEngineInterface defines the methods needed from consensus without importing the package
+// This is used by core package to interact with consensus without creating import cycle
+type ConsensusEngineInterface interface {
+	GetNodeID() string
+	ProposeBlock(block interface{}) error
+	GetConsensusSignatures() interface{}
+	RefreshLeaderStatus() (view uint64, electedLeaderID string, isLeader bool)
+	GetCurrentView() uint64
+	AddConsensusSignature(sig interface{})
+	CacheMerkleRoot(blockHash, merkleRoot string)
 }
 
 // GenesisConfig defines genesis-specific parameters
@@ -122,7 +166,7 @@ type Blockchain struct {
 	commitMu        sync.Mutex
 	status          BlockchainStatus
 	syncMode        SyncMode
-	consensusEngine *consensus.Consensus
+	consensusEngine ConsensusEngineInterface
 	sphincsManager  *sign.STHINCSManager
 	chainParams     *SphinxChainParameters
 

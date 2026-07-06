@@ -10,7 +10,6 @@ import (
 	"math/big"
 	"strings"
 
-	"github.com/sphinxfndorg/protocol/src/common"
 	"github.com/sphinxfndorg/protocol/src/consensus"
 	database "github.com/sphinxfndorg/protocol/src/core/state"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
@@ -80,13 +79,6 @@ func (bc *Blockchain) SetConsensus(consensus *consensus.Consensus) {
 // IsGenesisHash checks if a hash is a valid genesis hash (starts with GENESIS_)
 func (bc *Blockchain) IsGenesisHash(hash string) bool {
 	return strings.HasPrefix(hash, "GENESIS_")
-}
-
-// calculateEmptyTransactionsRoot returns a standard Merkle root for empty transactions
-func (bc *Blockchain) calculateEmptyTransactionsRoot() []byte {
-	// Standard empty Merkle root (hash of empty string)
-	emptyHash := common.SpxHash([]byte{})
-	return emptyHash
 }
 
 // IsValidChain checks the integrity of the full chain

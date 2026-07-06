@@ -1,0 +1,29 @@
+{
+  "chain_id": 7331,
+  "chain_name": "Sphinx Mainnet",
+  "symbol": "SPX",
+  "timestamp": 1732070400,
+  "timestamp_iso": "2024-11-20T02:40:00Z",
+  "extra_data": "Sphinx Network Genesis Block - Decentralized Future",
+  "initial_difficulty": "17179869184",
+  "initial_gas_limit": "5000",
+  "nonce": "0000000000000001",
+  "total_allocations": 2,
+  "total_allocated_nspx": "100000000000000000000000000",
+  "total_allocated_spx": "100000000",
+  "total_validators": 0,
+  "allocations": [
+    {
+      "address": "1000000000000000000000000000000000000001",
+      "balance_nspx": "50000000000000000000000000",
+      "balance_spx": "50000000",
+      "label": "Founder"
+    },
+    {
+      "address": "2000000000000000000000000000000000000001",
+      "balance_nspx": "50000000000000000000000000",
+      "balance_spx": "50000000",
+      "label": "Foundation"
+    }
+  ]
+}

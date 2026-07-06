@@ -1780,7 +1780,6 @@ func Run() {
 		}
 
 		// ── Hero balance card ─────────────────────────────────────
-		// ── Hero balance card ─────────────────────────────────────
 		balBg := canvas.NewRectangle(colSurface2)
 		balBg.CornerRadius = 14
 		balBg.StrokeColor = colAccent
@@ -1791,7 +1790,7 @@ func Run() {
 		balLabel.TextSize = 10
 		balLabel.TextStyle = fyne.TextStyle{Monospace: true}
 
-		balValue := canvas.NewText("Loading...", colAccent) // Changed from "0.000000"
+		balValue := canvas.NewText("Loading...", colAccent)
 		balValue.TextSize = 36
 		balValue.TextStyle = fyne.TextStyle{Bold: true}
 
@@ -1808,13 +1807,14 @@ func Run() {
 		balCard := container.NewMax(balBg, container.NewPadded(balInner))
 
 		// ── Fetch balance asynchronously ──────────────────────────
-		go func() {
+		fetchBalance := func() {
 			resp, err := walletClient.GetBalance("")
 			fyne.Do(func() {
 				if err != nil {
 					balValue.Text = "Error"
 					balValue.Color = colDanger
 					balValue.Refresh()
+					log.Printf("[Wallet] Failed to fetch balance: %v", err)
 					return
 				}
 				if resp != nil && resp.Balance != nil {
@@ -1825,9 +1825,119 @@ func Run() {
 					balValue.Text = balanceSPX.Text('f', 6)
 					balValue.Color = colAccent
 					balValue.Refresh()
+					log.Printf("[Wallet] Balance updated: %s SPX", balValue.Text)
 				}
 			})
-		}()
+		}
+
+		// Initial balance fetch
+		go fetchBalance()
+
+		// ── Transaction history container ─────────────────────────
+		txBox := container.NewVBox()
+		txScroll := container.NewScroll(txBox)
+		txScroll.SetMinSize(fyne.NewSize(0, 220))
+		txCard := styledCard(txScroll, 0, 220)
+
+		// ── Fetch transaction history ─────────────────────────────
+		fetchTransactionHistory := func() {
+			if sessionFingerprint == "" {
+				return
+			}
+
+			txs, err := walletClient.GetTransactionHistory(sessionFingerprint, 20)
+			fyne.Do(func() {
+				txBox.Objects = nil
+
+				if err != nil {
+					log.Printf("[Wallet] Failed to fetch transaction history: %v", err)
+					errLbl := canvas.NewText("Failed to load transaction history", colDanger)
+					errLbl.TextSize = 12
+					txBox.Add(container.NewCenter(errLbl))
+					txBox.Refresh()
+					return
+				}
+
+				if len(txs) == 0 {
+					noTx := canvas.NewText("No transactions yet.", colMuted)
+					noTx.TextSize = 12
+					txBox.Add(container.NewCenter(noTx))
+				} else {
+					for _, tx := range txs {
+						tx := tx
+						ts := ""
+						if !tx.Timestamp.IsZero() {
+							ts = tx.Timestamp.Format("2006-01-02 15:04")
+						}
+
+						// Determine direction and icon
+						var icon string
+						var iconCol color.Color
+						if tx.Sender == sessionFingerprint {
+							icon = "↑"
+							iconCol = colDanger
+						} else if tx.Receiver == sessionFingerprint {
+							icon = "↓"
+							iconCol = colAccent
+						} else {
+							icon = "•"
+							iconCol = colMuted
+						}
+
+						dirT := canvas.NewText(icon, iconCol)
+						dirT.TextSize = 14
+						dirT.TextStyle = fyne.TextStyle{Bold: true}
+						dirBadgeBg := canvas.NewRectangle(colSurface2)
+						dirBadgeBg.CornerRadius = 20
+						dirBadgeBg.SetMinSize(fyne.NewSize(30, 30))
+						dirBadge := container.NewMax(dirBadgeBg, container.NewCenter(dirT))
+
+						// Format amount
+						amountSPX := "0.000000"
+						if tx.Amount != nil {
+							amountFloat := new(big.Float).Quo(
+								new(big.Float).SetInt(tx.Amount),
+								big.NewFloat(1e18),
+							)
+							amountSPX = amountFloat.Text('f', 6)
+						}
+
+						// Build message
+						msg := fmt.Sprintf("%s %s", amountSPX, chainHeader.Symbol)
+						if tx.Sender == sessionFingerprint {
+							msg += fmt.Sprintf(" → %s…", tx.Receiver[:16])
+						} else {
+							msg += fmt.Sprintf(" ← %s…", tx.Sender[:16])
+						}
+
+						msgT := canvas.NewText(msg, colText)
+						msgT.TextSize = 11
+
+						tsT := canvas.NewText(ts, colFaint)
+						tsT.TextSize = 10
+						tsT.Alignment = fyne.TextAlignTrailing
+
+						rowBg := canvas.NewRectangle(colSurface)
+						rowBg.CornerRadius = 8
+						rowBg.StrokeColor = colBorder
+						rowBg.StrokeWidth = 1
+
+						inner := container.NewBorder(nil, nil,
+							container.NewHBox(dirBadge, spacer(10)),
+							nil,
+							container.NewBorder(nil, nil, msgT, tsT),
+						)
+						row := container.NewMax(rowBg, container.NewPadded(inner))
+						txBox.Add(row)
+						txBox.Add(spacer(4))
+					}
+				}
+				txBox.Refresh()
+			})
+		}
+
+		// Fetch transaction history
+		go fetchTransactionHistory()
 
 		// ── Send button ────────────────────────────────────────────
 		sendBtn := widget.NewButtonWithIcon(fmt.Sprintf("Send %s", chainHeader.Symbol), theme.MailSendIcon(), func() {
@@ -1851,7 +1961,8 @@ func Run() {
 
 		// ── Refresh button ────────────────────────────────────────
 		refreshBtn := widget.NewButtonWithIcon("Refresh", theme.ViewRefreshIcon(), func() {
-			showWalletScreen()
+			go fetchBalance()
+			go fetchTransactionHistory()
 		})
 		refreshBtn.Importance = widget.LowImportance
 
@@ -1875,63 +1986,6 @@ func Run() {
 
 		addrRow := container.NewBorder(nil, nil, nil, copyAddrInlineBtn, addrContainer)
 
-		// ── Recent activity ────────────────────────────────────────
-		activityListLock.Lock()
-		recentActivity := make([]string, len(activityList))
-		copy(recentActivity, activityList)
-		activityListLock.Unlock()
-
-		txBox := container.NewVBox()
-
-		if len(recentActivity) == 0 {
-			noTx := canvas.NewText("No transactions yet.", colMuted)
-			noTx.TextSize = 12
-			txBox.Add(container.NewCenter(noTx))
-		} else {
-			for _, entry := range recentActivity {
-				entry := entry
-				ts := ""
-				msg := entry
-				if parts := strings.SplitN(entry, " | ", 2); len(parts) == 2 {
-					ts = parts[0]
-					msg = parts[1]
-				}
-
-				dirT := canvas.NewText("•", colAccent)
-				dirT.TextSize = 14
-				dirT.TextStyle = fyne.TextStyle{Bold: true}
-				dirBadgeBg := canvas.NewRectangle(colAccentDim)
-				dirBadgeBg.CornerRadius = 20
-				dirBadgeBg.SetMinSize(fyne.NewSize(30, 30))
-				dirBadge := container.NewMax(dirBadgeBg, container.NewCenter(dirT))
-
-				msgT := canvas.NewText(msg, colText)
-				msgT.TextSize = 11
-
-				tsT := canvas.NewText(ts, colFaint)
-				tsT.TextSize = 10
-				tsT.Alignment = fyne.TextAlignTrailing
-
-				rowBg := canvas.NewRectangle(colSurface)
-				rowBg.CornerRadius = 8
-				rowBg.StrokeColor = colBorder
-				rowBg.StrokeWidth = 1
-
-				inner := container.NewBorder(nil, nil,
-					container.NewHBox(dirBadge, spacer(10)),
-					nil,
-					container.NewBorder(nil, nil, msgT, tsT),
-				)
-				row := container.NewMax(rowBg, container.NewPadded(inner))
-				txBox.Add(row)
-				txBox.Add(spacer(4))
-			}
-		}
-
-		txScroll := container.NewScroll(txBox)
-		txScroll.SetMinSize(fyne.NewSize(0, 220))
-		txCard := styledCard(txScroll, 0, 220)
-
 		// ── Right info panel ──────────────────────────────────────
 		makeStatMini := func(label, value string, col color.Color) fyne.CanvasObject {
 			lbl := canvas.NewText(strings.ToUpper(label), colFaint)
@@ -1948,7 +2002,7 @@ func Run() {
 			makeStatMini("Network", chainHeader.ChainName, colAccent),
 			makeStatMini("Symbol", chainHeader.Symbol, colAccent),
 			makeStatMini("Chain ID", fmt.Sprintf("%d", chainHeader.ChainID), colText),
-			makeStatMini("Activity Logged", fmt.Sprintf("%d", len(recentActivity)), colAccent),
+			makeStatMini("Address", addrShort[:16]+"…", colAccent),
 		)
 
 		panel := container.NewVBox(
@@ -1994,7 +2048,7 @@ func Run() {
 			spacer(20),
 			hRule(),
 			spacer(12),
-			sectionLabel("Recent Activity"),
+			sectionLabel("Transaction History"),
 			spacer(8),
 			txCard,
 			spacer(24),

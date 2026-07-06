@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"crypto"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -455,8 +456,7 @@ func (s *SigningService) SignProposal(proposal *Proposal) error {
 
 // VerifyProposal verifies a proposal signature using VM.
 // This validates that the proposal was signed by the claimed proposer
-// and that the signature is cryptographically valid.
-// VerifyProposal verifies a proposal signature using VM.
+// and that the signature covers the canonical block representation.
 func (s *SigningService) VerifyProposal(proposal *Proposal) (bool, error) {
 	if len(proposal.Signature) == 0 {
 		return false, fmt.Errorf("empty signature")
@@ -475,7 +475,9 @@ func (s *SigningService) VerifyProposal(proposal *Proposal) (bool, error) {
 
 	// Verify that the signed data matches the proposal content
 	if string(signedMsg.Data) != string(expectedHash) {
-		logger.Warn("❌ Signed data mismatch: got=%x, want=%x", signedMsg.Data, expectedHash)
+		logger.Error("❌ PROPOSAL HASH MISMATCH:")
+		logger.Error("   Signed data: %s", string(signedMsg.Data))
+		logger.Error("   Expected:    %s", string(expectedHash))
 		return false, fmt.Errorf("signed data does not match proposal content")
 	}
 
@@ -640,24 +642,66 @@ func (s *SigningService) executeSphinxHashInVM(data []byte) ([]byte, error) {
 }
 
 // serializeProposalForSigning creates a deterministic byte string from a proposal.
-// Uses VM execution with SphinxHash opcode.
+// Uses canonical block serialization to ensure signing and commit use identical data.
 func (s *SigningService) serializeProposalForSigning(proposal *Proposal) ([]byte, error) {
-	var dataStr string
-	if proposal.SlotNumber > 0 {
-		dataStr = fmt.Sprintf("PROPOSAL:%d:%s:%s:%d",
-			proposal.View,
-			proposal.Block.GetHash(),
-			proposal.ProposerID,
-			proposal.SlotNumber)
-	} else {
-		dataStr = fmt.Sprintf("PROPOSAL:%d:%s:%s",
-			proposal.View,
-			proposal.Block.GetHash(),
-			proposal.ProposerID)
+	// Extract the underlying block for canonical serialization
+	var tb *types.Block
+	if getter, ok := proposal.Block.(interface{ GetUnderlyingBlock() interface{} }); ok {
+		if underlying, ok := getter.GetUnderlyingBlock().(*types.Block); ok {
+			tb = underlying
+		}
+	} else if direct, ok := proposal.Block.(*types.Block); ok {
+		tb = direct
 	}
 
-	// Execute SphinxHash in VM
-	return s.executeSphinxHashInVM([]byte(dataStr))
+	if tb == nil {
+		return nil, fmt.Errorf("cannot extract underlying block for proposal serialization")
+	}
+
+	// Create canonical block representation for signing
+	// This MUST match exactly what is used at commit time
+	canonicalBlock := struct {
+		Height       uint64   `json:"height"`
+		ParentHash   string   `json:"parent_hash"`
+		Timestamp    int64    `json:"timestamp"`
+		ProposerID   string   `json:"proposer_id"`
+		Transactions []string `json:"transactions"` // Transaction hashes only
+		TxsRoot      string   `json:"txs_root"`
+		Nonce        string   `json:"nonce"`
+		Difficulty   string   `json:"difficulty"` // String representation of big.Int
+	}{
+		Height:     tb.Header.Height,
+		ParentHash: hex.EncodeToString(tb.Header.ParentHash),
+		Timestamp:  tb.Header.Timestamp,
+		ProposerID: proposal.ProposerID,
+		TxsRoot:    hex.EncodeToString(tb.Header.TxsRoot),
+		Nonce:      tb.Header.Nonce,
+		Difficulty: tb.Header.Difficulty.String(),
+	}
+
+	// Add transaction hashes (not full transactions) for deterministic serialization
+	if len(tb.Body.TxsList) > 0 {
+		canonicalBlock.Transactions = make([]string, len(tb.Body.TxsList))
+		for i, tx := range tb.Body.TxsList {
+			canonicalBlock.Transactions[i] = tx.ID
+		}
+	}
+
+	// Serialize to JSON with deterministic formatting
+	blockData, err := json.Marshal(canonicalBlock)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal canonical block: %w", err)
+	}
+
+	// Create the final proposal signing message with version specifier
+	// Format: SPEC_VERSION || VIEW || BLOCK_DATA
+	signingMsg := fmt.Sprintf("SPHINX_PROPOSAL_V1:%d:%s", proposal.View, string(blockData))
+
+	logger.Info("🔐 PROPOSAL SIGNING MESSAGE (view=%d, height=%d): %s",
+		proposal.View, tb.Header.Height, signingMsg)
+
+	// Execute SphinxHash in VM on the canonical message
+	return s.executeSphinxHashInVM([]byte(signingMsg))
 }
 
 // serializeVoteForSigning creates a deterministic byte string from a vote.

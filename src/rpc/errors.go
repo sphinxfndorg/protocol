@@ -13,4 +13,7 @@ var (
 	ErrInvalidAddress       = errors.New("invalid remote address")
 	ErrUnsupportedRPCType   = errors.New("unsupported RPC type")
 	ErrInvalidMessageFormat = errors.New("invalid message format")
+
+	// RPC hardening: authentication error
+	ErrCodeUnauthorized = -32501
 )

@@ -59,9 +59,12 @@ type Message struct {
 
 // Metrics holds RPC-related Prometheus metrics.
 type Metrics struct {
-	RequestCount   *prometheus.CounterVec
-	RequestLatency *prometheus.HistogramVec
-	ErrorCount     *prometheus.CounterVec
+	RequestCount     *prometheus.CounterVec
+	RequestLatency   *prometheus.HistogramVec
+	ErrorCount       *prometheus.CounterVec
+	SyncProgress     *prometheus.GaugeVec
+	ConsensusLatency *prometheus.HistogramVec
+	MempoolEvictions *prometheus.CounterVec
 }
 
 // Server processes RPC requests.
@@ -73,6 +76,44 @@ type Server struct {
 	queryManager   *QueryManager
 	store          *KVStore
 	sphincsManager *sign.STHINCSManager // Added
+
+	// RPC hardening: authentication and timeouts
+	authConfig     *AuthConfig
+	requestTimeout time.Duration
+	maxRequestSize int
+	pagination     *PaginationConfig
+}
+
+// AuthConfig holds authentication configuration
+type AuthConfig struct {
+	EnableAuth   bool
+	APIKeys      map[string]string // API key -> node ID mapping
+	RequireAuth  bool
+	TrustedNodes map[string]bool // Trusted node IDs that bypass auth
+}
+
+// DefaultAuthConfig returns secure defaults for RPC authentication
+func DefaultAuthConfig() *AuthConfig {
+	return &AuthConfig{
+		EnableAuth:   true,
+		APIKeys:      make(map[string]string),
+		RequireAuth:  true,
+		TrustedNodes: make(map[string]bool),
+	}
+}
+
+// PaginationConfig holds pagination configuration
+type PaginationConfig struct {
+	DefaultPageSize int
+	MaxPageSize     int
+}
+
+// DefaultPaginationConfig returns sensible defaults for pagination
+func DefaultPaginationConfig() *PaginationConfig {
+	return &PaginationConfig{
+		DefaultPageSize: 100,
+		MaxPageSize:     1000,
+	}
 }
 
 // JSONRPCRequest represents a JSON-RPC 2.0 request.

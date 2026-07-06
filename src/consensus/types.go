@@ -129,14 +129,14 @@ type ConsensusPhase int
 
 // StakedValidator represents a validator with SPX stake
 type StakedValidator struct {
-	ID              string
-	PublicKey       []byte
-	StakeAmount     *big.Int // In nSPX (base units)
-	ActivationEpoch uint64
-	ExitEpoch       uint64
-	IsSlashed       bool
-	LastAttested    uint64
-	RewardAddress   string
+	ID              string   `json:"id"`
+	PublicKey       []byte   `json:"public_key,omitempty"`
+	StakeAmount     *big.Int `json:"stake_amount"` // In nSPX (base units)
+	ActivationEpoch uint64   `json:"activation_epoch"`
+	ExitEpoch       uint64   `json:"exit_epoch"`
+	IsSlashed       bool     `json:"is_slashed"`
+	LastAttested    uint64   `json:"last_attested"`
+	RewardAddress   string   `json:"reward_address"` // SPIF address that receives block rewards
 }
 
 // ValidatorSet manages staked validators
@@ -298,6 +298,10 @@ type Consensus struct {
 	// The p2p/smr layer drains this channel and calls FastForward with
 	// each missing block fetched from a peer, in ascending height order.
 	syncNeededCh chan uint64
+
+	// Storage durability and crash recovery
+	storageDurabilityConfig *StorageDurabilityConfig
+	recoveryState           *RecoveryState
 }
 
 // SigningService handles cryptographic signing for consensus messages

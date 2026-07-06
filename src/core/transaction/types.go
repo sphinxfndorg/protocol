@@ -64,6 +64,7 @@ type Block struct {
 // Transaction represents a blockchain transaction
 type Transaction struct {
 	ID         string   `json:"id"`
+	ChainID    uint64   `json:"chain_id"` // EIP-155: Chain ID to prevent cross-chain replay attacks
 	Sender     string   `json:"sender"`
 	Receiver   string   `json:"receiver"`
 	Amount     *big.Int `json:"amount"`
@@ -75,8 +76,11 @@ type Transaction struct {
 	ReturnData []byte   `json:"return_data,omitempty"` // OP_RETURN data (memos, proofs, metadata)
 	// Optional data
 	Data           []byte `json:"data,omitempty"`
-	SignatureHash  []byte `json:"signature_hash"`             // ADD THIS - 32-byte hash of signature for replay detection
-	PublicKey      []byte `json:"public_key"`                 // Serialized SPHINCS+ public key (NOT sender address string)
+	Code           []byte `json:"code,omitempty"`             // Contract deployment bytecode
+	CallData       []byte `json:"call_data,omitempty"`        // Contract call input data
+	ToContract     string `json:"to_contract,omitempty"`      // Target contract address for calls
+	SignatureHash  []byte `json:"signature_hash"`             // 32-byte hash of signature for replay detection
+	PublicKey      []byte `json:"public_key"`                 // Serialized SPHINCS+ public key
 	AuthTimestamp  []byte `json:"auth_timestamp,omitempty"`   // 8-byte timestamp bound inside the SPHINCS signature
 	AuthNonce      []byte `json:"auth_nonce,omitempty"`       // 16-byte random nonce bound inside the SPHINCS signature
 	MerkleRootHash []byte `json:"merkle_root_hash,omitempty"` // SPHINCS+ receipt root derived from signature leaves
@@ -226,4 +230,17 @@ type AccountSet struct {
 	mu          sync.RWMutex
 	accounts    map[string]*AccountState // address -> account state
 	totalSupply *big.Int                 // circulating supply in nSPX
+}
+
+// NFTAnchorPayload is the contract-like record committed in tx.ReturnData.
+// It is the Sphinx equivalent of ERC-721 contract storage for tokenURI:
+// the tx itself is permanent, and the payload binds mint_id to an IPFS CID.
+type NFTAnchorPayload struct {
+	Type       string `json:"type"` // always sphinx_nft_anchor
+	Version    int    `json:"v"`
+	MintID     string `json:"mid"`
+	Subject    string `json:"sub,omitempty"`
+	CID        string `json:"cid"`
+	CIDHashHex string `json:"ch"` // sha256(CID) as hex
+	Timestamp  int64  `json:"ts"`
 }

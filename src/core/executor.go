@@ -5,15 +5,20 @@
 package core
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/sphinxfndorg/protocol/src/common"
 	"github.com/sphinxfndorg/protocol/src/consensus"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
 	logger "github.com/sphinxfndorg/protocol/src/log"
@@ -215,7 +220,10 @@ func (bc *Blockchain) WriteChainCheckpoint() error {
 		Phase:       phase,
 		ChainName:   chainName, // Use chainParams.ChainName
 		GenesisHash: genesisHash,
-		Timestamp:   time.Now().UTC().Format(time.RFC3339),
+		// Observability-only checkpoint timestamp derived from the chain tip,
+		// not wall-clock time, to avoid making checkpoint contents
+		// environment-dependent.
+		Timestamp: time.Unix(latestBlock.Header.Timestamp, 0).UTC().Format(time.RFC3339),
 
 		Supply: struct {
 			Max struct {
@@ -656,7 +664,7 @@ func (bc *Blockchain) previewStateRoot(height uint64, txs []*types.Transaction, 
 	stateDB, err := bc.newStateDB()
 	if err != nil {
 		logger.Warn("previewStateRoot: failed to open stateDB: %v", err)
-		return bc.calculateStateRoot()
+		return bc.calculateStateRootFallback()
 	}
 
 	block := &types.Block{
@@ -670,14 +678,29 @@ func (bc *Blockchain) previewStateRoot(height uint64, txs []*types.Transaction, 
 
 	if err := bc.applyTransactions(block, stateDB); err != nil {
 		logger.Warn("previewStateRoot: applyTransactions failed: %v", err)
-		return bc.calculateStateRoot()
+		return bc.calculateStateRootFallback()
 	}
 	bc.mintBlockReward(block, stateDB)
 
 	root, err := stateDB.computeStateRoot()
 	if err != nil {
 		logger.Warn("previewStateRoot: computeStateRoot failed: %v", err)
-		return bc.calculateStateRoot()
+		return bc.calculateStateRootFallback()
+	}
+	return root
+}
+
+// calculateStateRootFallback computes a state root from the current state DB.
+func (bc *Blockchain) calculateStateRootFallback() []byte {
+	stateDB, err := bc.newStateDB()
+	if err != nil {
+		logger.Warn("calculateStateRootFallback: failed to open state DB: %v", err)
+		return common.SpxHash([]byte{})
+	}
+	root, err := stateDB.computeStateRoot()
+	if err != nil {
+		logger.Warn("calculateStateRootFallback: failed to compute state root: %v", err)
+		return common.SpxHash([]byte{})
 	}
 	return root
 }
@@ -948,4 +971,348 @@ func (bc *Blockchain) GetRPCCaller() RPCCaller {
 	bc.lock.RLock()
 	defer bc.lock.RUnlock()
 	return bc.rpcCaller
+}
+
+// ============================================================================
+// Block production functions (moved from block_producer.go)
+// ============================================================================
+
+// CreateBlock creates a new block with transactions from mempool
+// and iterates nonce until consensus using existing functions.
+// Returns: New block or error
+func (bc *Blockchain) CreateBlock() (*types.Block, error) {
+	// Validate prerequisites
+	if bc.mempool == nil {
+		return nil, fmt.Errorf("mempool not initialized")
+	}
+	if bc.chainParams == nil {
+		return nil, fmt.Errorf("chain parameters not initialized")
+	}
+	bc.lock.Lock() // Write lock for thread safety
+	defer bc.lock.Unlock()
+
+	// Get the latest block to use as parent
+	prevBlock, err := bc.storage.GetLatestBlock()
+	if err != nil || prevBlock == nil {
+		return nil, fmt.Errorf("no previous block found: %v", err)
+	}
+
+	// Get previous hash (handles both hex and GENESIS_ formats)
+	parentHash := prevBlock.GetHash()
+	var parentHashBytes []byte
+
+	// Check if parent hash is in genesis format
+	if strings.HasPrefix(parentHash, "GENESIS_") {
+		parentHashBytes = []byte(parentHash)
+		logger.Info("Using genesis-style parent hash: %s (stored as %d bytes)",
+			parentHash, len(parentHashBytes))
+	} else {
+		parentHashBytes, err = hex.DecodeString(parentHash)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode parent hash: %w", err)
+		}
+		logger.Info("Using normal parent hash: %s (stored as %d bytes)",
+			parentHash, len(parentHashBytes))
+	}
+
+	// Get pending transactions from mempool
+	pendingTxs := bc.mempool.GetPendingTransactions()
+	selectedTxs := pendingTxs
+	totalSize := uint64(0)
+	if len(pendingTxs) > 0 {
+		logger.Info("Found %d pending transactions in mempool, max block size: %d bytes",
+			len(pendingTxs), bc.chainParams.MaxBlockSize)
+
+		var err error
+		selectedTxs, totalSize, err = bc.selectTransactionsForBlock(pendingTxs)
+		if err != nil {
+			return nil, fmt.Errorf("failed to select transactions: %w", err)
+		}
+	} else {
+		logger.Info("Mempool empty; creating empty block")
+	}
+
+	logger.Info("Creating block with %d transactions, estimated size: %d bytes (limit: %d, utilization: %.2f%%)",
+		len(selectedTxs), totalSize, bc.chainParams.MaxBlockSize,
+		float64(totalSize)/float64(bc.chainParams.MaxBlockSize)*100)
+
+	nextHeight := prevBlock.GetHeight() + 1
+	proposerID := ""
+	if bc.consensusEngine != nil {
+		proposerID = bc.consensusEngine.GetNodeID()
+	}
+
+	// Calculate roots for the block
+	txsRoot := bc.calculateTransactionsRoot(selectedTxs)
+	stateRoot := bc.previewStateRoot(nextHeight, selectedTxs, proposerID)
+
+	currentTimestamp := common.GetCurrentTimestamp()
+	// Leader-provided timestamp. If unset, use local time, but timestamp must
+	// never be used inside execution/state-root computation in a way that makes
+	// consensus non-deterministic.
+	if currentTimestamp == 0 {
+		currentTimestamp = time.Now().Unix()
+	}
+
+	logger.Info("Creating block with timestamp: %d (%s)",
+		currentTimestamp, time.Unix(currentTimestamp, 0).Format(time.RFC3339))
+
+	// Create miner address from proposer ID
+	miner := make([]byte, 20)
+	if bc.consensusEngine != nil && bc.consensusEngine.GetNodeID() != "" {
+		nodeIDHash := common.SpxHash([]byte(bc.consensusEngine.GetNodeID()))
+		if len(nodeIDHash) >= 20 {
+			miner = nodeIDHash[:20]
+		}
+	}
+
+	emptyUncles := []*types.BlockHeader{}
+	extraData := []byte(fmt.Sprintf("Sphinx Block %d", prevBlock.GetHeight()+1))
+
+	newHeader := types.NewBlockHeader(
+		nextHeight,
+		parentHashBytes,
+		bc.GetDifficulty(),
+		txsRoot,
+		stateRoot,
+		bc.chainParams.BlockGasLimit,
+		big.NewInt(0),
+		extraData,
+		miner,
+		currentTimestamp,
+		emptyUncles,
+	)
+
+	newBody := types.NewBlockBody(selectedTxs, emptyUncles)
+	newBlock := types.NewBlock(newHeader, newBody)
+	newBlock.Header.ProposerID = proposerID
+
+	// CRITICAL: Increment nonce multiple times until consensus is achieved
+	logger.Info("Starting nonce iteration for consensus: initial nonce=%s", newBlock.Header.Nonce)
+
+	maxAttempts := 1000000
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if err := newBlock.IncrementNonce(); err != nil {
+			logger.Warn("Failed to increment nonce on attempt %d: %v", attempt, err)
+			continue
+		}
+		newBlock.FinalizeHash()
+		if bc.checkConsensusRequirements(newBlock) {
+			logger.Info("✅ Consensus achieved with nonce %s after %d attempts",
+				newBlock.Header.Nonce, attempt+1)
+			break
+		}
+		if (attempt+1)%1000 == 0 {
+			logger.Debug("Nonce iteration: attempt %d, current nonce: %s",
+				attempt+1, newBlock.Header.Nonce)
+		}
+		if attempt == maxAttempts-1 {
+			logger.Info("⚠️ Max nonce attempts reached, using nonce %s", newBlock.Header.Nonce)
+		}
+	}
+
+	if err := newBlock.ValidateHashFormat(); err != nil {
+		logger.Warn("❌ Block hash format validation failed: %v", err)
+		newBlock.SetHash(hex.EncodeToString(newBlock.GenerateBlockHash()))
+		if err := newBlock.ValidateHashFormat(); err != nil {
+			return nil, fmt.Errorf("failed to generate valid block hash: %w", err)
+		}
+	}
+
+	if err := newBlock.ValidateTxsRoot(); err != nil {
+		return nil, fmt.Errorf("created block has inconsistent TxsRoot: %v", err)
+	}
+
+	// Cache merkle root in consensus engine
+	merkleRoot := hex.EncodeToString(txsRoot)
+	blockHash := newBlock.GetHash()
+	logger.Info("✅ Pre-calculated merkle root for new block %s: %s", blockHash, merkleRoot)
+
+	if bc.consensusEngine != nil {
+		bc.consensusEngine.CacheMerkleRoot(blockHash, merkleRoot)
+		logger.Info("✅ Cached merkle root in consensus engine")
+	} else {
+		logger.Warn("⚠️ No consensus engine available for caching")
+	}
+
+	logger.Info("✅ Created new PBFT block: height=%d, transactions=%d, hash=%s, final_nonce=%s",
+		newBlock.GetHeight(), len(selectedTxs), newBlock.GetHash(), newBlock.Header.Nonce)
+
+	return newBlock, nil
+}
+
+// selectTransactionsForBlock selects transactions for the block based on size constraints.
+func (bc *Blockchain) selectTransactionsForBlock(pendingTxs []*types.Transaction) ([]*types.Transaction, uint64, error) {
+	var selectedTxs []*types.Transaction
+	currentSize := uint64(0)
+	txCount := 0
+	maxTxCount := 10000
+
+	blockOverhead := uint64(1000)
+	availableSize := bc.chainParams.MaxBlockSize - blockOverhead
+
+	if availableSize <= 0 {
+		return nil, 0, fmt.Errorf("block size too small for overhead")
+	}
+
+	logger.Debug("Available block size for transactions: %d bytes (after %d bytes overhead)",
+		availableSize, blockOverhead)
+
+	currentGas := big.NewInt(0)
+
+	for _, tx := range pendingTxs {
+		if txCount >= maxTxCount {
+			logger.Warn("Reached maximum transaction count limit: %d", maxTxCount)
+			break
+		}
+
+		txSize, err := bc.calculateTxsSize(tx)
+		if err != nil {
+			logger.Warn("Failed to calculate transaction size: %v, skipping", err)
+			continue
+		}
+
+		if txSize > bc.chainParams.MaxTransactionSize {
+			logger.Warn("Transaction exceeds maximum size: %d > %d", txSize, bc.chainParams.MaxTransactionSize)
+			continue
+		}
+
+		if err := bc.ValidateTransactionPolicy(tx); err != nil {
+			logger.Warn("Transaction %s failed policy validation: %v", tx.ID, err)
+			continue
+		}
+
+		if currentSize+txSize > availableSize {
+			continue
+		}
+
+		if bc.chainParams.BlockGasLimit != nil {
+			txGas := bc.getTransactionGas(tx)
+			proposedGas := new(big.Int).Add(currentGas, txGas)
+			if proposedGas.Cmp(bc.chainParams.BlockGasLimit) > 0 {
+				logger.Debug("Transaction would exceed gas limit: %s > %s",
+					proposedGas.String(), bc.chainParams.BlockGasLimit.String())
+				continue
+			}
+			currentGas = proposedGas
+		}
+
+		selectedTxs = append(selectedTxs, tx)
+		currentSize += txSize
+		txCount++
+
+		if currentSize >= availableSize*95/100 {
+			logger.Debug("Reached 95%% of available block size, stopping selection")
+			break
+		}
+	}
+
+	if len(selectedTxs) > 0 {
+		utilization := float64(currentSize) / float64(availableSize) * 100
+		averageTxSize := float64(currentSize) / float64(len(selectedTxs))
+		logger.Info("Selected %d transactions, total size: %d bytes (%.2f%% utilization, avg tx: %.2f bytes)",
+			len(selectedTxs), currentSize, utilization, averageTxSize)
+		if bc.chainParams.BlockGasLimit != nil {
+			gasUtilization := float64(currentGas.Int64()) / float64(bc.chainParams.BlockGasLimit.Int64()) * 100
+			logger.Info("Gas usage: %s / %s (%.2f%%)",
+				currentGas.String(), bc.chainParams.BlockGasLimit.String(), gasUtilization)
+		}
+	}
+
+	sort.SliceStable(selectedTxs, func(i, j int) bool {
+		a := selectedTxs[i]
+		b := selectedTxs[j]
+		if a.Sender != b.Sender {
+			return a.Sender < b.Sender
+		}
+		if a.Nonce != b.Nonce {
+			return a.Nonce < b.Nonce
+		}
+		// Final deterministic tie-breaker for complete ordering.
+		return a.ID < b.ID
+	})
+
+	return selectedTxs, currentSize + blockOverhead, nil
+}
+
+// calculateTxsSize calculates the size of a transaction in bytes.
+func (bc *Blockchain) calculateTxsSize(tx *types.Transaction) (uint64, error) {
+	if bc.mempool != nil {
+		return bc.mempool.CalculateTransactionSize(tx), nil
+	}
+
+	estimatedSize := uint64(50) // Fixed overhead
+	estimatedSize += uint64(len(tx.ID))
+	estimatedSize += uint64(len(tx.Sender))
+	estimatedSize += uint64(len(tx.Receiver))
+
+	if tx.Amount != nil {
+		estimatedSize += uint64(len(tx.Amount.Bytes()))
+	}
+	if tx.GasLimit != nil {
+		estimatedSize += uint64(len(tx.GasLimit.Bytes()))
+	}
+	if tx.GasPrice != nil {
+		estimatedSize += uint64(len(tx.GasPrice.Bytes()))
+	}
+
+	estimatedSize += 8 // nonce
+	estimatedSize += 8 // timestamp
+
+	estimatedSize += uint64(len(tx.Signature))
+	estimatedSize += uint64(len(tx.SignatureHash))
+	estimatedSize += uint64(len(tx.PublicKey))
+	estimatedSize += uint64(len(tx.AuthTimestamp))
+	estimatedSize += uint64(len(tx.AuthNonce))
+	estimatedSize += uint64(len(tx.MerkleRootHash))
+	estimatedSize += uint64(len(tx.Commitment))
+	estimatedSize += uint64(len(tx.Proof))
+	estimatedSize += 4 // version
+
+	if tx.HasReturnData() && len(tx.ReturnData) > 0 {
+		estimatedSize += uint64(len(tx.ReturnData))
+	}
+
+	return estimatedSize, nil
+}
+
+// getTransactionGas returns the gas cost for a transaction.
+func (bc *Blockchain) getTransactionGas(tx *types.Transaction) *big.Int {
+	if tx.GasLimit != nil {
+		return tx.GasLimit
+	}
+	return big.NewInt(21000) // Default gas for a standard transfer
+}
+
+// checkConsensusRequirements checks if the block meets consensus requirements.
+func (bc *Blockchain) checkConsensusRequirements(_ *types.Block) bool {
+	// For PBFT, the nonce iteration is a placeholder for future PoW integration.
+	// Currently, any nonce is accepted as valid.
+	return true
+}
+
+// calculateTransactionsRoot calculates the Merkle root of a set of transactions.
+func (bc *Blockchain) calculateTransactionsRoot(txs []*types.Transaction) []byte {
+	if len(txs) == 0 {
+		return common.SpxHash([]byte{})
+	}
+	tempBody := types.NewBlockBody(txs, []*types.BlockHeader{})
+	tempBlock := types.NewBlock(&types.BlockHeader{}, tempBody)
+	return tempBlock.CalculateTxsRoot()
+}
+
+// calculateBlockTime calculates the time between this block and the previous block.
+func (bc *Blockchain) calculateBlockTime(block *types.Block) time.Duration {
+	if block.GetHeight() <= 1 {
+		return 5 * time.Second
+	}
+	prevBlock := bc.GetBlockByNumber(block.GetHeight() - 1)
+	if prevBlock == nil {
+		return 5 * time.Second
+	}
+	blockTime := time.Duration(block.Header.Timestamp-prevBlock.Header.Timestamp) * time.Second
+	if blockTime <= 0 {
+		blockTime = 1 * time.Second
+	}
+	return blockTime
 }

@@ -62,9 +62,23 @@ func (bc *Blockchain) GetGenesisTime() time.Time {
 	defer bc.lock.RUnlock()
 
 	if len(bc.chain) == 0 {
-		// If no chain, return a default (this shouldn't happen in practice)
-		logger.Warn("GetGenesisTime called with empty chain, returning default")
-		return time.Unix(1732070400, 0) // Default from your chain params
+		// FIX: The old fallback returned a hardcoded Unix timestamp
+		// (1732070400 = 2024-11-20), which is stale and completely
+		// unrelated to whatever genesis time this deployment's chain
+		// params actually define (e.g. 2026-07-07). Any caller that hit
+		// this path — such as during startup before the genesis block is
+		// appended to bc.chain, or a request racing block 0's commit —
+		// would report a genesis year from over a year in the past
+		// instead of the chain's real genesis time. Fall back to the
+		// canonical genesis time already recorded in chainParams, which
+		// is set before genesis block creation and does not depend on
+		// bc.chain being populated.
+		if bc.chainParams != nil && bc.chainParams.GenesisTime != 0 {
+			logger.Warn("GetGenesisTime called with empty chain, falling back to chainParams.GenesisTime")
+			return time.Unix(bc.chainParams.GenesisTime, 0)
+		}
+		logger.Warn("GetGenesisTime called with empty chain and no chainParams, returning current time")
+		return time.Now()
 	}
 
 	// Genesis block is at height 0
@@ -125,6 +139,7 @@ func GetGenesisBlockDefinition() *types.BlockHeader {
 	header := canonicalGenesis.Header
 	return &types.BlockHeader{
 		Version:    header.Version,
+		Block:      header.Block, // FIX: GetHeight() reads Block, not Height — keep them in sync
 		Height:     header.Height,
 		Timestamp:  header.Timestamp,
 		Difficulty: new(big.Int).Set(header.Difficulty),

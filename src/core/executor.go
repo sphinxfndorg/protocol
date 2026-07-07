@@ -1083,7 +1083,7 @@ func (bc *Blockchain) CreateBlock() (*types.Block, error) {
 		emptyUncles,
 	)
 
-	newBody := types.NewBlockBody(selectedTxs, emptyUncles)
+	newBody := types.NewBlockBody(selectedTxs, emptyUncles, nextHeight)
 	newBlock := types.NewBlock(newHeader, newBody)
 	newBlock.Header.ProposerID = proposerID
 
@@ -1296,7 +1296,7 @@ func (bc *Blockchain) calculateTransactionsRoot(txs []*types.Transaction) []byte
 	if len(txs) == 0 {
 		return types.EmptyMerkleRoot
 	}
-	tempBody := types.NewBlockBody(txs, []*types.BlockHeader{})
+	tempBody := types.NewBlockBody(txs, []*types.BlockHeader{}, 0)
 	tempBlock := types.NewBlock(&types.BlockHeader{}, tempBody)
 	return tempBlock.CalculateTxsRoot()
 }

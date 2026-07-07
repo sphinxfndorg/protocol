@@ -268,9 +268,8 @@ func (s *Storage) RecordBlock(block *types.Block, blockTime time.Duration) {
 
 	txCount := uint64(len(block.Body.TxsList))
 
-	s.tpsMetrics.CurrentWindowCount += txCount // ← REMOVE THIS
-	s.tpsMetrics.TotalTransactions += txCount  // ← REMOVE THIS
-
+	// FIX: Don't double-count transactions here - they're counted in RecordTransaction()
+	// Only increment BlocksProcessed
 	s.tpsMetrics.BlocksProcessed++
 
 	// Record block transaction count
@@ -646,7 +645,7 @@ func (s *Storage) calculateBlockSizeMetrics(chainState *ChainState) error {
 			Size:      blockSize,
 			SizeMB:    float64(blockSize) / (1024 * 1024),
 			TxCount:   uint64(len(block.Body.TxsList)),
-			Timestamp: block.Header.Timestamp,
+			Timestamp: common.GetTimeService().GetTimeInfo(block.Header.Timestamp).ISOUTC,
 		}
 		sizeStats = append(sizeStats, blockStat)
 
@@ -741,6 +740,28 @@ func (s *Storage) SaveCompleteChainState(chainState *ChainState, chainParams *Ch
 				logger.Warn("Node %d in chainState is nil, replacing with real node info", i)
 				// Replace nil nodes with real node information
 				chainState.Nodes[i] = s.createNodeInfo(i)
+				continue
+			}
+			// FIX: `node` may have been built earlier in the request (e.g. before
+			// the latest block finished committing), so its BlockHeight/BlockHash
+			// can lag behind s.bestBlockHash/s.totalBlocks by the time we actually
+			// persist. That produced chain_state.json output where a node reported
+			// height 1 while StorageState/BasicChainState (built fresh just below
+			// from s.bestBlockHash) already reported height 3. Always resync each
+			// node's chain-tip fields against current storage right before saving.
+			fresh := s.createNodeInfo(i)
+			node.BlockHeight = fresh.BlockHeight
+			node.BlockHash = fresh.BlockHash
+			node.MerkleRoot = fresh.MerkleRoot
+			node.Timestamp = fresh.Timestamp
+			if node.ChainInfo == nil {
+				node.ChainInfo = fresh.ChainInfo
+			} else {
+				node.ChainInfo["blocks_height"] = fresh.BlockHeight
+				node.ChainInfo["last_updated"] = fresh.Timestamp
+				node.ChainInfo["tps_current"] = fresh.ChainInfo["tps_current"]
+				node.ChainInfo["tps_average"] = fresh.ChainInfo["tps_average"]
+				node.ChainInfo["total_txs"] = fresh.ChainInfo["total_txs"]
 			}
 		}
 	}

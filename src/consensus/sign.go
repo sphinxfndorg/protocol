@@ -834,16 +834,14 @@ func (s *SigningService) VerifyBlockSignature(block Block) (bool, error) {
 		return false, fmt.Errorf("failed to deserialize block signature: %w", err)
 	}
 
-	// Recompute the RAW hash from the received unsigned header fields. Do not
-	// trust a cached or disk-loaded SigDataHash when validating a proposal.
-	proposerSignature := append([]byte(nil), tb.Header.ProposerSignature...)
-	sigValid := tb.Header.SigValid
-	tb.Header.ProposerSignature = nil
-	tb.Header.SigValid = false
-	tb.FinalizeHash()
-	rawHash := append([]byte(nil), tb.Header.SigDataHash...)
-	tb.Header.ProposerSignature = proposerSignature
-	tb.Header.SigValid = sigValid
+	// FIX: Compute rawHash WITHOUT modifying the block header
+	// The old code temporarily set ProposerSignature=nil which could cause race conditions
+	// if another goroutine reads the header during verification.
+	// Instead, we compute SigDataHash from a copy of the header.
+	rawHash, err := s.computeBlockSigDataHash(tb)
+	if err != nil {
+		return false, fmt.Errorf("failed to compute block sig data hash: %w", err)
+	}
 
 	if len(rawHash) == 0 {
 		return false, fmt.Errorf("block has no raw hash (SigDataHash)")
@@ -869,6 +867,31 @@ func (s *SigningService) VerifyBlockSignature(block Block) (bool, error) {
 	}
 
 	return valid, nil
+}
+
+// computeBlockSigDataHash computes the SigDataHash for a block WITHOUT modifying the header
+// This is a race-safe alternative to the old approach of temporarily setting ProposerSignature=nil
+func (s *SigningService) computeBlockSigDataHash(tb *types.Block) ([]byte, error) {
+	if tb == nil || tb.Header == nil {
+		return nil, fmt.Errorf("block or header is nil")
+	}
+
+	// Create a temporary copy of the header to avoid modifying the original
+	headerCopy := *tb.Header
+
+	// Clear signature fields in the copy (not the original)
+	headerCopy.ProposerSignature = nil
+	headerCopy.SigValid = false
+
+	// Create a temporary block with the copied header
+	tempBlock := *tb
+	tempBlock.Header = &headerCopy
+
+	// Finalize the hash on the copy
+	tempBlock.FinalizeHash()
+
+	// Return the SigDataHash from the copy
+	return append([]byte(nil), tempBlock.Header.SigDataHash...), nil
 }
 
 // GetSigningService returns the signing service instance from the Consensus object.

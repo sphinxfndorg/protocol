@@ -687,12 +687,12 @@ func (bc *Blockchain) CalculateAndStoreBlockSizeMetrics() error {
 		// Record individual block stats using BlockSizeInfo
 		// Create detailed statistics for this block
 		blockStat := storage.BlockSizeInfo{
-			Height:    block.GetHeight(),                  // Block number
-			Hash:      block.GetHash(),                    // Block hash
-			Size:      blockSize,                          // Size in bytes
-			SizeMB:    float64(blockSize) / (1024 * 1024), // Size in megabytes
-			TxCount:   uint64(len(block.Body.TxsList)),    // Transaction count
-			Timestamp: block.Header.Timestamp,             // Block timestamp
+			Height:    block.GetHeight(),                                                  // Block number
+			Hash:      block.GetHash(),                                                    // Block hash
+			Size:      blockSize,                                                          // Size in bytes
+			SizeMB:    float64(blockSize) / (1024 * 1024),                                 // Size in megabytes
+			TxCount:   uint64(len(block.Body.TxsList)),                                    // Transaction count
+			Timestamp: common.GetTimeService().GetTimeInfo(block.Header.Timestamp).ISOUTC, // ISO 8601 timestamp
 		}
 		sizeStats = append(sizeStats, blockStat) // Add to statistics slice
 	}
@@ -1622,10 +1622,24 @@ func (bc *Blockchain) createGenesisBlock() error {
 	genesis := bc.chain[0]
 
 	// ========== RECORD GENESIS BLOCK IN TPS MONITOR ==========
+	// NOTE: Both TPS trackers must be updated together, or the persisted
+	// storage.tpsMetrics (which feeds chain_state.json / the CLI report)
+	// silently diverges from bc.tpsMonitor (which feeds live GetStats()).
+	// Previously only bc.tpsMonitor was updated here, so the genesis
+	// block's transactions (and its BlockTXCount entry) never made it
+	// into storage.tpsMetrics.TransactionsPerBlock/TPSHistory — leaving
+	// peak/average TPS and avg_transactions_per_block computed from two
+	// inconsistent datasets (e.g. one showing genesis's 9 txs, the other
+	// missing them entirely).
 	if bc.tpsMonitor != nil {
 		txCount := uint64(len(genesis.Body.TxsList))
 		bc.tpsMonitor.RecordBlock(txCount, 5*time.Second)
 		logger.Info("📊 Recorded genesis block in TPS monitor with %d transactions", txCount)
+	}
+	if bc.storage != nil {
+		bc.storage.RecordBlock(genesis, 5*time.Second)
+		logger.Info("📊 Recorded genesis block in storage TPS metrics with %d transactions",
+			len(genesis.Body.TxsList))
 	}
 	// =========================================================
 

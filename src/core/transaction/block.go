@@ -99,12 +99,12 @@ func NewBlockHeader(height uint64, parentHash []byte, difficulty *big.Int, txsRo
 // Parameters:
 //   - txsList: List of transactions to include in the block
 //   - uncles: List of uncle block headers
+//   - height: Block height (required for proper uncles hash calculation)
 //
 // Returns: Initialized BlockBody pointer
-func NewBlockBody(txsList []*Transaction, uncles []*BlockHeader) *BlockBody {
-	// For block body, we don't have height context, so use 0 (will be overridden later)
-	// Or you can modify this function to accept height if needed
-	unclesHash := CalculateUnclesHash(uncles, 0) // Pass 0 as default
+func NewBlockBody(txsList []*Transaction, uncles []*BlockHeader, height uint64) *BlockBody {
+	// Calculate uncles hash with the actual block height for consistency with header
+	unclesHash := CalculateUnclesHash(uncles, height)
 
 	// Return fully initialized block body
 	return &BlockBody{
@@ -759,15 +759,24 @@ func (b *Block) UnmarshalJSON(data []byte) error {
 
 		// If the parsed header has height 0 but original had height > 0, restore it
 		// This can happen if the JSON doesn't include the height field properly
-		if b.Header.Height == 0 && originalHeight > 0 {
+		if b.Header.Height == 0 && b.Header.Block == 0 && originalHeight > 0 {
 			b.Header.Height = originalHeight
 			b.Header.Block = originalHeight
 		}
 
-		// Also check if the header has a valid height from the Block field
-		// The Block field in the JSON might contain the height
+		// FIX: reconcile Height/Block symmetrically. GetHeight() (helper.go)
+		// authoritatively reads Header.Block, not Header.Height — but the
+		// checks below used to only ever repair Height from Block, never
+		// the reverse. Any header whose JSON carried a valid "height" but a
+		// missing/zero "nblock" (partial/legacy payloads, or headers built
+		// via struct literals that only set Height) would silently end up
+		// with Height>0 but Block==0, so GetHeight() would report 0 for a
+		// real, non-genesis block — the exact symptom of a block quietly
+		// losing its height after a JSON round-trip.
 		if b.Header.Height == 0 && b.Header.Block > 0 {
 			b.Header.Height = b.Header.Block
+		} else if b.Header.Block == 0 && b.Header.Height > 0 {
+			b.Header.Block = b.Header.Height
 		}
 	} else {
 		// Initialize with empty header

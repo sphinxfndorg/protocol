@@ -1537,20 +1537,32 @@ func (c *Consensus) processProposal(proposal *Proposal) {
 
 	// In processProposal, after validating the block
 	if proposal.Block.GetHeight() == 0 {
-		// This is a deserialization issue - try to correct
-		logger.Warn("Block height is 0, attempting to correct to height 1")
+		// This is a deserialization issue - try to correct.
+		//
+		// FIX: This used to hardcode the corrected height to 1, which was
+		// only ever correct for the very first block after genesis. By the
+		// time we reach this point, proposalHeight has already been
+		// validated against expectedHeight (localTipHeight+1) above — any
+		// mismatch already returned early. So if something later zeroed
+		// out the height (e.g. a deserialization round-trip inside
+		// ValidateBlock), the CORRECT value to restore is expectedHeight,
+		// not a hardcoded 1. Hardcoding 1 here silently mislabeled every
+		// block after height 1 — e.g. a real height-2 block would get
+		// stamped as height 1 in the resulting ConsensusSignature and
+		// downstream final_states/chain_state.json output.
+		logger.Warn("Block height is 0, attempting to correct to expected height %d", expectedHeight)
 
 		// Try to set the height using reflection or interface
 		if setter, ok := proposal.Block.(interface{ SetHeight(uint64) }); ok {
-			setter.SetHeight(1)
-			logger.Info("Successfully corrected block height to 1")
+			setter.SetHeight(expectedHeight)
+			logger.Info("Successfully corrected block height to %d", expectedHeight)
 		} else {
 			// Try to access underlying block directly
 			if getter, ok := proposal.Block.(interface{ GetUnderlyingBlock() interface{} }); ok {
 				if underlying, ok := getter.GetUnderlyingBlock().(*types.Block); ok && underlying != nil {
-					underlying.Header.Height = 1
-					underlying.Header.Block = 1
-					logger.Info("Successfully corrected underlying block height to 1")
+					underlying.Header.Height = expectedHeight
+					underlying.Header.Block = expectedHeight
+					logger.Info("Successfully corrected underlying block height to %d", expectedHeight)
 				}
 			}
 		}
@@ -1994,8 +2006,17 @@ func (c *Consensus) tryEnterPreparedPhase(blockHash string, view uint64) {
 	if votes := c.prepareVotes[blockHash]; votes != nil {
 		for voterID, v := range votes {
 			c.addConsensusSig(&ConsensusSignature{
-				BlockHash:    blockHash,
-				BlockHeight:  c.currentHeight,
+				BlockHash: blockHash,
+				// FIX: c.currentHeight is only advanced at commit time (see
+				// SetCurrentHeight / the assignment after commit below), so
+				// during the Prepared phase — i.e. right here — it still
+				// reflects the PREVIOUS committed height, one less than the
+				// block actually being prepared. That produced final_states
+				// entries where a real height-2 block's "prepare" signature
+				// was recorded with block_height: 1. c.preparedBlock is the
+				// block actually reaching quorum right now (already used
+				// correctly in the log line below), so use its height.
+				BlockHeight:  c.preparedBlock.GetHeight(),
 				SignerNodeID: voterID,
 				Signature:    hex.EncodeToString(v.Signature),
 				MessageType:  "prepare",
@@ -2315,11 +2336,20 @@ func (c *Consensus) processVoteLocked(vote *Vote) Block {
 			if len(votesSnapshot) > 0 {
 				tb.Body.Attestations = make([]*types.Attestation, 0, len(votesSnapshot))
 				for voterID, vote := range votesSnapshot {
+					// Extract the raw SPHINCS+ signature bytes from the serialized SignedMessage
+					// vote.Signature is a serialized SignedMessage (includes length prefixes, timestamp, nonce, etc.)
+					// We need to deserialize it and extract just the actual signature bytes
+					signedMsg, err := DeserializeSignedMessage(vote.Signature)
+					if err != nil {
+						logger.Warn("Failed to deserialize vote signature for attestation: %v", err)
+						continue
+					}
+
 					tb.Body.Attestations = append(tb.Body.Attestations, &types.Attestation{
 						ValidatorID: voterID,
 						BlockHash:   blockToCommit.GetHash(),
 						View:        vote.View,
-						Signature:   vote.Signature, // Keep as bytes, hex encoding happens in storage
+						Signature:   signedMsg.Signature, // Extract raw SPHINCS+ signature bytes only
 					})
 				}
 				logger.Info("✅ Attached %d attestations to block BEFORE commit", len(tb.Body.Attestations))

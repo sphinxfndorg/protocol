@@ -150,7 +150,7 @@ type BlockSizeInfo struct {
 	Size      uint64  `json:"size_bytes"`
 	SizeMB    float64 `json:"size_mb"`
 	TxCount   uint64  `json:"transaction_count"`
-	Timestamp int64   `json:"timestamp"`
+	Timestamp string  `json:"timestamp"` // ISO 8601 format for consistency
 }
 
 // TPSMetrics represents Transactions Per Second metrics

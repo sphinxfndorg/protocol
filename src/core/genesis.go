@@ -231,7 +231,7 @@ func (gs *GenesisState) BuildBlock() *types.Block {
 	txs := gs.allocationsToTxList()
 
 	// Create body with the allocation transactions
-	body := types.NewBlockBody(txs, []*types.BlockHeader{})
+	body := types.NewBlockBody(txs, []*types.BlockHeader{}, 0)
 
 	// Calculate TxsRoot from the actual transactions
 	tempBlock := types.NewBlock(&types.BlockHeader{}, body)
@@ -280,7 +280,7 @@ func (gs *GenesisState) buildAllocationRoot() []byte {
 
 	// Build the same transaction list that BuildBlock uses so the root matches.
 	genesisTxs := gs.allocationsToTxList()
-	tempBody := types.NewBlockBody(genesisTxs, []*types.BlockHeader{})
+	tempBody := types.NewBlockBody(genesisTxs, []*types.BlockHeader{}, 0)
 	tempBlock := types.NewBlock(&types.BlockHeader{}, tempBody)
 	return tempBlock.CalculateTxsRoot()
 }

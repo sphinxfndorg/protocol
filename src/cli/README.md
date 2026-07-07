@@ -44,26 +44,31 @@ block, register itself, and begin participating in consensus.
 cd desktop/protocol/src/cli
 go run main.go node --role=validator \
     --tcp-addr=127.0.0.1:32307 --udp-port=32308 \
-    --http-port=127.0.0.1:8545 --datadir=data/node0 \
+    --http-port=127.0.0.1:8545 --datadir=data \
     --nodes=3 --node-index=0 --pbft
 
 # Terminal 2 — Node 1
 cd desktop/protocol/src/cli
 go run main.go node --role=validator \
     --tcp-addr=127.0.0.1:32308 --udp-port=32309 \
-    --http-port=127.0.0.1:8546 --datadir=data/node1 \
+    --http-port=127.0.0.1:8546 --datadir=data \
     --nodes=3 --node-index=1 --pbft
 
 # Terminal 3 — Node 2
 cd desktop/protocol/src/cli
 go run main.go node --role=validator \
     --tcp-addr=127.0.0.1:32309 --udp-port=32310 \
-    --http-port=127.0.0.1:8547 --datadir=data/node2 \
+    --http-port=127.0.0.1:8547 --datadir=data \
     --nodes=3 --node-index=2 --pbft
 ```
 
 Within seconds all three nodes will connect, elect a leader, and begin
 producing blocks. Each node's JSON-RPC is available on its `--http-port`.
+
+**Note:** Each node automatically creates its own subdirectory based on its
+TCP address (e.g., `data/Node-127.0.0.1:32307/`, `data/Node-127.0.0.1:32308/`,
+`data/Node-127.0.0.1:32309/`). You do not need to specify different `--datadir`
+values for each node.
 
 ### Three nodes on three machines (real network)
 
@@ -225,7 +230,7 @@ a `PATH` directory or use `./sphinx` directly.
     --tcp-addr=127.0.0.1:32307 \
     --udp-port=32308 \
     --http-port=127.0.0.1:8545 \
-    --datadir=data/node0 \
+    --datadir=data \
     --nodes=3 --node-index=0 --pbft
 ```
 
@@ -293,19 +298,19 @@ Or start manually:
 # Node 0
 ./sphinx node --role=validator \
     --tcp-addr=127.0.0.1:32307 --udp-port=32308 \
-    --http-port=127.0.0.1:8545 --datadir=data/node0 \
+    --http-port=127.0.0.1:8545 --datadir=data \
     --nodes=3 --node-index=0 --pbft
 
 # Node 1
 ./sphinx node --role=validator \
     --tcp-addr=127.0.0.1:32308 --udp-port=32309 \
-    --http-port=127.0.0.1:8546 --datadir=data/node1 \
+    --http-port=127.0.0.1:8546 --datadir=data \
     --nodes=3 --node-index=1 --pbft
 
 # Node 2
 ./sphinx node --role=validator \
     --tcp-addr=127.0.0.1:32309 --udp-port=32310 \
-    --http-port=127.0.0.1:8547 --datadir=data/node2 \
+    --http-port=127.0.0.1:8547 --datadir=data \
     --nodes=3 --node-index=2 --pbft
 ```
 

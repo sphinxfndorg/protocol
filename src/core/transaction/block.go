@@ -222,7 +222,7 @@ func CalculateUnclesHash(uncles []*BlockHeader, blockHeight uint64) []byte {
 func CalculateMerkleRootFromHashes(hashes [][]byte) []byte {
 	// Handle empty list - return hash of empty data
 	if len(hashes) == 0 {
-		return common.SpxHash([]byte{})
+		return EmptyMerkleRoot
 	}
 	// Handle single hash - return it directly (no need to hash)
 	if len(hashes) == 1 {
@@ -296,7 +296,7 @@ func (b *Block) GenerateBlockHash() []byte {
 		}
 	} else {
 		// For empty blocks, ensure TxsRoot is the hash of empty data
-		emptyHash := common.SpxHash([]byte{})
+		emptyHash := EmptyMerkleRoot
 		if len(b.Header.TxsRoot) == 0 || !bytes.Equal(b.Header.TxsRoot, emptyHash) {
 			b.Header.TxsRoot = emptyHash // Set to empty hash
 		}
@@ -638,7 +638,7 @@ func (h *BlockHeader) UnmarshalJSON(data []byte) error {
 			return fmt.Errorf("failed to decode txs_root: %w", err)
 		}
 	} else {
-		h.TxsRoot = common.SpxHash([]byte{})
+		h.TxsRoot = EmptyMerkleRoot
 	}
 
 	// Handle StateRoot - if empty, use empty hash
@@ -648,7 +648,7 @@ func (h *BlockHeader) UnmarshalJSON(data []byte) error {
 			return fmt.Errorf("failed to decode state_root: %w", err)
 		}
 	} else {
-		h.StateRoot = common.SpxHash([]byte{})
+		h.StateRoot = EmptyMerkleRoot
 	}
 
 	// Handle ParentHash - if empty, use empty hash
@@ -779,8 +779,8 @@ func (b *Block) UnmarshalJSON(data []byte) error {
 			Hash:       []byte{},
 			Difficulty: big.NewInt(1),
 			Nonce:      common.FormatNonce(2),
-			TxsRoot:    common.SpxHash([]byte{}),
-			StateRoot:  common.SpxHash([]byte{}),
+			TxsRoot:    EmptyMerkleRoot,
+			StateRoot:  EmptyMerkleRoot,
 			GasLimit:   big.NewInt(0),
 			GasUsed:    big.NewInt(0),
 			UnclesHash: common.SpxHash([]byte("empty_uncles_list")),

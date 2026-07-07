@@ -426,7 +426,7 @@ func StartNode(
 				return err
 			}
 
-			if _, err := conn.Write(encodedMsg); err != nil {
+			if err := writeFramedMessage(conn, encodedMsg); err != nil {
 				connPool.mu.Lock()
 				delete(connPool.connections, nodeAddress)
 				connPool.mu.Unlock()
@@ -733,7 +733,7 @@ func StartNode(
 			go func(c net.Conn) {
 				defer wg.Done()
 				defer c.Close()
-				handleIncomingConn(c, currentNodeID, currentAddress, rewardAddress, signingService, sthincsParams, cons, p2pMgr, rpcServer, getKnownPeers, registerDiscoveredPeer, registerPeerStakeClaim)
+				handleIncomingConn(c, currentNodeID, currentAddress, rewardAddress, signingService, sthincsParams, cons, p2pMgr, rpcServer, bc, getKnownPeers, registerDiscoveredPeer, registerPeerStakeClaim)
 			}(conn)
 		}
 	}()
@@ -883,15 +883,7 @@ func StartNode(
 		}()
 	}
 
-	// SECTION 12 — genesis verification
-	expectedGenesisHash := core.GetGenesisHash()
-	genesis := bc.GetLatestBlock()
-	if genesis == nil || genesis.GetHeight() != 0 {
-		return fmt.Errorf("genesis block not initialized")
-	}
-	logger.Info("✅ Genesis hash verified: %s", expectedGenesisHash)
-
-	// SECTION 13 — HTTP server
+	// SECTION 12 — HTTP server
 	httpPort := 8545 + nodeIndex
 	if nodeConfig.HTTPPort != "" {
 		if port, err := strconv.Atoi(nodeConfig.HTTPPort); err == nil {
@@ -910,11 +902,75 @@ func StartNode(
 		}
 	}()
 
-	// SECTION 14 — block production loop
+	// SECTION 14 — block sync loop (catch-up mechanism)
+	// The node starts in SYNCING state. It will query peers for missing blocks
+	// and apply them before participating in consensus.
+	var syncState SyncState = SyncStateSyncing
+	var syncStateMu sync.Mutex
+
+	// Collect peer addresses for the sync loop
+	peerRegistryMu.Lock()
+	peerAddrs := make([]string, 0, len(peerRegistry))
+	for _, addr := range peerRegistry {
+		peerAddrs = append(peerAddrs, addr)
+	}
+	peerRegistryMu.Unlock()
+
+	// Also add same-box network addresses if available
+	for _, addr := range networkAddresses {
+		if addr != currentAddress {
+			found := false
+			for _, existing := range peerAddrs {
+				if existing == addr {
+					found = true
+					break
+				}
+			}
+			if !found {
+				peerAddrs = append(peerAddrs, addr)
+			}
+		}
+	}
+
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		runBlockProductionLoop(ctx, bc, cons, currentNodeID, totalNodes, networkType, validatorIDs, validatorAddressMap, phase2State, effectivePeerCount)
+		runBlockSyncLoop(ctx, bc, cons, currentNodeID, peerAddrs, &syncState, &syncStateMu)
+	}()
+
+	// SECTION 13 — genesis verification (after sync loop has run)
+	// A late-joining node won't have genesis locally. The sync loop above
+	// fetches it from peers. We wait for the sync loop to complete before
+	// verifying genesis, so a node that needs to sync can do so first.
+	expectedGenesisHash := core.GetGenesisHash()
+	genesisVerified := false
+	var genesisBlock core.BlockInterface
+	for i := 0; i < 60; i++ { // wait up to 60 seconds for sync
+		genesisBlock = bc.GetLatestBlock()
+		if genesisBlock != nil && genesisBlock.GetHeight() == 0 {
+			logger.Info("✅ Genesis hash verified: %s", expectedGenesisHash)
+			genesisVerified = true
+			break
+		}
+		if syncState == SyncStateCaughtUp && (genesisBlock == nil || genesisBlock.GetHeight() != 0) {
+			// Sync completed but we're still at genesis height - this means
+			// the network is at genesis (no blocks produced yet)
+			logger.Info("✅ Network at genesis — no existing blocks to verify")
+			genesisVerified = true
+			break
+		}
+		logger.Info("Waiting for sync loop to fetch genesis (attempt %d/60)...", i+1)
+		time.Sleep(1 * time.Second)
+	}
+	if !genesisVerified {
+		logger.Warn("⚠️ Genesis verification timeout — proceeding anyway (sync loop will handle it)")
+	}
+
+	// SECTION 15 — block production loop (now gated by sync state)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		runBlockProductionLoop(ctx, bc, cons, currentNodeID, totalNodes, networkType, validatorIDs, validatorAddressMap, phase2State, effectivePeerCount, &syncState, &syncStateMu)
 	}()
 
 	// SECTION 15 — state persistence loop

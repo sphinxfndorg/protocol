@@ -23,8 +23,18 @@ import (
 //
 //	alloc := NewGenesisAllocation("a1b2...e5f6", big.NewInt(1e18), "Treasury")
 func NewGenesisAllocation(address string, balanceNSPX *big.Int, label string) *GenesisAllocation {
+	// Accept addresses either as raw hex or in "SPIF XXXX XXXX ..." display
+	// format. NormalizeSPIFAddress strips the "SPIF" prefix, spaces, and
+	// hyphens, and validates the result is 40/64-char hex. If normalization
+	// fails (e.g. malformed/short address), keep the original string as-is so
+	// that validate() can surface a proper error later instead of silently
+	// swallowing it here.
+	addr := address
+	if normalized, err := common.NormalizeSPIFAddress(address); err == nil {
+		addr = normalized
+	}
 	return &GenesisAllocation{
-		Address:     address,
+		Address:     addr,
 		BalanceNSPX: new(big.Int).Set(balanceNSPX),
 		Label:       label,
 	}
@@ -337,15 +347,18 @@ func (a *GenesisAllocation) validate() error {
 // deterministicBytes serialises the allocation to a canonical byte slice for
 // Merkle tree leaf computation. The encoding is:
 //
-//	[20 bytes: address] || [32 bytes: balance big-endian, zero-padded]
+//	[20 or 32 bytes: address] || [32 bytes: balance big-endian, zero-padded]
 //
-// This fixed-width encoding avoids ambiguity: a variable-length encoding could
-// allow two different (address, balance) pairs to produce the same byte string.
+// Addresses come in two valid widths: 20 bytes (legacy/placeholder,
+// Ethereum-style) and 32 bytes (real SPHINCS+ derived "SPIF" addresses).
+// Both are fixed-width per-address so there's no ambiguity within a single
+// address's own encoding.
 func (a *GenesisAllocation) deterministicBytes() []byte {
 	addrBytes, err := hex.DecodeString(a.Address)
-	if err != nil || len(addrBytes) != 20 {
-		// Fall back to hashing the address string if it cannot be decoded.
-		// This should never happen in a validated GenesisState.
+	if err != nil || (len(addrBytes) != 20 && len(addrBytes) != 32) {
+		// Fall back to hashing the address string if it cannot be decoded,
+		// or isn't one of the two recognised widths. This should never
+		// happen in a validated GenesisState.
 		addrBytes = common.SpxHash([]byte(a.Address))[:20]
 	}
 
@@ -359,7 +372,7 @@ func (a *GenesisAllocation) deterministicBytes() []byte {
 		copy(balBytes[32-len(raw):], raw) // right-align in 32-byte buffer
 	}
 
-	result := make([]byte, 0, 20+32)
+	result := make([]byte, 0, len(addrBytes)+32)
 	result = append(result, addrBytes...)
 	result = append(result, balBytes...)
 	return result

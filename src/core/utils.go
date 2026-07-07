@@ -243,13 +243,9 @@ func (bc *Blockchain) GetChainTip() map[string]interface{} {
 //
 // Returns: true if address is valid
 func (bc *Blockchain) ValidateAddress(address string) bool {
-	// Basic address validation - check length
-	if len(address) != 40 {
-		return false
-	}
-	// Check if it's valid hex
-	_, err := hex.DecodeString(address)
-	return err == nil
+	// Accepts raw hex (20-byte legacy or 32-byte SPHINCS+ addresses) as well
+	// as the "SPIF XXXX XXXX ..." display format handled by common.
+	return common.ValidateSPIFAddress(address)
 }
 
 // GetNetworkInfo returns network information

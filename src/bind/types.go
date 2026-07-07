@@ -11,6 +11,7 @@ import (
 	"github.com/sphinxfndorg/protocol/src/core"
 	config "github.com/sphinxfndorg/protocol/src/core/sthincs/config" // Add this import
 	key "github.com/sphinxfndorg/protocol/src/core/sthincs/key/backend"
+	types "github.com/sphinxfndorg/protocol/src/core/transaction"
 	security "github.com/sphinxfndorg/protocol/src/handshake"
 	"github.com/sphinxfndorg/protocol/src/http"
 	"github.com/sphinxfndorg/protocol/src/network"
@@ -19,8 +20,7 @@ import (
 	"github.com/sphinxfndorg/protocol/src/transport"
 )
 
-// NodeConfig defines the configuration for a node’s TCP server.
-// NodeConfig defines the configuration for a TCP server.
+// NodeConfig defines the configuration for a node's TCP server.
 type NodeConfig struct {
 	Address   string
 	Name      string
@@ -29,7 +29,7 @@ type NodeConfig struct {
 	ReadyCh   chan struct{}
 }
 
-// NodeSetupConfig defines the configuration for setting up a node’s servers.
+// NodeSetupConfig defines the configuration for setting up a node's servers.
 type NodeSetupConfig struct {
 	Address       string
 	Name          string
@@ -54,6 +54,52 @@ type NodeResources struct {
 	TCPServer            *transport.TCPServer
 	WebSocketServer      *transport.WebSocketServer
 	HTTPServer           *http.Server
+}
+
+// SyncState represents the current block synchronization status of a node.
+type SyncState int
+
+const (
+	// SyncStateSyncing means the node is still downloading/catching up on blocks
+	// and must NOT participate in PBFT voting or propose blocks.
+	SyncStateSyncing SyncState = iota
+
+	// SyncStateCaughtUp means the node's local height is within 1 block of the
+	// network tip. It can now transition to full consensus participation.
+	SyncStateCaughtUp
+
+	// SyncStateConsensusParticipant means the node is fully synced and actively
+	// participating in PBFT rounds (sending PREPARE/COMMIT votes, proposing).
+	SyncStateConsensusParticipant
+)
+
+// String returns a human-readable name for the SyncState.
+func (s SyncState) String() string {
+	switch s {
+	case SyncStateSyncing:
+		return "SYNCING"
+	case SyncStateCaughtUp:
+		return "CAUGHT_UP"
+	case SyncStateConsensusParticipant:
+		return "CONSENSUS_PARTICIPANT"
+	default:
+		return "UNKNOWN"
+	}
+}
+
+// GetBlocksRequest is the P2P message a syncing node sends to request a range
+// of blocks from a peer. Max 500 blocks per request to limit payload size.
+type GetBlocksRequest struct {
+	FromHeight uint64 `json:"from_height"`
+	ToHeight   uint64 `json:"to_height"`
+	MaxResults uint64 `json:"max_results,omitempty"` // optional, default 500
+}
+
+// GetBlocksResponse is the P2P reply containing the requested block data.
+type GetBlocksResponse struct {
+	Blocks    []*types.Block `json:"blocks"`
+	TipHeight uint64         `json:"tip_height"` // the peer's current chain tip
+	Error     string         `json:"error,omitempty"`
 }
 
 // knownPeerInfo describes a single peer entry as gossiped during a

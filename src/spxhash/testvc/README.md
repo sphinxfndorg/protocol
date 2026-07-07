@@ -203,13 +203,34 @@ go test -race -v
 
 ## Note on Determinism
 
-- **Fixed salt:** When a salt is provided, the hash is deterministic.
-- **Random salt:** When `nil` is passed, a random salt is generated, producing different output on each run.
-- **Test vectors:** Use a fixed salt for reproducible test vectors.
+`NewSphinxHash` and `NewSphinxHashKeyed` are two separate constructors with
+different guarantees — there is no longer a single constructor whose
+behavior changes based on whether `nil` is passed:
+
+- **`NewSphinxHash(bitSize, salt)` — deterministic, salt required.**
+  `salt` must be non-nil and non-empty. Given the same `bitSize` and the
+  same `salt`, `GetHash` always returns the same output, regardless of
+  process or instance. Passing `nil` or an empty slice now returns an
+  error instead of silently substituting randomness. Use this constructor
+  anywhere the output must be independently reproducible — transaction
+  hashes, block hashes, Merkle leaves/roots, address derivation, and test
+  vectors.
+- **`NewSphinxHashKeyed(bitSize)` — randomized, no salt argument.**
+  Each call generates its own fresh, cryptographically random salt
+  internally, so two instances will (with overwhelming probability)
+  produce different output for the same input, even across runs. Use
+  this constructor for password-storage / MAC-like use cases where
+  non-determinism across instances is the point. Do not use it anywhere
+  the hash must be reproduced later, unless you also persist the salt via
+  `EncodedSalt()`.
+- **Test vectors:** always use `NewSphinxHash` with a fixed salt (see
+  `generate_vectors.go`), never `NewSphinxHashKeyed`, so vectors stay
+  reproducible across runs and machines.
 
 ## Dependencies
 
 - `github.com/sphinxfndorg/protocol/src/spxhash/hash` - Main hash implementation
+- `golang.org/x/crypto/argon2` - Argon2id key derivation used by both constructors
 - `golang.org/x/crypto/hkdf` - HKDF for key derivation
 - `golang.org/x/crypto/sha3` - SHAKE256 support
 

@@ -218,15 +218,21 @@ func TestVectors(t *testing.T) {
 }
 
 // TestRandomSaltNonDeterminism verifies that different instances produce different hashes
+//
+// FIX DET (test update): this test relies on each instance getting its own
+// fresh, random salt, which is exactly the behavior NewSphinxHash(bitSize, nil)
+// used to provide implicitly. NewSphinxHash now requires a non-empty,
+// caller-supplied salt (it errors on nil/empty), so the random-salt behavior
+// must be requested explicitly via NewSphinxHashKeyed instead.
 func TestRandomSaltNonDeterminism(t *testing.T) {
 	input := []byte("test input for randomness")
 
-	s1, err := hash.NewSphinxHash(256, nil)
+	s1, err := hash.NewSphinxHashKeyed(256)
 	if err != nil {
 		t.Fatalf("Failed to create SphinxHash: %v", err)
 	}
 
-	s2, err := hash.NewSphinxHash(256, nil)
+	s2, err := hash.NewSphinxHashKeyed(256)
 	if err != nil {
 		t.Fatalf("Failed to create SphinxHash: %v", err)
 	}

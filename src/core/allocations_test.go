@@ -111,8 +111,12 @@ func TestDefaultGenesisAllocations_NoNilBalances(t *testing.T) {
 
 func TestDefaultGenesisAllocations_ValidAddresses(t *testing.T) {
 	for i, a := range DefaultGenesisAllocations() {
-		if len(a.Address) != 40 {
-			t.Errorf("allocation[%d]: address length want 40, got %d (%q)",
+		// Addresses are normalized (SPIF prefix/spaces stripped) at
+		// construction time, and are valid at either 40 hex chars (20-byte
+		// legacy/placeholder addresses) or 64 hex chars (32-byte real
+		// SPHINCS+ derived addresses).
+		if len(a.Address) != 40 && len(a.Address) != 64 {
+			t.Errorf("allocation[%d]: address length want 40 or 64, got %d (%q)",
 				i, len(a.Address), a.Address)
 		}
 		if _, err := hex.DecodeString(a.Address); err != nil {

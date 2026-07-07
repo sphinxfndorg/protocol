@@ -481,10 +481,10 @@ func (bc *Blockchain) applyTransactions(block *types.Block, stateDB *StateDB) er
 
 	for i, tx := range block.Body.TxsList {
 		// ========== FIX: Skip genesis "mint" transactions on block 0 ==========
-		// Block 0's genesis transactions with Sender: "genesis" are NOT processed
-		// as mints. Instead, mintBlockReward funds the vault with the total
-		// allocation amount. Block 1 then distributes from the vault to each
-		// allocation address using normal balance checks.
+		// Block 0's genesis transactions with Sender: GenesisVaultAddress are
+		// NOT processed as mints. Instead, mintBlockReward funds the vault with
+		// the total allocation amount. Block 1 then distributes from the vault
+		// to each allocation address using normal balance checks.
 		//
 		// This implements the proper "vault and distribute" model:
 		//   - Block 0: Vault receives total supply (mintBlockReward)
@@ -695,12 +695,12 @@ func (bc *Blockchain) calculateStateRootFallback() []byte {
 	stateDB, err := bc.newStateDB()
 	if err != nil {
 		logger.Warn("calculateStateRootFallback: failed to open state DB: %v", err)
-		return common.SpxHash([]byte{})
+		return types.EmptyMerkleRoot
 	}
 	root, err := stateDB.computeStateRoot()
 	if err != nil {
 		logger.Warn("calculateStateRootFallback: failed to compute state root: %v", err)
-		return common.SpxHash([]byte{})
+		return types.EmptyMerkleRoot
 	}
 	return root
 }
@@ -1294,7 +1294,7 @@ func (bc *Blockchain) checkConsensusRequirements(_ *types.Block) bool {
 // calculateTransactionsRoot calculates the Merkle root of a set of transactions.
 func (bc *Blockchain) calculateTransactionsRoot(txs []*types.Transaction) []byte {
 	if len(txs) == 0 {
-		return common.SpxHash([]byte{})
+		return types.EmptyMerkleRoot
 	}
 	tempBody := types.NewBlockBody(txs, []*types.BlockHeader{})
 	tempBlock := types.NewBlock(&types.BlockHeader{}, tempBody)

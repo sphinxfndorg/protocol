@@ -293,8 +293,8 @@ func TestAllocationToTx_Fields(t *testing.T) {
 	alloc := NewGenesisAllocationSPX("abcdef1234567890abcdef1234567890abcdef12", 50_000_000, "Test")
 	tx := allocationToTx(alloc, 0, 1732070400)
 
-	if tx.Sender != "genesis" {
-		t.Errorf("Sender: want %q, got %q", "genesis", tx.Sender)
+	if tx.Sender != GenesisVaultAddress {
+		t.Errorf("Sender: want %q, got %q", GenesisVaultAddress, tx.Sender)
 	}
 	if tx.Receiver != alloc.Address {
 		t.Errorf("Receiver: want %q, got %q", alloc.Address, tx.Receiver)
@@ -449,12 +449,12 @@ func TestBuildBlock_TxsRootMatchesBody(t *testing.T) {
 	}
 }
 
-// TestBuildBlock_TxSenderIsGenesis — all genesis txs use "genesis" as sender.
-func TestBuildBlock_TxSenderIsGenesis(t *testing.T) {
+// TestBuildBlock_TxSenderIsVault — all genesis txs use GenesisVaultAddress as sender.
+func TestBuildBlock_TxSenderIsVault(t *testing.T) {
 	block := minimalGenesisState().BuildBlock()
 	for i, tx := range block.Body.TxsList {
-		if tx.Sender != "genesis" {
-			t.Errorf("txs_list[%d].Sender: want %q, got %q", i, "genesis", tx.Sender)
+		if tx.Sender != GenesisVaultAddress {
+			t.Errorf("txs_list[%d].Sender: want %q, got %q", i, GenesisVaultAddress, tx.Sender)
 		}
 	}
 }

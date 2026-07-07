@@ -19,6 +19,7 @@ import (
 
 	"github.com/sphinxfndorg/protocol/src/common"
 	"github.com/sphinxfndorg/protocol/src/consensus"
+
 	"github.com/sphinxfndorg/protocol/src/pool"
 
 	sign "github.com/sphinxfndorg/protocol/src/core/sthincs/sign/backend"

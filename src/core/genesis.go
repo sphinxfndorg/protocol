@@ -150,7 +150,7 @@ func (gs *GenesisState) AddValidator(nodeID, address string, stakeInSPX int64, p
 // transaction that is placed in the block body.
 //
 // Convention:
-//   - Sender   : "genesis" (no real signing key at block 0)
+//   - Sender   : GenesisVaultAddress (vault distributes to allocations)
 //   - Receiver : the allocation address (hex, no 0x prefix)
 //   - Amount   : allocation.BalanceNSPX (in nSPX)
 //   - Nonce    : sequential index i, so every transaction is unique
@@ -186,15 +186,15 @@ func allocationToTx(alloc *GenesisAllocation, index uint64, genesisTimestamp int
 	}
 
 	return &types.Transaction{
-		ID:        txID,             // Deterministic unique identifier
-		Sender:    "genesis",        // No real sender at block 0
-		Receiver:  alloc.Address,    // The pre-funded account
-		Amount:    amount,           // Initial balance in nSPX
-		GasLimit:  big.NewInt(0),    // Genesis transactions consume no gas
-		GasPrice:  big.NewInt(0),    // Genesis transactions have zero gas price
-		Nonce:     index,            // Sequential to make each tx unique
-		Timestamp: genesisTimestamp, // Anchored to genesis time
-		Signature: []byte{},         // No signature for genesis funding transactions
+		ID:        txID,                // Deterministic unique identifier
+		Sender:    GenesisVaultAddress, // Vault distributes to allocations
+		Receiver:  alloc.Address,       // The pre-funded account
+		Amount:    amount,              // Initial balance in nSPX
+		GasLimit:  big.NewInt(0),       // Genesis transactions consume no gas
+		GasPrice:  big.NewInt(0),       // Genesis transactions have zero gas price
+		Nonce:     index,               // Sequential to make each tx unique
+		Timestamp: genesisTimestamp,    // Anchored to genesis time
+		Signature: []byte{},            // No signature for genesis funding transactions
 	}
 }
 
@@ -275,7 +275,7 @@ func (gs *GenesisState) BuildBlock() *types.Block {
 func (gs *GenesisState) buildAllocationRoot() []byte {
 	if len(gs.Allocations) == 0 {
 		// Empty body → standard empty Merkle root.
-		return common.SpxHash([]byte{})
+		return types.EmptyMerkleRoot
 	}
 
 	// Build the same transaction list that BuildBlock uses so the root matches.
@@ -291,7 +291,7 @@ func (gs *GenesisState) buildAllocationRoot() []byte {
 // Retained for use by the test suite.
 func merkleRootFromLeaves(leaves [][]byte) []byte {
 	if len(leaves) == 0 {
-		return common.SpxHash([]byte{})
+		return types.EmptyMerkleRoot
 	}
 
 	layer := make([][]byte, len(leaves))

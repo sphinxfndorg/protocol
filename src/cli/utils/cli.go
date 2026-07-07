@@ -83,6 +83,8 @@ HYBRID CONSENSUS INFORMATION
 
 REAL-DEVICE QUICK START (ETH/BTC style — no pre-agreed node count)
   Each machine runs independently; peer discovery is via --seeds.
+  Nodes can join or leave the network at any time — late joiners automatically
+  sync the full blockchain from peers before participating in consensus.
 
   # Node 1 (bootnode / first validator)
   go run main.go node --role=validator \
@@ -90,7 +92,7 @@ REAL-DEVICE QUICK START (ETH/BTC style — no pre-agreed node count)
       --http-port=<PUBLIC_IP_1>:8545 \
       --datadir=data --pbft
 
-  # Node 2 — joins by pointing at Node 1
+  # Node 2 — joins by pointing at Node 1 (can be started anytime)
   go run main.go node --role=validator \
       --tcp-addr=<PUBLIC_IP_2>:30303 \
       --http-port=<PUBLIC_IP_2>:8545 \
@@ -98,12 +100,14 @@ REAL-DEVICE QUICK START (ETH/BTC style — no pre-agreed node count)
       --datadir=data --pbft
 
   # Node 3+ — same pattern; any known node can be used as seed
+  # Nodes can be started minutes, hours, or days after the network is live
   go run main.go node --role=validator \
       --tcp-addr=<PUBLIC_IP_3>:30303 \
       --seeds=<PUBLIC_IP_1>:30303,<PUBLIC_IP_2>:30303 \
       --datadir=data --pbft
 
   PBFT activates automatically once ≥ 3 validators are connected.
+  Late-joining nodes sync automatically and join consensus when caught up.
   No --nodes or --node-index required.
 
 EIP-1459 DNS DISCOVERY (cryptographically authenticated bootstrap)
@@ -125,20 +129,26 @@ EIP-1459 DNS DISCOVERY (cryptographically authenticated bootstrap)
       --datadir=data --pbft
 
 SAME-BOX / DEV QUICK START (all nodes on one machine)
+  For local development and testing. Nodes can be started in any order and
+  late-joining nodes will automatically sync from peers.
+
   # Terminal 1 — first validator (creates genesis block)
   go run main.go node --role=validator --tcp-addr=127.0.0.1:30303 \
       --udp-port=30304 --http-port=127.0.0.1:8545 --datadir=data/validator \
       --nodes=3 --pbft
 
-  # Terminal 2
+  # Terminal 2 — can be started anytime, even after Terminal 1 is running
   go run main.go node --role=validator --tcp-addr=127.0.0.1:30304 \
       --udp-port=30305 --http-port=127.0.0.1:8546 --datadir=data/validator2 \
       --node-index=1 --nodes=3 --pbft
 
-  # Terminal 3
+  # Terminal 3 — can also be delayed; will sync automatically
   go run main.go node --role=validator --tcp-addr=127.0.0.1:30305 \
       --udp-port=30306 --http-port=127.0.0.1:8547 --datadir=data/validator3 \
       --node-index=2 --nodes=3 --pbft
+
+  TIP: To test late-joiner sync, start Terminal 1, wait for it to produce a few
+  blocks, then start Terminal 2 and/or 3 — they will automatically catch up.
 
 LEGACY COMMANDS
   go run main.go -test-nodes=3     Run PBFT integration test (single process)

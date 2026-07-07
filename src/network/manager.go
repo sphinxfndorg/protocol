@@ -15,6 +15,7 @@ import (
 
 	"github.com/sphinxfndorg/protocol/src/common"
 	"github.com/sphinxfndorg/protocol/src/consensus"
+
 	database "github.com/sphinxfndorg/protocol/src/core/state"
 	sthincs "github.com/sphinxfndorg/protocol/src/core/sthincs/key/backend"
 )
@@ -1275,6 +1276,70 @@ func (m *P2PConsensusNodeManager) HandleIncomingMessage(msgType string, data []b
 			return fmt.Errorf("failed to unmarshal RANDAO data: %v", err)
 		}
 		return m.consensusEngine.HandleRANDAOSync(randaoData.Mix, randaoData.Submissions)
+
+	case "sync_request":
+		// Request missing blocks during PBFT catch-up.
+		// This must be correlated with consensus' pendingSyncRequests.
+		// Consensus.fetchBlockFromPeers currently broadcasts a payload:
+		// {"method":"blockchain.getBlockByHeight","params":[height]}
+		var req struct {
+			Method string        `json:"method"`
+			Params []interface{} `json:"params"`
+		}
+		if err := json.Unmarshal(data, &req); err != nil {
+			return fmt.Errorf("failed to unmarshal sync_request: %v", err)
+		}
+		if req.Method != "blockchain.getBlockByHeight" || len(req.Params) < 1 {
+			return nil
+		}
+		// Parse height from params
+		heightF, ok := req.Params[0].(float64)
+		if !ok {
+			return nil
+		}
+		height := uint64(heightF)
+
+		// Fetch block from the consensus' underlying blockchain via its BlockChain interface.
+		// Consensus currently exposes pendingSyncRequests + HandleSyncResponse, but does not
+		// define a GetBlockByHeight method. We therefore call into the blockchain stored
+		// inside consensus.
+		//
+		// NOTE: This requires consensus engine to have a blockChain field accessible here.
+		// As a safe fallback, request a block by asking the node's blockchain directly
+		// is not possible from this layer, so we only support sync when consensus provides
+		// blocks via HandleSyncResponse path.
+		//
+		// For now, respond nil (avoid compile errors). This will be replaced once we add
+		// a public consensus method in src/consensus.
+		var blockBytes []byte
+		_ = blockBytes
+
+		// Send back to origin node only.
+		// NOTE: fromNode is the peer that originated this message.
+		// We deliver on msgType "sync_response".
+		resp := map[string]interface{}{
+			"height": height,
+			"block":  blockBytes,
+		}
+		respBytes, err := json.Marshal(resp)
+		if err != nil {
+			return nil
+		}
+		if m.sendMessageFunc != nil {
+			_ = m.sendMessageFunc(m.nodeManager.GetNode(fromNode).Address, "sync_response", respBytes)
+		}
+		return nil
+
+	case "sync_response":
+		var resp struct {
+			Height uint64          `json:"height"`
+			Block  json.RawMessage `json:"block"`
+		}
+		if err := json.Unmarshal(data, &resp); err != nil {
+			return fmt.Errorf("failed to unmarshal sync_response: %v", err)
+		}
+		// Deliver to consensus waiting channel.
+		return m.consensusEngine.HandleSyncResponse(resp.Height, resp.Block)
 
 	default:
 		log.Printf("[P2PConsensus] Unknown message type: %s", msgType)

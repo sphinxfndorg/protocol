@@ -206,6 +206,12 @@ type TimeConverter struct {
 	genesisTime time.Time
 }
 
+// pendingSyncRequest tracks a block fetch request waiting for a peer response
+type pendingSyncRequest struct {
+	height   uint64
+	response chan Block
+}
+
 // Consensus is the main PBFT + PoS consensus engine.
 type Consensus struct {
 	mu sync.RWMutex
@@ -298,6 +304,10 @@ type Consensus struct {
 	// The p2p/smr layer drains this channel and calls FastForward with
 	// each missing block fetched from a peer, in ascending height order.
 	syncNeededCh chan uint64
+
+	// pendingSyncRequests tracks block fetch requests waiting for peer responses
+	pendingSyncRequests map[uint64]*pendingSyncRequest
+	pendingSyncMutex    sync.RWMutex
 
 	// Storage durability and crash recovery
 	storageDurabilityConfig *StorageDurabilityConfig

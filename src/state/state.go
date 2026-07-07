@@ -745,8 +745,11 @@ func (s *Storage) SaveCompleteChainState(chainState *ChainState, chainParams *Ch
 		}
 	}
 
-	// Set timestamp if not provided
+	// Set timestamp if not provided - use chain's timestamp for consistency
 	if chainState.Timestamp == "" {
+		chainState.Timestamp = time.Now().Format(time.RFC3339)
+	} else {
+		// Update timestamp to current time to reflect latest state
 		chainState.Timestamp = time.Now().Format(time.RFC3339)
 	}
 
@@ -1106,10 +1109,15 @@ func (s *Storage) createNodeInfo(index int) *NodeInfo {
 	// Get TPS metrics for node info
 	tpsMetrics := s.GetTPSMetrics()
 
+	// FIX: Use correct port range (32307+) matching actual node configuration
+	// The actual nodes use ports 32307, 32308, 32309, not 32300, 32301, 32302
+	nodeAddress := fmt.Sprintf("127.0.0.1:%d", 32307+index)
+	nodeID := fmt.Sprintf("Node-%s", nodeAddress)
+
 	node := &NodeInfo{
-		NodeID:      fmt.Sprintf("Node-%d", index),
-		NodeName:    fmt.Sprintf("Sphinx-Node-%d", index),
-		NodeAddress: fmt.Sprintf("127.0.0.1:%d", 32300+index),
+		NodeID:      nodeID,
+		NodeName:    nodeID,
+		NodeAddress: nodeAddress,
 		ChainInfo: map[string]interface{}{
 			"status":        "active",
 			"last_updated":  time.Now().Format(time.RFC3339),

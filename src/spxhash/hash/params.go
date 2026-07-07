@@ -27,30 +27,21 @@ const (
 	DefaultCacheSize = 100 // Default LRU cache size for SphinxHash
 )
 
-// Size returns the number of bytes in the hash output based on the configured bit size.
-func (s *SphinxHash) Size() int {
-	switch s.bitSize {
-	case 256:
-		return 32 // SHA-512/256: 256 bits = 32 bytes
-	case 384:
-		return 48 // SHA-384: 384 bits = 48 bytes
-	case 512:
-		return 64 // SHA-512: 512 bits = 64 bytes
-	default:
-		return 32 // Default to SHA-512/256 output size
-	}
-}
-
-// BlockSize returns the hash block size based on the configured bit size.
-func (s *SphinxHash) BlockSize() int {
-	switch s.bitSize {
-	case 256:
-		return 128 // SHA-512/256 block size: 128 bytes
-	case 384:
-		return 128 // SHA-384 block size: 128 bytes
-	case 512:
-		return 128 // SHA-512 block size: 128 bytes
-	default:
-		return 136 // SHAKE256 block size: 136 bytes (1088 bits)
-	}
-}
+// ProtocolSalt is the fixed, public salt to use with NewSphinxHash at every
+// call site that needs a deterministic, consensus-critical digest —
+// transaction hashes, block hashes, Merkle leaves/roots, address derivation,
+// or anything else that must be independently reproducible by every node.
+//
+// FIX DET (determinism/one-way contradiction):
+// Before this fix, callers that wanted a "plain hash" had no single agreed
+// value to pass as salt, and NewSphinxHash even accepted nil and silently
+// substituted random entropy, so two nodes could compute different hashes
+// for the same bytes. ProtocolSalt gives every deterministic call site one
+// canonical value to pass, so all nodes agree by construction.
+//
+// This value is NOT a secret — its only purpose is domain separation (so
+// SphinxHash output doesn't collide with some other unrelated use of
+// Argon2id), not unpredictability. It must never change without a
+// coordinated protocol version bump, since changing it changes every
+// resulting hash.
+var ProtocolSalt = []byte("sphinx-protocol-hash-v1")

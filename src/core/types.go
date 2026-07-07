@@ -454,3 +454,25 @@ type StateDB struct {
 	rewardsMinted *big.Int
 	blockchain    *Blockchain
 }
+
+// StakedValidator represents a validator with SPX stake
+// This type is used for validator set snapshots in sync verification
+type StakedValidator struct {
+	ID              string   `json:"id"`
+	PublicKey       []byte   `json:"public_key,omitempty"`
+	StakeAmount     *big.Int `json:"stake_amount"` // In nSPX (base units)
+	ActivationEpoch uint64   `json:"activation_epoch"`
+	ExitEpoch       uint64   `json:"exit_epoch"`
+	IsSlashed       bool     `json:"is_slashed"`
+	LastAttested    uint64   `json:"last_attested"`
+	RewardAddress   string   `json:"reward_address"` // SPIF address that receives block rewards
+}
+
+// ValidatorSet manages staked validators
+// This is a minimal implementation for sync verification purposes
+type ValidatorSet struct {
+	validators     map[string]*StakedValidator
+	totalStake     *big.Int
+	mu             sync.RWMutex
+	minStakeAmount *big.Int
+}

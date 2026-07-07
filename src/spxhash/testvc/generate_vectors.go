@@ -50,6 +50,13 @@ func computeDerivedKey(inputLen int) string {
 }
 
 func main() {
+	// FIX DET (confirming comment, no functional change): this call already
+	// passes a non-empty, fixed salt (fixedSalt), so it is unaffected by the
+	// split of NewSphinxHash into a deterministic, salt-required constructor
+	// plus the separate NewSphinxHashKeyed for randomized instances. Test
+	// vectors must be reproducible across runs, so this file deliberately
+	// keeps using NewSphinxHash with an explicit salt rather than
+	// NewSphinxHashKeyed.
 	s, err := hash.NewSphinxHash(256, fixedSalt)
 	if err != nil {
 		panic(err)

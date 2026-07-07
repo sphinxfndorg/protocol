@@ -10,13 +10,16 @@ package bind
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"math/big"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sphinxfndorg/protocol/src/common"
@@ -25,6 +28,7 @@ import (
 	svm "github.com/sphinxfndorg/protocol/src/core/svm/opcodes"
 	vmachine "github.com/sphinxfndorg/protocol/src/core/svm/vm"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
+
 	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/parameters"
 	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/sthincs"
 	security "github.com/sphinxfndorg/protocol/src/handshake"
@@ -85,14 +89,21 @@ func exchangeKeyWithPeerSync(peerAddr string, nodeID string, ownRewardAddress st
 	defer conn.Close()
 
 	msg := security.Message{Type: "key_exchange", Data: payloadBytes}
-	if err := json.NewEncoder(conn).Encode(&msg); err != nil {
+	encodedMsg, err := msg.Encode()
+	if err != nil {
+		return nil, fmt.Errorf("encode failed: %v", err)
+	}
+	if err := writeFramedMessage(conn, encodedMsg); err != nil {
 		return nil, fmt.Errorf("send failed: %v", err)
 	}
 
-	var reply security.Message
-	decoder := json.NewDecoder(conn)
-	if err := decoder.Decode(&reply); err != nil {
+	replyData, err := readFramedMessage(conn)
+	if err != nil {
 		return nil, fmt.Errorf("receive failed: %v", err)
+	}
+	var reply security.Message
+	if err := json.Unmarshal(replyData, &reply); err != nil {
+		return nil, fmt.Errorf("decode failed: %v", err)
 	}
 
 	if reply.Type != "key_exchange" {
@@ -129,14 +140,21 @@ func requestPeerListSync(peerAddr string, selfNodeID string, selfAddr string) (*
 	defer conn.Close()
 
 	msg := security.Message{Type: "peer_exchange", Data: requestBytes}
-	if err := json.NewEncoder(conn).Encode(&msg); err != nil {
+	encodedMsg, err := msg.Encode()
+	if err != nil {
+		return nil, fmt.Errorf("encode failed: %v", err)
+	}
+	if err := writeFramedMessage(conn, encodedMsg); err != nil {
 		return nil, fmt.Errorf("send failed: %v", err)
 	}
 
-	var reply security.Message
-	decoder := json.NewDecoder(conn)
-	if err := decoder.Decode(&reply); err != nil {
+	replyData, err := readFramedMessage(conn)
+	if err != nil {
 		return nil, fmt.Errorf("receive failed: %v", err)
+	}
+	var reply security.Message
+	if err := json.Unmarshal(replyData, &reply); err != nil {
+		return nil, fmt.Errorf("decode failed: %v", err)
 	}
 	if reply.Type != "peer_exchange" {
 		return nil, fmt.Errorf("unexpected reply type: %s", reply.Type)
@@ -250,13 +268,20 @@ func handleIncomingConn(
 	cons *consensus.Consensus,
 	p2pMgr *network.P2PConsensusNodeManager,
 	rpcServer *rpc.Server,
+	bc *core.Blockchain,
 	getKnownPeers func() []knownPeerInfo,
 	onPeerDiscovered func(nodeID, address string),
 	onPeerStakeClaim func(nodeID, rewardAddress string),
 ) {
+	// Read length-prefixed message from client
+	msgData, err := readFramedMessage(conn)
+	if err != nil {
+		log.Printf("[%s] Failed to read message: %v", selfID, err)
+		return
+	}
+
 	var msg security.Message
-	decoder := json.NewDecoder(conn)
-	if err := decoder.Decode(&msg); err != nil {
+	if err := json.Unmarshal(msgData, &msg); err != nil {
 		log.Printf("[%s] Failed to decode message: %v", selfID, err)
 		return
 	}
@@ -304,7 +329,10 @@ func handleIncomingConn(
 		reply := peerKeyExchangeMsg{NodeID: selfID, PublicKey: ownPKBytes, RewardAddress: ownRewardAddress}
 		replyBytes, _ := json.Marshal(reply)
 		replyMsg := security.Message{Type: "key_exchange", Data: replyBytes}
-		json.NewEncoder(conn).Encode(&replyMsg)
+		encodedReply, _ := replyMsg.Encode()
+		if err := writeFramedMessage(conn, encodedReply); err != nil {
+			log.Printf("[%s] Failed to send key exchange reply: %v", selfID, err)
+		}
 
 	case "peer_exchange":
 		var req peerExchangeMsg
@@ -332,7 +360,12 @@ func handleIncomingConn(
 			return
 		}
 		replyMsg := security.Message{Type: "peer_exchange", Data: replyBytes}
-		if err := json.NewEncoder(conn).Encode(&replyMsg); err != nil {
+		encodedReply, err := replyMsg.Encode()
+		if err != nil {
+			log.Printf("[%s] Failed to encode peer exchange reply: %v", selfID, err)
+			return
+		}
+		if err := writeFramedMessage(conn, encodedReply); err != nil {
 			log.Printf("[%s] Failed to send peer exchange reply: %v", selfID, err)
 		}
 
@@ -351,6 +384,53 @@ func handleIncomingConn(
 				log.Printf("[%s] Failed to handle checkpoint: %v", selfID, err)
 			}
 		}
+
+	case "get_blocks":
+		var req GetBlocksRequest
+		if err := json.Unmarshal(msg.Data, &req); err != nil {
+			log.Printf("[%s] Failed to unmarshal get_blocks request: %v", selfID, err)
+			return
+		}
+
+		// Validate request bounds
+		if req.FromHeight > req.ToHeight || req.ToHeight-req.FromHeight > 500 {
+			log.Printf("[%s] Invalid get_blocks range: %d -> %d", selfID, req.FromHeight, req.ToHeight)
+			return
+		}
+		if req.MaxResults == 0 || req.MaxResults > 500 {
+			req.MaxResults = 500
+		}
+		if req.ToHeight-req.FromHeight+1 > req.MaxResults {
+			req.ToHeight = req.FromHeight + req.MaxResults - 1
+		}
+
+		// Gather blocks from local storage
+		var blocks []*types.Block
+		for h := req.FromHeight; h <= req.ToHeight; h++ {
+			blk := bc.GetBlockByNumber(h)
+			if blk == nil {
+				break // gap in chain, serve what we have
+			}
+			blocks = append(blocks, blk)
+		}
+
+		// Get our tip height so the requester knows how far ahead we are
+		tipHeight := uint64(0)
+		if latest := bc.GetLatestBlock(); latest != nil {
+			tipHeight = latest.GetHeight()
+		}
+
+		resp := GetBlocksResponse{
+			Blocks:    blocks,
+			TipHeight: tipHeight,
+		}
+		respBytes, _ := json.Marshal(resp)
+		respMsg := security.Message{Type: "get_blocks", Data: respBytes}
+		encodedResp, _ := respMsg.Encode()
+		if err := writeFramedMessage(conn, encodedResp); err != nil {
+			log.Printf("[%s] Failed to send get_blocks response: %v", selfID, err)
+		}
+		logger.Info("[%s] 📦 Served %d blocks (heights %d-%d) to peer", selfID, len(blocks), req.FromHeight, req.ToHeight)
 
 	case "proposal", "prepare", "vote", "timeout", "randao_sync":
 		if p2pMgr == nil {
@@ -387,7 +467,7 @@ func handleIncomingConn(
 			log.Printf("[%s] Failed to encode RPC response: %v", selfID, err)
 			return
 		}
-		if _, err := conn.Write(encodedResp); err != nil {
+		if err := writeFramedMessage(conn, encodedResp); err != nil {
 			log.Printf("[%s] Failed to send RPC response: %v", selfID, err)
 		}
 		return
@@ -395,6 +475,40 @@ func handleIncomingConn(
 	default:
 		log.Printf("[%s] Unknown message type: %s", selfID, msg.Type)
 	}
+}
+
+// writeFramedMessage writes a length-prefixed message to the connection.
+func writeFramedMessage(conn net.Conn, data []byte) error {
+	// Write 4-byte big-endian length prefix
+	lenBuf := make([]byte, 4)
+	binary.BigEndian.PutUint32(lenBuf, uint32(len(data)))
+	if _, err := conn.Write(lenBuf); err != nil {
+		return fmt.Errorf("writing length prefix: %w", err)
+	}
+	// Write payload
+	if _, err := conn.Write(data); err != nil {
+		return fmt.Errorf("writing payload: %w", err)
+	}
+	return nil
+}
+
+// readFramedMessage reads a length-prefixed message from the connection.
+func readFramedMessage(conn net.Conn) ([]byte, error) {
+	// Read 4-byte big-endian length prefix
+	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	var lenBuf [4]byte
+	if _, err := io.ReadFull(conn, lenBuf[:]); err != nil {
+		return nil, fmt.Errorf("reading length prefix: %w", err)
+	}
+	size := binary.BigEndian.Uint32(lenBuf[:])
+	if size == 0 || size > 16*1024*1024 { // Sanity cap: 16MB
+		return nil, fmt.Errorf("implausible message size: %d", size)
+	}
+	data := make([]byte, size)
+	if _, err := io.ReadFull(conn, data); err != nil {
+		return nil, fmt.Errorf("reading %d-byte payload: %w", size, err)
+	}
+	return data, nil
 }
 
 // ============================================================================
@@ -436,11 +550,52 @@ func flushNodeState(bc *core.Blockchain, nodeID, address string) {
 		sm.SyncFinalStatesNow()
 	}
 
-	if err := bc.StoreChainState([]*state.NodeInfo{nodeInfo}); err != nil {
+	// Preserve already-known peer entries so each node's chain_state.json
+	// reflects the full network view instead of overwriting it with only
+	// our local node.
+	if err := bc.SaveBasicChainState(); err != nil {
+		// SaveBasicChainState already preserves nodes[] if the full file exists,
+		// and falls back to an empty nodes array on first run.
+		logger.Warn("[%s] SaveBasicChainState (preload/merge): %v", nodeID, err)
+	}
+
+	// Load existing chain state and merge our current node info into it.
+	if err := func() error {
+		cs, err := bc.GetStorage().LoadCompleteChainState()
+		if err != nil {
+			// If we can't load the complete state, fall back to storing our
+			// single node entry so we at least write a valid chain_state.json.
+			return bc.StoreChainState([]*state.NodeInfo{nodeInfo})
+		}
+		if cs == nil {
+			return bc.StoreChainState([]*state.NodeInfo{nodeInfo})
+		}
+		// Merge: update/insert by NodeID.
+		merged := make([]*state.NodeInfo, 0, len(cs.Nodes)+1)
+		seen := make(map[string]bool)
+		for _, n := range cs.Nodes {
+			if n == nil {
+				continue
+			}
+			if n.NodeID == nodeInfo.NodeID {
+				merged = append(merged, nodeInfo)
+				seen[n.NodeID] = true
+				continue
+			}
+			merged = append(merged, n)
+			seen[n.NodeID] = true
+		}
+		if !seen[nodeInfo.NodeID] {
+			merged = append(merged, nodeInfo)
+		}
+
+		return bc.StoreChainState(merged)
+	}(); err != nil {
 		logger.Warn("[%s] StoreChainState: %v", nodeID, err)
 	} else {
 		logger.Info("[%s] 💾 Chain state persisted — height=%d", nodeID, latest.GetHeight())
 	}
+
 }
 
 // runStatePersistenceLoop periodically persists node state.
@@ -845,10 +1000,461 @@ func tryInitPhase2WithRetry(
 }
 
 // ============================================================================
+// Block sync / catch-up mechanism
+// ============================================================================
+
+// requestBlocksFromPeer dials a peer, sends a GetBlocksRequest for the given
+// height range, and returns the response. It is a blocking call that should
+// be called from the sync loop goroutine.
+//
+// Detailed logging captures the exact bytes sent and received to diagnose
+// serialization or I/O issues during late-joiner sync.
+func requestBlocksFromPeer(peerAddr string, fromHeight, toHeight uint64) (*GetBlocksResponse, error) {
+	req := GetBlocksRequest{
+		FromHeight: fromHeight,
+		ToHeight:   toHeight,
+		MaxResults: 500,
+	}
+	reqBytes, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal get_blocks request: %w", err)
+	}
+
+	logger.Debug("requestBlocksFromPeer[%s]: REQUEST JSON: %s", peerAddr, string(reqBytes))
+
+	conn, err := net.DialTimeout("tcp", peerAddr, 10*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("dial failed: %w", err)
+	}
+	defer conn.Close()
+
+	msg := security.Message{Type: "get_blocks", Data: reqBytes}
+	encodedMsg, err := msg.Encode()
+	if err != nil {
+		return nil, fmt.Errorf("encode failed: %w", err)
+	}
+
+	logger.Debug("requestBlocksFromPeer[%s]: WIRE MSG (hex): %x", peerAddr, encodedMsg)
+	logger.Debug("requestBlocksFromPeer[%s]: WIRE MSG (len=%d)", peerAddr, len(encodedMsg))
+
+	if err := writeFramedMessage(conn, encodedMsg); err != nil {
+		return nil, fmt.Errorf("send failed: %w", err)
+	}
+
+	replyData, err := readFramedMessage(conn)
+	if err != nil {
+		return nil, fmt.Errorf("receive failed: %w", err)
+	}
+
+	logger.Debug("requestBlocksFromPeer[%s]: REPLY RAW (hex): %x", peerAddr, replyData)
+	logger.Debug("requestBlocksFromPeer[%s]: REPLY RAW (len=%d)", peerAddr, len(replyData))
+
+	var reply security.Message
+	if err := json.Unmarshal(replyData, &reply); err != nil {
+		return nil, fmt.Errorf("decode failed: %w", err)
+	}
+
+	logger.Debug("requestBlocksFromPeer[%s]: REPLY TYPE=%s, DATA_LEN=%d", peerAddr, reply.Type, len(reply.Data))
+
+	if reply.Type != "get_blocks" {
+		return nil, fmt.Errorf("unexpected reply type: %s", reply.Type)
+	}
+
+	var resp GetBlocksResponse
+	if err := json.Unmarshal(reply.Data, &resp); err != nil {
+		logger.Error("requestBlocksFromPeer[%s]: Failed to unmarshal GetBlocksResponse: %v\n  Data (hex): %x\n  Data (str): %s",
+			peerAddr, err, reply.Data, string(reply.Data))
+		return nil, fmt.Errorf("unmarshal response failed: %w", err)
+	}
+
+	logger.Debug("requestBlocksFromPeer[%s]: RESPONSE: tip_height=%d, blocks_count=%d, error=%q",
+		peerAddr, resp.TipHeight, len(resp.Blocks), resp.Error)
+
+	if resp.Error != "" {
+		return nil, fmt.Errorf("peer error: %s", resp.Error)
+	}
+	return &resp, nil
+}
+
+// getPeerTipHeight asks a single peer for its current chain tip height by
+// requesting a single block at height 0 (genesis) and reading the TipHeight
+// from the response. This is a lightweight way to learn the network tip.
+func getPeerTipHeight(peerAddr string) (uint64, error) {
+	logger.Debug("getPeerTipHeight[%s]: Querying peer for tip height", peerAddr)
+	resp, err := requestBlocksFromPeer(peerAddr, 0, 0)
+	if err != nil {
+		logger.Warn("getPeerTipHeight[%s]: Failed: %v", peerAddr, err)
+		return 0, err
+	}
+	logger.Debug("getPeerTipHeight[%s]: Peer tip height=%d", peerAddr, resp.TipHeight)
+	return resp.TipHeight, nil
+}
+
+// runBlockSyncLoop runs the initial block download / catch-up loop.
+//
+// It starts in SyncStateSyncing, queries peers for the current network tip
+// height, then requests and applies missing blocks sequentially. Each block
+// is validated (parent hash chain continuity) before being committed locally.
+// The loop repeats until local height is within 1 block of the network tip.
+//
+// Once caught up, it transitions to SyncStateCaughtUp. The caller
+// (runBlockProductionLoop) should check the sync state and only begin PBFT
+// participation after the state reaches SyncStateConsensusParticipant.
+//
+// This loop NEVER gives up — it retries with exponential backoff (up to 5 minutes)
+// and keeps trying all known peers indefinitely until the node is caught up.
+func runBlockSyncLoop(
+	ctx context.Context,
+	bc *core.Blockchain,
+	cons *consensus.Consensus,
+	nodeID string,
+	peerAddrs []string,
+	syncState *SyncState,
+	syncStateMu *sync.Mutex,
+) {
+	logger.Info("[%s] 🔄 Block sync loop started (state=%s)", nodeID, syncState.String())
+
+	// Exponential backoff parameters
+	const (
+		maxBatchSize        uint64 = 500
+		baseRetryInterval          = 1 * time.Second
+		maxRetryInterval           = 5 * time.Minute
+		backoffMultiplier          = 2
+		peerRefreshInterval        = 30 * time.Second
+	)
+
+	currentRetryInterval := baseRetryInterval
+	consecutiveFailures := 0
+	lastPeerRefresh := time.Now()
+
+	// Track which peers we've successfully contacted to avoid retrying failed ones
+	peerFailureCount := make(map[string]int)
+
+	for {
+		select {
+		case <-ctx.Done():
+			logger.Info("[%s] Block sync loop shutting down", nodeID)
+			return
+		default:
+		}
+
+		// Determine our local tip
+		localTip := bc.GetLatestBlock()
+		localHeight := uint64(0)
+		if localTip != nil {
+			localHeight = localTip.GetHeight()
+		}
+
+		logger.Debug("[%s] Sync loop: localHeight=%d, peerCount=%d, retryInterval=%v",
+			nodeID, localHeight, len(peerAddrs), currentRetryInterval)
+
+		// Periodically refresh peer list to handle stale peerRegistry
+		// This ensures late-joining nodes can discover peers even if their
+		// initial peer list is outdated
+		if time.Since(lastPeerRefresh) > peerRefreshInterval {
+			logger.Debug("[%s] Refreshing peer list (last refresh %v ago)", nodeID, time.Since(lastPeerRefresh))
+			// Reset failure counts to give peers another chance
+			peerFailureCount = make(map[string]int)
+			lastPeerRefresh = time.Now()
+		}
+
+		// ── GENESIS HANDLING ──
+		// If we're at height 0 (genesis), check if peers have blocks.
+		// If all peers are also at genesis, this is a fresh network — exit.
+		// If peers have blocks, we need to sync from them (including genesis).
+		if localHeight == 0 {
+			networkTip := uint64(0)
+			bestPeerAddr := ""
+			reachablePeers := 0
+			for _, addr := range peerAddrs {
+				if addr == "" {
+					continue
+				}
+				tip, err := getPeerTipHeight(addr)
+				if err != nil {
+					logger.Debug("[%s] Peer %s failed tip query: %v", nodeID, addr, err)
+					continue
+				}
+				reachablePeers++
+				if tip > networkTip {
+					networkTip = tip
+					bestPeerAddr = addr
+				}
+			}
+
+			// IMPORTANT: networkTip==0 is ambiguous — it means either every
+			// reachable peer is genuinely at genesis, OR every peer query
+			// failed (peer not listening yet, dial timeout, etc). We must
+			// not declare CAUGHT_UP on the failure case, or a late joiner
+			// that starts before its peers finish binding will permanently
+			// exit the sync loop stuck at height 0.
+			if reachablePeers == 0 {
+				logger.Warn("[%s] ⚠️ No peers reachable while at genesis (tried %d peers) — backing off before retry",
+					nodeID, len(peerAddrs))
+				consecutiveFailures++
+				currentRetryInterval = time.Duration(float64(currentRetryInterval) * backoffMultiplier)
+				if currentRetryInterval > maxRetryInterval {
+					currentRetryInterval = maxRetryInterval
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(currentRetryInterval):
+				}
+				continue
+			}
+
+			if networkTip == 0 {
+				// At least one peer answered, and it reported genesis too —
+				// genuinely a fresh network.
+				syncStateMu.Lock()
+				if *syncState == SyncStateSyncing {
+					*syncState = SyncStateCaughtUp
+					logger.Info("[%s] ✅ At genesis (height 0) — transitioning to CAUGHT_UP (fresh network)", nodeID)
+				}
+				syncStateMu.Unlock()
+				return
+			}
+
+			// Peers have blocks - sync from them
+			logger.Info("[%s] 🔄 Late-joining: syncing genesis from peer %s (network tip=%d)", nodeID, bestPeerAddr, networkTip)
+			resp, err := requestBlocksFromPeer(bestPeerAddr, 0, networkTip)
+			if err != nil || len(resp.Blocks) == 0 {
+				logger.Warn("[%s] Failed to get genesis from peer %s: %v", nodeID, bestPeerAddr, err)
+				consecutiveFailures++
+				currentRetryInterval = time.Duration(float64(currentRetryInterval) * backoffMultiplier)
+				if currentRetryInterval > maxRetryInterval {
+					currentRetryInterval = maxRetryInterval
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(currentRetryInterval):
+				}
+				continue
+			}
+
+			// Success - reset backoff
+			consecutiveFailures = 0
+			currentRetryInterval = baseRetryInterval
+
+			applied := 0
+			for _, blk := range resp.Blocks {
+				if blk == nil {
+					continue
+				}
+				wrapped := core.NewBlockHelper(blk)
+				if err := bc.CommitBlock(wrapped); err != nil {
+					logger.Error("[%s] Failed to commit synced block %d: %v", nodeID, blk.GetHeight(), err)
+					break
+				}
+				applied++
+			}
+			if applied > 0 {
+				logger.Info("[%s] ✅ Applied %d synced blocks (now at height %d)", nodeID, applied, bc.GetLatestBlock().GetHeight())
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(500 * time.Millisecond):
+			}
+			continue
+		}
+
+		// We have blocks locally — query peers for network tip
+		networkTip := uint64(0)
+		bestPeerAddr := ""
+		reachablePeers := 0
+
+		// Sort peers by failure count (try most reliable peers first)
+		type peerInfo struct {
+			addr     string
+			failures int
+		}
+		var peersByReliability []peerInfo
+		for _, addr := range peerAddrs {
+			if addr == "" {
+				continue
+			}
+			peersByReliability = append(peersByReliability, peerInfo{
+				addr:     addr,
+				failures: peerFailureCount[addr],
+			})
+		}
+
+		// Try peers in order of reliability (fewest failures first)
+		for _, peer := range peersByReliability {
+			tip, err := getPeerTipHeight(peer.addr)
+			if err != nil {
+				logger.Debug("[%s] Peer %s unreachable (failures=%d): %v",
+					nodeID, peer.addr, peer.failures, err)
+				peerFailureCount[peer.addr]++
+				continue
+			}
+
+			reachablePeers++
+			if tip > networkTip {
+				networkTip = tip
+				bestPeerAddr = peer.addr
+			}
+		}
+
+		logger.Debug("[%s] Tip query: reachablePeers=%d, networkTip=%d, bestPeer=%s",
+			nodeID, reachablePeers, networkTip, bestPeerAddr)
+
+		// Check if we're caught up (within 1 block of network tip).
+		// CRITICAL: only trust this when at least one peer actually answered
+		// this round. If reachablePeers==0, networkTip is stuck at its zero
+		// value and "localHeight >= networkTip" would be trivially true,
+		// causing the node to falsely declare CAUGHT_UP and permanently exit
+		// the sync loop on a transient "peers not up yet" failure.
+		if reachablePeers > 0 && (localHeight >= networkTip || networkTip-localHeight <= 1) {
+			syncStateMu.Lock()
+			if *syncState == SyncStateSyncing {
+				*syncState = SyncStateCaughtUp
+				logger.Info("[%s] ✅ Caught up at height %d (network tip %d) — transitioning to CAUGHT_UP",
+					nodeID, localHeight, networkTip)
+			}
+			syncStateMu.Unlock()
+			return
+		}
+
+		// If no peers are reachable, use exponential backoff and retry
+		if bestPeerAddr == "" {
+			logger.Warn("[%s] ⚠️ No peers reachable (tried %d peers, total failures across all peers: %d) — backing off before retry",
+				nodeID, len(peerAddrs), consecutiveFailures)
+			consecutiveFailures++
+			currentRetryInterval = time.Duration(float64(currentRetryInterval) * backoffMultiplier)
+			if currentRetryInterval > maxRetryInterval {
+				currentRetryInterval = maxRetryInterval
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(currentRetryInterval):
+			}
+			continue
+		}
+
+		// We're behind — request missing blocks
+		fromHeight := localHeight + 1
+		toHeight := networkTip
+		if toHeight-fromHeight+1 > maxBatchSize {
+			toHeight = fromHeight + maxBatchSize - 1
+		}
+
+		logger.Info("[%s] 🔄 Syncing blocks %d -> %d from %s (local=%d, network=%d)",
+			nodeID, fromHeight, toHeight, bestPeerAddr, localHeight, networkTip)
+
+		resp, err := requestBlocksFromPeer(bestPeerAddr, fromHeight, toHeight)
+		if err != nil {
+			logger.Warn("[%s] Failed to request blocks from %s: %v", nodeID, bestPeerAddr, err)
+			peerFailureCount[bestPeerAddr]++
+			consecutiveFailures++
+			currentRetryInterval = time.Duration(float64(currentRetryInterval) * backoffMultiplier)
+			if currentRetryInterval > maxRetryInterval {
+				currentRetryInterval = maxRetryInterval
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(currentRetryInterval):
+			}
+			continue
+		}
+
+		if len(resp.Blocks) == 0 {
+			logger.Warn("[%s] Peer %s returned 0 blocks for range %d-%d", nodeID, bestPeerAddr, fromHeight, toHeight)
+			peerFailureCount[bestPeerAddr]++
+			consecutiveFailures++
+			currentRetryInterval = time.Duration(float64(currentRetryInterval) * backoffMultiplier)
+			if currentRetryInterval > maxRetryInterval {
+				currentRetryInterval = maxRetryInterval
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(currentRetryInterval):
+			}
+			continue
+		}
+
+		// Success - reset backoff and clear failure count for this peer
+		consecutiveFailures = 0
+		currentRetryInterval = baseRetryInterval
+		peerFailureCount[bestPeerAddr] = 0
+
+		// Apply each block sequentially with validation
+		applied := 0
+		for _, blk := range resp.Blocks {
+			if blk == nil {
+				continue
+			}
+
+			// Validate parent hash chain continuity
+			currentTip := bc.GetLatestBlock()
+			if currentTip != nil && blk.GetPrevHash() != currentTip.GetHash() {
+				logger.Warn("[%s] Block %d parent hash mismatch: expected %s, got %s — stopping batch",
+					nodeID, blk.GetHeight(), currentTip.GetHash()[:16], blk.GetPrevHash()[:16])
+				break
+			}
+
+			// Validate the block height is contiguous
+			if currentTip != nil && blk.GetHeight() != currentTip.GetHeight()+1 {
+				logger.Warn("[%s] Block %d is not contiguous (tip=%d) — stopping batch",
+					nodeID, blk.GetHeight(), currentTip.GetHeight())
+				break
+			}
+
+			// QUORUM CERTIFICATE VALIDATION:
+			if cons != nil {
+				vs := cons.GetValidatorSet()
+				if vs != nil {
+					blockEpoch := blk.GetHeight() / consensus.SlotsPerEpoch
+					if err := core.VerifyBlockAttestations(blk, vs, blockEpoch); err != nil {
+						logger.Error("[%s] ❌ Block %d failed attestation quorum check: %v — rejecting batch from peer %s",
+							nodeID, blk.GetHeight(), err, bestPeerAddr)
+						applied = 0
+						break
+					}
+				} else {
+					logger.Warn("[%s] No validator set available — skipping attestation verification for block %d",
+						nodeID, blk.GetHeight())
+				}
+			}
+
+			wrapped := core.NewBlockHelper(blk)
+			if err := bc.CommitBlock(wrapped); err != nil {
+				logger.Error("[%s] Failed to commit synced block %d: %v", nodeID, blk.GetHeight(), err)
+				break
+			}
+
+			applied++
+		}
+
+		if applied > 0 {
+			logger.Info("[%s] ✅ Applied %d/%d synced blocks (now at height %d)",
+				nodeID, applied, len(resp.Blocks), bc.GetLatestBlock().GetHeight())
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
+
+// ============================================================================
 // Block production loop
 // ============================================================================
 
 // runBlockProductionLoop runs continuous block production with PBFT consensus.
+//
+// It checks the syncState before entering the PBFT loop. A node in SYNCING
+// state will NOT participate in PBFT rounds (no voting, no proposing). It
+// will wait until the sync loop transitions it to CAUGHT_UP, then transition
+// itself to CONSENSUS_PARTICIPANT and begin full PBFT participation.
 func runBlockProductionLoop(
 	ctx context.Context,
 	bc *core.Blockchain,
@@ -860,6 +1466,8 @@ func runBlockProductionLoop(
 	validatorAddressMap map[string]string,
 	phase2State *phase2InitState,
 	peerCountFunc func() int,
+	syncState *SyncState,
+	syncStateMu *sync.Mutex,
 ) {
 	const (
 		singleNodeInterval  = 10 * time.Second
@@ -925,18 +1533,87 @@ func runBlockProductionLoop(
 		}
 	}
 
+	// ──────────────────────────────────────────────────────────────────────
+	// SYNC STATE GATE: A node in SYNCING state must NOT participate in PBFT.
+	// It waits here until runBlockSyncLoop transitions it to CAUGHT_UP, then
+	// we transition to CONSENSUS_PARTICIPANT and fall through to PBFT.
+	// ──────────────────────────────────────────────────────────────────────
+	for {
+		syncStateMu.Lock()
+		currentSyncState := *syncState
+		syncStateMu.Unlock()
+
+		if currentSyncState == SyncStateSyncing {
+			logger.Info("[%s] ⏳ Sync in progress — waiting to catch up before joining PBFT (state=%s)",
+				nodeID, currentSyncState.String())
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(3 * time.Second):
+			}
+			continue
+		}
+
+		if currentSyncState == SyncStateCaughtUp {
+			// Transition to full consensus participation
+			syncStateMu.Lock()
+			*syncState = SyncStateConsensusParticipant
+			syncStateMu.Unlock()
+			logger.Info("[%s] 🎉 Transitioning to CONSENSUS_PARTICIPANT — joining PBFT rounds", nodeID)
+			break
+		}
+
+		// CONSENSUS_PARTICIPANT — proceed to PBFT
+		break
+	}
+
+startPBFT:
+
 	// Even when the gate above passes on the very first check (all peers were
 	// already known at startup), give the P2P broadcast layer a brief moment
 	// to finish establishing persistent peer connections before this node's
 	// first leader election / proposal for view 0. Known-peer registration
 	// (via key exchange) does not itself guarantee the broadcast link is up.
-	select {
-	case <-ctx.Done():
-		return
-	case <-time.After(2 * time.Second):
-	}
+	//
+	// Instead of a fixed 2-second sleep, wait until either:
+	// 1. The sync loop has finished (syncState != SYNCING), OR
+	// 2. A minimum number of peers are connected (if still syncing)
+	// This makes the delay dynamic and adapts to actual network conditions.
+	logger.Info("[%s] ⏳ Waiting for P2P broadcast layer to stabilize before PBFT...", nodeID)
 
-startPBFT:
+	broadcastReadyTimeout := time.After(30 * time.Second)
+	broadcastReady := false
+
+	for !broadcastReady {
+		select {
+		case <-ctx.Done():
+			return
+		case <-broadcastReadyTimeout:
+			logger.Warn("[%s] ⚠️ Broadcast layer stabilization timeout (30s) — proceeding to PBFT", nodeID)
+			broadcastReady = true
+		default:
+			syncStateMu.Lock()
+			currentSync := *syncState
+			syncStateMu.Unlock()
+
+			// If sync is complete, we're ready
+			if currentSync != SyncStateSyncing {
+				logger.Info("[%s] ✅ Sync complete — P2P layer ready (syncState=%s)", nodeID, currentSync.String())
+				broadcastReady = true
+				continue
+			}
+
+			// If we have enough peers and have been syncing for a bit, proceed
+			if peerCountFunc != nil && peerCountFunc() >= 2 {
+				// Give it at least 3 seconds even with peers connected
+				time.Sleep(500 * time.Millisecond)
+				continue
+			}
+
+			// Still waiting for peers
+			time.Sleep(1 * time.Second)
+		}
+	}
 
 	var currentHeight uint64 = 0
 	latestBlock := bc.GetLatestBlock()

@@ -5,7 +5,10 @@
 package rpc
 
 import (
+	"encoding/binary"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net"
 	"time"
 
@@ -131,12 +134,16 @@ func CallRPC(address, method string, params interface{}, nodeID NodeID, ttl uint
 		return nil, err
 	}
 
-	if _, err := conn.Write(encodedData); err != nil {
+	// Write length-prefixed message
+	if err := writeFramedMessage(conn, encodedData); err != nil {
 		return nil, err
 	}
 
-	// Read response
-	respData := readConn(conn)
+	// Read length-prefixed response
+	respData, err := readFramedMessage(conn)
+	if err != nil {
+		return nil, err
+	}
 	respMsg, err := security.DecodeMessage(respData)
 	if err != nil {
 		return nil, err
@@ -157,6 +164,23 @@ func CallRPC(address, method string, params interface{}, nodeID NodeID, ttl uint
 		return nil, ErrInvalidMessageFormat
 	}
 
+	// Check if the response is a JSON-RPC error response before trying to unmarshal as binary Message.
+	// The server may return JSON-RPC errors (e.g. method not found). Those payloads are valid
+	// JSON, not binary RPC Message bytes, so attempting resp.Unmarshal() would fail with
+	// buffer-size / format errors.
+	var rpcErrResp struct {
+		JSONRPC string    `json:"jsonrpc"`
+		Error   *RPCError `json:"error"`
+		Result  any       `json:"result"`
+	}
+	if err := json.Unmarshal(dataBytes, &rpcErrResp); err == nil && rpcErrResp.JSONRPC == "2.0" {
+		if rpcErrResp.Error != nil {
+			return nil, fmt.Errorf("RPC error (%d): %s", rpcErrResp.Error.Code, rpcErrResp.Error.Message)
+		}
+		// If it's a JSON-RPC response without an error, we still can't treat it as a binary Message.
+		return nil, fmt.Errorf("unexpected JSON-RPC response (expected binary Message): %s", string(dataBytes))
+	}
+
 	var resp Message
 	if err := resp.Unmarshal(dataBytes); err != nil {
 		return nil, err
@@ -165,9 +189,36 @@ func CallRPC(address, method string, params interface{}, nodeID NodeID, ttl uint
 	return &resp, nil
 }
 
-// readConn reads data from a connection.
-func readConn(conn net.Conn) []byte {
-	buf := make([]byte, 4096)
-	n, _ := conn.Read(buf)
-	return buf[:n]
+// writeFramedMessage writes a length-prefixed message to the connection.
+func writeFramedMessage(conn net.Conn, data []byte) error {
+	// Write 4-byte big-endian length prefix
+	lenBuf := make([]byte, 4)
+	binary.BigEndian.PutUint32(lenBuf, uint32(len(data)))
+	if _, err := conn.Write(lenBuf); err != nil {
+		return fmt.Errorf("writing length prefix: %w", err)
+	}
+	// Write payload
+	if _, err := conn.Write(data); err != nil {
+		return fmt.Errorf("writing payload: %w", err)
+	}
+	return nil
+}
+
+// readFramedMessage reads a length-prefixed message from the connection.
+func readFramedMessage(conn net.Conn) ([]byte, error) {
+	// Read 4-byte big-endian length prefix
+	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	var lenBuf [4]byte
+	if _, err := io.ReadFull(conn, lenBuf[:]); err != nil {
+		return nil, fmt.Errorf("reading length prefix: %w", err)
+	}
+	size := binary.BigEndian.Uint32(lenBuf[:])
+	if size == 0 || size > 16*1024*1024 { // Sanity cap: 16MB
+		return nil, fmt.Errorf("implausible message size: %d", size)
+	}
+	data := make([]byte, size)
+	if _, err := io.ReadFull(conn, data); err != nil {
+		return nil, fmt.Errorf("reading %d-byte payload: %w", size, err)
+	}
+	return data, nil
 }

@@ -14,8 +14,12 @@ import (
 
 // Message represents a secure P2P or RPC message.
 type Message struct {
-	Type string          `json:"type"`
-	Data json.RawMessage `json:"data"` // This is correct - stays as json.RawMessage
+	Type string `json:"type"`
+	// Data is kept as json.RawMessage so callers can decode it into the exact
+	// concrete type they expect (e.g. GetBlocksResponse, transactions, blocks).
+	// It must remain RawMessage end-to-end; the transport layer will
+	// json.Marshal/json.Unmarshal this field.
+	Data json.RawMessage `json:"data"`
 }
 
 // Handshake manages TLS or secure channel handshakes.

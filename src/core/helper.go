@@ -142,9 +142,17 @@ func (bc *Blockchain) GetChainParams() *SphinxChainParameters {
 }
 
 // SaveBasicChainState saves a basic chain state
-// Simplified version of chain state saving without node information
+// Enhanced to preserve existing node information
 func (bc *Blockchain) SaveBasicChainState() error {
-	return bc.StoreChainState(nil) // Only one parameter now
+	// Load existing chain state to preserve node information
+	existingChainState, err := bc.storage.LoadCompleteChainState()
+	if err != nil || existingChainState == nil {
+		// No existing state, create with empty nodes array
+		return bc.StoreChainState([]*storage.NodeInfo{})
+	}
+
+	// Preserve existing nodes array
+	return bc.StoreChainState(existingChainState.Nodes)
 }
 
 // SetStorageDB injects a shared *database.DB into the blockchain's storage

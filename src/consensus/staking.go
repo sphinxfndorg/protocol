@@ -11,6 +11,7 @@ import (
 	"sort"
 
 	logger "github.com/sphinxfndorg/protocol/src/log"
+
 	denom "github.com/sphinxfndorg/protocol/src/params/denom"
 )
 
@@ -148,6 +149,36 @@ func (vs *ValidatorSet) GetTotalStake() *big.Int {
 		return big.NewInt(0)
 	}
 	return new(big.Int).Set(vs.totalStake)
+}
+
+// GetValidator returns the validator details mapped into core.StakedValidator
+// so core.VerifyBlockAttestations can verify quorum via validatorSetProvider.
+func (vs *ValidatorSet) GetValidator(id string) interface{} {
+	vs.mu.RLock()
+	defer vs.mu.RUnlock()
+
+	v, exists := vs.validators[id]
+	if !exists || v == nil {
+		return nil
+	}
+
+	cs := &StakedValidator{ // reuse consensus.StakedValidator type
+		ID:          v.ID,
+		StakeAmount: new(big.Int).Set(v.StakeAmount),
+		// remaining fields are ignored by core.VerifyBlockAttestations
+	}
+
+	if v.StakeAmount != nil {
+		cs.StakeAmount = new(big.Int).Set(v.StakeAmount)
+	} else {
+		cs.StakeAmount = big.NewInt(0)
+	}
+	cs.ActivationEpoch = v.ActivationEpoch
+	cs.ExitEpoch = v.ExitEpoch
+	cs.IsSlashed = v.IsSlashed
+	cs.LastAttested = v.LastAttested
+	cs.RewardAddress = v.RewardAddress
+	return cs
 }
 
 // GetStakeInSPX returns a validator's stake in SPX as float64.

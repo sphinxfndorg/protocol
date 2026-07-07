@@ -10,15 +10,25 @@ import (
 )
 
 // TestBitSizeValidation covers FIX J — invalid bitSize must return an error.
+//
+// FIX DET (test update): this test only cares about bitSize validation, not
+// salt/determinism behavior, so it now uses NewSphinxHashKeyed instead of
+// NewSphinxHash(bitSize, nil). NewSphinxHash no longer accepts a nil/empty
+// salt at all (it now returns a salt-required error unconditionally — see
+// FIX DET in spxhash.go), so calling it with nil here would always error,
+// even for otherwise-valid bitSizes, and would no longer be testing what
+// this test is meant to test. NewSphinxHashKeyed still validates bitSize
+// the same way (FIX J) without requiring a salt argument, so it isolates
+// the bitSize check cleanly.
 func TestBitSizeValidation(t *testing.T) {
 	for _, bad := range []int{0, 128, 255, 257, 1024} {
-		if _, err := NewSphinxHash(bad, nil); err == nil {
-			t.Errorf("NewSphinxHash(%d) expected error, got nil", bad)
+		if _, err := NewSphinxHashKeyed(bad); err == nil {
+			t.Errorf("NewSphinxHashKeyed(%d) expected error, got nil", bad)
 		}
 	}
 	for _, good := range []int{256, 384, 512} {
-		if _, err := NewSphinxHash(good, nil); err != nil {
-			t.Errorf("NewSphinxHash(%d) unexpected error: %v", good, err)
+		if _, err := NewSphinxHashKeyed(good); err != nil {
+			t.Errorf("NewSphinxHashKeyed(%d) unexpected error: %v", good, err)
 		}
 	}
 }
@@ -59,12 +69,26 @@ func TestDeterminismWithinInstance(t *testing.T) {
 	}
 }
 
-// TestNonDeterminismAcrossInstances covers FIX #2 — different instances must
-// (with overwhelming probability) produce different hashes for the same input.
+// TestNonDeterminismAcrossInstances covers the NewSphinxHashKeyed constructor
+// — separate instances must (with overwhelming probability) produce
+// different hashes for the same input, since each gets its own fresh random
+// salt.
+//
+// FIX DET (test update): this test previously called
+// NewSphinxHash(256, input) — passing the SAME salt (input) to both
+// instances — and asserted the two hashes must differ. That was only true
+// under the old implementation where a caller-supplied salt was mixed with
+// extra internal randomness. Under the current split API, NewSphinxHash is
+// deterministic BY DEFINITION: the same bitSize and the same salt must
+// always produce the same hash across instances. Asserting non-determinism
+// from two NewSphinxHash calls with an identical salt is therefore testing
+// for a bug, not a feature. Non-determinism across instances is now the
+// explicit contract of NewSphinxHashKeyed (no salt argument, fresh random
+// salt every call), so this test now exercises that constructor instead.
 func TestNonDeterminismAcrossInstances(t *testing.T) {
 	input := []byte("the quick brown fox")
-	s1, _ := NewSphinxHash(256, input)
-	s2, _ := NewSphinxHash(256, input)
+	s1, _ := NewSphinxHashKeyed(256)
+	s2, _ := NewSphinxHashKeyed(256)
 	h1 := s1.GetHash(input)
 	h2 := s2.GetHash(input)
 	if bytes.Equal(h1, h2) {

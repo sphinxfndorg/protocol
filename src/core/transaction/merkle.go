@@ -13,6 +13,11 @@ import (
 	"github.com/sphinxfndorg/protocol/src/common"
 )
 
+// EmptyMerkleRoot is the deterministic hash of an empty Merkle tree.
+// Hardcoded to avoid repeated SpxHash computations.
+// Computed as: SpxHash([]byte{}) = 5a6c2e9e730d5cb534e7f28c883ca7b604794c691f72398f3001be48cfef12bf
+var EmptyMerkleRoot = []byte{0x5a, 0x6c, 0x2e, 0x9e, 0x73, 0x0d, 0x5c, 0xb5, 0x34, 0xe7, 0xf2, 0x8c, 0x88, 0x3c, 0xa7, 0xb6, 0x04, 0x79, 0x4c, 0x69, 0x1f, 0x72, 0x39, 0x8f, 0x30, 0x01, 0xbe, 0x48, 0xcf, 0xef, 0x12, 0xbf}
+
 // NewMerkleNode creates a new Merkle node
 func NewMerkleNode(left, right *MerkleNode, data []byte) *MerkleNode {
 	node := &MerkleNode{}
@@ -51,9 +56,8 @@ func NewMerkleTree(txs []*Transaction) *MerkleTree {
 
 	// Handle empty block case
 	if len(leaves) == 0 {
-		emptyHash := common.SpxHash([]byte{})
 		return &MerkleTree{
-			Root:   &MerkleNode{Hash: emptyHash, IsLeaf: true},
+			Root:   &MerkleNode{Hash: EmptyMerkleRoot, IsLeaf: true},
 			Leaves: leaves,
 		}
 	}
@@ -99,7 +103,7 @@ func buildMerkleTree(nodes []*MerkleNode) *MerkleNode {
 // GetRoot returns the root hash of the Merkle tree
 func (mt *MerkleTree) GetRoot() []byte {
 	if mt.Root == nil {
-		return common.SpxHash([]byte{})
+		return EmptyMerkleRoot
 	}
 	return mt.Root.Hash
 }

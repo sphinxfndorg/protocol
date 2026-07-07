@@ -42,6 +42,15 @@ import (
 //
 // FIX SALT: If entropy is provided (non-nil), use it directly instead of
 // generating random entropy. This allows deterministic testing with fixed salts.
+//
+// FIX DET (determinism/one-way contradiction):
+// generateSalt itself is unchanged — it still supports both "use the entropy
+// I was given" and "generate fresh random entropy" modes. What changed is
+// that callers can no longer reach the random-entropy branch by accident.
+// NewSphinxHash (the deterministic, consensus-safe constructor) now requires
+// a non-empty salt and always takes the providedEntropy branch below. Only
+// NewSphinxHashKeyed is allowed to request the random branch, and it does so
+// explicitly and by name.
 func generateSalt(data []byte, saltSz int, providedEntropy []byte) (salt []byte, entropy []byte, err error) {
 	// If entropy is provided, use it directly (deterministic mode)
 	if providedEntropy != nil {
@@ -78,27 +87,95 @@ func generateSalt(data []byte, saltSz int, providedEntropy []byte) (salt []byte,
 	return salt, entropy, nil
 }
 
-// NewSphinxHash creates a new SphinxHash with a specific bit size for the hash.
+// NewSphinxHash creates a new, DETERMINISTIC SphinxHash with a specific bit
+// size for the hash.
 //
-// FIX #2: salt generation now incorporates random entropy (see generateSalt).
-// Returns an error if the OS random source is unavailable.
+// This is the constructor to use anywhere the output must be independently
+// reproducible by another process, another node, or another call — for
+// example transaction hashes, block hashes, Merkle leaves/roots, or address
+// derivation from a public key. Given the same bitSize and the same salt,
+// GetHash(data) always returns the same bytes, no matter which instance or
+// process computed it.
+//
+// FIX #2: salt generation now incorporates the caller-supplied entropy (see
+// generateSalt). Returns an error if the OS random source is unavailable
+// during that derivation.
 //
 // FIX J: bitSize is now validated; values other than 256, 384, or 512 are
 // rejected with an explicit error instead of silently falling through to the
 // default 32-byte output in Size(), which would produce wrong-length hashes
 // with no indication to the caller.
 //
-// FIX SALT: If data is provided, it's used as the entropy for deterministic
-// hashing. If data is nil, random entropy is generated.
-func NewSphinxHash(bitSize int, entropy []byte) (*SphinxHash, error) {
+// FIX SALT: salt is used as the entropy for deterministic hashing.
+//
+// FIX DET (determinism/one-way contradiction):
+// Previously this same function accepted a nil entropy argument and silently
+// fell back to crypto/rand, meaning two calls with entropy == nil produced
+// two different, non-comparable hashers even though they shared a name and
+// a bitSize. That made "SphinxHash" behave like a keyed/salted construction
+// (Argon2id, HMAC) rather than a classical hash function, and there was
+// nothing in the API surface warning a caller which behavior they'd get.
+// salt is now required and validated up front: a nil or empty salt is
+// rejected with an error rather than silently substituted with randomness.
+// Callers that actually want per-instance randomness must say so explicitly
+// by calling NewSphinxHashKeyed instead.
+func NewSphinxHash(bitSize int, salt []byte) (*SphinxHash, error) {
 	// FIX J: validate bitSize before doing any work.
 	if bitSize != 256 && bitSize != 384 && bitSize != 512 {
 		return nil, fmt.Errorf("spxhash: unsupported bitSize %d (must be 256, 384, or 512)", bitSize)
 	}
 
-	// If entropy is nil, generate random entropy. If provided, use it directly.
+	// FIX DET: a deterministic hasher is meaningless without a fixed salt.
+	// Reject nil/empty here instead of quietly generating random entropy, so
+	// a caller that forgets to pass a salt gets a loud error instead of a
+	// silently non-reproducible hash.
+	if len(salt) == 0 {
+		return nil, errors.New("spxhash: NewSphinxHash requires a non-empty salt for deterministic hashing; use NewSphinxHashKeyed for randomized, per-instance hashing")
+	}
+
 	var data []byte // Empty data for salt generation
-	salt, saltEntropy, err := generateSalt(data, saltSize, entropy)
+	derivedSalt, saltEntropy, err := generateSalt(data, saltSize, salt)
+	if err != nil {
+		return nil, err
+	}
+
+	return &SphinxHash{
+		bitSize:     bitSize,
+		salt:        derivedSalt,
+		saltEntropy: saltEntropy,
+		cache:       NewLRUCache(DefaultCacheSize),
+	}, nil
+}
+
+// NewSphinxHashKeyed creates a new, RANDOMIZED SphinxHash with a specific bit
+// size for the hash.
+//
+// Each call produces an instance with its own fresh, cryptographically
+// random salt, so two instances created by NewSphinxHashKeyed will (with
+// overwhelming probability) produce different output for the same input.
+// This is the intended behavior for password-storage / MAC-like use cases,
+// where non-determinism across instances defeats pre-computation attacks —
+// it mirrors how Argon2id or HMAC-with-a-fresh-key is normally used.
+//
+// FIX DET (determinism/one-way contradiction):
+// This constructor did not exist before; its behavior is what NewSphinxHash
+// used to do whenever it was called with a nil entropy argument. Splitting
+// it out means the random-salt behavior now has to be requested by name —
+// it can no longer be reached by accident (e.g. forgetting to pass a salt)
+// at a call site that actually needed a reproducible hash.
+//
+// Do not use this constructor anywhere the resulting hash must be
+// independently reproduced by another process or node.
+func NewSphinxHashKeyed(bitSize int) (*SphinxHash, error) {
+	// FIX J: validate bitSize before doing any work.
+	if bitSize != 256 && bitSize != 384 && bitSize != 512 {
+		return nil, fmt.Errorf("spxhash: unsupported bitSize %d (must be 256, 384, or 512)", bitSize)
+	}
+
+	var data []byte // Empty data for salt generation
+	// Passing nil here deliberately takes the random-entropy branch inside
+	// generateSalt — this is the one and only constructor allowed to do so.
+	salt, saltEntropy, err := generateSalt(data, saltSize, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -111,6 +188,20 @@ func NewSphinxHash(bitSize int, entropy []byte) (*SphinxHash, error) {
 	}, nil
 }
 
+// Size returns the output length in bytes for this instance's configured
+// bitSize: 256 -> 32, 384 -> 48, 512 -> 64.
+//
+// FIX SIZE (missing method / compile error "s.Size undefined"):
+// hashData and sphinxHash both call s.Size() to determine the dynamic
+// output length (shakeLength), but no Size method was ever defined on
+// SphinxHash, so the package failed to compile. bitSize is already
+// validated to be one of 256, 384, or 512 in NewSphinxHash and
+// NewSphinxHashKeyed (FIX J), so a plain division by 8 is safe here and
+// needs no extra validation.
+func (s *SphinxHash) Size() int {
+	return s.bitSize / 8
+}
+
 // EncodedSalt returns the random entropy bytes that were used to derive this
 // instance's salt.
 //
@@ -119,6 +210,12 @@ func NewSphinxHash(bitSize int, entropy []byte) (*SphinxHash, error) {
 // across a network). Callers should store the value returned here alongside the
 // hash output and pass it to DecodeSalt when reconstructing the instance for
 // verification.
+//
+// Note: for instances created with NewSphinxHash, this returns the caller's
+// own fixed salt (echoed back), which is already known and shared. For
+// instances created with NewSphinxHashKeyed, this is the only way to recover
+// the random entropy that made the instance unique, and it must be persisted
+// if the hash needs to be reproduced later.
 func (s *SphinxHash) EncodedSalt() []byte {
 	out := make([]byte, len(s.saltEntropy))
 	copy(out, s.saltEntropy)

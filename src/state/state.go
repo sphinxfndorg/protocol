@@ -1326,6 +1326,56 @@ func (s *Storage) StoreBlock(block *types.Block) error {
 	return nil
 }
 
+// ReplaceGenesis overwrites the local genesis block with one received from a peer.
+// This is used by late-joining nodes that created a local genesis (with their own
+// wall-clock timestamp) and need to adopt the network's canonical genesis block.
+func (s *Storage) ReplaceGenesis(block *types.Block) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	blockHash := block.GetHash()
+	height := block.GetHeight()
+	if height != 0 {
+		return fmt.Errorf("ReplaceGenesis: block height %d is not genesis (height 0)", height)
+	}
+
+	// Remove old genesis from indices
+	for hash, existing := range s.blockIndex {
+		if existing.GetHeight() == 0 {
+			delete(s.blockIndex, hash)
+			break
+		}
+	}
+	for h := range s.heightIndex {
+		if h == 0 {
+			delete(s.heightIndex, h)
+			break
+		}
+	}
+
+	// Store the new genesis block to disk
+	if err := s.storeBlockToDisk(block); err != nil {
+		return fmt.Errorf("ReplaceGenesis: failed to store block to disk: %w", err)
+	}
+
+	// Update in-memory indices
+	s.blockIndex[blockHash] = block
+	s.heightIndex[0] = block
+	s.bestBlockHash = blockHash
+	s.totalBlocks = 1
+
+	// Persist updated indices
+	if err := s.saveBlockIndex(); err != nil {
+		return fmt.Errorf("ReplaceGenesis: failed to save block index: %w", err)
+	}
+	if err := s.saveChainState(); err != nil {
+		return fmt.Errorf("ReplaceGenesis: failed to save chain state: %w", err)
+	}
+
+	logger.Info("✅ ReplaceGenesis: genesis replaced with peer's version — hash=%s", blockHash)
+	return nil
+}
+
 // calculateEmptyMerkleRoot returns standard empty Merkle root
 func (s *Storage) calculateEmptyMerkleRoot() []byte {
 	// This should match what the blockchain calculates

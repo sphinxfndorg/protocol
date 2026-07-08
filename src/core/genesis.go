@@ -34,11 +34,15 @@ func NewGenesisValidatorStake(spx int64) *big.Int {
 // GetDevnetChainParams() and pass the result to GenesisStateFromChainParams().
 func DefaultGenesisState() *GenesisState {
 	return &GenesisState{
-		ChainID:           7331,
-		ChainName:         "Sphinx Mainnet",
-		Symbol:            "SPX",
-		Timestamp:         1732070400, // Nov 20 2024 00:00:00 UTC — MUST match genesisBlockDefinition
-		ExtraData:         []byte("The Times 20/Nov/2024 Sphinx Genesis. Privacy, sovereignty, human dignity. No surveillance."),
+		ChainID:   7331,
+		ChainName: "Sphinx Mainnet",
+		Symbol:    "SPX",
+		// Genesis timestamp is set at runtime by the first genesis creator (NODE-A).
+		// Late joiners must NOT execute genesis locally; they will download block 0
+		// (including this timestamp) from peers.
+		Timestamp: common.GetCurrentTimestamp(),
+
+		ExtraData:         []byte("Sphinx: The personal ledger. Beyond a financial ledger—this is about privacy, sovereignty, and human dignity."),
 		InitialDifficulty: big.NewInt(17179869184),
 		InitialGasLimit:   big.NewInt(5000),
 		Nonce:             common.FormatNonce(1), // "0000000000000001"
@@ -62,16 +66,15 @@ func DefaultGenesisState() *GenesisState {
 // This means devnet, testnet, and mainnet all produce the same genesis hash
 // as long as these four fields stay constant.
 //
-// Note: The canonical cryptographic fields (Timestamp, ExtraData, InitialDifficulty,
-// InitialGasLimit, Nonce) are normally frozen to ensure a consistent genesis hash
-// across all environments. However, if p.GenesisConfig is provided, its values
-// take precedence, allowing tests to override these fields.
+// Note: The canonical cryptographic fields (Timestamp, Difficulty, GasLimit)
+// are frozen to ensure a consistent genesis hash across all environments.
+// However, if p.GenesisConfig is provided, its values take precedence,
+// allowing tests to override these fields.
 func GenesisStateFromChainParams(p *SphinxChainParameters) *GenesisState {
-	// These four fields are the only ones that feed into BuildBlock() →
-	// FinalizeHash(). They must never change across environments in production.
-	// However, tests may override them via p.GenesisConfig.
+	// These fields feed into BuildBlock() → FinalizeHash().
+	// Timestamp uses p.GenesisTime (the actual minting time).
+	// Difficulty and gas limit are frozen across all environments.
 	const (
-		canonicalTimestamp  = int64(1732070400) // Nov 20 2024 00:00:00 UTC, frozen forever
 		canonicalDifficulty = int64(17179869184)
 		canonicalGasLimit   = int64(5000)
 	)
@@ -79,7 +82,7 @@ func GenesisStateFromChainParams(p *SphinxChainParameters) *GenesisState {
 	canonicalNonce := common.FormatNonce(1)
 
 	// Apply test overrides if GenesisConfig is provided
-	timestamp := canonicalTimestamp
+	timestamp := p.GenesisTime // Actual wall-clock time when genesis is minted (trusted setup)
 	extraData := canonicalExtraData
 	difficulty := canonicalDifficulty
 	gasLimit := canonicalGasLimit
@@ -690,4 +693,30 @@ func toLower(s string) string {
 		}
 	}
 	return string(b)
+}
+
+// WriteGenesisStateFromBlock writes the genesis_state.json file based on a downloaded genesis block.
+// Used by late-joining nodes to create the audit file after syncing.
+func (bc *Blockchain) WriteGenesisStateFromBlock(block *types.Block) error {
+	if block == nil || block.Header == nil {
+		return fmt.Errorf("invalid genesis block")
+	}
+	if bc.chainParams == nil {
+		return fmt.Errorf("chain parameters not initialized")
+	}
+
+	gs := &GenesisState{
+		ChainID:           bc.chainParams.ChainID,
+		ChainName:         bc.chainParams.ChainName,
+		Symbol:            bc.chainParams.Symbol,
+		Timestamp:         block.Header.Timestamp,
+		ExtraData:         block.Header.ExtraData,
+		InitialDifficulty: new(big.Int).Set(block.Header.Difficulty),
+		InitialGasLimit:   new(big.Int).Set(block.Header.GasLimit),
+		Nonce:             block.Header.Nonce,
+		Allocations:       DefaultGenesisAllocations(),
+		InitialValidators: []*GenesisValidator{}, // not critical for late joiners
+	}
+
+	return gs.writeGenesisStateFile(bc.storage.GetStateDir())
 }

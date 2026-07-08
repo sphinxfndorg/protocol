@@ -112,6 +112,42 @@ func (bc *Blockchain) SetConsensusEngine(engine *consensus.Consensus) {
 	bc.consensusEngine = engine
 }
 
+// SetLateJoiner marks this node as a late joiner that should NOT create genesis
+// locally. Instead, it will download the entire chain (including genesis) from
+// peers via the sync loop. Call this before initializeChain().
+func (bc *Blockchain) SetLateJoiner() {
+	bc.lock.Lock()
+	defer bc.lock.Unlock()
+	bc.lateJoiner = true
+	logger.Info("📥 Late-joiner mode: genesis will be synced from peers, not created locally")
+}
+
+// IsLateJoiner returns whether this node is a late joiner.
+func (bc *Blockchain) IsLateJoiner() bool {
+	bc.lock.RLock()
+	defer bc.lock.RUnlock()
+	return bc.lateJoiner
+}
+
+// ReplaceGenesis replaces the local genesis block with one received from a peer.
+// This is used by late-joining nodes that created a local genesis (with their own
+// wall-clock timestamp) and need to adopt the network's canonical genesis block.
+func (bc *Blockchain) ReplaceGenesis(block *types.Block) error {
+	bc.lock.Lock()
+	defer bc.lock.Unlock()
+
+	// Replace in storage
+	if err := bc.storage.ReplaceGenesis(block); err != nil {
+		return fmt.Errorf("ReplaceGenesis: storage: %w", err)
+	}
+
+	// Replace in-memory chain
+	bc.chain = []*types.Block{block}
+
+	logger.Info("✅ ReplaceGenesis: local genesis replaced with peer's version — hash=%s", block.GetHash())
+	return nil
+}
+
 // GetStorage returns the storage instance for external access
 func (bc *Blockchain) GetStorage() *storage.Storage {
 	return bc.storage

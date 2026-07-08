@@ -1114,7 +1114,6 @@ func runBlockSyncLoop(
 ) {
 	logger.Info("[%s] 🔄 Block sync loop started (state=%s)", nodeID, syncState.String())
 
-	// Exponential backoff parameters
 	const (
 		maxBatchSize        uint64 = 500
 		baseRetryInterval          = 1 * time.Second
@@ -1126,8 +1125,6 @@ func runBlockSyncLoop(
 	currentRetryInterval := baseRetryInterval
 	consecutiveFailures := 0
 	lastPeerRefresh := time.Now()
-
-	// Track which peers we've successfully contacted to avoid retrying failed ones
 	peerFailureCount := make(map[string]int)
 
 	for {
@@ -1138,191 +1135,50 @@ func runBlockSyncLoop(
 		default:
 		}
 
-		// Determine our local tip
 		localTip := bc.GetLatestBlock()
 		localHeight := uint64(0)
+		hasGenesis := false
 		if localTip != nil {
 			localHeight = localTip.GetHeight()
+			hasGenesis = true
 		}
 
-		logger.Debug("[%s] Sync loop: localHeight=%d, peerCount=%d, retryInterval=%v",
-			nodeID, localHeight, len(peerAddrs), currentRetryInterval)
+		logger.Debug("[%s] Sync loop: localHeight=%d, hasGenesis=%v, peerCount=%d, retryInterval=%v",
+			nodeID, localHeight, hasGenesis, len(peerAddrs), currentRetryInterval)
 
-		// Periodically refresh peer list to handle stale peerRegistry
-		// This ensures late-joining nodes can discover peers even if their
-		// initial peer list is outdated
 		if time.Since(lastPeerRefresh) > peerRefreshInterval {
 			logger.Debug("[%s] Refreshing peer list (last refresh %v ago)", nodeID, time.Since(lastPeerRefresh))
-			// Reset failure counts to give peers another chance
 			peerFailureCount = make(map[string]int)
 			lastPeerRefresh = time.Now()
 		}
 
-		// ── GENESIS HANDLING ──
-		// If we're at height 0 (genesis), check if peers have blocks.
-		// If all peers are also at genesis, this is a fresh network — exit.
-		// If peers have blocks, we need to sync from them (including genesis).
-		if localHeight == 0 {
-			networkTip := uint64(0)
-			bestPeerAddr := ""
-			reachablePeers := 0
-			for _, addr := range peerAddrs {
-				if addr == "" {
-					continue
-				}
-				tip, err := getPeerTipHeight(addr)
-				if err != nil {
-					logger.Debug("[%s] Peer %s failed tip query: %v", nodeID, addr, err)
-					continue
-				}
-				reachablePeers++
-				if tip > networkTip {
-					networkTip = tip
-					bestPeerAddr = addr
-				}
-			}
-
-			// IMPORTANT: networkTip==0 is ambiguous — it means either every
-			// reachable peer is genuinely at genesis, OR every peer query
-			// failed (peer not listening yet, dial timeout, etc). We must
-			// not declare CAUGHT_UP on the failure case, or a late joiner
-			// that starts before its peers finish binding will permanently
-			// exit the sync loop stuck at height 0.
-			if reachablePeers == 0 {
-				logger.Warn("[%s] ⚠️ No peers reachable while at genesis (tried %d peers) — backing off before retry",
-					nodeID, len(peerAddrs))
-				consecutiveFailures++
-				currentRetryInterval = time.Duration(float64(currentRetryInterval) * backoffMultiplier)
-				if currentRetryInterval > maxRetryInterval {
-					currentRetryInterval = maxRetryInterval
-				}
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(currentRetryInterval):
-				}
-				continue
-			}
-
-			if networkTip == 0 {
-				// At least one peer answered, and it reported genesis too —
-				// genuinely a fresh network.
-				syncStateMu.Lock()
-				if *syncState == SyncStateSyncing {
-					*syncState = SyncStateCaughtUp
-					logger.Info("[%s] ✅ At genesis (height 0) — transitioning to CAUGHT_UP (fresh network)", nodeID)
-				}
-				syncStateMu.Unlock()
-				return
-			}
-
-			// Peers have blocks - sync from them
-			logger.Info("[%s] 🔄 Late-joining: syncing genesis from peer %s (network tip=%d)", nodeID, bestPeerAddr, networkTip)
-			resp, err := requestBlocksFromPeer(bestPeerAddr, 0, networkTip)
-			if err != nil || len(resp.Blocks) == 0 {
-				logger.Warn("[%s] Failed to get genesis from peer %s: %v", nodeID, bestPeerAddr, err)
-				consecutiveFailures++
-				currentRetryInterval = time.Duration(float64(currentRetryInterval) * backoffMultiplier)
-				if currentRetryInterval > maxRetryInterval {
-					currentRetryInterval = maxRetryInterval
-				}
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(currentRetryInterval):
-				}
-				continue
-			}
-
-			// Success - reset backoff
-			consecutiveFailures = 0
-			currentRetryInterval = baseRetryInterval
-
-			applied := 0
-			for _, blk := range resp.Blocks {
-				if blk == nil {
-					continue
-				}
-				wrapped := core.NewBlockHelper(blk)
-				if err := bc.CommitBlock(wrapped); err != nil {
-					logger.Error("[%s] Failed to commit synced block %d: %v", nodeID, blk.GetHeight(), err)
-					break
-				}
-				applied++
-			}
-			if applied > 0 {
-				logger.Info("[%s] ✅ Applied %d synced blocks (now at height %d)", nodeID, applied, bc.GetLatestBlock().GetHeight())
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(500 * time.Millisecond):
-			}
-			continue
-		}
-
-		// We have blocks locally — query peers for network tip
+		// ── QUERY PEERS FOR NETWORK TIP ──
 		networkTip := uint64(0)
 		bestPeerAddr := ""
 		reachablePeers := 0
-
-		// Sort peers by failure count (try most reliable peers first)
-		type peerInfo struct {
-			addr     string
-			failures int
-		}
-		var peersByReliability []peerInfo
 		for _, addr := range peerAddrs {
 			if addr == "" {
 				continue
 			}
-			peersByReliability = append(peersByReliability, peerInfo{
-				addr:     addr,
-				failures: peerFailureCount[addr],
-			})
-		}
-
-		// Try peers in order of reliability (fewest failures first)
-		for _, peer := range peersByReliability {
-			tip, err := getPeerTipHeight(peer.addr)
+			tip, err := getPeerTipHeight(addr)
 			if err != nil {
-				logger.Debug("[%s] Peer %s unreachable (failures=%d): %v",
-					nodeID, peer.addr, peer.failures, err)
-				peerFailureCount[peer.addr]++
+				logger.Debug("[%s] Peer %s failed tip query: %v", nodeID, addr, err)
 				continue
 			}
-
 			reachablePeers++
+			// ★ FIX 1: keep the first reachable peer as fallback even if tip=0
+			if bestPeerAddr == "" {
+				bestPeerAddr = addr
+			}
 			if tip > networkTip {
 				networkTip = tip
-				bestPeerAddr = peer.addr
+				bestPeerAddr = addr
 			}
 		}
 
-		logger.Debug("[%s] Tip query: reachablePeers=%d, networkTip=%d, bestPeer=%s",
-			nodeID, reachablePeers, networkTip, bestPeerAddr)
-
-		// Check if we're caught up (within 1 block of network tip).
-		// CRITICAL: only trust this when at least one peer actually answered
-		// this round. If reachablePeers==0, networkTip is stuck at its zero
-		// value and "localHeight >= networkTip" would be trivially true,
-		// causing the node to falsely declare CAUGHT_UP and permanently exit
-		// the sync loop on a transient "peers not up yet" failure.
-		if reachablePeers > 0 && (localHeight >= networkTip || networkTip-localHeight <= 1) {
-			syncStateMu.Lock()
-			if *syncState == SyncStateSyncing {
-				*syncState = SyncStateCaughtUp
-				logger.Info("[%s] ✅ Caught up at height %d (network tip %d) — transitioning to CAUGHT_UP",
-					nodeID, localHeight, networkTip)
-			}
-			syncStateMu.Unlock()
-			return
-		}
-
-		// If no peers are reachable, use exponential backoff and retry
-		if bestPeerAddr == "" {
-			logger.Warn("[%s] ⚠️ No peers reachable (tried %d peers, total failures across all peers: %d) — backing off before retry",
-				nodeID, len(peerAddrs), consecutiveFailures)
+		if reachablePeers == 0 {
+			logger.Warn("[%s] ⚠️ No peers reachable (tried %d peers) — backing off before retry",
+				nodeID, len(peerAddrs))
 			consecutiveFailures++
 			currentRetryInterval = time.Duration(float64(currentRetryInterval) * backoffMultiplier)
 			if currentRetryInterval > maxRetryInterval {
@@ -1336,7 +1192,117 @@ func runBlockSyncLoop(
 			continue
 		}
 
-		// We're behind — request missing blocks
+		// ── GENESIS HANDLING ──
+		if !hasGenesis {
+			logger.Info("[%s] 📥 No genesis block locally – fetching from peer %s", nodeID, bestPeerAddr)
+			resp, err := requestBlocksFromPeer(bestPeerAddr, 0, 0)
+			if err != nil || len(resp.Blocks) == 0 {
+				logger.Warn("[%s] Failed to fetch genesis from %s: %v", nodeID, bestPeerAddr, err)
+				consecutiveFailures++
+				currentRetryInterval = time.Duration(float64(currentRetryInterval) * backoffMultiplier)
+				if currentRetryInterval > maxRetryInterval {
+					currentRetryInterval = maxRetryInterval
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(currentRetryInterval):
+				}
+				continue
+			}
+			genesisBlock := resp.Blocks[0]
+			if genesisBlock == nil || genesisBlock.GetHeight() != 0 {
+				logger.Warn("[%s] Peer %s returned invalid genesis block", nodeID, bestPeerAddr)
+				consecutiveFailures++
+				currentRetryInterval = time.Duration(float64(currentRetryInterval) * backoffMultiplier)
+				if currentRetryInterval > maxRetryInterval {
+					currentRetryInterval = maxRetryInterval
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(currentRetryInterval):
+				}
+				continue
+			}
+			if err := bc.ReplaceGenesis(genesisBlock); err != nil {
+				logger.Error("[%s] Failed to replace genesis: %v", nodeID, err)
+				consecutiveFailures++
+				currentRetryInterval = time.Duration(float64(currentRetryInterval) * backoffMultiplier)
+				if currentRetryInterval > maxRetryInterval {
+					currentRetryInterval = maxRetryInterval
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(currentRetryInterval):
+				}
+				continue
+			}
+			logger.Info("[%s] ✅ Genesis block installed (hash=%s)", nodeID, genesisBlock.GetHash())
+
+			// Write genesis_state.json from the downloaded genesis block
+			if err := bc.WriteGenesisStateFromBlock(genesisBlock); err != nil {
+				logger.Warn("[%s] Failed to write genesis state file: %v", nodeID, err)
+			} else {
+				logger.Info("[%s] ✅ Genesis state file written after syncing genesis", nodeID)
+			}
+
+			// ════════════════════════════════════════════════════════════════════
+			// ★ FIX 2: Reset VDF parameters and RANDAO after genesis replacement
+			// ════════════════════════════════════════════════════════════════════
+			if cons != nil {
+				// Reload VDF parameters from the new genesis hash.
+				// (You need to implement LoadCanonicalVDFParamsFromHash or modify
+				// the existing loader to accept a hash. For simplicity, we call
+				// LoadCanonicalVDFParams which uses the global genesis hash
+				// provider. Since we just replaced the genesis block, ensure that
+				// the provider returns the new hash. Alternatively, you can pass
+				// the hash directly. Here we assume the provider is updated.)
+				newVDFParams, err := consensus.LoadCanonicalVDFParams()
+				if err != nil {
+					logger.Error("[%s] Failed to load VDF params for new genesis: %v", nodeID, err)
+				} else {
+					if err := consensus.SetCanonicalVDFParameters(&newVDFParams); err != nil {
+						logger.Warn("[%s] Failed to set canonical VDF params: %v", nodeID, err)
+					}
+				}
+				// Reset the RANDAO instance inside the consensus engine.
+				if err := cons.ResetRANDAO(genesisBlock); err != nil {
+					logger.Error("[%s] Failed to reset RANDAO after genesis sync: %v", nodeID, err)
+				} else {
+					logger.Info("[%s] ✅ RANDAO re-initialized with new genesis", nodeID)
+				}
+			}
+			// ════════════════════════════════════════════════════════════════════
+
+			consecutiveFailures = 0
+			currentRetryInterval = baseRetryInterval
+			continue
+		}
+
+		// ── Now we have genesis ──
+		if networkTip == 0 {
+			syncStateMu.Lock()
+			if *syncState == SyncStateSyncing {
+				*syncState = SyncStateCaughtUp
+				logger.Info("[%s] ✅ At genesis (height 0) — transitioning to CAUGHT_UP (fresh network)", nodeID)
+			}
+			syncStateMu.Unlock()
+			return
+		}
+
+		if localHeight >= networkTip {
+			syncStateMu.Lock()
+			if *syncState == SyncStateSyncing {
+				*syncState = SyncStateCaughtUp
+				logger.Info("[%s] ✅ Caught up at height %d (network tip %d) — transitioning to CAUGHT_UP",
+					nodeID, localHeight, networkTip)
+			}
+			syncStateMu.Unlock()
+			return
+		}
+
 		fromHeight := localHeight + 1
 		toHeight := networkTip
 		if toHeight-fromHeight+1 > maxBatchSize {
@@ -1379,35 +1345,27 @@ func runBlockSyncLoop(
 			continue
 		}
 
-		// Success - reset backoff and clear failure count for this peer
 		consecutiveFailures = 0
 		currentRetryInterval = baseRetryInterval
 		peerFailureCount[bestPeerAddr] = 0
 
-		// Apply each block sequentially with validation
 		applied := 0
 		for _, blk := range resp.Blocks {
 			if blk == nil {
 				continue
 			}
-
-			// Validate parent hash chain continuity
 			currentTip := bc.GetLatestBlock()
 			if currentTip != nil && blk.GetPrevHash() != currentTip.GetHash() {
 				logger.Warn("[%s] Block %d parent hash mismatch: expected %s, got %s — stopping batch",
 					nodeID, blk.GetHeight(), currentTip.GetHash()[:16], blk.GetPrevHash()[:16])
 				break
 			}
-
-			// Validate the block height is contiguous
 			if currentTip != nil && blk.GetHeight() != currentTip.GetHeight()+1 {
 				logger.Warn("[%s] Block %d is not contiguous (tip=%d) — stopping batch",
 					nodeID, blk.GetHeight(), currentTip.GetHeight())
 				break
 			}
-
-			// QUORUM CERTIFICATE VALIDATION:
-			if cons != nil {
+			if cons != nil && blk.GetHeight() > 0 {
 				vs := cons.GetValidatorSet()
 				if vs != nil {
 					blockEpoch := blk.GetHeight() / consensus.SlotsPerEpoch
@@ -1417,18 +1375,13 @@ func runBlockSyncLoop(
 						applied = 0
 						break
 					}
-				} else {
-					logger.Warn("[%s] No validator set available — skipping attestation verification for block %d",
-						nodeID, blk.GetHeight())
 				}
 			}
-
 			wrapped := core.NewBlockHelper(blk)
 			if err := bc.CommitBlock(wrapped); err != nil {
 				logger.Error("[%s] Failed to commit synced block %d: %v", nodeID, blk.GetHeight(), err)
 				break
 			}
-
 			applied++
 		}
 

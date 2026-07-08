@@ -37,29 +37,60 @@ go run main.go node --role=validator \
 This starts a validator on your local machine. It will create the genesis
 block, register itself, and begin participating in consensus.
 
-### Three nodes on one machine (local testnet)
+
+### This will open 6 new Terminal windows (on macOS) and start each node. You can monitor each node live.
+
+```bash
+cd desktop/protocol/src/cli
+chmod +x run.sh
+./run.sh cluster 10
+```
+
+### Example: 10 Nodes (Commands to Paste into 10 Terminals local testnet)
 
 ```bash
 # Terminal 1 — Node 0
 cd desktop/protocol/src/cli
-go run main.go node --role=validator \
-    --tcp-addr=127.0.0.1:32307 --udp-port=32308 \
-    --http-port=127.0.0.1:8545 --datadir=data \
-    --nodes=3 --node-index=0 --pbft
+go run main.go node --role=validator --tcp-addr=127.0.0.1:32307 --udp-port=32308 --http-port=127.0.0.1:8545 --datadir=data0 --nodes=10 --node-index=0 --pbft
 
 # Terminal 2 — Node 1
 cd desktop/protocol/src/cli
-go run main.go node --role=validator \
-    --tcp-addr=127.0.0.1:32308 --udp-port=32309 \
-    --http-port=127.0.0.1:8546 --datadir=data \
-    --nodes=3 --node-index=1 --pbft
+go run main.go node --role=validator --tcp-addr=127.0.0.1:32308 --udp-port=32309 --http-port=127.0.0.1:8546 --datadir=data1 --nodes=10 --node-index=1 --seeds=127.0.0.1:32307 --pbft
 
 # Terminal 3 — Node 2
 cd desktop/protocol/src/cli
-go run main.go node --role=validator \
-    --tcp-addr=127.0.0.1:32309 --udp-port=32310 \
-    --http-port=127.0.0.1:8547 --datadir=data \
-    --nodes=3 --node-index=2 --pbft
+go run main.go node --role=validator --tcp-addr=127.0.0.1:32309 --udp-port=32310 --http-port=127.0.0.1:8547 --datadir=data2 --nodes=10 --node-index=2 --seeds=127.0.0.1:32307 --pbft
+
+
+# Terminal 4 — Node 3
+cd desktop/protocol/src/cli
+go run main.go node --role=validator --tcp-addr=127.0.0.1:32310 --udp-port=32311 --http-port=127.0.0.1:8548 --datadir=data3 --nodes=10 --node-index=3 --seeds=127.0.0.1:32307 --pbft
+
+# Terminal 5 — Node 4
+cd desktop/protocol/src/cli
+go run main.go node --role=validator --tcp-addr=127.0.0.1:32311 --udp-port=32312 --http-port=127.0.0.1:8549 --datadir=data4 --nodes=10 --node-index=4 --seeds=127.0.0.1:32307 --pbft
+
+# Terminal 6 — Node 5
+cd desktop/protocol/src/cli
+go run main.go node --role=validator --tcp-addr=127.0.0.1:32312 --udp-port=32313 --http-port=127.0.0.1:8550 --datadir=data5 --nodes=10 --node-index=5 --seeds=127.0.0.1:32307 --pbft
+
+
+# Terminal 7 — Node 6
+cd desktop/protocol/src/cli
+go run main.go node --role=validator --tcp-addr=127.0.0.1:32313 --udp-port=32314 --http-port=127.0.0.1:8551 --datadir=data6 --nodes=10 --node-index=6 --seeds=127.0.0.1:32307 --pbft
+
+# Terminal 8 — Node 7
+cd desktop/protocol/src/cli
+go run main.go node --role=validator --tcp-addr=127.0.0.1:32314 --udp-port=32315 --http-port=127.0.0.1:8552 --datadir=data7 --nodes=10 --node-index=7 --seeds=127.0.0.1:32307 --pbft
+
+
+# Terminal 9 — Node 8
+cd desktop/protocol/src/cli
+go run main.go node --role=validator --tcp-addr=127.0.0.1:32315 --udp-port=32316 --http-port=127.0.0.1:8553 --datadir=data8 --nodes=10 --node-index=8 --seeds=127.0.0.1:32307 --pbft
+
+# Terminal 10 — Node 9
+cd desktop/protocol/src/cli
+go run main.go node --role=validator --tcp-addr=127.0.0.1:32316 --udp-port=32317 --http-port=127.0.0.1:8554 --datadir=data9 --nodes=10 --node-index=9 --seeds=127.0.0.1:32307 --pbft
 ```
 
 Within seconds all three nodes will connect, elect a leader, and begin

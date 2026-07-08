@@ -236,7 +236,7 @@ func StartNode(
 	}
 
 	// SECTION 5 — blockchain + genesis
-	bc, err := core.NewBlockchain(currentAddress, currentNodeID, validatorIDs, networkType)
+	bc, err := core.NewBlockchain(currentAddress, currentNodeID, validatorIDs, networkType, seeds != "")
 	if err != nil {
 		return fmt.Errorf("failed to create blockchain: %w", err)
 	}
@@ -254,16 +254,23 @@ func StartNode(
 	bc.SetRPCCaller(rpcCaller)
 	logger.Info("✅ RPC Caller set for blockchain")
 
-	if err := bc.ExecuteGenesisBlock(); err != nil {
-		logger.Warn("ExecuteGenesisBlock: %v", err)
-	} else {
-		logger.Info("✅ Genesis vault funded")
-	}
+	// Late joiners MUST NOT execute/patch genesis locally.
+	// genesis execution (vault funding) must happen only on the first node that
+	// created genesis in its own storage.
+	if !bc.IsLateJoiner() {
+		if err := bc.ExecuteGenesisBlock(); err != nil {
+			logger.Warn("ExecuteGenesisBlock: %v", err)
+		} else {
+			logger.Info("✅ Genesis vault funded")
+		}
 
-	if cpErr := bc.WriteChainCheckpoint(); cpErr != nil {
-		logger.Warn("Failed to write initial checkpoint: %v", cpErr)
+		if cpErr := bc.WriteChainCheckpoint(); cpErr != nil {
+			logger.Warn("Failed to write initial checkpoint: %v", cpErr)
+		} else {
+			logger.Info("✅ Initial checkpoint saved after genesis")
+		}
 	} else {
-		logger.Info("✅ Initial checkpoint saved after genesis")
+		logger.Info("📥 Late-joiner mode: skipping ExecuteGenesisBlock() and initial checkpoint; will sync genesis+blocks from peers")
 	}
 
 	// VDF genesis-hash provider

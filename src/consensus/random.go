@@ -807,3 +807,36 @@ func (c *Consensus) GetRANDAO() *RANDAO {
 	defer c.mu.RUnlock() // Releases read lock when function returns
 	return c.randao      // Returns RANDAO instance
 }
+
+// ResetRANDAO re-initializes the RANDAO instance with the given genesis block.
+// This is called after a late-joining node replaces its local genesis with the
+// network's canonical genesis block.
+func (c *Consensus) ResetRANDAO(genesisBlock Block) error {
+	if genesisBlock == nil || genesisBlock.GetHeight() != 0 {
+		return fmt.Errorf("invalid genesis block")
+	}
+	// Derive the 32-byte seed from the genesis hash.
+	var seed [32]byte
+	hash := sha3.Sum256([]byte(genesisBlock.GetHash()))
+	copy(seed[:], hash[:])
+
+	// Get current VDF parameters (they should be derived from the new genesis hash)
+	params, err := LoadCanonicalVDFParams()
+	if err != nil {
+		return fmt.Errorf("failed to load VDF params: %w", err)
+	}
+
+	// Recreate RANDAO with the new seed and VDF params.
+	c.mu.Lock()
+	c.randao = NewRANDAO(seed, params, c.nodeID)
+	c.mu.Unlock()
+
+	// Re-validate the RANDAO state.
+	if err := c.randao.ValidateState(); err != nil {
+		return fmt.Errorf("RANDAO state validation failed: %w", err)
+	}
+	// Update leader status immediately to reflect new RANDAO.
+	c.UpdateLeaderStatus()
+	logger.Info("✅ RANDAO reset with genesis hash %s", genesisBlock.GetHash())
+	return nil
+}

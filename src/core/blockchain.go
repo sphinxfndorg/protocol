@@ -46,7 +46,7 @@ import (
 // with the correct network parameters.  The genesis block is now built through
 // GenesisState.BuildBlock() so every node that uses the same networkType
 // produces a byte-for-byte identical genesis hash.
-func NewBlockchain(dataDir string, nodeID string, validators []string, networkType string) (*Blockchain, error) {
+func NewBlockchain(dataDir string, nodeID string, validators []string, networkType string, lateJoiner bool) (*Blockchain, error) {
 	// Initialize storage layer for persistent block storage
 	// Creates a new storage instance that will handle all disk I/O operations
 	store, err := storage.NewStorage(dataDir)
@@ -62,6 +62,7 @@ func NewBlockchain(dataDir string, nodeID string, validators []string, networkTy
 	// Create blockchain with mempool (will be configured after chain params are set)
 	// Initialize the blockchain structure with default values and empty caches
 	blockchain := &Blockchain{
+		lateJoiner:      lateJoiner,
 		storage:         store,                                // Persistent storage for blocks and state
 		stateMachine:    stateMachine,                         // State machine for BFT consensus
 		mempool:         nil,                                  // Will be set after blockchain is created
@@ -102,6 +103,23 @@ func NewBlockchain(dataDir string, nodeID string, validators []string, networkTy
 	// This handles both existing chains and first-time initialization
 	if err := blockchain.initializeChain(); err != nil {
 		return nil, fmt.Errorf("failed to initialize chain: %w", err)
+	}
+
+	// If this node is a late joiner and has a genesis block but missing genesis_state.json,
+	// write it from the downloaded block.
+	if blockchain.IsLateJoiner() {
+		genesisBlock := blockchain.GetBlockByNumber(0) // returns *types.Block or nil
+		if genesisBlock != nil {
+			stateDir := blockchain.storage.GetStateDir()
+			genesisStatePath := filepath.Join(stateDir, "genesis_state.json")
+			if _, err := os.Stat(genesisStatePath); os.IsNotExist(err) {
+				if err := blockchain.WriteGenesisStateFromBlock(genesisBlock); err != nil {
+					logger.Warn("[%s] Failed to write genesis state file on startup: %v", nodeID, err)
+				} else {
+					logger.Info("[%s] ✅ Genesis state file written on startup from existing genesis block", nodeID)
+				}
+			}
+		}
 	}
 
 	// ========== FIX: Create mempool AFTER blockchain is created ==========
@@ -396,9 +414,9 @@ func (bc *Blockchain) StoreChainState(nodes []*storage.NodeInfo) error {
 	}
 	// ==================================================
 
-	// Convert genesis_time to ISO RFC format for output (human-readable)
-	// Get current time in ISO format for timestamp
-	genesisTimeISO := common.GetTimeService().GetCurrentTimeInfo().ISOUTC
+	// Convert genesis_time from Unix timestamp to ISO RFC format for output
+	// Use the actual genesis timestamp from chain parameters, not current time
+	genesisTimeISO := common.GetTimeService().GetTimeInfo(bc.chainParams.GenesisTime).ISOUTC
 
 	// Convert blockchain params to storage.ChainParams with ISO format
 	// Create storage-compatible chain parameters
@@ -1544,6 +1562,13 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 //
 // Returns: Error if initialization fails
 func (bc *Blockchain) initializeChain() error {
+	// Late joiner check: skip genesis creation entirely.
+	// The sync loop will download the entire chain (including genesis) from peers.
+	if bc.IsLateJoiner() {
+		logger.Info("📥 Late-joiner mode: skipping local genesis creation — will sync from peers")
+		return nil
+	}
+
 	// First, try to get the latest block
 	latestBlock, err := bc.storage.GetLatestBlock()
 	if err != nil {

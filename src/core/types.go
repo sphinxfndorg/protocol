@@ -156,6 +156,10 @@ type PerformanceConfig struct {
 
 // Blockchain manages the chain of blocks with state machine replication
 type Blockchain struct {
+	// lateJoiner indicates this node did NOT create genesis locally and
+	// must download the entire chain (including genesis) from peers.
+	// Set to true when --seeds is provided at startup.
+	lateJoiner      bool
 	storage         *storage.Storage
 	stateMachine    *storage.StateMachine
 	mempool         *pool.Mempool

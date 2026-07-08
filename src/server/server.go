@@ -54,7 +54,7 @@ func NewServer(tcpAddr, wsAddr, httpAddr, p2pAddr string, seeds []string, db *le
 
 	validators := []string{nodeID}
 
-	blockchain, err := core.NewBlockchain(dataDir, nodeID, validators, "devnet")
+	blockchain, err := core.NewBlockchain(dataDir, nodeID, validators, "devnet", false)
 	if err != nil {
 		log.Fatalf("Failed to create blockchain: %v", err)
 	}

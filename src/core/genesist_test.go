@@ -158,9 +158,10 @@ func TestDefaultGenesisState_MainnetConstants(t *testing.T) {
 		t.Errorf("ChainID: want %d, got %d", wantChainID, gs.ChainID)
 	}
 
-	const wantTimestamp = int64(1732070400) // Nov 20 2024 00:00:00 UTC
-	if gs.Timestamp != wantTimestamp {
-		t.Errorf("Timestamp: want %d, got %d", wantTimestamp, gs.Timestamp)
+	// Genesis timestamp is now runtime-set by the first genesis creator.
+	// It must only be a positive Unix epoch.
+	if gs.Timestamp <= 0 {
+		t.Errorf("Timestamp: must be positive, got %d", gs.Timestamp)
 	}
 
 	wantDiff := big.NewInt(17179869184)

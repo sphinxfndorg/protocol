@@ -461,7 +461,7 @@ func SetupNodes(configs []NodeSetupConfig, wg *sync.WaitGroup) ([]NodeResources,
 		logger.Infof("Initializing blockchain for %s", cfg.Name)
 		dataDir := common.GetBlockchainDataDir(cfg.Name)
 		networkType := "devnet"
-		blockchain, err := core.NewBlockchain(dataDir, cfg.Name, allValidators, networkType)
+		blockchain, err := core.NewBlockchain(dataDir, cfg.Name, allValidators, networkType, false)
 		if err != nil {
 			logger.Errorf("Failed to initialize blockchain for %s: %v", cfg.Name, err)
 			return nil, fmt.Errorf("failed to initialize blockchain for %s: %w", cfg.Name, err)

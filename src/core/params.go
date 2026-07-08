@@ -96,17 +96,13 @@ func GetSphinxChainParams() *SphinxChainParameters {
 	// Get base chain parameters from commit package
 	baseParams := commit.SphinxChainParams()
 
-	// Use the canonical genesis timestamp from DefaultGenesisState() to ensure
-	// the genesis block timestamp matches across all environments
-	canonicalGenesisTime := DefaultGenesisState().Timestamp
-
 	// Return complete mainnet configuration with proper type conversions
 	return &SphinxChainParameters{
 		// Network Identification - unique identifiers for the blockchain
 		ChainID:       baseParams.ChainID,               // uint64
 		ChainName:     baseParams.ChainName,             // string
 		Symbol:        baseParams.Symbol,                // string
-		GenesisTime:   canonicalGenesisTime,             // int64 — use canonical genesis timestamp
+		GenesisTime:   DefaultGenesisState().Timestamp,  // int64 — actual wall-clock time when genesis is minted (matches cached genesis block)
 		GenesisHash:   genesisHash,                      // Genesis block hash
 		Version:       baseParams.Version,               // string
 		MagicNumber:   baseParams.MagicNumber,           // uint32

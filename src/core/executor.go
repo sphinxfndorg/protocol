@@ -641,21 +641,26 @@ func (bc *Blockchain) mintBlockReward(block *types.Block, stateDB *StateDB) {
 func (bc *Blockchain) ExecuteBlock(block *types.Block) ([]byte, error) {
 	stateDB, err := bc.newStateDB()
 	if err != nil {
-		logger.Error("ExecuteBlock: failed to open stateDB: %v", err)
-		return nil, errors.New("failed to open stateDB")
+		return nil, err
+	}
+
+	// For genesis block, fund the vault BEFORE distributing to allocations.
+	if block.GetHeight() == 0 {
+		bc.mintBlockReward(block, stateDB)
 	}
 
 	if err := bc.applyTransactions(block, stateDB); err != nil {
-		logger.Error("ExecuteBlock: applyTransactions failed: %v", err)
-		return nil, errors.New("applyTransactions failed")
+		return nil, err
 	}
 
-	bc.mintBlockReward(block, stateDB)
+	// For all other blocks, mint reward AFTER transactions.
+	if block.GetHeight() > 0 {
+		bc.mintBlockReward(block, stateDB)
+	}
 
 	stateRoot, err := stateDB.Commit()
 	if err != nil {
-		logger.Error("ExecuteBlock: commit failed: %v", err)
-		return nil, errors.New("commit failed")
+		return nil, err
 	}
 	return stateRoot, nil
 }

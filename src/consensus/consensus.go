@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"math/big"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -2048,6 +2049,19 @@ func (c *Consensus) addConsensusSig(sig *ConsensusSignature) {
 
 	logger.Info("🔄 Adding consensus signature for block %s (type: %s)", sig.BlockHash, sig.MessageType)
 
+	// Deduplicate before appending. Failed rounds can otherwise accumulate
+	// multiple proposal/prepare/commit entries for the same stale block, which
+	// then show up as duplicate final_states in chain_state.json.
+	dedupKey := sig.BlockHash + "|" + sig.SignerNodeID + "|" + sig.MessageType
+	for _, existing := range c.consensusSignatures {
+		if existing.BlockHash == sig.BlockHash &&
+			existing.SignerNodeID == sig.SignerNodeID &&
+			existing.MessageType == sig.MessageType {
+			logger.Debug("⏭ Skipping duplicate consensus signature %s", dedupKey)
+			return
+		}
+	}
+
 	// Try to get merkle root from cache first
 	if sig.MerkleRoot == "" {
 		if cachedRoot := c.GetCachedMerkleRoot(sig.BlockHash); cachedRoot != "" {
@@ -2204,9 +2218,31 @@ func (c *Consensus) GetConsensusSignatures() interface{} {
 
 // processVote handles incoming commit votes.
 func (c *Consensus) processVote(vote *Vote) {
+	c.mu.Lock()
+	if c.sentVotes == nil {
+		c.sentVotes = make(map[string]bool)
+	}
+	commitKey := vote.BlockHash + "|" + vote.VoterID
+	if c.sentVotes[commitKey] {
+		c.mu.Unlock()
+		logger.Debug("⏭ Skipping already-processed commit vote from %s for %s", vote.VoterID, vote.BlockHash[:16])
+		return
+	}
+	c.mu.Unlock()
+
 	blockToCommit := c.processVoteLocked(vote)
 	if blockToCommit != nil {
+		c.mu.Lock()
+		c.sentVotes[commitKey] = true
+		c.mu.Unlock()
 		c.commitBlock(blockToCommit)
+	} else {
+		// Even if quorum not reached (or vote ignored as duplicate in receivedVotes),
+		// mark this (blockHash, voterID) as processed so it won't be re-counted
+		// after a stale-commit reset that clears receivedVotes.
+		c.mu.Lock()
+		c.sentVotes[commitKey] = true
+		c.mu.Unlock()
 	}
 }
 
@@ -2657,16 +2693,15 @@ func (c *Consensus) commitBlock(block Block) {
 	if blockHeight == currentHeight {
 		// Same height: check if it's the same block
 		if block.GetHash() == currentTip.GetHash() {
-			logger.Info("Block height %d hash %s already committed, ignoring duplicate", blockHeight, block.GetHash())
-			return
-		} else {
-			// Different block at same height – fork
-			logger.Warn("Fork detected: block height %d hash %s differs from current tip %s",
-				blockHeight, block.GetHash(), currentTip.GetHash())
-			// Optionally trigger a sync or recovery here
+			// Same block, just ignore
 			return
 		}
+		// Different block at same height – already committed by another path
+		logger.Info("Block height %d hash %s differs from committed tip %s at same height; ignoring stale block",
+			blockHeight, block.GetHash(), currentTip.GetHash())
+		return
 	}
+
 	// Now blockHeight > currentHeight, proceed with normal commit
 	logger.Info("🚀 Node %s attempting to commit block %s at height %d (current tip %d)",
 		c.nodeID, block.GetHash(), blockHeight, currentHeight)
@@ -2722,6 +2757,53 @@ func (c *Consensus) commitBlock(block Block) {
 	// Commit block to blockchain
 	if err := c.blockChain.CommitBlock(block); err != nil {
 		logger.Error("❌ Error committing block: %v", err)
+
+		// FIX: This round did NOT actually complete on this node — c.phase was
+		// already advanced to PhaseCommitted (by whichever path detected quorum:
+		// processProposal's catch-up check or processVote/processVoteLocked)
+		// before blockChain.CommitBlock was ever called. Previously, returning
+		// here left c.phase stuck at PhaseCommitted, c.currentView un-incremented,
+		// and the stale vote maps (c.receivedVotes/c.weightedCommitVotes) for
+		// this hash still populated — forever, since that cleanup only lived in
+		// the success path below. A node in this state would ignore legitimate
+		// proposals/votes for the next round (anything gated on c.phase) until
+		// an external view-change timeout (10-15s) eventually forced a reset.
+		//
+		// Reconcile immediately instead: the block we tried to commit lost a
+		// race (e.g. against a synced block or a different validator's proposal
+		// that committed first) — bc's actual tip is authoritative. Adopt its
+		// height and drop back to PhaseIdle so this node can participate in the
+		// next round right away instead of waiting on the poll loop / timeout.
+		//
+		// CRITICAL: Also clear prepareVotes/sentPrepareVotes/weightedPrepareVotes
+		// so the stuck quorum does not immediately re-trigger commit on the next
+		// incoming vote / proposal.
+		c.mu.Lock()
+		if tip := c.blockChain.GetLatestBlock(); tip != nil && tip.GetHeight() > c.currentHeight {
+			c.currentHeight = tip.GetHeight()
+		}
+		c.phase = PhaseIdle
+		c.lockedBlock = nil
+		c.preparedBlock = nil
+		c.preparedView = 0
+		c.preparedBlockHash = ""
+		c.receivedVotes = make(map[string]map[string]*Vote)
+		c.prepareVotes = make(map[string]map[string]*Vote)
+		// Clear ONLY the stale block's dedup keys from c.sentVotes so the same
+		// (blockHash, voterID) pair cannot retry this exact stale commit, while
+		// preserving dedup state for any other in-flight blocks.
+		stalePrefix := block.GetHash() + "|"
+		for key := range c.sentVotes {
+			if strings.HasPrefix(key, stalePrefix) {
+				delete(c.sentVotes, key)
+			}
+		}
+		c.sentPrepareVotes = make(map[string]bool)
+		c.weightedPrepareVotes = make(map[string]*big.Int)
+		c.weightedCommitVotes = make(map[string]*big.Int)
+		logger.Warn("🔄 commitBlock: dropped stale block %s at height %d (chain tip already advanced) — reset to PhaseIdle at height %d",
+			block.GetHash(), block.GetHeight(), c.currentHeight)
+		c.mu.Unlock()
 		return
 	}
 

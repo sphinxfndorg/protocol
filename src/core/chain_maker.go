@@ -15,21 +15,6 @@ import (
 	logger "github.com/sphinxfndorg/protocol/src/log"
 )
 
-const (
-	// PhaseDevnet is the bootstrap phase: the vault is being drained via
-	// distribution blocks.  The chain must NOT be promoted until
-	// IsDistributionComplete() returns true.
-	PhaseDevnet ChainPhase = "devnet"
-
-	// PhaseTestnet is the public test phase.  It continues the devnet chain
-	// from wherever devnet stopped — same genesis, same block history, higher
-	// ChainID, different ports.
-	PhaseTestnet ChainPhase = "testnet"
-
-	// PhaseMainnet is production.  Same ancestry as devnet and testnet.
-	PhaseMainnet ChainPhase = "mainnet"
-)
-
 // NOTE: WriteChainCheckpoint is now defined in executor.go
 // DO NOT duplicate it here.
 

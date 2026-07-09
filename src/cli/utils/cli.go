@@ -247,27 +247,53 @@ func runNodeCmd(args []string) error {
 	logger.Infof("Starting node role=%s tcp=%s udp=%s rpc=%s seeds=%q data=%s pbft=%v mode=%s network=%s",
 		*role, nodeConfig.TCPAddr, nodeConfig.UDPPort, nodeConfig.HTTPPort, *seeds, *dataDir, *pbftMode, *mode, *networkFlag)
 
-	// In real-device mode (non-loopback --tcp-addr) the validator count is
-	// discovered dynamically — we don't require --nodes=3.  The same-box
-	// harness still needs it because there's no PEX to learn about peers.
+	// ── Determine mode: real-device, seed-based, or same-box ──
+	//
+	// real-device mode: non-loopback --tcp-addr (public IP or hostname).
+	//   Peers discovered dynamically via --seeds / DNS + PEX.
+	//   --nodes and --node-index are ignored.
+	//
+	// seed-based mode: loopback --tcp-addr WITH --seeds provided.
+	//   Like real-device mode: the node discovers peers via --seeds.
+	//   --nodes and --node-index are NOT required (no same-box harness).
+	//   This is the recommended way to test late-joiner sync on localhost.
+	//
+	// same-box mode: loopback --tcp-addr WITHOUT --seeds.
+	//   Uses the legacy hardcoded 32307+ port range.
+	//   Requires --nodes=3 and --node-index for peer pre-registration.
 	isRealDevice := false
+	isSeedBased := false
 	if *tcpAddr != "" {
-		if host, _, err := net.SplitHostPort(*tcpAddr); err == nil {
-			if ip := net.ParseIP(host); ip != nil && !ip.IsLoopback() {
-				isRealDevice = true
-			} else if host != "" && host != "localhost" && net.ParseIP(host) == nil {
-				isRealDevice = true // hostname, assume non-loopback
-			}
+		host, _, splitErr := net.SplitHostPort(*tcpAddr)
+		if splitErr != nil {
+			host = *tcpAddr
+		}
+		if ip := net.ParseIP(host); ip != nil && !ip.IsLoopback() {
+			isRealDevice = true
+		} else if host != "" && host != "localhost" && net.ParseIP(host) == nil {
+			isRealDevice = true // hostname, assume non-loopback
 		}
 	}
+	// If --seeds is provided (even for loopback), treat as seed-based mode.
+	// The node discovers peers dynamically and does NOT need the same-box
+	// harness with pre-registered peer addresses.
+	if *seeds != "" && strings.TrimSpace(*seeds) != "" {
+		isSeedBased = true
+	}
 
-	if *pbftMode && !isRealDevice && *numNodes < 3 {
+	if *pbftMode && !isRealDevice && !isSeedBased && *numNodes < 3 {
 		return fmt.Errorf("same-box PBFT mode requires at least 3 total nodes (--nodes=3), got %d", *numNodes)
 	}
+	// ★ FIX: In seed-based mode (loopback with --seeds), preserve --nodes for
+	// local multi-node testing. Only set numNodes=1 for true real-device mode
+	// (non-loopback IP). This allows 3-node local testing with --seeds to work
+	// correctly.
 	if *pbftMode && isRealDevice && *numNodes > 1 {
-		logger.Info("ℹ️  Real-device mode: --nodes=%d ignored; validator count derived from peer discovery", *numNodes)
+		logger.Info("ℹ️  Real-device mode (non-loopback IP): --nodes=%d ignored; validator count derived from peer discovery", *numNodes)
 		*numNodes = 1 // normalise so same-box harness arrays aren't synthesised
 	}
+	// For seed-based mode on loopback, keep the user's --nodes value so that
+	// local multi-node tests (e.g., 3 nodes with --seeds=127.0.0.1:30303) work.
 
 	var vdfParams *consensus.VDFParams
 
@@ -426,10 +452,23 @@ func legacyExecute() error {
 	flag.IntVar(&testCfg.NumNodes, "test-nodes", 0,
 		"Run the PBFT integration test with N validator nodes (0 = disabled)")
 
+	flag.BoolVar(&cfg.legacyCluster, "legacy-cluster", false,
+		"Run the deprecated same-process 3-node devnet harness (requires simultaneous "+
+			"startup, does not support late-joining nodes). Opt-in only.")
+
 	flag.Parse()
 
-	if flag.NFlag() == 0 {
+	if cfg.legacyCluster {
+		logger.Warn("⚠️  -legacy-cluster requested: using RunMultipleNodesInternal(), " +
+			"a same-process 3-node harness that does NOT support late joiners. " +
+			"Use the 'node' subcommand or -seeds for production multi-node networks.")
 		return bind.RunMultipleNodesInternal()
+	}
+
+	if flag.NFlag() == 0 {
+		return fmt.Errorf("no flags or subcommand given — run with 'help' for usage, " +
+			"or pass -datadir/-seeds/etc. to start a production node " +
+			"(pass -legacy-cluster to explicitly opt into the deprecated same-process harness)")
 	}
 
 	var nodeConfig network.NodePortConfig

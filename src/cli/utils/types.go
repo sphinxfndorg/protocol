@@ -25,6 +25,7 @@ type Config struct {
 	dataDir       string // Directory path for LevelDB storage (default: "data")
 	nodeIndex     int    // Index of the node to run when managing multiple nodes (0 to numNodes-1)
 	rewardAddress string // SPIF wallet address to stake and receive block rewards from
+	legacyCluster bool   // Explicit opt-in to the deprecated same-process 3-node devnet harness
 }
 
 // TestConfig holds the parameters that the test harness uses.

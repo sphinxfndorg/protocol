@@ -73,13 +73,22 @@ func (s *phase2InitState) isInitialized() bool {
 // It returns the peer's full handshake payload (including their claimed
 // RewardAddress) so the caller can decide separately whether to admit them
 // as a validator — key exchange itself never grants stake.
-func exchangeKeyWithPeerSync(peerAddr string, nodeID string, ownRewardAddress string, signingService *consensus.SigningService, sthincsParams *parameters.Parameters) (*peerKeyExchangeMsg, error) {
+//
+// Genesis hash verification: If the peer's genesis hash differs from ours,
+// the connection is rejected with an error. This prevents accidental network
+// splits when nodes bootstrap from different genesis configurations.
+func exchangeKeyWithPeerSync(peerAddr string, nodeID string, ownRewardAddress string, ownGenesisHash string, signingService *consensus.SigningService, sthincsParams *parameters.Parameters) (*peerKeyExchangeMsg, error) {
 	ownPKBytes, err := signingService.GetPublicKey()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get own public key: %v", err)
 	}
 
-	payload := peerKeyExchangeMsg{NodeID: nodeID, PublicKey: ownPKBytes, RewardAddress: ownRewardAddress}
+	payload := peerKeyExchangeMsg{
+		NodeID:        nodeID,
+		PublicKey:     ownPKBytes,
+		RewardAddress: ownRewardAddress,
+		GenesisHash:   ownGenesisHash,
+	}
 	payloadBytes, _ := json.Marshal(payload)
 
 	conn, err := net.DialTimeout("tcp", peerAddr, 5*time.Second)
@@ -115,13 +124,29 @@ func exchangeKeyWithPeerSync(peerAddr string, nodeID string, ownRewardAddress st
 		return nil, fmt.Errorf("unmarshal failed: %v", err)
 	}
 
+	// ════════════════════════════════════════════════════════════════════
+	// GENESIS HASH VERIFICATION
+	// ════════════════════════════════════════════════════════════════════
+	// If the peer advertises a genesis hash and it differs from ours, the
+	// peer is on a fundamentally incompatible chain. Reject the connection
+	// immediately — a peer with a different genesis must never be admitted
+	// to the gossip graph or validator set.
+	if kx.GenesisHash != "" && ownGenesisHash != "" && kx.GenesisHash != ownGenesisHash {
+		return nil, fmt.Errorf(
+			"genesis hash mismatch with peer %s at %s: peer=%s, local=%s — "+
+				"peer is on a different chain, connection rejected",
+			kx.NodeID, peerAddr, kx.GenesisHash, ownGenesisHash,
+		)
+	}
+	// ════════════════════════════════════════════════════════════════════
+
 	pk, err := sthincs.DeserializePK(sthincsParams, kx.PublicKey)
 	if err != nil {
 		return nil, fmt.Errorf("deserialize failed: %v", err)
 	}
 
 	signingService.RegisterPublicKey(kx.NodeID, pk)
-	logger.Info("✅ Key exchange complete with %s", kx.NodeID)
+	logger.Info("✅ Key exchange complete with %s (genesis=%s)", kx.NodeID, kx.GenesisHash)
 	return &kx, nil
 }
 
@@ -215,7 +240,7 @@ func discoverAndRegisterPeers(
 			}
 			visited[addr] = true
 
-			kx, err := exchangeKeyWithPeerSync(addr, selfNodeID, ownRewardAddress, signingService, sthincsParams)
+			kx, err := exchangeKeyWithPeerSync(addr, selfNodeID, ownRewardAddress, core.GetGenesisHash(), signingService, sthincsParams)
 			if err != nil {
 				logger.Warn("discoverAndRegisterPeers: key exchange with %s failed: %v", addr, err)
 				continue
@@ -1143,6 +1168,26 @@ func runBlockSyncLoop(
 			hasGenesis = true
 		}
 
+		// ★ FIX: If no peer addresses are configured (solo mode / first node), there is
+		// nothing to sync — immediately transition to CAUGHT_UP so the block production
+		// loop can start mining blocks. Without this, the first node gets stuck at genesis
+		// because the sync loop can never reach a peer, so it never transitions state, and
+		// the block production loop waits for CAUGHT_UP before it starts mining.
+		if len(peerAddrs) == 0 {
+			syncStateMu.Lock()
+			if *syncState == SyncStateSyncing {
+				*syncState = SyncStateCaughtUp
+				logger.Info("[%s] No peer addresses configured — skipping sync, transitioning to CAUGHT_UP", nodeID)
+			}
+			syncStateMu.Unlock()
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(10 * time.Second):
+			}
+			continue
+		}
+
 		logger.Debug("[%s] Sync loop: localHeight=%d, hasGenesis=%v, peerCount=%d, retryInterval=%v",
 			nodeID, localHeight, hasGenesis, len(peerAddrs), currentRetryInterval)
 
@@ -1241,6 +1286,36 @@ func runBlockSyncLoop(
 			}
 			logger.Info("[%s] ✅ Genesis block installed (hash=%s)", nodeID, genesisBlock.GetHash())
 
+			// ════════════════════════════════════════════════════════════════════
+			// ★ FIX: Execute genesis right after installing it.
+			// ════════════════════════════════════════════════════════════════════
+			// The genesis block's body carries one distribution transaction per
+			// allocation (Sender: GenesisVaultAddress), but nothing funds the
+			// vault or applies those transactions until ExecuteGenesisBlock runs.
+			// createGenesisBlock() calls it for the first node, but a late
+			// joiner only ever goes through ReplaceGenesis — without this call
+			// its vault and every allocation address (including validator
+			// stake addresses) stay at zero balance forever, which
+			// IsDistributionComplete() used to silently read as "distribution
+			// already complete" because an unfunded vault also has a zero
+			// balance. ExecuteGenesisBlock is idempotent, so this is safe even
+			// if some other path already funded it.
+			if err := bc.ExecuteGenesisBlock(); err != nil {
+				logger.Error("[%s] Failed to execute genesis block: %v", nodeID, err)
+			} else {
+				logger.Info("[%s] ✅ Genesis block executed — vault funded and allocations distributed", nodeID)
+			}
+			// ════════════════════════════════════════════════════════════════════
+
+			// ★ FIX: After replacing genesis with the peer's canonical version,
+			// clear any locally-mined blocks (block 1+) that reference the old
+			// genesis. Without this, the sync loop tries to download block 2+
+			// from the peer but the parent hash of block 2 doesn't match this
+			// node's locally-mined block 1 — causing a permanent "parent hash
+			// mismatch" stall. Clearing the chain ensures all blocks are
+			// re-downloaded from scratch from the peer's genesis.
+			bc.ClearChainAfter(0)
+
 			// Write genesis_state.json from the downloaded genesis block
 			if err := bc.WriteGenesisStateFromBlock(genesisBlock); err != nil {
 				logger.Warn("[%s] Failed to write genesis state file: %v", nodeID, err)
@@ -1282,6 +1357,39 @@ func runBlockSyncLoop(
 		}
 
 		// ── Now we have genesis ──
+		// ★ FIX: Verify our genesis hash matches the peer's. If not, the peer
+		// is on a different chain (different genesis timestamp → different hash).
+		// Fetch the peer's genesis and replace ours, then clear locally-mined
+		// blocks so the chain is consistent.
+		if hasGenesis && bestPeerAddr != "" {
+			peerGenesisResp, err := requestBlocksFromPeer(bestPeerAddr, 0, 0)
+			if err == nil && len(peerGenesisResp.Blocks) > 0 {
+				peerGenesis := peerGenesisResp.Blocks[0]
+				localGenesis := bc.GetBlockByNumber(0)
+				if localGenesis != nil && peerGenesis != nil && localGenesis.GetHash() != peerGenesis.GetHash() {
+					logger.Info("[%s] ⚠️ Local genesis hash differs from peer %s — replacing genesis and clearing chain", nodeID, bestPeerAddr)
+					if err := bc.ReplaceGenesis(peerGenesis); err != nil {
+						logger.Warn("[%s] Failed to replace genesis: %v", nodeID, err)
+					} else {
+						bc.ClearChainAfter(0)
+						logger.Info("[%s] ✅ Genesis replaced with peer's version — re-downloading chain from scratch", nodeID)
+						// Same fix as the initial-install site above: a
+						// replaced genesis is unexecuted genesis. Fund the
+						// vault and apply the embedded distribution txs now,
+						// or every allocation stays at zero balance again.
+						if err := bc.ExecuteGenesisBlock(); err != nil {
+							logger.Error("[%s] Failed to execute replaced genesis block: %v", nodeID, err)
+						} else {
+							logger.Info("[%s] ✅ Replaced genesis block executed — vault funded and allocations distributed", nodeID)
+						}
+						// Reset local height so we re-download from block 1
+						localHeight = 0
+						hasGenesis = true
+					}
+				}
+			}
+		}
+
 		if networkTip == 0 {
 			syncStateMu.Lock()
 			if *syncState == SyncStateSyncing {
@@ -1289,18 +1397,41 @@ func runBlockSyncLoop(
 				logger.Info("[%s] ✅ At genesis (height 0) — transitioning to CAUGHT_UP (fresh network)", nodeID)
 			}
 			syncStateMu.Unlock()
-			return
+			// ★ FIX: Don't return — enter periodic sync check mode. The network
+			// may produce blocks later. We keep checking every 10 seconds so a
+			// node that joined early (before any blocks were mined) automatically
+			// catches up when blocks arrive, without needing a restart.
+			// This implements "synchronization shouldn't happen only during startup"
+			// — the node continuously monitors the network tip and catches up
+			// whenever it falls behind.
+			logger.Info("[%s] 🔍 Entering periodic sync check mode — will re-check every 10s", nodeID)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(10 * time.Second):
+				continue
+			}
 		}
 
 		if localHeight >= networkTip {
+			// ★ FIX: Mark CAUGHT_UP on first pass, then enter periodic check.
+			// After reaching network tip, don't exit — keep monitoring for new
+			// blocks. This allows a node to stay synchronized without restarting.
 			syncStateMu.Lock()
 			if *syncState == SyncStateSyncing {
 				*syncState = SyncStateCaughtUp
-				logger.Info("[%s] ✅ Caught up at height %d (network tip %d) — transitioning to CAUGHT_UP",
+				logger.Info("[%s] ✅ Caught up at height %d (network tip %d) — entering periodic sync check",
 					nodeID, localHeight, networkTip)
 			}
 			syncStateMu.Unlock()
-			return
+			// Stay in loop, re-check periodically for new blocks
+			logger.Info("[%s] 🔍 Monitoring for new blocks — will re-check every 10s", nodeID)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(10 * time.Second):
+				continue
+			}
 		}
 
 		fromHeight := localHeight + 1
@@ -1366,15 +1497,32 @@ func runBlockSyncLoop(
 				break
 			}
 			if cons != nil && blk.GetHeight() > 0 {
-				vs := cons.GetValidatorSet()
-				if vs != nil {
-					blockEpoch := blk.GetHeight() / consensus.SlotsPerEpoch
-					if err := core.VerifyBlockAttestations(blk, vs, blockEpoch); err != nil {
-						logger.Error("[%s] ❌ Block %d failed attestation quorum check: %v — rejecting batch from peer %s",
-							nodeID, blk.GetHeight(), err, bestPeerAddr)
-						applied = 0
-						break
+				// ── Attestation quorum check ──
+				// Blocks mined in solo mode (before PBFT was active, i.e. when there
+				// were fewer than 3 validators) have zero attestations.  This is by
+				// design — solo-mined blocks are trusted by parent-hash chain continuity
+				// alone, not by PBFT quorum.  Only blocks that actually went through
+				// PBFT carry attestations, and only those need quorum verification.
+				//
+				// Without this guard, a late-joiner (Node-B) that syncs from a solo-
+				// mining first node (Node-A) will reject every block because
+				// VerifyBlockAttestations requires ≥2/3 stake, but solo-mined blocks
+				// have zero attestations.  The sync loop then discards the entire batch
+				// and the late joiner never catches up.
+				if len(blk.Body.Attestations) > 0 {
+					vs := cons.GetValidatorSet()
+					if vs != nil {
+						blockEpoch := blk.GetHeight() / consensus.SlotsPerEpoch
+						if err := core.VerifyBlockAttestations(blk, vs, blockEpoch); err != nil {
+							logger.Error("[%s] ❌ Block %d failed attestation quorum check: %v — rejecting batch from peer %s",
+								nodeID, blk.GetHeight(), err, bestPeerAddr)
+							applied = 0
+							break
+						}
 					}
+				} else {
+					logger.Info("[%s] 📋 Block %d has no attestations (solo-mined before PBFT) — skipping quorum check, verified by chain continuity",
+						nodeID, blk.GetHeight())
 				}
 			}
 			wrapped := core.NewBlockHelper(blk)
@@ -1439,7 +1587,16 @@ func runBlockProductionLoop(
 	effectiveValidatorCount := func() int {
 		if peerCountFunc != nil {
 			known := peerCountFunc() + 1 // +1 for self
-			if known > totalNodes {
+			// totalNodes == 1 is the seed-based/real-device sentinel set by
+			// cli.go's runNodeCmd ("validator count derived from peer
+			// discovery" — see the *numNodes = 1 normalization there). It
+			// does NOT mean "there is exactly one validator"; it means
+			// "don't trust a static count, trust what we actually discover."
+			// Only apply the cap when totalNodes is a real, configured
+			// same-box upper bound (> 1) — otherwise a seed-based node would
+			// clamp its own discovered peer count back down to 1 forever
+			// and never leave solo mode even with 2+ peers connected.
+			if totalNodes > 1 && known > totalNodes {
 				known = totalNodes // never report more than the configured network size
 			}
 			return known
@@ -1447,49 +1604,12 @@ func runBlockProductionLoop(
 		return totalNodes
 	}
 
-	if effectiveValidatorCount() == 1 {
-		ticker := time.NewTicker(singleNodeInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				blk, err := bc.CreateBlock()
-				if err != nil {
-					logger.Error("[%s] solo mine error: %v", nodeID, err)
-					continue
-				}
-				pending := bc.GetMempool().GetPendingTransactions()
-				logger.Info("[%s] ⛏ Solo-mined block height=%d txs=%d", nodeID, blk.GetHeight(), len(pending))
-			}
-		}
-	}
-
-	if effectiveValidatorCount() < 3 {
-		logger.Warn("[%s] Block-production suspended (need ≥ 3 validators for PBFT, have %d — waiting for peers to connect)",
-			nodeID, effectiveValidatorCount())
-		ticker := time.NewTicker(5 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				if effectiveValidatorCount() >= 3 {
-					logger.Info("[%s] ✅ %d validators now known — starting PBFT block production",
-						nodeID, effectiveValidatorCount())
-					goto startPBFT
-				}
-				logger.Info("[%s] Waiting for validators (%d/3 minimum)…", nodeID, effectiveValidatorCount())
-			}
-		}
-	}
-
 	// ──────────────────────────────────────────────────────────────────────
 	// SYNC STATE GATE: A node in SYNCING state must NOT participate in PBFT.
-	// It waits here until runBlockSyncLoop transitions it to CAUGHT_UP, then
-	// we transition to CONSENSUS_PARTICIPANT and fall through to PBFT.
+	// This check MUST come BEFORE the validator count check, because a late
+	// joiner may have 0 validators and 0 peers but still needs to sync.
+	// If we check validator count first, the late joiner gets stuck in the
+	// "waiting for validators" loop forever, never reaching the sync gate.
 	// ──────────────────────────────────────────────────────────────────────
 	for {
 		syncStateMu.Lock()
@@ -1518,6 +1638,74 @@ func runBlockProductionLoop(
 
 		// CONSENSUS_PARTICIPANT — proceed to PBFT
 		break
+	}
+
+	// ── SOLO MODE (no peers) ──
+	// If this node is the only validator, it mines blocks solo WITHOUT PBFT.
+	// Each block is committed immediately via CommitBlock, not through PBFT
+	// voting. This is the correct behavior for the first node (Node-A) that
+	// starts with no peers — it should mine blocks without waiting for quorum.
+	if effectiveValidatorCount() == 1 {
+		logger.Info("[%s] 🟢 SOLO MODE — no peers detected, mining blocks independently", nodeID)
+		blockTicker := time.NewTicker(singleNodeInterval)
+		defer blockTicker.Stop()
+		peerCheckTicker := time.NewTicker(5 * time.Second)
+		defer peerCheckTicker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+
+			case <-blockTicker.C:
+				blk, err := bc.CreateBlock()
+				if err != nil {
+					logger.Error("[%s] solo mine error: %v", nodeID, err)
+					continue
+				}
+				wrapped := core.NewBlockHelper(blk)
+				if err := bc.CommitBlock(wrapped); err != nil {
+					logger.Error("[%s] solo commit error: %v", nodeID, err)
+					continue
+				}
+				pending := bc.GetMempool().GetPendingTransactions()
+				logger.Info("[%s] ⛏ Solo-mined and committed block height=%d txs=%d", nodeID, blk.GetHeight(), len(pending))
+
+			case <-peerCheckTicker.C:
+				// Re‑evaluate validator count
+				if effectiveValidatorCount() >= 3 {
+					logger.Info("[%s] 🟢 %d validators now known — switching to PBFT", nodeID, effectiveValidatorCount())
+					// Break out of solo loop to fall through to PBFT section
+					goto afterSolo
+				}
+			}
+		}
+	afterSolo:
+		// continue to PBFT setup below (the code after the solo block)
+	}
+
+	// ── INSUFFICIENT VALIDATORS ──
+	// After sync is complete, check if we have enough validators for PBFT.
+	// If not, wait for more peers to connect. This is the correct place for
+	// this check — AFTER the sync gate, so late joiners can sync first.
+	if effectiveValidatorCount() < 3 {
+		logger.Warn("[%s] Block-production suspended (need ≥ 3 validators for PBFT, have %d — waiting for peers to connect)",
+			nodeID, effectiveValidatorCount())
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if effectiveValidatorCount() >= 3 {
+					logger.Info("[%s] ✅ %d validators now known — starting PBFT block production",
+						nodeID, effectiveValidatorCount())
+					goto startPBFT
+				}
+				logger.Info("[%s] Waiting for validators (%d/3 minimum)…", nodeID, effectiveValidatorCount())
+			}
+		}
 	}
 
 startPBFT:
@@ -1578,6 +1766,18 @@ startPBFT:
 
 	phase2Initialized := false
 
+	// FIX: watchAndUpdateStakes is the one height-robust (`height >= 1`)
+	// trigger for Phase 2 peer-validator registration, but it previously had
+	// no caller anywhere in the codebase — only the fragile `currentHeight
+	// == 1` checks below were live, which silently no-op for a node that
+	// restarts from a checkpoint already past height 1, or whose sync loop
+	// jumps past height 1 in one batch. Run it here in parallel as a
+	// defense-in-depth belt-and-suspenders: it's idempotent via
+	// phase2State.begin()/isInitialized(), so having both this goroutine and
+	// the inline checks below race to register validators is safe — whichever
+	// gets there first wins and the other becomes a no-op.
+	go watchAndUpdateStakes(ctx, bc, cons, nodeID, validatorIDs, validatorAddressMap, phase2State)
+
 	// ------------------------------------------------------------------
 	// Liveness watchdog: PBFT must make progress even if the currently
 	// elected leader is unresponsive (crashed, hung, network-partitioned,
@@ -1615,7 +1815,18 @@ startPBFT:
 				stallHeight, stallView, stallLeader = 0, 0, ""
 			}
 
-			if currentHeight == 1 && !phase2Initialized {
+			// FIX: was `currentHeight == 1`, which only fires if this node's
+			// local loop observes height tick through exactly 1. A node that
+			// restarts from a checkpoint already past height 1 (see
+			// chain_checkpoint.json), or whose sync loop applies a batch that
+			// jumps straight from 0 to some height > 1, would never see an
+			// exact match and would permanently skip Phase 2 stake init —
+			// leaving validatorSet containing only this node's own
+			// self-registration from NewConsensus() forever ("validators=1"
+			// in SelectProposer logs, even at height 13/14). `>= 1` is
+			// idempotent thanks to phase2Initialized/phase2State, so it's
+			// safe to check every iteration once height has advanced at all.
+			if currentHeight >= 1 && !phase2Initialized {
 				if tryInitPhase2WithRetry(bc, cons, nodeID, validatorIDs, validatorAddressMap, phase2State) {
 					phase2Initialized = true
 				}
@@ -1805,7 +2016,11 @@ startPBFT:
 
 					logger.Info("[%s] 🎉 Block committed! Height now: %d", nodeID, currentHeight)
 
-					if currentHeight == 1 && !phase2Initialized {
+					// FIX: see matching comment at the other trigger site above —
+					// `== 1` silently skips Phase 2 for checkpoint restarts and
+					// batch syncs that jump past height 1. `>= 1` + phase2Initialized
+					// keeps this idempotent.
+					if currentHeight >= 1 && !phase2Initialized {
 						if tryInitPhase2WithRetry(bc, cons, nodeID, validatorIDs, validatorAddressMap, phase2State) {
 							phase2Initialized = true
 						}

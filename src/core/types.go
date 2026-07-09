@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sphinxfndorg/protocol/src/consensus"
 	database "github.com/sphinxfndorg/protocol/src/core/state"
 	sign "github.com/sphinxfndorg/protocol/src/core/sthincs/sign/backend"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
@@ -156,6 +157,9 @@ type PerformanceConfig struct {
 
 // Blockchain manages the chain of blocks with state machine replication
 type Blockchain struct {
+	// Node identifier
+	nodeID string
+
 	// lateJoiner indicates this node did NOT create genesis locally and
 	// must download the entire chain (including genesis) from peers.
 	// Set to true when --seeds is provided at startup.
@@ -173,6 +177,7 @@ type Blockchain struct {
 	consensusEngine ConsensusEngineInterface
 	sphincsManager  *sign.STHINCSManager
 	chainParams     *SphinxChainParameters
+	syncManager     *SyncManager
 
 	merkleRootCache map[string]string
 
@@ -307,8 +312,7 @@ type genesisStateSnapshot struct {
 	ChainID            uint64 `json:"chain_id"`
 	ChainName          string `json:"chain_name"`
 	Symbol             string `json:"symbol"`
-	Timestamp          int64  `json:"timestamp"`
-	TimestampISO       string `json:"timestamp_iso"`
+	Timestamp          string `json:"timestamp"`
 	ExtraData          string `json:"extra_data"`
 	InitialDifficulty  string `json:"initial_difficulty"`
 	InitialGasLimit    string `json:"initial_gas_limit"`
@@ -479,4 +483,150 @@ type ValidatorSet struct {
 	totalStake     *big.Int
 	mu             sync.RWMutex
 	minStakeAmount *big.Int
+}
+
+// validatorSetProvider is an interface for accessing validator set data
+// This allows VerifyBlockAttestations to work with both consensus.ValidatorSet
+// and core.ValidatorSet without creating circular dependencies
+type validatorSetProvider interface {
+	GetTotalStake() *big.Int
+	// GetValidator returns a core-compatible view of a validator.
+	// To avoid import cycles between core<->consensus, this method is
+	// intentionally flexible: implementations may return either *StakedValidator
+	// or a consensus.StakedValidator pointer that core can interpret.
+	GetValidator(id string) interface{}
+}
+
+// ValidatorSetSnapshot stores a frozen copy of the validator set at a given
+// epoch, so that blocks from that epoch can be verified even after the live
+// validator set has changed (validators joined/left/slashed).
+type ValidatorSetSnapshot struct {
+	Epoch      uint64
+	Validators map[string]*StakedValidator // copy of validators at this epoch
+	TotalStake *big.Int
+}
+
+// NodeState represents the operational state of a node in the synchronization lifecycle
+type NodeState int
+
+// P2PServerInterface defines the interface needed from p2p.Server to avoid import cycle
+type P2PServerInterface interface {
+	GetNodeManager() NodeManagerInterface
+	SendMessageToPeer(peerID string, messageType string, data []byte) error
+}
+
+// NodeManagerInterface defines the interface needed from network.NodeManager
+type NodeManagerInterface interface {
+	GetPeers() map[string]PeerInterface
+}
+
+// PeerInterface defines the interface needed from network.Peer
+type PeerInterface interface {
+	GetID() string
+	GetStatus() string
+	GetNodeID() string
+}
+
+// SyncManager coordinates all synchronization activities
+type SyncManager struct {
+	bc        *Blockchain
+	p2pServer P2PServerInterface
+	consensus *consensus.Consensus
+
+	// Node lifecycle state
+	mu          sync.RWMutex
+	state       NodeState
+	targetState NodeState
+
+	// Peer management
+	peers    map[string]PeerInterface
+	peerInfo map[string]*PeerChainInfo // peerID -> chain info
+
+	// Synchronization state
+	syncHeight uint64        // Target height to sync to
+	syncFrom   uint64        // Height to start syncing from
+	syncHash   string        // Hash we're syncing to
+	locator    *BlockLocator // Current block locator
+
+	// Download coordination
+	downloadQueue map[uint64]bool // Heights currently being downloaded
+	downloaded    map[uint64]*types.Block
+	downloadMutex sync.Mutex
+
+	// Parallel download
+	maxParallel int
+	downloadWg  sync.WaitGroup
+
+	// State sync
+	stateSyncMode bool
+	stateSyncHash string
+
+	// Reorganization tracking
+	reorgDepth  uint64
+	oldBestHash string
+
+	// Control channels
+	stopCh       chan struct{}
+	syncCh       chan struct{}
+	peerUpdateCh chan PeerInterface
+
+	// Timing
+	lastSyncTime time.Time
+	syncTimeout  time.Duration
+
+	// Metrics
+	blocksDownloaded uint64
+	bytesDownloaded  uint64
+
+	// ========== FIX: Add production robustness features ==========
+	// Continuous sync monitoring
+	lastSyncCheck     time.Time
+	syncCheckInterval time.Duration
+	// Genesis verification
+	genesisVerified bool
+	// Reconnection tracking
+	reconnectAttempts    map[string]int
+	maxReconnectAttempts int
+	reconnectBackoff     time.Duration
+}
+
+// PeerChainInfo contains chain information exchanged during handshake
+type PeerChainInfo struct {
+	// Chain Identity
+	ChainID     uint64 `json:"chain_id"`
+	GenesisHash string `json:"genesis_hash"`
+	GenesisTime int64  `json:"genesis_time"`
+
+	// Chain State
+	Height          uint64 `json:"height"`
+	BestHash        string `json:"best_hash"`
+	FinalizedHeight uint64 `json:"finalized_height"`
+	FinalizedHash   string `json:"finalized_hash"`
+
+	// Consensus State
+	ValidatorSetHash string `json:"validator_set_hash"`
+	CurrentView      uint64 `json:"current_view"`
+	CurrentEpoch     uint64 `json:"current_epoch"`
+	LeaderID         string `json:"leader_id"`
+
+	// Network Info
+	ProtocolVersion string `json:"protocol_version"`
+	Timestamp       int64  `json:"timestamp"`
+}
+
+// BlockLocator is used for efficient sync (similar to Bitcoin's getblocks)
+// It identifies blocks at exponentially increasing distances from the tip
+type BlockLocator struct {
+	Hashes []string `json:"hashes"` // Block hashes at various heights
+}
+
+// SphinxChainHeader contains only the fields needed for Ledger headers and wallet operations.
+// This lightweight struct does NOT require blockchain initialization.
+type SphinxChainHeader struct {
+	ChainID       uint64 `json:"chain_id"`
+	ChainName     string `json:"chain_name"`
+	Symbol        string `json:"symbol"`
+	MagicNumber   uint32 `json:"magic_number"`
+	LedgerName    string `json:"ledger_name"`
+	BIP44CoinType uint64 `json:"bip44_coin_type"`
 }

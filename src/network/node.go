@@ -206,37 +206,51 @@ func GetConsensusRegistry() map[string]*consensus.Consensus {
 // NewNode creates a new node with real SPHINCS+ keys.
 // All key generation and persistence is handled by NetworkKeyManager in manager.go.
 // No key logic lives here.
+//
+// IMPORTANT: Filesystem writes (keys, node-info) are performed ONLY for LOCAL nodes
+// (isLocal=true). PEER nodes (isLocal=false) do NOT need their own key material stored
+// in this node's data directory — they exchange real keys over the wire via the
+// key-exchange handshake. Skipping filesystem writes for peers prevents each node
+// from creating directory trees for every other node it discovers.
 func NewNode(address, ip, port, udpPort string, isLocal bool, role NodeRole, db *database.DB) *Node {
 	nodeID := fmt.Sprintf("Node-%s", address)
 
-	// NetworkKeyManager is the single source of truth for all key operations
-	nkm, err := NewNetworkKeyManager(db)
-	if err != nil {
-		log.Printf("NewNode: Failed to create NetworkKeyManager for %s: %v", nodeID, err)
-		return nil
-	}
+	var privateKey, publicKey []byte
 
-	// GetOrCreateKeys handles: config file → DB → generate fresh SPHINCS+ keys
-	privateKey, publicKey, err := nkm.GetOrCreateKeys(address)
-	if err != nil {
-		log.Printf("NewNode: Failed to get/create SPHINCS+ keys for %s: %v", nodeID, err)
-		return nil
-	}
+	if isLocal {
+		// NetworkKeyManager is the single source of truth for all key operations.
+		// Only invoked for LOCAL nodes — peers get their keys via key exchange.
+		nkm, err := NewNetworkKeyManager(db)
+		if err != nil {
+			log.Printf("NewNode: Failed to create NetworkKeyManager for %s: %v", nodeID, err)
+			return nil
+		}
 
-	// Write node metadata (non-critical, log and continue on failure)
-	nodeInfo := map[string]interface{}{
-		"id":          nodeID,
-		"address":     address,
-		"ip":          ip,
-		"port":        port,
-		"udp_port":    udpPort,
-		"kademlia_id": GenerateKademliaID(address),
-		"role":        string(role),
-		"is_local":    isLocal,
-		"created_at":  time.Now().Format(time.RFC3339),
-	}
-	if err := common.WriteNodeInfo(address, nodeInfo); err != nil {
-		log.Printf("NewNode: Failed to write node info for %s: %v", nodeID, err)
+		// GetOrCreateKeys handles: config file → DB → generate fresh SPHINCS+ keys
+		privateKey, publicKey, err = nkm.GetOrCreateKeys(address)
+		if err != nil {
+			log.Printf("NewNode: Failed to get/create SPHINCS+ keys for %s: %v", nodeID, err)
+			return nil
+		}
+
+		// Write node metadata (non-critical, log and continue on failure).
+		// Only for local nodes — peer metadata is transient.
+		nodeInfo := map[string]interface{}{
+			"id":          nodeID,
+			"address":     address,
+			"ip":          ip,
+			"port":        port,
+			"udp_port":    udpPort,
+			"kademlia_id": GenerateKademliaID(address),
+			"role":        string(role),
+			"is_local":    isLocal,
+			"created_at":  time.Now().Format(time.RFC3339),
+		}
+		if err := common.WriteNodeInfo(address, nodeInfo); err != nil {
+			log.Printf("NewNode: Failed to write node info for %s: %v", nodeID, err)
+		}
+	} else {
+		log.Printf("NewNode: Skipping key generation for peer node %s — keys will be received via key exchange", nodeID)
 	}
 
 	return &Node{

@@ -15,17 +15,6 @@ import (
 	"github.com/sphinxfndorg/protocol/src/pool"
 )
 
-// SphinxChainHeader contains only the fields needed for Ledger headers and wallet operations.
-// This lightweight struct does NOT require blockchain initialization.
-type SphinxChainHeader struct {
-	ChainID       uint64 `json:"chain_id"`
-	ChainName     string `json:"chain_name"`
-	Symbol        string `json:"symbol"`
-	MagicNumber   uint32 `json:"magic_number"`
-	LedgerName    string `json:"ledger_name"`
-	BIP44CoinType uint64 `json:"bip44_coin_type"`
-}
-
 // GetChainParams returns the chain parameters from the mock provider
 // This implements the ChainParamsProvider interface
 func (m *MockChainParamsProvider) GetChainParams() *SphinxChainParameters {

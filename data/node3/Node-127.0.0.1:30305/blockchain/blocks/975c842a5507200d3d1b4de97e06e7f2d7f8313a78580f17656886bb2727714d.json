@@ -1,0 +1,28 @@
+{
+  "header": {
+    "hash": "975c842a5507200d3d1b4de97e06e7f2d7f8313a78580f17656886bb2727714d",
+    "txs_root": "5a6c2e9e730d5cb534e7f28c883ca7b604794c691f72398f3001be48cfef12bf",
+    "state_root": "7e87a4db077fb0fd6944f1e6481e4b795dbbf83a40bd728ed198b4125c836b6a",
+    "parent_hash": "1ea36d507c1f96c36685dd11782ff3240481c24ff7754f6d6b132a975cc95459",
+    "uncles_hash": "5ce4e9b9bc674f08627fed51a45b77ba4fdd910f23085a5c5b97c095024ba146",
+    "extra_data": "Sphinx Block 2",
+    "miner": "3b7b572ae4b7fa208171075cb6bc2226fc0a3155",
+    "version": 1,
+    "nblock": 2,
+    "height": 2,
+    "timestamp": "2026-07-09T19:43:45Z",
+    "difficulty": "17179869184",
+    "nonce": "0000000000000003",
+    "gas_limit": "50000000",
+    "gas_used": "0",
+    "proposer_signature": "",
+    "proposer_id": "Node-127.0.0.1:30303",
+    "sig_data_hash": "975c842a5507200d3d1b4de97e06e7f2d7f8313a78580f17656886bb2727714d",
+    "commit_status": "committed",
+    "signature_valid": false
+  },
+  "body": {
+    "txs_list": [],
+    "uncles_hash": "5ce4e9b9bc674f08627fed51a45b77ba4fdd910f23085a5c5b97c095024ba146"
+  }
+}

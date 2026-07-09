@@ -42,7 +42,7 @@ func DefaultGenesisState() *GenesisState {
 		// (including this timestamp) from peers.
 		Timestamp: common.GetCurrentTimestamp(),
 
-		ExtraData:         []byte("Sphinx: The personal ledger. Beyond a financial ledger—this is about privacy, sovereignty, and human dignity."),
+		ExtraData:         []byte("Sphinx: The personal ledger beyond it's economics participants. Privacy, sovereignty, and humanity."),
 		InitialDifficulty: big.NewInt(17179869184),
 		InitialGasLimit:   big.NewInt(5000),
 		Nonce:             common.FormatNonce(1), // "0000000000000001"
@@ -577,8 +577,7 @@ func (gs *GenesisState) writeGenesisStateFile(stateDir string) error {
 		ChainID:            gs.ChainID,
 		ChainName:          gs.ChainName,
 		Symbol:             gs.Symbol,
-		Timestamp:          gs.Timestamp,
-		TimestampISO:       time.Unix(gs.Timestamp, 0).UTC().Format(time.RFC3339),
+		Timestamp:          time.Unix(gs.Timestamp, 0).UTC().Format(time.RFC3339),
 		ExtraData:          string(gs.ExtraData),
 		InitialDifficulty:  gs.InitialDifficulty.String(),
 		InitialGasLimit:    gs.InitialGasLimit.String(),

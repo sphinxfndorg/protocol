@@ -34,6 +34,7 @@ import (
 	svm "github.com/sphinxfndorg/protocol/src/core/svm/opcodes"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
 	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/sthincs"
+	"github.com/sphinxfndorg/protocol/src/dht"
 	security "github.com/sphinxfndorg/protocol/src/handshake"
 	"github.com/sphinxfndorg/protocol/src/http"
 	logger "github.com/sphinxfndorg/protocol/src/log"
@@ -43,6 +44,7 @@ import (
 	"github.com/sphinxfndorg/protocol/src/pool"
 	"github.com/sphinxfndorg/protocol/src/rpc"
 	"github.com/syndtr/goleveldb/leveldb"
+	"go.uber.org/zap"
 )
 
 // ConnectionPool manages persistent TCP connections for consensus messages
@@ -130,6 +132,13 @@ func StartNode(
 	rewardAddress string,
 ) error {
 
+	// ════════════════════════════════════════════════════════════════════
+	// ★ FIX: Respect --datadir flag. Without this, all path resolution
+	// (GetNodeDataDir, GetLevelDBPath, etc.) falls back to the default
+	// directory "data" regardless of what the user passed.
+	// ════════════════════════════════════════════════════════════════════
+	common.SetDataDir(dataDir)
+
 	logger.Info("=== STARTING NODE ===")
 
 	isProduction := totalNodes > 100
@@ -166,7 +175,22 @@ func StartNode(
 	logger.Info("✅ Shared STHINCS parameters created")
 
 	// SECTION 3 — node identity
+	// ── Determine real-device vs same-box mode ──
+	// real-device mode: the user provided a public / non-loopback IP.
+	//   In this mode we don't pre-configure peer addresses; discovery
+	//   happens via --seeds / DNS + PEX.  synthCount = 1.
+	//
+	// same-box mode: all nodes on loopback, using the legacy hardcoded
+	//   32307+ port range.  synthCount = totalNodes.
+	//
+	// ★ FIX: When --tcp-addr is explicitly provided by the user (even for
+	// loopback like 127.0.0.1:30303), use it as the node's own address.
+	// The old code went to the else branch for all loopback addresses,
+	// silently replacing e.g. 127.0.0.1:30303 with 127.0.0.1:32307.
+	// Now we detect that nodeConfig.TCPAddr differs from the default
+	// hardcoded port and honour the user's choice.
 	usingRealAddress := false
+	userProvidedTCP := false
 	if nodeConfig.TCPAddr != "" {
 		host, _, splitErr := net.SplitHostPort(nodeConfig.TCPAddr)
 		if splitErr != nil {
@@ -175,29 +199,52 @@ func StartNode(
 		if !isLoopbackHost(host) {
 			usingRealAddress = true
 		}
+		// Check if the port differs from the default same-box port
+		_, portStr, _ := net.SplitHostPort(nodeConfig.TCPAddr)
+		defaultPort := fmt.Sprintf("%d", 32307+nodeIndex)
+		if portStr != "" && portStr != defaultPort {
+			userProvidedTCP = true
+		}
 	}
 
 	synthCount := totalNodes
-	if usingRealAddress {
+	if usingRealAddress || userProvidedTCP {
 		synthCount = 1
 		nodeIndex = 0
 	}
 
+	// Build the list of known network peers (same-box harness) and
+	// validator IDs.  For real-device mode or when the user explicitly
+	// set --tcp-addr, we use nodeConfig.TCPAddr directly.
+	var currentAddress, currentNodeID string
 	validatorIDs := make([]string, synthCount)
 	networkAddresses := make([]string, synthCount)
-	for i := 0; i < synthCount; i++ {
-		addr := fmt.Sprintf("127.0.0.1:%d", 32307+i)
-		networkAddresses[i] = addr
-		validatorIDs[i] = fmt.Sprintf("Node-%s", addr)
-	}
-
-	var currentAddress, currentNodeID string
-	if usingRealAddress {
+	if usingRealAddress || userProvidedTCP {
 		currentAddress = nodeConfig.TCPAddr
 		currentNodeID = fmt.Sprintf("Node-%s", currentAddress)
 		networkAddresses[0] = currentAddress
 		validatorIDs[0] = currentNodeID
+		// For same-box peers (non-real-address), also populate the
+		// remaining slots with the hardcoded ports so peer discovery
+		// works when not using --seeds.
+		if !usingRealAddress {
+			for i := 0; i < synthCount; i++ {
+				if i == nodeIndex {
+					continue
+				}
+				addr := fmt.Sprintf("127.0.0.1:%d", 32307+i)
+				networkAddresses[i] = addr
+				validatorIDs[i] = fmt.Sprintf("Node-%s", addr)
+			}
+		}
 	} else {
+		// No --tcp-addr provided: use the legacy hardcoded same-box
+		// port range (32307+).
+		for i := 0; i < synthCount; i++ {
+			addr := fmt.Sprintf("127.0.0.1:%d", 32307+i)
+			networkAddresses[i] = addr
+			validatorIDs[i] = fmt.Sprintf("Node-%s", addr)
+		}
 		if nodeIndex < 0 || nodeIndex >= synthCount {
 			nodeIndex = 0
 		}
@@ -205,7 +252,7 @@ func StartNode(
 		currentNodeID = validatorIDs[nodeIndex]
 	}
 
-	logger.Info("Node identity: %s at %s (real-device=%v)", currentNodeID, currentAddress, usingRealAddress)
+	logger.Info("Node identity: %s at %s (real-device=%v, datadir=%s)", currentNodeID, currentAddress, usingRealAddress, dataDir)
 
 	// SECTION 4 — database initialization
 	if err := common.EnsureNodeDirs(currentAddress); err != nil {
@@ -236,12 +283,25 @@ func StartNode(
 	}
 
 	// SECTION 5 — blockchain + genesis
-	bc, err := core.NewBlockchain(currentAddress, currentNodeID, validatorIDs, networkType, seeds != "")
+	//
+	// ★ FIX: core.NewBlockchain() now defers chain loading / genesis creation
+	// (via core.WithDeferredInit()) so we can attach mainDatabase/stateDatabase
+	// to bc.storage BEFORE that runs. Previously bc.SetStorageDB/bc.SetStateDB
+	// were called AFTER core.NewBlockchain() returned — too late, since a
+	// fresh node's chain loading calls ExecuteGenesisBlock() synchronously,
+	// which needs bc.storage.GetDB() to already have a handle. That ordering
+	// gap caused "no shared database handle" / "failed to open stateDB"
+	// panics on first-run genesis creation. bc.FinishInit() now does that
+	// deferred work, once the DB handles are attached.
+	bc, err := core.NewBlockchain(currentAddress, currentNodeID, validatorIDs, networkType, seeds != "", core.WithDeferredInit())
 	if err != nil {
 		return fmt.Errorf("failed to create blockchain: %w", err)
 	}
 	bc.SetStorageDB(mainDatabase)
 	bc.SetStateDB(stateDatabase)
+	if err := bc.FinishInit(currentNodeID); err != nil {
+		return fmt.Errorf("failed to create blockchain: %w", err)
+	}
 
 	var nodeID rpc.NodeID
 	nodeIDBytes := []byte(currentNodeID)
@@ -322,9 +382,7 @@ func StartNode(
 	logger.Info("✅ RPC server created (synchronous mode)")
 
 	// SECTION 7 — network node manager
-	var dhtInstance network.DHT = nil
-	nodeMgr := network.NewNodeManager(16, dhtInstance, mainDatabase)
-
+	// ── Parse TCP/UDP addresses first (needed for local node + DHT) ──
 	tcpPort := "30303"
 	if nodeConfig.TCPAddr != "" {
 		_, portStr, err := net.SplitHostPort(nodeConfig.TCPAddr)
@@ -346,6 +404,77 @@ func StartNode(
 	if err != nil || localHost == "" {
 		localHost = "127.0.0.1"
 	}
+
+	// ════════════════════════════════════════════════════════════════════
+	// ★ FIX: Wire up the Kademlia DHT for iterative peer discovery.
+	// Previously this was hardcoded nil — the DHT interface existed and
+	// a full implementation lived in src/dht/, but StartNode never
+	// instantiated it. Now we create a real DHT instance bound to our
+	// UDP port, giving the NodeManager true Kademlia iterative lookups
+	// instead of relying solely on static seeds + PEX gossip.
+	// ════════════════════════════════════════════════════════════════════
+	udpPortNum := 32308 + nodeIndex
+	if nodeConfig.UDPPort != "" {
+		if p, err := strconv.Atoi(nodeConfig.UDPPort); err == nil {
+			udpPortNum = p
+		}
+	}
+
+	localUDPAddr := &net.UDPAddr{IP: net.ParseIP(localHost), Port: udpPortNum}
+
+	// Parse seed addresses into UDP router addresses for DHT join
+	var dhtRouters []net.UDPAddr
+	if seeds != "" {
+		for _, seed := range strings.Split(seeds, ",") {
+			seed = strings.TrimSpace(seed)
+			if seed == "" {
+				continue
+			}
+			// Skip enrtree:// URLs — those are DNS, not plain UDP routers
+			if strings.HasPrefix(seed, "enrtree://") {
+				continue
+			}
+			if h, p, err := net.SplitHostPort(seed); err == nil {
+				sp, _ := strconv.Atoi(p)
+				dhtRouters = append(dhtRouters, net.UDPAddr{IP: net.ParseIP(h), Port: sp})
+			}
+		}
+	}
+
+	// If no routers from seeds and not same-box, try the default DNS seed
+	if len(dhtRouters) == 0 && usingRealAddress {
+		logger.Info("No DHT routers from --seeds; DHT will bootstrap via DNS discovery tree + PEX")
+	}
+
+	dhtCfg := dht.Config{
+		Proto:   "udp4",
+		Address: *localUDPAddr,
+		Routers: dhtRouters,
+		Secret:  0, // Zero means no secret filtering
+	}
+
+	zapLogger, err := zap.NewProduction()
+	if err != nil {
+		return fmt.Errorf("failed to create zap logger for DHT: %w", err)
+	}
+
+	dhtInstance, err := dht.NewDHT(dhtCfg, zapLogger)
+	if err != nil {
+		logger.Warn("Failed to create DHT instance: %v — continuing without Kademlia peer discovery", err)
+		// Non-fatal: fall back to static seeds + PEX gossip
+		dhtInstance = nil
+	} else {
+		logger.Info("🌐 Kademlia DHT initialised on %s with %d router(s)", localUDPAddr.String(), len(dhtRouters))
+
+		// Start the DHT in a background goroutine
+		if startErr := dhtInstance.Start(); startErr != nil {
+			logger.Warn("Failed to start DHT: %v — continuing without Kademlia", startErr)
+		} else {
+			logger.Info("✅ Kademlia DHT started — iterative peer lookup/routing is now active")
+		}
+	}
+
+	nodeMgr := network.NewNodeManager(16, dhtInstance, mainDatabase)
 
 	if err := nodeMgr.CreateLocalNode(
 		currentAddress,
@@ -482,7 +611,7 @@ func StartNode(
 	// permissionless network we don't know who else is running a node or
 	// what address they'll claim — that only ever gets decided at runtime,
 	// per-peer, after a verified balance check (see registerDiscoveredPeer
-	// below and stakeValidatorFromRewardAddress in helpers.go).
+	// below and registerPeerStakeClaim in helpers.go).
 	//
 	// The only stake this function seeds directly is our OWN, from the
 	// reward address the operator passed in. If that address has a real,
@@ -596,7 +725,7 @@ func StartNode(
 			Fee:        0,
 			AmountNSPX: new(big.Int).Set(alloc.BalanceNSPX),
 			Storage:    fmt.Sprintf("genesis-dist-%d-%s", i, alloc.Label),
-			ReturnData: []byte(fmt.Sprintf("Genesis distribution to %s", alloc.Address)),
+			ReturnData: fmt.Appendf([]byte(nil), "Genesis distribution to %s", alloc.Address),
 		}
 		nonce := senderNonces[note.From]
 		tx := note.ToTxs(nonce, big.NewInt(0), big.NewInt(0))
@@ -830,7 +959,7 @@ func StartNode(
 				continue
 			}
 			logger.Info("Exchanging keys with same-box peer: %s", addr)
-			if kx, err := exchangeKeyWithPeerSync(addr, currentNodeID, rewardAddress, signingService, sthincsParams); err != nil {
+			if kx, err := exchangeKeyWithPeerSync(addr, currentNodeID, rewardAddress, core.GetGenesisHash(), signingService, sthincsParams); err != nil {
 				logger.Warn("Failed to exchange keys with %s: %v", addr, err)
 			} else if kx.RewardAddress != "" {
 				registerPeerStakeClaim(kx.NodeID, kx.RewardAddress)
@@ -844,7 +973,7 @@ func StartNode(
 		peerRegistryMu.Unlock()
 		for _, addr := range discoveredAddrs {
 			logger.Info("Exchanging keys with discovered peer: %s", addr)
-			if kx, err := exchangeKeyWithPeerSync(addr, currentNodeID, rewardAddress, signingService, sthincsParams); err != nil {
+			if kx, err := exchangeKeyWithPeerSync(addr, currentNodeID, rewardAddress, core.GetGenesisHash(), signingService, sthincsParams); err != nil {
 				logger.Warn("Failed to exchange keys with %s: %v", addr, err)
 			} else if kx.RewardAddress != "" {
 				registerPeerStakeClaim(kx.NodeID, kx.RewardAddress)
@@ -892,9 +1021,19 @@ func StartNode(
 
 	// SECTION 12 — HTTP server
 	httpPort := 8545 + nodeIndex
+	httpListenAddr := fmt.Sprintf(":%d", httpPort)
 	if nodeConfig.HTTPPort != "" {
-		if port, err := strconv.Atoi(nodeConfig.HTTPPort); err == nil {
+		// ★ FIX: Parse the full address (could be "127.0.0.1:8546" or just "8546")
+		if _, portStr, err := net.SplitHostPort(nodeConfig.HTTPPort); err == nil {
+			// Full address provided (host:port)
+			httpListenAddr = nodeConfig.HTTPPort
+			if port, err := strconv.Atoi(portStr); err == nil {
+				httpPort = port
+			}
+		} else if port, err := strconv.Atoi(nodeConfig.HTTPPort); err == nil {
+			// Just a port number provided
 			httpPort = port
+			httpListenAddr = fmt.Sprintf(":%d", httpPort)
 		}
 	}
 
@@ -902,8 +1041,8 @@ func StartNode(
 	go func() {
 		defer wg.Done()
 		msgCh := make(chan *security.Message, 100)
-		httpSrv := http.NewServer(fmt.Sprintf(":%d", httpPort), msgCh, bc, nil)
-		logger.Info("JSON-RPC listening on http://127.0.0.1:%d", httpPort)
+		httpSrv := http.NewServer(httpListenAddr, msgCh, bc, nil)
+		logger.Info("JSON-RPC listening on http://%s", httpListenAddr)
 		if err := httpSrv.Start(); err != nil {
 			logger.Error("HTTP server error: %v", err)
 		}
@@ -949,28 +1088,68 @@ func StartNode(
 	// A late-joining node won't have genesis locally. The sync loop above
 	// fetches it from peers. We wait for the sync loop to complete before
 	// verifying genesis, so a node that needs to sync can do so first.
+	//
+	// ★ FIX: Wait INDEFINITELY for genesis, not just 60 seconds. A late joiner
+	// may need to wait for peers to come online, and a 60-second timeout is
+	// arbitrary and harmful — it causes the node to proceed without genesis,
+	// which then causes all subsequent operations to fail. The sync loop
+	// (runBlockSyncLoop) will eventually fetch genesis from peers; we just
+	// need to wait for it.
+	//
+	// For solo nodes (no peers), genesis is created locally in NewBlockchain
+	// and is immediately available, so the wait is instant.
 	expectedGenesisHash := core.GetGenesisHash()
 	genesisVerified := false
 	var genesisBlock core.BlockInterface
-	for i := 0; i < 60; i++ { // wait up to 60 seconds for sync
-		genesisBlock = bc.GetLatestBlock()
-		if genesisBlock != nil && genesisBlock.GetHeight() == 0 {
-			logger.Info("✅ Genesis hash verified: %s", expectedGenesisHash)
-			genesisVerified = true
-			break
-		}
-		if syncState == SyncStateCaughtUp && (genesisBlock == nil || genesisBlock.GetHeight() != 0) {
-			// Sync completed but we're still at genesis height - this means
-			// the network is at genesis (no blocks produced yet)
-			logger.Info("✅ Network at genesis — no existing blocks to verify")
-			genesisVerified = true
-			break
-		}
-		logger.Info("Waiting for sync loop to fetch genesis (attempt %d/60)...", i+1)
-		time.Sleep(1 * time.Second)
+
+	// Check if genesis is already available (solo node or first node)
+	genesisBlock = bc.GetLatestBlock()
+	if genesisBlock != nil && genesisBlock.GetHeight() == 0 {
+		logger.Info("✅ Genesis block already present: %s", expectedGenesisHash)
+		genesisVerified = true
 	}
+
+	// For nodes with peers (late joiners or multi-node networks), wait for
+	// the sync loop to fetch genesis. We wait indefinitely with periodic
+	// logging so the operator can see progress.
+	if !genesisVerified && effectivePeerCount() > 0 {
+		logger.Info("⏳ Waiting for sync loop to fetch genesis from peers (will wait indefinitely)...")
+		checkTicker := time.NewTicker(1 * time.Second)
+		defer checkTicker.Stop()
+		lastLog := time.Now()
+	genesisLoop:
+		for {
+			genesisBlock = bc.GetLatestBlock()
+			if genesisBlock != nil && genesisBlock.GetHeight() == 0 {
+				logger.Info("✅ Genesis hash verified: %s", expectedGenesisHash)
+				genesisVerified = true
+				break genesisLoop
+			}
+			// Also check if sync completed (network at genesis, no blocks yet)
+			syncStateMu.Lock()
+			currentSync := syncState
+			syncStateMu.Unlock()
+			if currentSync == SyncStateCaughtUp {
+				logger.Info("✅ Sync completed — network at genesis (no blocks produced yet)")
+				genesisVerified = true
+				break genesisLoop
+			}
+			if time.Since(lastLog) > 10*time.Second {
+				logger.Info("⏳ Still waiting for genesis from peers (syncState=%s)...", currentSync.String())
+				lastLog = time.Now()
+			}
+			select {
+			case <-checkTicker.C:
+			case <-ctx.Done():
+				logger.Warn("⚠️ Context cancelled while waiting for genesis")
+				genesisVerified = false
+				break genesisLoop
+			}
+		}
+	}
+
 	if !genesisVerified {
-		logger.Warn("⚠️ Genesis verification timeout — proceeding anyway (sync loop will handle it)")
+		logger.Warn("⚠️ Genesis not verified — proceeding anyway (sync loop will handle it)")
 	}
 
 	// SECTION 15 — block production loop (now gated by sync state)

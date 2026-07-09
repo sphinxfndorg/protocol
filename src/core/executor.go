@@ -70,11 +70,25 @@ func (bc *Blockchain) newStateDB() (*StateDB, error) {
 }
 
 // IsDistributionComplete returns true when the genesis vault has been fully
-// drained — i.e. every allocation has been transferred out of GenesisVaultAddress.
+// funded AND fully drained — i.e. every allocation has been transferred out
+// of GenesisVaultAddress.
+//
+// FIX: previously this only checked bal.Sign() == 0, which is trivially true
+// before ExecuteGenesisBlock ever runs (an unfunded vault also has a zero
+// balance). That false positive let downstream code believe distribution
+// had completed when in fact nothing had ever been funded or distributed,
+// which is how every allocation — including validator stake addresses —
+// ended up at zero. Requiring genesisSupply > 0 first ensures "complete"
+// only means "funded, then drained", not "never funded".
 func (bc *Blockchain) IsDistributionComplete() bool {
 	stateDB, err := bc.newStateDB()
 	if err != nil {
 		logger.Warn("IsDistributionComplete: cannot open stateDB: %v", err)
+		return false
+	}
+	genesisSupply := stateDB.GetGenesisSupply()
+	if genesisSupply == nil || genesisSupply.Sign() == 0 {
+		logger.Warn("IsDistributionComplete: genesis vault has not been funded yet")
 		return false
 	}
 	bal, err := stateDB.GetBalance(GenesisVaultAddress)
@@ -84,7 +98,8 @@ func (bc *Blockchain) IsDistributionComplete() bool {
 	}
 	complete := bal.Sign() == 0
 	if complete {
-		logger.Info("✅ IsDistributionComplete: vault %s balance = 0, distribution done", GenesisVaultAddress)
+		logger.Info("✅ IsDistributionComplete: vault %s funded with %s nSPX and fully drained, distribution done",
+			GenesisVaultAddress, genesisSupply.String())
 	}
 	return complete
 }
@@ -480,27 +495,14 @@ func (bc *Blockchain) applyTransactions(block *types.Block, stateDB *StateDB) er
 	proposerID := block.Header.ProposerID
 
 	for i, tx := range block.Body.TxsList {
-		// ========== FIX: Skip genesis "mint" transactions on block 0 ==========
-		// Block 0's genesis transactions with Sender: GenesisVaultAddress are
-		// NOT processed as mints. Instead, mintBlockReward funds the vault with
-		// the total allocation amount. Block 1 then distributes from the vault
-		// to each allocation address using normal balance checks.
-		//
-		// This implements the proper "vault and distribute" model:
-		//   - Block 0: Vault receives total supply (mintBlockReward)
-		//   - Block 1: Vault distributes to allocation addresses (applyTransactions)
-		if tx.Sender == "genesis" {
-			logger.Info("executor: tx[%d] genesis → skipping (vault will be funded via mintBlockReward)", i)
-			continue
-		}
-		// ====================================================================
-
-		// ========== FIX: Process GenesisVaultAddress as normal sender ==========
-		// Block 1 distribution transactions use GenesisVaultAddress as sender.
-		// The vault has balance from block 0's mintBlockReward, so normal
-		// balance checks apply. This is the correct "vault and distribute" model.
-		// After block 1, IsDistributionComplete() returns true.
-		// ========================================================================
+		// Genesis (block 0) distribution transactions have
+		// Sender: GenesisVaultAddress and are processed here as normal
+		// transfers, same as any other block. ExecuteBlock funds the vault
+		// via mintBlockReward BEFORE calling applyTransactions on block 0,
+		// so the vault already has balance to cover these by the time this
+		// loop runs. There is no separate "block 1" distribution step —
+		// funding and distribution both happen while executing block 0.
+		// After that, IsDistributionComplete() returns true.
 
 		expected, err := stateDB.GetNonce(tx.Sender)
 		if err != nil {
@@ -586,12 +588,10 @@ func (bc *Blockchain) mintBlockReward(block *types.Block, stateDB *StateDB) {
 		return
 	}
 
-	if block.GetHeight() == 1 {
-		logger.Info("mintBlockReward: skipping reward for distribution block 1")
-		return
-	}
-
-	// ========== Blocks 2+ get normal block rewards ==========
+	// ========== Blocks 1+ get normal block rewards ==========
+	// (There's no separate "distribution block 1" anymore — genesis
+	// allocations are distributed inside block 0 itself via
+	// ExecuteGenesisBlock, so block 1 is just the first ordinary block.)
 	reward := new(big.Int).Set(bc.chainParams.BaseBlockReward)
 	if reward.Sign() <= 0 {
 		return
@@ -1072,7 +1072,7 @@ func (bc *Blockchain) CreateBlock() (*types.Block, error) {
 	}
 
 	emptyUncles := []*types.BlockHeader{}
-	extraData := []byte(fmt.Sprintf("Sphinx Block %d", prevBlock.GetHeight()+1))
+	extraData := fmt.Appendf([]byte(nil), "Sphinx Block %d", prevBlock.GetHeight()+1)
 
 	newHeader := types.NewBlockHeader(
 		nextHeight,

@@ -18,36 +18,6 @@ import (
 	denom "github.com/sphinxfndorg/protocol/src/params/denom"
 )
 
-// Constants for blockchain status, sync modes, etc.
-const (
-	StatusInitializing BlockchainStatus = iota
-	StatusSyncing
-	StatusRunning
-	StatusStopped
-	StatusForked
-)
-
-const (
-	SyncModeFull SyncMode = iota
-	SyncModeFast
-	SyncModeLight
-)
-
-const (
-	ImportedBest BlockImportResult = iota
-	ImportedSide
-	ImportedExisting
-	ImportInvalid
-	ImportError
-)
-
-const (
-	CacheTypeBlock CacheType = iota
-	CacheTypeTransaction
-	CacheTypeReceipt
-	CacheTypeState
-)
-
 // genesisOnce ensures BuildBlock() runs exactly once per process.
 // argon2 takes ~134s — running it 3 times (one per node) would hang for 400s+.
 var (

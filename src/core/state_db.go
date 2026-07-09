@@ -18,14 +18,6 @@ import (
 	"github.com/sphinxfndorg/protocol/src/pool"
 )
 
-// Add constants for new keys
-const (
-	accountPrefix    = "acct:"
-	totalSupplyKey   = "supply:total"
-	genesisSupplyKey = "supply:genesis"
-	rewardsMintedKey = "supply:rewards"
-)
-
 // Ensure StateDB implements pool.StateDB
 var _ pool.StateDB = (*StateDB)(nil)
 

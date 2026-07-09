@@ -148,6 +148,36 @@ func (bc *Blockchain) ReplaceGenesis(block *types.Block) error {
 	return nil
 }
 
+// ClearChainAfter removes all blocks with height > keepAfter from the
+// in-memory chain. This is used after ReplaceGenesis to clear locally-mined
+// blocks that reference the old genesis, so the sync loop can re-download
+// blocks from the peer against the canonical genesis without hitting
+// "parent hash mismatch" errors.
+//
+// Storage blocks are intentionally NOT deleted here — they will be
+// overwritten when the sync loop downloads fresh blocks from peers
+// via StoreBlock. Clearing storage would also be risky if ReplaceGenesis
+// ran mid-commit on a chain that already has validated blocks.
+func (bc *Blockchain) ClearChainAfter(keepAfter uint64) {
+	bc.lock.Lock()
+	defer bc.lock.Unlock()
+
+	if len(bc.chain) == 0 {
+		return
+	}
+
+	// Keep only up to keepAfter in memory
+	kept := make([]*types.Block, 0)
+	for _, blk := range bc.chain {
+		if blk.GetHeight() <= keepAfter {
+			kept = append(kept, blk)
+		}
+	}
+	bc.chain = kept
+
+	logger.Info("ClearChainAfter: cleared blocks after height %d (chain now has %d blocks)", keepAfter, len(bc.chain))
+}
+
 // GetStorage returns the storage instance for external access
 func (bc *Blockchain) GetStorage() *storage.Storage {
 	return bc.storage

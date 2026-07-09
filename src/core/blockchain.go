@@ -30,6 +30,37 @@ import (
 	storage "github.com/sphinxfndorg/protocol/src/state"
 )
 
+// blockchainInitOptions controls how NewBlockchain finishes initialization.
+type blockchainInitOptions struct {
+	deferFinish bool
+}
+
+// BlockchainOption configures NewBlockchain's behavior. Zero options means
+// exactly the original behavior: chain loading / genesis creation happens
+// synchronously inside NewBlockchain, before it returns. Existing callers
+// that pass no options (server.go, legacy.go) are unaffected.
+type BlockchainOption func(*blockchainInitOptions)
+
+// WithDeferredInit tells NewBlockchain NOT to load/create the chain before
+// returning. Use this when the caller manages its own storage DB handle and
+// needs to attach it (via SetStorageDB/SetStateDB) before chain loading
+// happens.
+//
+// Why this matters: on a fresh node, chain loading calls createGenesisBlock()
+// -> ExecuteGenesisBlock(), which needs bc.storage.GetDB() to already return
+// a real handle. bind.StartNode opens its own LevelDB handles and used to
+// attach them via SetStorageDB/SetStateDB AFTER calling NewBlockchain() —
+// by which point genesis creation had already run and failed with
+// "no shared database handle" / "failed to open stateDB".
+//
+// Callers using WithDeferredInit MUST call bc.FinishInit(nodeID) themselves,
+// after SetStorageDB/SetStateDB, to actually load/create the chain and start
+// the mempool + state machine. Without that call the returned *Blockchain is
+// inert (no chain loaded, mempool nil, status stuck at StatusInitializing).
+func WithDeferredInit() BlockchainOption {
+	return func(o *blockchainInitOptions) { o.deferFinish = true }
+}
+
 // NewBlockchain creates a blockchain with state machine replication
 // Initialize TPS monitor in NewBlockchain - main constructor for blockchain
 // Parameters:
@@ -37,16 +68,23 @@ import (
 //   - nodeID: Unique identifier for this node
 //   - validators: List of validator node IDs
 //   - networkType: Type of network (testnet, devnet, mainnet)
+//   - opts: optional behavior overrides — see WithDeferredInit. Omit for the
+//     original synchronous behavior.
 //
 // Returns: Initialized Blockchain instance or error
 //
 // Integration with genesis.go / allocation.go:
-// Chain parameters are resolved from networkType BEFORE initializeChain() is
-// called so that createGenesisBlock() can call GenesisStateFromChainParams()
-// with the correct network parameters.  The genesis block is now built through
+// Chain parameters are resolved from networkType BEFORE chain loading happens
+// so that createGenesisBlock() can call GenesisStateFromChainParams() with
+// the correct network parameters.  The genesis block is now built through
 // GenesisState.BuildBlock() so every node that uses the same networkType
 // produces a byte-for-byte identical genesis hash.
-func NewBlockchain(dataDir string, nodeID string, validators []string, networkType string, lateJoiner bool) (*Blockchain, error) {
+func NewBlockchain(dataDir string, nodeID string, validators []string, networkType string, lateJoiner bool, opts ...BlockchainOption) (*Blockchain, error) {
+	var options blockchainInitOptions
+	for _, opt := range opts {
+		opt(&options)
+	}
+
 	// Initialize storage layer for persistent block storage
 	// Creates a new storage instance that will handle all disk I/O operations
 	store, err := storage.NewStorage(dataDir)
@@ -74,14 +112,14 @@ func NewBlockchain(dataDir string, nodeID string, validators []string, networkTy
 		syncMode:        SyncModeFull,                         // Default to full synchronization mode
 		consensusEngine: nil,                                  // Consensus engine (set later after initialization)
 		chainParams:     nil,                                  // Chain parameters (set later after genesis)
-		merkleRootCache: make(map[string]string),              // Cache for Merkle roots to avoid recalculation
+		syncManager:     nil,                                  // Sync manager (set later after initialization)
 		tpsMonitor:      types.NewTPSMonitor(5 * time.Second), // Monitor transactions per second with 5-second window
 		// SVM data stores
 		returnDataStore: make(map[string][]byte),           // Initialize OP_RETURN data store
 		svmFailures:     make([]map[string]interface{}, 0), // Initialize failure tracking
 	}
 
-	// ── Resolve chain parameters BEFORE initializeChain so that
+	// ── Resolve chain parameters BEFORE chain loading so that
 	// createGenesisBlock() can call GenesisStateFromChainParams() with the
 	// correct network parameters.  This is the only ordering change versus the
 	// original constructor.
@@ -99,10 +137,37 @@ func NewBlockchain(dataDir string, nodeID string, validators []string, networkTy
 	// Store early so createGenesisBlock can read bc.chainParams immediately
 	blockchain.chainParams = chainParams
 
+	if options.deferFinish {
+		// Caller still needs to attach its own DB handles (SetStorageDB /
+		// SetStateDB) and then call bc.FinishInit(nodeID) itself.
+		return blockchain, nil
+	}
+
+	if err := blockchain.FinishInit(nodeID); err != nil {
+		return nil, err
+	}
+
+	return blockchain, nil
+}
+
+// FinishInit loads the existing chain from storage (or creates the genesis
+// block on a fresh node), wires up the mempool, and starts the state machine
+// for non-late-joiners. This logic used to be inlined unconditionally at the
+// end of NewBlockchain; it's now also callable on its own so that callers
+// using WithDeferredInit() can attach their own storage DB handles
+// (SetStorageDB / SetStateDB) first — see WithDeferredInit's doc comment for
+// why that ordering matters.
+//
+// Call this exactly once per Blockchain. If the caller attaches an external
+// DB handle at all, do that before calling FinishInit.
+func (blockchain *Blockchain) FinishInit(nodeID string) error {
+	chainParams := blockchain.chainParams
+	stateMachine := blockchain.stateMachine
+
 	// Load existing chain from storage or create genesis block if new chain
 	// This handles both existing chains and first-time initialization
 	if err := blockchain.initializeChain(); err != nil {
-		return nil, fmt.Errorf("failed to initialize chain: %w", err)
+		return fmt.Errorf("failed to initialize chain: %w", err)
 	}
 
 	// If this node is a late joiner and has a genesis block but missing genesis_state.json,
@@ -178,10 +243,15 @@ func NewBlockchain(dataDir string, nodeID string, validators []string, networkTy
 		}
 	}
 
-	// Start state machine replication for Byzantine Fault Tolerance
-	// Initialize the consensus state machine with current validators
-	if err := stateMachine.Start(); err != nil {
-		return nil, fmt.Errorf("failed to start state machine: %w", err)
+	// ========== FIX: Start state machine ONLY for non-late-joiners ==========
+	// Late joiners should NOT start PBFT until after they've synchronized
+	if !blockchain.IsLateJoiner() {
+		logger.Info("Starting state machine (non-late-joiner mode)")
+		if err := stateMachine.Start(); err != nil {
+			return fmt.Errorf("failed to start state machine: %w", err)
+		}
+	} else {
+		logger.Info("⏸️  Delaying state machine start for late-joiner until after sync")
 	}
 
 	// Update status to running after successful initialization
@@ -195,7 +265,7 @@ func NewBlockchain(dataDir string, nodeID string, validators []string, networkTy
 		blockchain.chainParams.GetNetworkName(),
 		blockchain.chainParams.GenesisHash)
 
-	return blockchain, nil
+	return nil
 }
 
 // Ensure Blockchain implements pool.BlockchainStateProvider
@@ -472,11 +542,17 @@ func (bc *Blockchain) StoreChainState(nodes []*storage.NodeInfo) error {
 			finalStates = []*storage.FinalStateInfo{} // Empty slice, not nil
 			logger.Info("No consensus signatures available yet, created empty validation")
 		} else {
-			// Process signatures as before
-			finalStates = make([]*storage.FinalStateInfo, len(sigs))
+			// Process signatures with deduplication to prevent stale-block entries
+			seen := make(map[string]bool)
+			var deduped []*storage.FinalStateInfo
 			validCount := 0
-			for i, rawSig := range sigs {
-				finalStates[i] = &storage.FinalStateInfo{
+			for _, rawSig := range sigs {
+				key := rawSig.BlockHash + "|" + rawSig.SignerNodeID + "|" + rawSig.MessageType
+				if seen[key] {
+					continue
+				}
+				seen[key] = true
+				deduped = append(deduped, &storage.FinalStateInfo{
 					BlockHash:        rawSig.BlockHash,
 					BlockHeight:      rawSig.BlockHeight,
 					SignerNodeID:     rawSig.SignerNodeID,
@@ -487,11 +563,12 @@ func (bc *Blockchain) StoreChainState(nodes []*storage.NodeInfo) error {
 					Valid:            rawSig.Valid,
 					SignatureStatus:  "Valid",
 					VerificationTime: common.GetTimeService().GetCurrentTimeInfo().ISOLocal,
-				}
+				})
 				if rawSig.Valid {
 					validCount++
 				}
 			}
+			finalStates = deduped
 			signatureValidation = &storage.SignatureValidation{
 				TotalSignatures:   len(finalStates),
 				ValidSignatures:   validCount,
@@ -1636,10 +1713,23 @@ func (bc *Blockchain) createGenesisBlock() error {
 	}
 
 	// DO NOT call ApplyGenesisState here.
-	// The vault-and-distribute model (ExecuteGenesisBlock + block 1 txs)
-	// is the single authoritative path for crediting balances.
-	// ApplyGenesisState credits balances directly AND increments total_supply,
-	// which would cause double-counting when block 1 distribution txs run.
+	// genesis.go's BuildBlock() already embeds one distribution transaction
+	// per allocation directly in block 0's body (Sender: GenesisVaultAddress).
+	// There is no separate "block 1" that distributes from the vault — that
+	// model is gone. ApplyGenesisState would set balances directly AND
+	// increment total_supply, which double-counts once ExecuteGenesisBlock
+	// (below) funds the vault and applies those same transactions.
+	//
+	// ExecuteGenesisBlock is the single authoritative path for crediting
+	// genesis balances: it funds GenesisVaultAddress via mintBlockReward,
+	// then runs applyTransactions on block 0's body to drain the vault into
+	// every allocation address, in the same block. It's idempotent (it
+	// no-ops if the vault already has a balance), so it's safe to call here
+	// even though sync.go's handleVerifying() also calls it for late joiners
+	// after a downloaded genesis is verified.
+	if err := bc.ExecuteGenesisBlock(); err != nil {
+		return fmt.Errorf("ExecuteGenesisBlock failed: %w", err)
+	}
 
 	LogAllocationSummary(gs.Allocations)
 

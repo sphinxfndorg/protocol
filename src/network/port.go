@@ -102,6 +102,23 @@ const (
 	portStep     = 10    // Increased to reduce localhost conflicts
 )
 
+// isPortInUse checks whether a TCP or UDP port is already bound on localhost.
+func isPortInUse(port int) bool {
+	// Try TCP first
+	if ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port)); err == nil {
+		_ = ln.Close()
+	} else {
+		return true
+	}
+	// Try UDP
+	if ln, err := net.Listen("udp", fmt.Sprintf("127.0.0.1:%d", port)); err == nil {
+		_ = ln.Close()
+	} else {
+		return true
+	}
+	return false
+}
+
 // FindFreePort finds an available port starting from basePort.
 // Parameters:
 //   - basePort: Starting port number to check
@@ -176,7 +193,22 @@ func GetNodePortConfigs(numNodes int, roles []NodeRole, overrides map[string]str
 
 	// Generate new configurations if none exist or insufficient
 	configs := make([]NodePortConfig, numNodes)
-	usedPorts := make(map[int]bool) // Track used ports to avoid conflicts
+
+	// ★ FIX: Track used ports globally across all nodes to prevent conflicts
+	// even when nodes are started independently in seed-based mode
+	usedPorts := make(map[int]bool)
+
+	// Pre-populate with currently used ports to avoid conflicts with
+	// already-running nodes
+	checkBasePorts := []int{baseTCPPort, baseUDPPort, baseHTTPPort, baseWSPort}
+	for _, base := range checkBasePorts {
+		for port := base; port < base+numNodes*portStep+100; port++ {
+			if isPortInUse(port) {
+				usedPorts[port] = true
+				log.Printf("GetNodePortConfigs: Port %d already in use, will skip", port)
+			}
+		}
+	}
 
 	// Generate configuration for each node
 	for i := 0; i < numNodes; i++ {

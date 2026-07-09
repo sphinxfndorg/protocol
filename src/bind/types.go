@@ -119,10 +119,18 @@ type knownPeerInfo struct {
 // as a known network peer with zero stake; it does not grant validator
 // status. This is what makes peer admission permissionless-safe: showing
 // up on the wire is enough to be gossiped to, but never enough to vote.
+//
+// GenesisHash is the peer's claimed genesis block hash. It is verified
+// against the local genesis hash during key exchange. If the hashes differ,
+// the connection is rejected — this prevents accidental network splits when
+// nodes bootstrap from different genesis configurations. A peer with a
+// different genesis is on a fundamentally incompatible chain and must never
+// be admitted to the gossip graph or validator set.
 type peerKeyExchangeMsg struct {
 	NodeID        string `json:"node_id"`
 	PublicKey     []byte `json:"public_key"`
 	RewardAddress string `json:"reward_address,omitempty"`
+	GenesisHash   string `json:"genesis_hash,omitempty"`
 }
 
 // peerExchangeMsg is the payload sent over the wire when a node asks a peer

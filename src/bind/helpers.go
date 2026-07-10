@@ -1632,6 +1632,11 @@ func runBlockProductionLoop(
 			syncStateMu.Lock()
 			*syncState = SyncStateConsensusParticipant
 			syncStateMu.Unlock()
+			// FIX: Enable PBFT participation by flipping the sync-ready gate
+			if cons != nil {
+				cons.SetSyncReady(true)
+				logger.Info("[%s] 🎉 Sync gate opened — node may now participate in PBFT", nodeID)
+			}
 			logger.Info("[%s] 🎉 Transitioning to CONSENSUS_PARTICIPANT — joining PBFT rounds", nodeID)
 			break
 		}

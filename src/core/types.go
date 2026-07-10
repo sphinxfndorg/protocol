@@ -195,6 +195,19 @@ type Blockchain struct {
 	// SPIF reward addresses.  Block rewards and gas fees are credited to the
 	// SPIF address so validators can actually spend them.
 	validatorRewardMap map[string]string
+
+	// orphanBlocks stores blocks whose parent is not yet committed.
+	// Keyed by parent hash, each entry is a list of child blocks waiting
+	// for their parent to arrive. When a block is committed, its children
+	// are replayed automatically.
+	orphanBlocks map[string][]*types.Block
+
+	// orphanMu guards orphanBlocks access.
+	orphanMu sync.Mutex
+
+	// chainWeight is the cumulative PBFT attestation weight of the current
+	// canonical chain. It is updated atomically whenever a block is committed.
+	chainWeight *big.Int
 }
 
 // GenesisState holds the complete genesis configuration used to bootstrap a node.
@@ -506,6 +519,16 @@ type ValidatorSetSnapshot struct {
 	TotalStake *big.Int
 }
 
+// StateDBInterface is a simplified interface for state DB operations
+// used by the state snapshot system. It avoids exposing internal StateDB.
+type StateDBInterface interface {
+	IterateAccounts(fn func(addr string, balance *big.Int, nonce uint64))
+	SetBalance(addr string, balance *big.Int)
+	SetNonce(addr string, nonce uint64)
+	GetBalance(addr string) *big.Int
+	GetNonce(addr string) uint64
+}
+
 // NodeState represents the operational state of a node in the synchronization lifecycle
 type NodeState int
 
@@ -525,6 +548,13 @@ type PeerInterface interface {
 	GetID() string
 	GetStatus() string
 	GetNodeID() string
+}
+
+// blockResult carries a downloaded block (or error) through the pipeline channel.
+type blockResult struct {
+	height uint64
+	block  *types.Block
+	err    error
 }
 
 // SyncManager coordinates all synchronization activities
@@ -557,6 +587,32 @@ type SyncManager struct {
 	maxParallel int
 	downloadWg  sync.WaitGroup
 
+	// ========== PIPELINED BULK DOWNLOAD (Phase A) ==========
+	// Pipeline depth: number of in-flight block requests per peer.
+	// Higher values = more throughput at the cost of memory.
+	// Default: 64 for bulk sync, 4 for tip chasing.
+	pipelineDepth int
+
+	// blockResultCh receives downloaded blocks from pipeline workers
+	// in the order they were requested (not the order they arrive).
+	blockResultCh chan *blockResult
+
+	// pendingPipeline tracks which heights have been dispatched to the pipeline
+	// but not yet collected. Key = height, value = true.
+	pendingPipeline map[uint64]bool
+	pipelineMu      sync.Mutex
+
+	// bulkSyncMode is true when the node is far behind the network tip.
+	// In this mode we use larger batches, pipelining, and sparse verification.
+	bulkSyncMode bool
+
+	// bulkSyncThreshold is the height at which we switch from bulk sync
+	// (sparse verification) to tip chasing (full verification).
+	// Calculated as: targetHeight - 10000 (last 10K blocks get full verification).
+	bulkSyncThreshold uint64
+
+	// =======================================================
+
 	// State sync
 	stateSyncMode bool
 	stateSyncHash string
@@ -574,6 +630,11 @@ type SyncManager struct {
 	lastSyncTime time.Time
 	syncTimeout  time.Duration
 
+	// Late-joiner sync budget (to avoid blocking forever)
+	lateJoinerSyncStartTime       time.Time
+	lateJoinerMaxSyncDuration     time.Duration
+	lateJoinerFallbackToStateSync bool
+
 	// Metrics
 	blocksDownloaded uint64
 	bytesDownloaded  uint64
@@ -588,6 +649,10 @@ type SyncManager struct {
 	reconnectAttempts    map[string]int
 	maxReconnectAttempts int
 	reconnectBackoff     time.Duration
+
+	// ========== FIX: Add pending request tracking for async block responses ==========
+	pendingBlockRequests map[string]chan *types.Block
+	pendingRequestMu     sync.Mutex
 }
 
 // PeerChainInfo contains chain information exchanged during handshake
@@ -630,3 +695,81 @@ type SphinxChainHeader struct {
 	LedgerName    string `json:"ledger_name"`
 	BIP44CoinType uint64 `json:"bip44_coin_type"`
 }
+
+// StateSnapshotHeader contains metadata about a state snapshot.
+type StateSnapshotHeader struct {
+	Version         int    `json:"version"`
+	BlockHeight     uint64 `json:"block_height"`
+	BlockHash       string `json:"block_hash"`
+	StateRoot       string `json:"state_root"`
+	Epoch           uint64 `json:"epoch"`
+	TotalAccounts   int    `json:"total_accounts"`
+	TotalValidators int    `json:"total_validators"`
+	TotalSupply     string `json:"total_supply"`
+	Timestamp       string `json:"timestamp"`
+	FileSize        int64  `json:"file_size"`
+	SnapshotFile    string `json:"snapshot_file"`
+}
+
+// StateSnapshotData contains the full state at a checkpoint.
+type StateSnapshotData struct {
+	Version     int                           `json:"version"`
+	BlockHeight uint64                        `json:"block_height"`
+	BlockHash   string                        `json:"block_hash"`
+	StateRoot   string                        `json:"state_root"`
+	Accounts    map[string]*SnapshotAccount   `json:"accounts"`
+	Validators  map[string]*SnapshotValidator `json:"validators"`
+	TotalSupply string                        `json:"total_supply"`
+	Timestamp   string                        `json:"timestamp"`
+}
+
+// SnapshotAccount represents a single account in a state snapshot.
+type SnapshotAccount struct {
+	BalanceNSPX string `json:"balance_nspx"`
+	Nonce       uint64 `json:"nonce"`
+}
+
+// SnapshotValidator represents a validator in a state snapshot.
+type SnapshotValidator struct {
+	StakeNSPX       string `json:"stake_nspx"`
+	RewardAddress   string `json:"reward_address,omitempty"`
+	ActivationEpoch uint64 `json:"activation_epoch"`
+	ExitEpoch       uint64 `json:"exit_epoch"`
+	IsSlashed       bool   `json:"is_slashed"`
+}
+
+// CheckpointMessage is the message exchanged between peers to advertise
+// available checkpoints.
+type CheckpointMessage struct {
+	BlockHeight uint64            `json:"block_height"`
+	BlockHash   string            `json:"block_hash"`
+	StateRoot   string            `json:"state_root"`
+	Epoch       uint64            `json:"epoch"`
+	Signatures  map[string]string `json:"signatures"`
+	Timestamp   int64             `json:"timestamp"`
+}
+
+// ========== STATE SNAPSHOT MANAGER ==========
+
+// StateSnapshotManager manages state snapshot generation, storage, and retrieval.
+type StateSnapshotManager struct {
+	bc *Blockchain
+
+	mu sync.RWMutex
+
+	snapshotsDir   string
+	snapshotIndex  map[uint64]*StateSnapshotHeader
+	latestSnapshot *StateSnapshotHeader
+	checkpoints    map[uint64]*CheckpointMessage
+}
+
+// blockchainInitOptions controls how NewBlockchain finishes initialization.
+type blockchainInitOptions struct {
+	deferFinish bool
+}
+
+// BlockchainOption configures NewBlockchain's behavior. Zero options means
+// exactly the original behavior: chain loading / genesis creation happens
+// synchronously inside NewBlockchain, before it returns. Existing callers
+// that pass no options (server.go, legacy.go) are unaffected.
+type BlockchainOption func(*blockchainInitOptions)

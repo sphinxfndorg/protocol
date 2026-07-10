@@ -36,6 +36,12 @@ type BlockHeader struct {
 	// NEW: explicit status fields
 	CommitStatus string `json:"commit_status"`   // "proposed" | "prepared" | "committed"
 	SigValid     bool   `json:"signature_valid"` // true once verified by a peer
+
+	// ChainWeight is the cumulative PBFT attestation weight for this chain branch.
+	// It is the sum of all validator stake that has signed attestations leading
+	// to this block, starting from genesis. This is used for fork-choice:
+	// the chain with the highest cumulative weight is the canonical chain.
+	ChainWeight *big.Int `json:"chain_weight,omitempty"`
 }
 
 // BlockBody represents the transactions and uncle blocks.
@@ -47,18 +53,29 @@ type BlockBody struct {
 	Attestations []*Attestation `json:"attestations,omitempty"`
 }
 
-// NEW: Attestation struct
+// NEW: Attestation struct — each attestation represents a PBFT commit vote
+// from a validator for a specific block. The cumulative weight of all
+// attestations for a chain determines the canonical fork.
 type Attestation struct {
 	ValidatorID string `json:"validator_id"`
 	Signature   []byte `json:"signature"`
 	BlockHash   string `json:"block_hash"`
 	View        uint64 `json:"view"`
+	// Stake is the validator's stake at the time of attestation, cached here
+	// so that chain weight calculation does NOT require live validator set
+	// lookups that could change between epochs.
+	Stake *big.Int `json:"stake,omitempty"`
 }
 
 // Block represents the entire block structure including the header and body.
 type Block struct {
 	Header *BlockHeader `json:"header"`
 	Body   BlockBody    `json:"body"`
+
+	// ChainWeight is cached cumulative weight for fast fork-choice decisions.
+	// It is set once during chain processing and does not participate in
+	// block hash computation.
+	ChainWeight *big.Int `json:"-"`
 }
 
 // Transaction represents a blockchain transaction

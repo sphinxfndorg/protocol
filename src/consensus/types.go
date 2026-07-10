@@ -299,6 +299,32 @@ type Consensus struct {
 	// it to be discarded as stale the moment verification finishes.
 	proposalInFlight bool
 
+	// syncReady gates ALL active PBFT participation (casting prepare/commit
+	// votes and accepting FastForward catch-up commits). It defaults to
+	// false and must be explicitly flipped to true by the node's sync
+	// orchestrator (bind.runBlockProductionLoop / bind.SyncState) once the
+	// node has verified its local tip matches the network's canonical tip.
+	//
+	// Without this gate, Consensus.Start() launches handleProposals /
+	// handleVotes / handlePrepareVotes / syncLoop unconditionally at node
+	// boot — before any sync-catch-up loop has even started — so a
+	// late-joining node could vote on and fast-forward-commit blocks before
+	// it has adopted the canonical chain. See SetSyncReady / IsSyncReady.
+	syncReady int32 // atomic bool: 0 = not ready, 1 = ready
+
+	// attestationVerifier, when set, is invoked by FastForward before it
+	// commits a block fetched reactively from a single peer during
+	// catch-up. FastForward otherwise has no PBFT quorum check at all
+	// (unlike the normal proposal pipeline in processProposal, and unlike
+	// bind.runBlockSyncLoop's bulk sync path, both of which verify
+	// attestation quorum). Without this hook a single misbehaving or
+	// forked peer could plant a block on this node that the rest of the
+	// network never actually reached quorum on, permanently diverging this
+	// node's tip hash from the canonical chain. Wired from the bind
+	// package (which can see both core.VerifyBlockAttestations and this
+	// Consensus instance) via SetAttestationVerifier.
+	attestationVerifier func(block Block) error
+
 	// syncNeededCh receives the next height this node needs to sync from
 	// when processProposal detects a gap (proposal height > localTip+1).
 	// The p2p/smr layer drains this channel and calls FastForward with
@@ -312,6 +338,12 @@ type Consensus struct {
 	// Storage durability and crash recovery
 	storageDurabilityConfig *StorageDurabilityConfig
 	recoveryState           *RecoveryState
+
+	// isSynced gates all consensus participation. It is set to true by
+	// SetSynced() only after the sync manager confirms the node has caught
+	// up to the network tip. Until then, proposals, votes, and commits are
+	// all blocked to prevent a not-yet-synced node from creating forks.
+	isSynced bool
 }
 
 // SigningService handles cryptographic signing for consensus messages

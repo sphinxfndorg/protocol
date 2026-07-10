@@ -20,6 +20,11 @@ type Message struct {
 	// It must remain RawMessage end-to-end; the transport layer will
 	// json.Marshal/json.Unmarshal this field.
 	Data json.RawMessage `json:"data"`
+	// Metadata carries optional key-value context such as request_id for
+	// correlating requests with responses. It is not marshaled into the
+	// transport payload; instead callers set it before handing the message
+	// to in-process handlers.
+	Metadata map[string]interface{} `json:"-"`
 }
 
 // Handshake manages TLS or secure channel handshakes.

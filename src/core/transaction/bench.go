@@ -339,8 +339,8 @@ func BenchmarkMerkleTree(b *testing.B) {
 		})
 	}
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	// b.ResetTimer() is not needed with b.Loop()
+	for b.Loop() {
 		_ = NewMerkleTree(txs)
 	}
 }
@@ -349,16 +349,18 @@ func BenchmarkMerkleTree(b *testing.B) {
 func BenchmarkTransactionProcessing(b *testing.B) {
 	monitor := NewTPSMonitor(time.Second)
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	// b.ResetTimer() is not needed with b.Loop()
+	iter := 0
+	for b.Loop() {
+		iter++
 		tx := &Transaction{
-			ID:       fmt.Sprintf("benchmark-tx-%d", i),
+			ID:       fmt.Sprintf("benchmark-tx-%d", iter),
 			Sender:   "benchmark-sender",
 			Receiver: "benchmark-receiver",
-			Amount:   big.NewInt(int64(i % 1000)),
+			Amount:   big.NewInt(int64(iter % 1000)),
 			GasLimit: big.NewInt(21000),
 			GasPrice: big.NewInt(10),
-			Nonce:    uint64(i),
+			Nonce:    uint64(iter),
 		}
 
 		// Simulate transaction processing
@@ -373,10 +375,11 @@ func BenchmarkTransactionProcessing(b *testing.B) {
 func BenchmarkTPSMonitoring(b *testing.B) {
 	monitor := NewTPSMonitor(time.Second)
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	iter := 0
+	for b.Loop() {
+		iter++
 		monitor.RecordTransaction()
-		if i%1000 == 0 {
+		if iter%1000 == 0 {
 			_ = monitor.GetStats()
 		}
 	}
@@ -387,10 +390,11 @@ func BenchmarkRealWorldTPS(b *testing.B) {
 	monitor := NewTPSMonitor(time.Second)
 
 	// Simulate bursty traffic pattern
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	iter := 0
+	for b.Loop() {
+		iter++
 		// Simulate transaction bursts
-		if i%100 == 0 {
+		if iter%100 == 0 {
 			// Burst of 10 transactions
 			for j := 0; j < 10; j++ {
 				monitor.RecordTransaction()
@@ -400,7 +404,7 @@ func BenchmarkRealWorldTPS(b *testing.B) {
 		}
 
 		// Simulate block creation every 1000 transactions
-		if i%1000 == 0 && i > 0 {
+		if iter%1000 == 0 && iter > 0 {
 			monitor.RecordBlock(50, 5*time.Second) // 50 txs in 5 seconds
 		}
 	}

@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sphinxfndorg/protocol/src/common"
@@ -819,6 +820,16 @@ func (c *Consensus) RefreshLeaderStatus() (view uint64, electedLeaderID string, 
 func (c *Consensus) ProposeBlock(block interface{}) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	// SYNC GATE: a node that hasn't finished adopting the canonical chain
+	// must never propose — a proposal built on a stale/incomplete local tip
+	// would be built with the wrong height and parent hash, and even though
+	// honest peers' own processProposal height checks would reject it, it
+	// still wastes a view and can trip view-change churn network-wide. Fail
+	// fast here instead.
+	if !c.IsSyncReady() {
+		return fmt.Errorf("node %s cannot propose: not sync-ready yet (still catching up to canonical chain)", c.nodeID)
+	}
 
 	c.updateLeaderStatusLocked()
 
@@ -2446,6 +2457,18 @@ func (c *Consensus) processTimeout(timeout *TimeoutMsg) {
 
 // sendPrepareVote creates and broadcasts a prepare vote for a block
 func (c *Consensus) sendPrepareVote(blockHash string, view uint64) {
+	// SYNC GATE: never cast a vote until this node has been declared caught
+	// up by its sync orchestrator. Height/parent-hash checks in
+	// processProposal already stop most premature voting, but this is a
+	// second, independent line of defense that closes the window between
+	// "local height happens to match" and "this node has actually adopted
+	// the canonical chain" (see SetSyncReady doc).
+	if !c.IsSyncReady() {
+		logger.Info("⏳ Node %s not sync-ready — withholding prepare vote for block %s (view %d)",
+			c.nodeID, blockHash, view)
+		return
+	}
+
 	// Check if already sent prepare vote for this block
 	if c.sentPrepareVotes[blockHash] {
 		return
@@ -2496,6 +2519,14 @@ func (c *Consensus) sendPrepareVote(blockHash string, view uint64) {
 
 // voteForBlock creates and broadcasts a commit vote for a block
 func (c *Consensus) voteForBlock(blockHash string, view uint64) {
+	// SYNC GATE: same reasoning as sendPrepareVote — never cast a commit
+	// vote until this node has been declared caught up.
+	if !c.IsSyncReady() {
+		logger.Info("⏳ Node %s not sync-ready — withholding commit vote for block %s (view %d)",
+			c.nodeID, blockHash, view)
+		return
+	}
+
 	// Check if already sent commit vote for this block
 	if c.sentVotes[blockHash] {
 		return
@@ -3194,6 +3225,40 @@ func (c *Consensus) GetSyncNeededCh() <-chan uint64 {
 	return c.syncNeededCh
 }
 
+// SetSyncReady flips the gate that allows this node to actively participate
+// in PBFT (cast prepare/commit votes, accept FastForward catch-up commits).
+// The node's sync orchestrator must call SetSyncReady(true) only after it has
+// verified localHeight matches the network's canonical tip height — see
+// bind.runBlockProductionLoop's SYNC STATE GATE. Before that, incoming
+// proposals are still queued and height-checked (so gap-detection/back-fill
+// signalling keeps working), but no vote is ever cast and FastForward refuses
+// to commit.
+func (c *Consensus) SetSyncReady(ready bool) {
+	var v int32
+	if ready {
+		v = 1
+	}
+	old := atomic.SwapInt32(&c.syncReady, v)
+	if int32(v) != old {
+		logger.Info("Node %s PBFT participation gate: syncReady=%v", c.nodeID, ready)
+	}
+}
+
+// IsSyncReady reports whether this node is permitted to actively participate
+// in PBFT (vote / commit). See SetSyncReady.
+func (c *Consensus) IsSyncReady() bool {
+	return atomic.LoadInt32(&c.syncReady) == 1
+}
+
+// SetAttestationVerifier installs the callback FastForward uses to verify
+// PBFT quorum before committing a block fetched reactively from a single
+// peer. See the attestationVerifier field doc for why this is required.
+func (c *Consensus) SetAttestationVerifier(fn func(block Block) error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.attestationVerifier = fn
+}
+
 // FastForward commits a block that was fetched from a peer during a sync
 // catch-up, bypassing the normal proposal/vote pipeline. The block must be
 // exactly localTip+1; call repeatedly in ascending order to fill a gap.
@@ -3201,6 +3266,26 @@ func (c *Consensus) GetSyncNeededCh() <-chan uint64 {
 // now matches the new expectedHeight is re-queued to proposalCh so normal
 // PBFT processing resumes automatically once the gap is closed.
 func (c *Consensus) FastForward(block Block) error {
+	// ────────────────────────────────────────────────────────────────────
+	// SYNC-GATE + QUORUM CHECK
+	// ────────────────────────────────────────────────────────────────────
+	// FastForward previously had NO PBFT safety check at all: it would
+	// commit whatever single block a single peer handed back for a
+	// syncNeededCh request, with only a height/parent-hash continuity
+	// check. That let one out-of-sync or dishonest peer plant a block this
+	// node's own honest quorum never actually certified, permanently
+	// diverging this node's tip hash from the canonical chain — the exact
+	// symptom under investigation. Require the same attestation-quorum
+	// check bind.runBlockSyncLoop's bulk path already performs (solo-mined
+	// pre-PBFT blocks with zero attestations are still accepted, since
+	// they were never subject to quorum in the first place).
+	if c.attestationVerifier != nil {
+		if err := c.attestationVerifier(block); err != nil {
+			return fmt.Errorf("FastForward: attestation quorum check failed for height %d: %w",
+				block.GetHeight(), err)
+		}
+	}
+
 	tip := c.blockChain.GetLatestBlock()
 	if tip == nil {
 		return fmt.Errorf("FastForward: no local tip")

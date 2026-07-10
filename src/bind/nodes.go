@@ -959,10 +959,18 @@ func StartNode(
 				continue
 			}
 			logger.Info("Exchanging keys with same-box peer: %s", addr)
+			// FIX: Register same-box peers in peerRegistry so effectivePeerCount() works correctly
+			peerRegistryMu.Lock()
+			peerRegistry[validatorIDs[0]] = addr // Will be overwritten below with correct ID
+			peerRegistryMu.Unlock()
 			if kx, err := exchangeKeyWithPeerSync(addr, currentNodeID, rewardAddress, core.GetGenesisHash(), signingService, sthincsParams); err != nil {
 				logger.Warn("Failed to exchange keys with %s: %v", addr, err)
-			} else if kx.RewardAddress != "" {
-				registerPeerStakeClaim(kx.NodeID, kx.RewardAddress)
+			} else {
+				// Register the peer's node ID and address from the key exchange
+				registerDiscoveredPeer(kx.NodeID, addr)
+				if kx.RewardAddress != "" {
+					registerPeerStakeClaim(kx.NodeID, kx.RewardAddress)
+				}
 			}
 		}
 		peerRegistryMu.Lock()
@@ -980,6 +988,17 @@ func StartNode(
 			}
 		}
 		logger.Info("✅ Key exchange completed with all known peers")
+	} else {
+		// Same-box devnet mode: no external peers, but we still need to register ourselves
+		logger.Info("=== SAME-BOX DEVNET MODE: Registering static peers ===")
+		for i, addr := range networkAddresses {
+			if i == nodeIndex {
+				continue
+			}
+			// Register in peerRegistry with correct node ID for effectivePeerCount()
+			peerRegistry[validatorIDs[i]] = addr
+			logger.Info("[%s] Pre-registered same-box peer: %s at %s", currentNodeID, validatorIDs[i], addr)
+		}
 	}
 
 	logger.Info("=== VERIFYING KEY SERIALIZATION ROUND-TRIP ===")

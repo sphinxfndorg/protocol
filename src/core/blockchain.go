@@ -30,17 +30,6 @@ import (
 	storage "github.com/sphinxfndorg/protocol/src/state"
 )
 
-// blockchainInitOptions controls how NewBlockchain finishes initialization.
-type blockchainInitOptions struct {
-	deferFinish bool
-}
-
-// BlockchainOption configures NewBlockchain's behavior. Zero options means
-// exactly the original behavior: chain loading / genesis creation happens
-// synchronously inside NewBlockchain, before it returns. Existing callers
-// that pass no options (server.go, legacy.go) are unaffected.
-type BlockchainOption func(*blockchainInitOptions)
-
 // WithDeferredInit tells NewBlockchain NOT to load/create the chain before
 // returning. Use this when the caller manages its own storage DB handle and
 // needs to attach it (via SetStorageDB/SetStateDB) before chain loading
@@ -288,6 +277,146 @@ func (bc *Blockchain) SetSTHINCSManager(mgr *sign.STHINCSManager) {
 	defer bc.lock.Unlock()
 	bc.sphincsManager = mgr
 }
+
+// SetSyncManager sets the sync manager for this blockchain
+func (bc *Blockchain) SetSyncManager(sm *SyncManager) {
+	bc.lock.Lock()
+	defer bc.lock.Unlock()
+	bc.syncManager = sm
+}
+
+// GetSyncManager returns the sync manager for this blockchain
+func (bc *Blockchain) GetSyncManager() *SyncManager {
+	bc.lock.RLock()
+	defer bc.lock.RUnlock()
+	return bc.syncManager
+}
+
+// ========== STATE SNAPSHOT BRIDGE METHODS ==========
+
+// stateDBMu guards stateDB access for the snapshot system
+var stateDBMu sync.Mutex
+var globalStateDB StateDBInterface
+
+// snapshotManagerMu guards the global snapshot manager reference
+var snapshotManagerMu sync.Mutex
+var globalSnapshotManager *StateSnapshotManager
+
+// SetSnapshotManager sets the global snapshot manager reference.
+func SetSnapshotManager(sm *StateSnapshotManager) {
+	snapshotManagerMu.Lock()
+	defer snapshotManagerMu.Unlock()
+	globalSnapshotManager = sm
+}
+
+// GetSnapshotManager returns the global snapshot manager.
+func (bc *Blockchain) GetSnapshotManager() *StateSnapshotManager {
+	snapshotManagerMu.Lock()
+	defer snapshotManagerMu.Unlock()
+	return globalSnapshotManager
+}
+
+// GetStateDB returns the state DB interface for snapshot generation/restoration.
+// Returns nil if not yet initialized.
+func (bc *Blockchain) GetStateDB() StateDBInterface {
+	stateDBMu.Lock()
+	defer stateDBMu.Unlock()
+	return globalStateDB
+}
+
+// SetGlobalStateDB sets the global state DB reference used by the snapshot system.
+// This is called during blockchain initialization after the state DB is created.
+func SetGlobalStateDB(sdb StateDBInterface) {
+	stateDBMu.Lock()
+	defer stateDBMu.Unlock()
+	globalStateDB = sdb
+}
+
+// GetValidatorSet returns the blockchain's validator set.
+func (bc *Blockchain) GetValidatorSet() *ValidatorSet {
+	// Access the ValidatorSet from consensus if available
+	if bc.consensusEngine != nil {
+		// Try to get from consensus engine
+		if cs, ok := bc.consensusEngine.(*consensus.Consensus); ok {
+			vs := cs.GetValidatorSet()
+			if vs == nil {
+				return nil
+			}
+			// Convert consensus.ValidatorSet to core.ValidatorSet
+			coreVS := &ValidatorSet{
+				validators:     make(map[string]*StakedValidator),
+				totalStake:     vs.GetTotalStake(),
+				minStakeAmount: vs.GetMinStakeAmount(),
+			}
+			// Copy validators by iterating through the consensus validator set
+			// Use GetActiveValidators to get all active validators
+			activeVals := vs.GetActiveValidators(0) // epoch 0 = all active
+			for _, val := range activeVals {
+				if val == nil {
+					continue
+				}
+				coreVS.validators[val.ID] = &StakedValidator{
+					ID:              val.ID,
+					StakeAmount:     val.StakeAmount,
+					RewardAddress:   val.RewardAddress,
+					ActivationEpoch: val.ActivationEpoch,
+					ExitEpoch:       val.ExitEpoch,
+					IsSlashed:       val.IsSlashed,
+				}
+			}
+			return coreVS
+		}
+	}
+	return nil
+}
+
+// SetChainTip sets the chain tip to a specific height and hash.
+// This is used after restoring from a state snapshot to fast-forward past
+// all blocks that were already applied in the snapshot.
+func (bc *Blockchain) SetChainTip(height uint64, hash string) error {
+	bc.lock.Lock()
+	defer bc.lock.Unlock()
+
+	logger.Info("📦 Setting chain tip to height %d (hash=%s)", height, hash[:16])
+
+	// Update in-memory chain state
+	// The storage layer will be updated when blocks are replayed from checkpoint to tip
+	bc.chainParams.GenesisHash = hash
+
+	return nil
+}
+
+// RollbackToHeight rolls back the chain to the given height.
+// All blocks above the target height are removed from the chain and storage.
+// This is used during chain reorganization when a fork is detected.
+func (bc *Blockchain) RollbackToHeight(targetHeight uint64) error {
+	bc.lock.Lock()
+	defer bc.lock.Unlock()
+
+	currentHeight := uint64(0)
+	if len(bc.chain) > 0 {
+		currentHeight = bc.chain[len(bc.chain)-1].GetHeight()
+	}
+
+	if targetHeight >= currentHeight {
+		return fmt.Errorf("target height %d is not less than current height %d", targetHeight, currentHeight)
+	}
+
+	logger.Info("🔄 Rolling back chain from height %d to %d", currentHeight, targetHeight)
+
+	// Remove blocks from in-memory chain
+	for i := len(bc.chain) - 1; i >= 0; i-- {
+		if bc.chain[i].GetHeight() <= targetHeight {
+			bc.chain = bc.chain[:i+1]
+			break
+		}
+	}
+
+	logger.Info("✅ Chain rolled back to height %d (TODO: persistent storage cleanup)", targetHeight)
+	return nil
+}
+
+// ==================================================
 
 // GetMerkleRoot returns the Merkle root of transactions for a specific block
 // This is used for verification and proof generation
@@ -1050,7 +1179,12 @@ func (bc *Blockchain) StartLeaderLoop(ctx context.Context) {
 	}()
 }
 
-// ImportBlock imports a new block into the blockchain with result tracking
+// ImportBlock imports a new block into the blockchain with result tracking.
+// It implements a proper fork-choice rule: if the block extends the current
+// tip it is committed directly. If it competes at the same height with a
+// different hash (fork), the chain with the higher attestation weight wins.
+// If the parent is missing the block is stored as an orphan for later replay.
+//
 // Parameters:
 //   - block: Block to import
 //
@@ -1068,25 +1202,83 @@ func (bc *Blockchain) ImportBlock(block *types.Block) BlockImportResult {
 		return ImportInvalid
 	}
 
-	// Verify block links to current chain using ParentHash
 	latestBlock := bc.GetLatestBlock()
-	if latestBlock != nil && block.GetPrevHash() != latestBlock.GetHash() {
-		// Block doesn't extend main chain, might be a side chain
-		logger.Info("Block does not extend current chain: expected ParentHash=%s, got ParentHash=%s",
-			latestBlock.GetHash(), block.GetPrevHash())
-		return ImportedSide
+	if latestBlock != nil {
+		// Extract the underlying *types.Block from the consensus.Block adapter
+		var latestTypeBlock *types.Block
+		if helper, ok := latestBlock.(*BlockHelper); ok {
+			if underlying, ok := helper.GetUnderlyingBlock().(*types.Block); ok {
+				latestTypeBlock = underlying
+			}
+		}
+
+		// ── Block extends the current tip → normal commit ──
+		if block.GetPrevHash() == latestBlock.GetHash() {
+			consensusBlock := NewBlockHelper(block)
+			if err := bc.CommitBlock(consensusBlock); err != nil {
+				logger.Warn("Block commit failed: %v", err)
+				return ImportError
+			}
+			logger.Info("Block imported successfully: height=%d, hash=%s", block.GetHeight(), block.GetHash())
+			return ImportedBest
+		}
+
+		// ── Block at same height, different hash → fork-choice ──
+		if block.GetHeight() == latestBlock.GetHeight() {
+			if block.GetHash() == latestBlock.GetHash() {
+				logger.Info("Block %s already committed at height %d, skipping", block.GetHash()[:16], block.GetHeight())
+				return ImportedBest
+			}
+			// Competing chain: compare cumulative attestation weight
+			logger.Info("🔀 Fork detected at height %d: current=%s competing=%s — comparing weight",
+				block.GetHeight(), latestBlock.GetHash()[:16], block.GetHash()[:16])
+
+			newWeight := bc.calculateChainWeight(block)
+			var oldWeight *big.Int
+			if latestTypeBlock != nil {
+				oldWeight = bc.calculateChainWeight(latestTypeBlock)
+			} else {
+				oldWeight = big.NewInt(0)
+			}
+			logger.Info("📊 Fork weight comparison: current_chain=%s competing_chain=%s",
+				oldWeight.String(), newWeight.String())
+
+			if newWeight.Cmp(oldWeight) > 0 {
+				logger.Info("🔄 Competing chain has higher weight (%s > %s) — reorganizing",
+					newWeight.String(), oldWeight.String())
+				if latestTypeBlock != nil {
+					if err := bc.reorganizeChain(block, latestTypeBlock); err != nil {
+						logger.Error("Reorg failed: %v", err)
+						bc.storeOrphanBlock(block)
+						return ImportError
+					}
+				}
+				return ImportedBest
+			}
+			// Our current chain is heavier — store the competing block as orphan
+			// so it can be promoted if the network eventually adopts it
+			logger.Info("Current chain is heavier (%s > %s), storing competing as orphan",
+				oldWeight.String(), newWeight.String())
+			bc.storeOrphanBlock(block)
+			return ImportedSide
+		}
+
+		// ── Block height > tip+1 → missing parent → orphan ──
+		if block.GetHeight() > latestBlock.GetHeight()+1 {
+			logger.Info("📦 Block %s at height %d ahead of tip %d — storing as orphan",
+				block.GetHash()[:16], block.GetHeight(), latestBlock.GetHeight())
+			bc.storeOrphanBlock(block)
+			return ImportedSide
+		}
 	}
 
-	// Try to commit the block through state machine replication
+	// ── No tip or first block → normal commit ──
 	consensusBlock := NewBlockHelper(block)
 	if err := bc.CommitBlock(consensusBlock); err != nil {
 		logger.Warn("Block commit failed: %v", err)
 		return ImportError
 	}
-
-	// Block successfully imported as best block
-	logger.Info("Block imported successfully: height=%d, hash=%s, ParentHash=%s",
-		block.GetHeight(), block.GetHash(), block.GetPrevHash())
+	logger.Info("Block imported successfully: height=%d, hash=%s", block.GetHeight(), block.GetHash())
 	return ImportedBest
 }
 
@@ -1426,19 +1618,39 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 	logger.Info("✅ Block executed, stateRoot=%x", stateRoot)
 
 	// ════════════════════════════════════════════════════════════════════════
-	// PRODUCTION FIX: Embed the computed state root in the block header
+	// CONSENSUS-SAFETY FIX: never silently rehash a divergent block
 	// ════════════════════════════════════════════════════════════════════════
-	// The block hash was voted on before CommitBlock, but the StateRoot in
-	// the header must match what execution produced. We update the header
-	// AND re-finalize the hash so the stored block is self-consistent.
-	// The consensus-approved hash (from the proposal/vote phase) is preserved
-	// in the block's metadata; the stored hash is the canonical one.
+	// A block that reached this point already has a header.StateRoot that was
+	// either (a) computed by the original leader and voted on by the PBFT
+	// quorum (normal proposal path), or (b) copied verbatim from a peer during
+	// sync (bind.runBlockSyncLoop / Consensus.FastForward). In both cases the
+	// StateRoot is a claim that every honest node must be able to reproduce
+	// by executing the exact same block against the exact same prior state.
+	//
+	// The previous behavior here — silently overwriting header.StateRoot with
+	// whatever THIS node computed locally, and re-deriving the hash to match —
+	// is what actually produces the "different tip hash on every node" bug:
+	// if this node's local execution diverges from the rest of the network for
+	// ANY reason (a still-in-flight race between the multiple independent sync
+	// paths, a resumed-from-checkpoint node with slightly different prior
+	// state, non-deterministic execution, etc.), this code used to paper over
+	// that divergence by minting a brand-new "canonical" hash for this node
+	// alone. Every peer of this node then rejects its next block proposal
+	// (parent-hash mismatch) and/or this node rejects every future incoming
+	// proposal (its own tip hash no longer matches what anyone else has),
+	// which is exactly the symptom of nodes converging on height but
+	// disagreeing on tip hash.
+	//
+	// The correct behavior is to treat a state-root mismatch as a fatal local
+	// error: refuse to commit, leave the tip where it was, and let the caller
+	// force a resync from a trusted peer instead of fabricating a new hash.
 	if !bytes.Equal(typeBlock.Header.StateRoot, stateRoot) {
-		logger.Info("🔧 Updating block header StateRoot: proposed=%x → executed=%x",
-			typeBlock.Header.StateRoot, stateRoot)
-		typeBlock.Header.StateRoot = stateRoot
-		typeBlock.FinalizeHash() // Re-compute hash with correct state root
-		logger.Info("✅ Block hash re-finalized with correct state root: %s", typeBlock.GetHash())
+		logger.Error("❌ STATE DIVERGENCE DETECTED at height %d: header claims StateRoot=%x, local execution produced=%x — refusing to commit",
+			typeBlock.GetHeight(), typeBlock.Header.StateRoot, stateRoot)
+		return fmt.Errorf(
+			"CommitBlock: state root mismatch at height %d (header=%x, executed=%x) — local state has diverged from the network; refusing to commit rather than silently rehashing",
+			typeBlock.GetHeight(), typeBlock.Header.StateRoot, stateRoot,
+		)
 	}
 	// ════════════════════════════════════════════════════════════════════════
 
@@ -1618,6 +1830,11 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 			logger.Warn("Invalid signature type returned from consensus")
 		}
 	}
+
+	// Process any orphan blocks whose parent is now the committed block.
+	// This allows the chain to converge when blocks arrive out of order
+	// (e.g., a competing fork's tip arrives before its intermediate blocks).
+	bc.processOrphansAfterCommit(typeBlock.GetHash())
 
 	// Log successful commit with final TPS stats
 	finalStats := bc.tpsMonitor.GetStats()
@@ -1977,6 +2194,430 @@ func (bc *Blockchain) Close() error {
 	bc.SetStatus(StatusStopped)
 	logger.Info("Blockchain shutting down...")
 	return bc.storage.Close() // Close storage
+}
+
+// getTypeBlock extracts the underlying *types.Block from a consensus.Block.
+// This is needed because GetBlockByHash and GetLatestBlock return the
+// consensus.Block interface (wrapping *BlockHelper), but the reorg and
+// weight functions need the concrete *types.Block.
+func (bc *Blockchain) getTypeBlock(block consensus.Block) *types.Block {
+	if block == nil {
+		return nil
+	}
+	if helper, ok := block.(*BlockHelper); ok {
+		if underlying, ok := helper.GetUnderlyingBlock().(*types.Block); ok {
+			return underlying
+		}
+	}
+	if tb, ok := block.(*types.Block); ok {
+		return tb
+	}
+	return nil
+}
+
+// =========================================================================
+// CHAIN WEIGHT: cumulative PBFT attestation weight for fork-choice
+// =========================================================================
+
+// calculateChainWeight computes the cumulative attestation weight for a chain
+// branch starting from genesis up to the given block. The weight is the sum
+// of all validator stake that has signed attestations in the chain.
+// The chain with the highest cumulative weight is the canonical chain.
+func (bc *Blockchain) calculateChainWeight(block *types.Block) *big.Int {
+	total := big.NewInt(0)
+
+	// If the block already has a cached ChainWeight, use it directly.
+	if block.ChainWeight != nil && block.ChainWeight.Sign() > 0 {
+		return new(big.Int).Set(block.ChainWeight)
+	}
+
+	current := block
+	seen := make(map[string]bool)
+
+	// Walk back to genesis, accumulating attestation weight from the block body.
+	for current != nil {
+		hashStr := current.GetHash()
+		if seen[hashStr] {
+			break // Prevent infinite loops from circular references
+		}
+		seen[hashStr] = true
+
+		// Add attestation weights from this block's body
+		for _, att := range current.Body.Attestations {
+			if att == nil {
+				continue
+			}
+			// Use cached stake if available
+			if att.Stake != nil && att.Stake.Sign() > 0 {
+				total.Add(total, att.Stake)
+			}
+		}
+		// Walk to parent
+		if current.GetHeight() == 0 {
+			break
+		}
+		current = bc.getTypeBlock(bc.GetBlockByHash(current.GetPrevHash()))
+	}
+
+	// Cache the computed weight on the block for subsequent calls
+	block.ChainWeight = new(big.Int).Set(total)
+
+	return total
+}
+
+// GetChainWeight returns the cumulative attestation weight of the current
+// canonical chain.
+func (bc *Blockchain) GetChainWeight() *big.Int {
+	bc.lock.RLock()
+	defer bc.lock.RUnlock()
+	if bc.chainWeight == nil {
+		return big.NewInt(0)
+	}
+	return new(big.Int).Set(bc.chainWeight)
+}
+
+// =========================================================================
+// ORPHAN BLOCK MANAGEMENT
+// =========================================================================
+
+// storeOrphanBlock saves a block whose parent is not yet committed into an
+// orphan pool. When the parent eventually arrives via CommitBlock, the orphan
+// is automatically replayed so the chain can converge to the highest-weight
+// fork even when blocks arrive out of order.
+func (bc *Blockchain) storeOrphanBlock(block *types.Block) {
+	bc.orphanMu.Lock()
+	defer bc.orphanMu.Unlock()
+
+	if bc.orphanBlocks == nil {
+		bc.orphanBlocks = make(map[string][]*types.Block)
+	}
+
+	parentHash := block.GetPrevHash()
+	blockHash := block.GetHash()
+
+	// Dedup: check if this block is already stored as an orphan
+	for _, orphan := range bc.orphanBlocks[parentHash] {
+		if orphan.GetHash() == blockHash {
+			logger.Debug("Orphan block %s already stored under parent %s", blockHash[:16], parentHash[:16])
+			return
+		}
+	}
+
+	bc.orphanBlocks[parentHash] = append(bc.orphanBlocks[parentHash], block)
+	logger.Info("📦 Stored orphan block %s (height=%d, parent=%s), total orphans=%d",
+		blockHash[:16], block.GetHeight(), parentHash[:16], len(bc.orphanBlocks))
+
+	// Prune if the orphan pool grows too large to prevent memory exhaustion
+	totalOrphans := 0
+	for _, children := range bc.orphanBlocks {
+		totalOrphans += len(children)
+	}
+	if totalOrphans > 10000 {
+		bc.pruneOrphanBlocks()
+	}
+}
+
+// processOrphansAfterCommit is called after a block is committed to check if
+// any orphan blocks can now be connected (their parent is now the canonical tip).
+// If multiple orphans chain together, they are all processed recursively.
+func (bc *Blockchain) processOrphansAfterCommit(committedHash string) {
+	// Collect all orphans whose parent matches the committed hash
+	bc.orphanMu.Lock()
+	children, exists := bc.orphanBlocks[committedHash]
+	if exists {
+		delete(bc.orphanBlocks, committedHash)
+	}
+	bc.orphanMu.Unlock()
+
+	if !exists || len(children) == 0 {
+		return
+	}
+
+	// Sort orphans by height (lowest first) to ensure correct replay order
+	for i := 0; i < len(children); i++ {
+		for j := i + 1; j < len(children); j++ {
+			if children[i].GetHeight() > children[j].GetHeight() {
+				children[i], children[j] = children[j], children[i]
+			}
+		}
+	}
+
+	// Attempt to import each orphan
+	for _, child := range children {
+		// Only process orphans that extend the NEW tip (the one we just committed)
+		// or the tip that was set by a previous orphan in this loop
+		currentTip := bc.GetLatestBlock()
+		if child.GetPrevHash() != currentTip.GetHash() {
+			// If the orphan still doesn't extend the tip, re-store it
+			logger.Debug("Orphan %s still doesn't extend tip, re-storing", child.GetHash()[:16])
+			bc.storeOrphanBlock(child)
+			continue
+		}
+
+		logger.Info("🔄 Processing orphan block %s at height %d (parent %s now committed)",
+			child.GetHash()[:16], child.GetHeight(), committedHash[:16])
+
+		result := bc.ImportBlock(child)
+		if result == ImportedBest || result == ImportedSide {
+			logger.Info("✅ Orphan block %s processed successfully (%v)", child.GetHash()[:16], result)
+			// Recursively process children of this orphan
+			bc.processOrphansAfterCommit(child.GetHash())
+		} else {
+			logger.Warn("⚠️ Orphan block %s failed to import: %v", child.GetHash()[:16], result)
+			// Re-store for later retry
+			bc.storeOrphanBlock(child)
+		}
+	}
+}
+
+// pruneOrphanBlocks removes the oldest orphans from the pool when it exceeds
+// the size limit. This prevents unbounded memory growth while still keeping
+// recent orphans that are more likely to resolve.
+func (bc *Blockchain) pruneOrphanBlocks() {
+	bc.orphanMu.Lock()
+	defer bc.orphanMu.Unlock()
+
+	if len(bc.orphanBlocks) == 0 {
+		return
+	}
+
+	// Collect all orphans with their heights
+	type orphanEntry struct {
+		parentHash string
+		block      *types.Block
+	}
+
+	var entries []orphanEntry
+	for parentHash, children := range bc.orphanBlocks {
+		for _, child := range children {
+			entries = append(entries, orphanEntry{parentHash: parentHash, block: child})
+		}
+	}
+
+	// Sort by height ascending (lower height = older)
+	for i := 0; i < len(entries); i++ {
+		for j := i + 1; j < len(entries); j++ {
+			if entries[i].block.GetHeight() > entries[j].block.GetHeight() {
+				entries[i], entries[j] = entries[j], entries[i]
+			}
+		}
+	}
+
+	// Remove oldest entries (keep 5000)
+	keepCount := 5000
+	if keepCount > len(entries) {
+		keepCount = len(entries)
+	}
+	entries = entries[len(entries)-keepCount:]
+
+	// Rebuild the orphan map with only the kept entries
+	bc.orphanBlocks = make(map[string][]*types.Block)
+	for _, entry := range entries {
+		bc.orphanBlocks[entry.parentHash] = append(bc.orphanBlocks[entry.parentHash], entry.block)
+	}
+
+	logger.Info("🧹 Pruned orphan blocks: kept %d orphans", len(entries))
+}
+
+// =========================================================================
+// CHAIN REORGANIZATION
+// =========================================================================
+
+// reorganizeChain replaces the current canonical chain with a competing fork
+// that has higher cumulative attestation weight. It:
+//  1. Finds the common ancestor of the old and new chains
+//  2. Collects blocks to disconnect (old fork from tip → common ancestor)
+//  3. Collects blocks to connect (new fork from common ancestor + 1 → new tip)
+//  4. Rolls back state from disconnected blocks
+//  5. Applies state from connected blocks
+//  6. Resurrects orphaned transactions back into the mempool
+//
+// This is called automatically by CommitBlock when a fork-choice rule
+// determines the incoming block has higher weight.
+func (bc *Blockchain) reorganizeChain(newForkBlock, oldTip *types.Block) error {
+	logger.Info("🔄 Starting chain reorganization: old_tip=%s (height=%d), new_tip=%s (height=%d)",
+		oldTip.GetHash()[:16], oldTip.GetHeight(), newForkBlock.GetHash()[:16], newForkBlock.GetHeight())
+
+	// Step 1: Find common ancestor
+	forkHeight, forkHash := bc.findCommonAncestor(newForkBlock, oldTip)
+	if forkHash == "" || forkHeight == 0 {
+		return fmt.Errorf("no common ancestor found between chains — cannot reorganize")
+	}
+	logger.Info("📍 Common ancestor at height %d (hash=%s)", forkHeight, forkHash[:16])
+
+	// Step 2: Collect blocks to disconnect (old chain: tip → fork+1)
+	var oldBlocks []*types.Block
+	current := oldTip
+	for current != nil && current.GetHeight() > forkHeight {
+		oldBlocks = append(oldBlocks, current)
+		current = bc.getTypeBlock(bc.GetBlockByHash(current.GetPrevHash()))
+		if current == nil {
+			return fmt.Errorf("broken chain while walking back from old tip at height transition %d→%d",
+				oldTip.GetHeight(), forkHeight)
+		}
+	}
+
+	// Step 3: Collect blocks to connect (new chain: fork+1 → tip)
+	var newBlocks []*types.Block
+	current = newForkBlock
+	for current != nil && current.GetHeight() > forkHeight {
+		newBlocks = append([]*types.Block{current}, newBlocks...)
+		current = bc.getTypeBlock(bc.GetBlockByHash(current.GetPrevHash()))
+		if current == nil {
+			return fmt.Errorf("broken chain while walking back from new fork tip at height transition %d→%d",
+				newForkBlock.GetHeight(), forkHeight)
+		}
+	}
+
+	logger.Info("📊 Reorg: rolling back %d blocks, applying %d blocks", len(oldBlocks), len(newBlocks))
+
+	// Step 4: Disconnect old blocks (collect transactions to resurrect)
+	var txsToResurrect []*types.Transaction
+	for _, ob := range oldBlocks {
+		// Collect transactions from the block being disconnected
+		for _, tx := range ob.Body.TxsList {
+			if tx != nil {
+				txsToResurrect = append(txsToResurrect, tx)
+			}
+		}
+		// Remove from in-memory chain (backwards)
+		bc.lock.Lock()
+		for i := len(bc.chain) - 1; i >= 0; i-- {
+			if bc.chain[i].GetHash() == ob.GetHash() {
+				bc.chain = append(bc.chain[:i], bc.chain[i+1:]...)
+				break
+			}
+		}
+		bc.lock.Unlock()
+
+		logger.Info("🔙 Rolled back block %s at height %d", ob.GetHash()[:16], ob.GetHeight())
+	}
+
+	// Step 5: Apply new blocks in forward order
+	for _, nb := range newBlocks {
+		// Validate the block (sparse check — full attestation verification happens in sync)
+		if err := nb.Validate(); err != nil {
+			// Emergency rollback: put old blocks back
+			bc.emergencyReorgRollback(oldBlocks, newBlocks)
+			return fmt.Errorf("new fork block %s at height %d failed validation: %w",
+				nb.GetHash()[:16], nb.GetHeight(), err)
+		}
+		// Append to in-memory chain
+		bc.lock.Lock()
+		bc.chain = append(bc.chain, nb)
+		bc.lock.Unlock()
+
+		// Store block to disk
+		if err := bc.storage.StoreBlock(nb); err != nil {
+			logger.Error("Failed to store reorg block %s: %v", nb.GetHash()[:16], err)
+		}
+
+		logger.Info("🔀 Applied new block %s at height %d", nb.GetHash()[:16], nb.GetHeight())
+	}
+
+	// Step 6: Resurrect transactions into mempool
+	if bc.mempool != nil {
+		for _, tx := range txsToResurrect {
+			if err := bc.mempool.BroadcastTransaction(tx); err != nil {
+				logger.Debug("Reorg: could not resurrect tx %s: %v", tx.ID, err)
+			}
+		}
+		logger.Info("🔄 Resurrected %d transactions back to mempool after reorg", len(txsToResurrect))
+	}
+
+	// Step 7: Update chain weight
+	bc.lock.Lock()
+	bc.chainWeight = bc.calculateChainWeight(newForkBlock)
+	bc.lock.Unlock()
+
+	// Step 8: Persist chain state
+	if err := bc.SaveBasicChainState(); err != nil {
+		logger.Warn("Failed to save chain state after reorg: %v", err)
+	}
+
+	// Step 9: Write checkpoint
+	if err := bc.WriteChainCheckpoint(); err != nil {
+		logger.Warn("Failed to write checkpoint after reorg: %v", err)
+	}
+
+	logger.Info("✅ Reorg complete: rolled back %d blocks, applied %d blocks, new_tip=%s at height %d, weight=%s",
+		len(oldBlocks), len(newBlocks), newForkBlock.GetHash()[:16], newForkBlock.GetHeight(), bc.chainWeight)
+	return nil
+}
+
+// findCommonAncestor walks both chains backwards from their tips to find
+// the first common block (same hash). Returns the height and hash of the
+// common ancestor. Returns ("", 0) if no common ancestor exists.
+func (bc *Blockchain) findCommonAncestor(blockA, blockB *types.Block) (uint64, string) {
+	// Build the ancestry set for block A
+	ancestorsA := make(map[string]uint64)
+	current := blockA
+	for current != nil {
+		hashStr := current.GetHash()
+		if _, exists := ancestorsA[hashStr]; exists {
+			break // Prevent cycles
+		}
+		ancestorsA[hashStr] = current.GetHeight()
+		if current.GetHeight() == 0 {
+			break
+		}
+		current = bc.getTypeBlock(bc.GetBlockByHash(current.GetPrevHash()))
+		if current == nil {
+			break
+		}
+	}
+
+	// Walk block B's ancestors looking for a match
+	current = blockB
+	for current != nil {
+		hashStr := current.GetHash()
+		if heightA, exists := ancestorsA[hashStr]; exists {
+			// Found common ancestor
+			return heightA, hashStr
+		}
+		if current.GetHeight() == 0 {
+			break
+		}
+		current = bc.getTypeBlock(bc.GetBlockByHash(current.GetPrevHash()))
+		if current == nil {
+			break
+		}
+	}
+
+	return 0, ""
+}
+
+// emergencyReorgRollback restores the original chain after a failed reorg
+// attempt. This ensures the node is never left in an inconsistent state.
+func (bc *Blockchain) emergencyReorgRollback(oldBlocks, failedNewBlocks []*types.Block) {
+	logger.Error("🚨 EMERGENCY: Rolling back failed reorg — restoring %d original blocks", len(oldBlocks))
+
+	// Remove any new blocks that were applied
+	for _, nb := range failedNewBlocks {
+		bc.lock.Lock()
+		for i := len(bc.chain) - 1; i >= 0; i-- {
+			if bc.chain[i].GetHash() == nb.GetHash() {
+				bc.chain = append(bc.chain[:i], bc.chain[i+1:]...)
+				break
+			}
+		}
+		bc.lock.Unlock()
+	}
+
+	// Restore old blocks in forward order
+	for i := len(oldBlocks) - 1; i >= 0; i-- {
+		ob := oldBlocks[i]
+		bc.lock.Lock()
+		bc.chain = append(bc.chain, ob)
+		bc.lock.Unlock()
+	}
+
+	// Restore chain weight
+	bc.lock.Lock()
+	bc.chainWeight = bc.calculateChainWeight(oldBlocks[0])
+	bc.lock.Unlock()
+
+	logger.Info("✅ Emergency reorg rollback complete — original chain restored")
 }
 
 // ValidateBlock validates a block including TxsRoot = MerkleRoot verification

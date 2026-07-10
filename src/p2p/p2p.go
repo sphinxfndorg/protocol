@@ -338,6 +338,21 @@ func (s *Server) handleMessages() {
 				continue
 			}
 
+			// Check if this is a response to a sync request
+			requestID := ""
+			if msgID, ok := msg.Metadata["request_id"].(string); ok {
+				requestID = msgID
+			}
+
+			// If this is a requested block response, route to sync manager
+			if requestID != "" && s.blockchain.GetSyncManager() != nil {
+				if err := s.blockchain.GetSyncManager().HandleBlockResponse(requestID, &block); err != nil {
+					log.Printf("Failed to handle block response: %v", err)
+				}
+				continue
+			}
+
+			// Otherwise, process as new block broadcast
 			if err := block.Validate(); err != nil {
 				log.Printf("Block validation failed: %v", err)
 				if originID != "" {
@@ -583,6 +598,389 @@ func (s *Server) handleMessages() {
 				s.peerManager.UpdatePeerScore(originID, 10)
 			}
 
+		// ========== SYNC PROTOCOL HANDLERS (Phase A) ==========
+		// These handlers implement the Bitcoin-style sync protocol:
+		//   getchaininfo → chaininfo  (exchange chain state)
+		//   getblocks    → inv        (batch block inventory)
+		//   getdata      → block      (individual block delivery)
+
+		case "getchaininfo":
+			// Peer is requesting our chain information.
+			// Respond with current height, genesis hash, best hash, etc.
+			var reqData map[string]interface{}
+			if err := json.Unmarshal(msg.Data, &reqData); err != nil {
+				log.Printf("Failed to unmarshal getchaininfo request: %v", err)
+				continue
+			}
+
+			// Build chain info response
+			chainParams := s.blockchain.GetChainParams()
+			genesisBlock := s.blockchain.GetBlockByNumber(0)
+			latestBlock := s.blockchain.GetLatestBlock()
+			currentHeight := s.blockchain.GetBlockCount()
+
+			genesisHash := ""
+			if genesisBlock != nil {
+				genesisHash = genesisBlock.GetHash()
+			}
+
+			latestHash := ""
+			if latestBlock != nil {
+				latestHash = latestBlock.GetHash()
+			}
+
+			// Get consensus state if available
+			currentView := uint64(0)
+			leaderID := ""
+			if s.consensus != nil {
+				currentView, _, _ = s.consensus.RefreshLeaderStatus()
+				leaderID = s.consensus.GetNodeID()
+			}
+
+			// Calculate current epoch from chain height (100 blocks per epoch)
+			currentEpoch := currentHeight / 100
+
+			chainInfo := map[string]interface{}{
+				"chain_id":         chainParams.ChainID,
+				"genesis_hash":     genesisHash,
+				"genesis_time":     chainParams.GenesisTime,
+				"current_height":   currentHeight,
+				"latest_block":     latestHash,
+				"finalized_height": currentHeight, // Simplified: all blocks are finalized
+				"finalized_hash":   latestHash,
+				"protocol_version": chainParams.Version,
+				"current_view":     currentView,
+				"current_epoch":    currentEpoch,
+				"leader_id":        leaderID,
+				"node_id":          s.localNode.ID,
+			}
+
+			chainInfoData, err := json.Marshal(chainInfo)
+			if err != nil {
+				log.Printf("Failed to marshal chain info: %v", err)
+				continue
+			}
+
+			// Send response back to requesting peer
+			if peer, ok := s.nodeManager.GetPeers()[originID]; ok && originID != "" {
+				transport.SendMessage(peer.Node.Address, &security.Message{
+					Type: "chaininfo",
+					Data: chainInfoData,
+				})
+				s.peerManager.UpdatePeerScore(originID, 5)
+				log.Printf("📤 Sent chaininfo to peer %s: height=%d, genesis=%s",
+					originID, currentHeight, genesisHash[:16])
+			}
+
+		case "chaininfo":
+			// Received chain info from a peer — route to SyncManager
+			var chainInfo map[string]interface{}
+			if err := json.Unmarshal(msg.Data, &chainInfo); err != nil {
+				log.Printf("Failed to unmarshal chaininfo: %v", err)
+				continue
+			}
+
+			if s.blockchain.GetSyncManager() != nil {
+				s.blockchain.GetSyncManager().HandleChainInfoResponse(originID, chainInfo)
+			}
+			if originID != "" {
+				s.peerManager.UpdatePeerScore(originID, 10)
+			}
+
+		case "getblocks":
+			// Peer is requesting a batch of blocks (inventory-style).
+			// Respond with an inv message containing block hashes in the requested range.
+			var reqData map[string]interface{}
+			if err := json.Unmarshal(msg.Data, &reqData); err != nil {
+				log.Printf("Failed to unmarshal getblocks request: %v", err)
+				continue
+			}
+
+			startHeight, _ := reqData["start_height"].(float64)
+			count, _ := reqData["count"].(float64)
+
+			if count <= 0 || count > 1024 {
+				count = 1024 // Cap at 1024 blocks per request
+			}
+
+			// Build inventory response
+			inv := make([]map[string]interface{}, 0)
+			for h := uint64(startHeight); h < uint64(startHeight+count); h++ {
+				block := s.blockchain.GetBlockByNumber(h)
+				if block == nil {
+					break // Reached end of chain
+				}
+				inv = append(inv, map[string]interface{}{
+					"type":   "block",
+					"hash":   block.GetHash(),
+					"height": h,
+				})
+			}
+
+			invResponse := map[string]interface{}{
+				"inventory": inv,
+			}
+
+			invData, err := json.Marshal(invResponse)
+			if err != nil {
+				log.Printf("Failed to marshal inv response: %v", err)
+				continue
+			}
+
+			// Send inv response back
+			if peer, ok := s.nodeManager.GetPeers()[originID]; ok && originID != "" {
+				transport.SendMessage(peer.Node.Address, &security.Message{
+					Type: "inv",
+					Data: invData,
+				})
+				s.peerManager.UpdatePeerScore(originID, 5)
+				log.Printf("📤 Sent inv to peer %s: %d blocks (heights %d-%d)",
+					originID, len(inv), uint64(startHeight), uint64(startHeight)+uint64(len(inv))-1)
+			}
+
+		case "inv":
+			// Received inventory from a peer — contains block hashes/heights.
+			// For each block in the inventory, send a getdata request.
+			var invData map[string]interface{}
+			if err := json.Unmarshal(msg.Data, &invData); err != nil {
+				log.Printf("Failed to unmarshal inv: %v", err)
+				continue
+			}
+
+			inventory, _ := invData["inventory"].([]interface{})
+			log.Printf("📥 Received inv from peer %s: %d blocks", originID, len(inventory))
+
+			// For each unknown block, request it via getdata
+			for _, entry := range inventory {
+				entryMap, ok := entry.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				height, _ := entryMap["height"].(float64)
+				blockType, _ := entryMap["type"].(string)
+
+				if blockType != "block" {
+					continue
+				}
+
+				// Check if we already have this block
+				existing := s.blockchain.GetBlockByNumber(uint64(height))
+				if existing != nil {
+					continue // Already have it
+				}
+
+				// Request this block via getdata
+				requestID := fmt.Sprintf("inv-block-%d-%s", uint64(height), originID)
+				getdataReq := map[string]interface{}{
+					"method":     "getdata",
+					"request_id": requestID,
+					"params": []map[string]interface{}{
+						{
+							"type":   "block",
+							"height": uint64(height),
+						},
+					},
+				}
+
+				getdataData, _ := json.Marshal(getdataReq)
+				if peer, ok := s.nodeManager.GetPeers()[originID]; ok && originID != "" {
+					transport.SendMessage(peer.Node.Address, &security.Message{
+						Type: "getdata",
+						Data: getdataData,
+					})
+				}
+			}
+
+			if originID != "" {
+				s.peerManager.UpdatePeerScore(originID, 10)
+			}
+
+		case "getdata":
+			// Peer is requesting specific data (blocks, transactions, etc.)
+			// Respond with the requested data.
+			var reqData map[string]interface{}
+			if err := json.Unmarshal(msg.Data, &reqData); err != nil {
+				log.Printf("Failed to unmarshal getdata request: %v", err)
+				continue
+			}
+
+			requestID, _ := reqData["request_id"].(string)
+			params, _ := reqData["params"].([]interface{})
+
+			for _, param := range params {
+				paramMap, ok := param.(map[string]interface{})
+				if !ok {
+					continue
+				}
+
+				dataType, _ := paramMap["type"].(string)
+				height, _ := paramMap["height"].(float64)
+
+				if dataType == "block" {
+					block := s.blockchain.GetBlockByNumber(uint64(height))
+					if block == nil {
+						log.Printf("Block %d not found for peer %s", uint64(height), originID)
+						continue
+					}
+
+					// Serialize block
+					blockData, err := json.Marshal(block)
+					if err != nil {
+						log.Printf("Failed to marshal block %d: %v", uint64(height), err)
+						continue
+					}
+
+					// Send block response with request_id for matching
+					response := &security.Message{
+						Type: "block",
+						Data: blockData,
+					}
+					response.Metadata = map[string]interface{}{
+						"request_id": requestID,
+					}
+
+					if peer, ok := s.nodeManager.GetPeers()[originID]; ok && originID != "" {
+						transport.SendMessage(peer.Node.Address, response)
+						s.peerManager.UpdatePeerScore(originID, 5)
+						log.Printf("📤 Sent block %d to peer %s (request_id=%s)",
+							uint64(height), originID, requestID)
+					}
+				}
+			}
+
+		// ========== STATE SNAPSHOT / CHECKPOINT SYNC (Phase B+C) ==========
+		// These handlers implement snapshot-based state sync:
+		//   getsnapshot  → snapshot     (download full state snapshot)
+		//   checkpoint  → checkpoint   (exchange checkpoint messages)
+
+		case "getsnapshot":
+			// Peer is requesting a state snapshot at a given height.
+			var reqData map[string]interface{}
+			if err := json.Unmarshal(msg.Data, &reqData); err != nil {
+				log.Printf("Failed to unmarshal getsnapshot request: %v", err)
+				continue
+			}
+
+			height, _ := reqData["height"].(float64)
+			log.Printf("📥 Received getsnapshot request from peer %s for height %d", originID, uint64(height))
+
+			// Get the snapshot manager from the blockchain
+			snapshotMgr := s.blockchain.GetSnapshotManager()
+			if snapshotMgr == nil {
+				log.Printf("No snapshot manager available — cannot serve getsnapshot request")
+				continue
+			}
+
+			// Load the snapshot data
+			snapshotData, err := snapshotMgr.LoadSnapshot(uint64(height))
+			if err != nil {
+				log.Printf("Snapshot at height %d not found: %v", uint64(height), err)
+				// Send error response
+				errResp := map[string]interface{}{
+					"error":  fmt.Sprintf("snapshot at height %d not available", uint64(height)),
+					"height": uint64(height),
+				}
+				errData, _ := json.Marshal(errResp)
+				if peer, ok := s.nodeManager.GetPeers()[originID]; ok && originID != "" {
+					transport.SendMessage(peer.Node.Address, &security.Message{
+						Type: "snapshot_error",
+						Data: errData,
+					})
+				}
+				continue
+			}
+
+			// Serialize and send snapshot data
+			snapshotBytes, err := json.Marshal(snapshotData)
+			if err != nil {
+				log.Printf("Failed to marshal snapshot: %v", err)
+				continue
+			}
+
+			if peer, ok := s.nodeManager.GetPeers()[originID]; ok && originID != "" {
+				msg := &security.Message{
+					Type: "snapshot",
+					Data: snapshotBytes,
+				}
+				msg.Metadata = map[string]interface{}{
+					"height":        uint64(height),
+					"block_hash":    snapshotData.BlockHash,
+					"account_count": len(snapshotData.Accounts),
+				}
+				transport.SendMessage(peer.Node.Address, msg)
+				s.peerManager.UpdatePeerScore(originID, 10)
+				log.Printf("📤 Sent snapshot at height %d to peer %s (%d accounts, %d validators)",
+					uint64(height), originID, len(snapshotData.Accounts), len(snapshotData.Validators))
+			}
+
+		case "snapshot":
+			// Received a state snapshot from a peer.
+			var snapshotData core.StateSnapshotData
+			if err := json.Unmarshal(msg.Data, &snapshotData); err != nil {
+				log.Printf("Failed to unmarshal snapshot data: %v", err)
+				continue
+			}
+
+			log.Printf("📥 Received snapshot from peer %s at height %d (%d accounts, %d validators)",
+				originID, snapshotData.BlockHeight, len(snapshotData.Accounts), len(snapshotData.Validators))
+
+			// Store the snapshot locally
+			snapshotMgr := s.blockchain.GetSnapshotManager()
+			if snapshotMgr == nil {
+				log.Printf("No snapshot manager available — cannot store received snapshot")
+				continue
+			}
+
+			// Write snapshot to disk
+			if err := snapshotMgr.StoreReceivedSnapshot(&snapshotData); err != nil {
+				log.Printf("Failed to store received snapshot: %v", err)
+				continue
+			}
+
+			// Create checkpoint from snapshot metadata
+			cp := &core.CheckpointMessage{
+				BlockHeight: snapshotData.BlockHeight,
+				BlockHash:   snapshotData.BlockHash,
+				StateRoot:   snapshotData.StateRoot,
+				Epoch:       snapshotData.BlockHeight / 100,
+				Signatures:  make(map[string]string),
+				Timestamp:   time.Now().Unix(),
+			}
+			snapshotMgr.AddCheckpointFromPeer(cp)
+
+			if originID != "" {
+				s.peerManager.UpdatePeerScore(originID, 15)
+			}
+
+		case "snapshot_error":
+			// Peer could not serve the requested snapshot
+			var errData map[string]interface{}
+			if err := json.Unmarshal(msg.Data, &errData); err != nil {
+				log.Printf("Failed to unmarshal snapshot_error: %v", err)
+				continue
+			}
+			height, _ := errData["height"].(float64)
+			errMsg, _ := errData["error"].(string)
+			log.Printf("⚠️ Snapshot error from peer %s for height %d: %s", originID, uint64(height), errMsg)
+
+		case "checkpoint_sync":
+			// Peer is sharing checkpoint information for state sync discovery
+			var cpMsg core.CheckpointMessage
+			if err := json.Unmarshal(msg.Data, &cpMsg); err != nil {
+				log.Printf("Failed to unmarshal checkpoint message: %v", err)
+				continue
+			}
+
+			snapshotMgr := s.blockchain.GetSnapshotManager()
+			if snapshotMgr != nil {
+				if snapshotMgr.AddCheckpointFromPeer(&cpMsg) {
+					log.Printf("📥 Stored checkpoint from peer %s at height %d", originID, cpMsg.BlockHeight)
+				}
+			}
+			if originID != "" {
+				s.peerManager.UpdatePeerScore(originID, 5)
+			}
+
 		default:
 			log.Printf("Unknown message type: %s", msg.Type)
 			if originID != "" {
@@ -683,9 +1081,28 @@ func (s *Server) validateTransaction(tx *types.Transaction) error {
 	return nil
 }
 
+// SendMessageToPeer sends a message to a specific peer by ID.
+// This implements the P2PServerInterface required by the SyncManager.
+// It looks up the peer by ID and sends the message via transport.
+func (s *Server) SendMessageToPeer(peerID string, messageType string, data []byte) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	peer, exists := s.nodeManager.GetPeers()[peerID]
+	if !exists {
+		return fmt.Errorf("peer %s not found", peerID)
+	}
+
+	msg := &security.Message{
+		Type: messageType,
+		Data: data,
+	}
+
+	return transport.SendMessage(peer.Node.Address, msg)
+}
+
 // Broadcast sends a message to all peers.
 // Simple wrapper around peer manager's propagation function
-// Broadcast sends a message to all peers.
 func (s *Server) Broadcast(msg *security.Message) {
 	// Make a copy and ensure Data is marshaled properly
 	msgCopy := &security.Message{

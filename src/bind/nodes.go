@@ -13,6 +13,7 @@ package bind
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"math/big"
 	"net"
@@ -43,6 +44,7 @@ import (
 	"github.com/sphinxfndorg/protocol/src/params/commit"
 	"github.com/sphinxfndorg/protocol/src/pool"
 	"github.com/sphinxfndorg/protocol/src/rpc"
+	"github.com/sphinxfndorg/protocol/src/state"
 	"github.com/syndtr/goleveldb/leveldb"
 	"go.uber.org/zap"
 )
@@ -1233,4 +1235,111 @@ func isLoopbackHost(host string) bool {
 		return false
 	}
 	return ip.IsLoopback()
+}
+
+// ============================================================================
+// State persistence
+// ============================================================================
+
+// flushNodeState persists the current node state.
+func flushNodeState(bc *core.Blockchain, nodeID, address string) {
+	latest := bc.GetLatestBlock()
+	if latest == nil {
+		return
+	}
+
+	merkleRoot := "unknown"
+
+	if block, ok := latest.(*types.Block); ok {
+		if block.Header != nil && len(block.Header.TxsRoot) > 0 {
+			merkleRoot = hex.EncodeToString(block.Header.TxsRoot)
+		}
+	} else if txsRootGetter, ok := latest.(interface{ GetTxsRoot() []byte }); ok {
+		merkleRoot = hex.EncodeToString(txsRootGetter.GetTxsRoot())
+	}
+
+	nodeInfo := &state.NodeInfo{
+		NodeID:      nodeID,
+		NodeName:    nodeID,
+		NodeAddress: address,
+		ChainInfo:   bc.GetChainInfo(),
+		BlockHeight: latest.GetHeight(),
+		BlockHash:   latest.GetHash(),
+		MerkleRoot:  merkleRoot,
+		Timestamp:   time.Now().Format(time.RFC3339),
+	}
+
+	if sm := bc.GetStateMachine(); sm != nil {
+		if err := sm.ForcePopulateFinalStates(); err != nil {
+			logger.Warn("[%s] ForcePopulateFinalStates: %v", nodeID, err)
+		}
+		sm.SyncFinalStatesNow()
+	}
+
+	// Preserve already-known peer entries so each node's chain_state.json
+	// reflects the full network view instead of overwriting it with only
+	// our local node.
+	if err := bc.SaveBasicChainState(); err != nil {
+		// SaveBasicChainState already preserves nodes[] if the full file exists,
+		// and falls back to an empty nodes array on first run.
+		logger.Warn("[%s] SaveBasicChainState (preload/merge): %v", nodeID, err)
+	}
+
+	// Load existing chain state and merge our current node info into it.
+	if err := func() error {
+		cs, err := bc.GetStorage().LoadCompleteChainState()
+		if err != nil {
+			// If we can't load the complete state, fall back to storing our
+			// single node entry so we at least write a valid chain_state.json.
+			return bc.StoreChainState([]*state.NodeInfo{nodeInfo})
+		}
+		if cs == nil {
+			return bc.StoreChainState([]*state.NodeInfo{nodeInfo})
+		}
+		// Merge: update/insert by NodeID.
+		merged := make([]*state.NodeInfo, 0, len(cs.Nodes)+1)
+		seen := make(map[string]bool)
+		for _, n := range cs.Nodes {
+			if n == nil {
+				continue
+			}
+			if n.NodeID == nodeInfo.NodeID {
+				merged = append(merged, nodeInfo)
+				seen[n.NodeID] = true
+				continue
+			}
+			merged = append(merged, n)
+			seen[n.NodeID] = true
+		}
+		if !seen[nodeInfo.NodeID] {
+			merged = append(merged, nodeInfo)
+		}
+
+		return bc.StoreChainState(merged)
+	}(); err != nil {
+		logger.Warn("[%s] StoreChainState: %v", nodeID, err)
+	} else {
+		logger.Info("[%s] 💾 Chain state persisted — height=%d", nodeID, latest.GetHeight())
+	}
+
+}
+
+// runStatePersistenceLoop periodically persists node state.
+func runStatePersistenceLoop(
+	ctx context.Context,
+	bc *core.Blockchain,
+	nodeID, address string,
+) {
+	const flushInterval = 30 * time.Second
+	ticker := time.NewTicker(flushInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			flushNodeState(bc, nodeID, address)
+		}
+	}
 }

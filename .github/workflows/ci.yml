@@ -1,6 +1,6 @@
 # CI Workflow for Sphinx Protocol
 # Runs on every push and pull request to ensure code quality
-# Note: GUI packages require Fyne dependencies, skipped in CI
+# Note: GUI packages require Fyne dependencies
 name: CI
 on:
   push:
@@ -29,7 +29,17 @@ jobs:
       - name: Install system dependencies for Fyne/GUI
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgl1-mesa-dev libegl1-mesa-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxkbcommon-dev pkg-config
+          sudo apt-get install -y \
+            libgl1-mesa-dev \
+            libglu1-mesa-dev \
+            libegl1-mesa-dev \
+            libx11-dev \
+            libxrandr-dev \
+            libxinerama-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libxkbcommon-dev \
+            pkg-config
 
       - name: Run go fmt
         run: go fmt ./...

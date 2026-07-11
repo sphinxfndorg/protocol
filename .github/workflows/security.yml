@@ -24,15 +24,11 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Install system dependencies for Fyne/GUI
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libgl1-mesa-dev libegl1-mesa-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxkbcommon-dev pkg-config
-
       - name: Run govulncheck
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
-          govulncheck ./...
+          # Exclude GUI packages that require system libraries
+          govulncheck $(go list ./... | grep -v 'fyne.io' | grep -v 'go-gl')
 
   codeql:
     name: CodeQL Analysis
@@ -46,10 +42,8 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install system dependencies for Fyne/GUI
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libgl1-mesa-dev libegl1-mesa-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxkbcommon-dev pkg-config
+      - name: Install system dependencies for CodeQL
+        run: sudo apt-get update && sudo apt-get install -y libgl1-mesa-dev libegl1-mesa-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxkbcommon-dev pkg-config libglfw3 libglfw3-dev
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v3

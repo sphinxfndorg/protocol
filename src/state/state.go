@@ -1326,6 +1326,135 @@ func (s *Storage) StoreBlock(block *types.Block) error {
 	return nil
 }
 
+// DeleteBlocksAbove removes every stored block with height > targetHeight
+// from disk, from the in-memory blockIndex/heightIndex/txIndex, and resets
+// bestBlockHash/totalBlocks to match targetHeight. Used by
+// Blockchain.RollbackToHeight during chain reorganization (see handleReorg
+// in sync.go) to purge an invalidated fork from persistent storage —
+// without this, a rolled-back chain would resurface after a restart or a
+// plain GetBlockByNumber() lookup, since StoreBlock/loadBlockIndex would
+// just reload the orphaned blocks straight back off disk.
+//
+// Mirrors the exact locking, indexing, and disk-file conventions used by
+// StoreBlock/storeBlockToDisk/saveBlockIndex/saveChainState above, so the
+// on-disk state stays internally consistent with those methods.
+func (s *Storage) DeleteBlocksAbove(targetHeight uint64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.totalBlocks == 0 {
+		return nil // nothing stored yet
+	}
+	currentTip := s.totalBlocks - 1
+	if targetHeight >= currentTip {
+		return nil // nothing above targetHeight to remove
+	}
+
+	logger.Info("🗑️ Purging stored blocks above height %d (current tip=%d)", targetHeight, currentTip)
+
+	// hash-by-height lookup that falls back to the persisted block index
+	// file for blocks not currently resident in heightIndex (e.g. loaded
+	// this run but later evicted, or never touched since process start).
+	hashForHeight := func(height uint64) (string, bool) {
+		if block, ok := s.heightIndex[height]; ok {
+			return block.GetHash(), true
+		}
+		return s.lookupHashInPersistedIndex(height)
+	}
+
+	removed := 0
+	for height := currentTip; height > targetHeight; height-- {
+		hash, found := hashForHeight(height)
+		if !found {
+			logger.Warn("DeleteBlocksAbove: no known hash for height %d, skipping disk cleanup for it", height)
+			delete(s.heightIndex, height)
+			continue
+		}
+
+		// Remove the block file from disk.
+		filename := filepath.Join(s.blocksDir, s.sanitizeFilename(hash)+".json")
+		if err := os.Remove(filename); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("DeleteBlocksAbove: failed to remove block file for height %d: %w", height, err)
+		}
+
+		// Remove its transactions from the tx index, if the block was loaded.
+		if block, ok := s.blockIndex[hash]; ok {
+			for _, tx := range block.Body.TxsList {
+				if tx != nil && tx.ID != "" {
+					delete(s.txIndex, tx.ID)
+				}
+			}
+		}
+
+		delete(s.blockIndex, hash)
+		delete(s.heightIndex, height)
+		removed++
+	}
+
+	// Reset chain tip bookkeeping to targetHeight.
+	s.totalBlocks = targetHeight + 1
+	if newTipHash, found := hashForHeight(targetHeight); found {
+		s.bestBlockHash = newTipHash
+		// Make sure the new tip is actually loaded in memory, not just
+		// known by hash — GetLatestBlock() reads it straight out of
+		// blockIndex.
+		if _, ok := s.blockIndex[newTipHash]; !ok {
+			if block, err := s.loadBlockFromDisk(newTipHash); err == nil {
+				s.blockIndex[newTipHash] = block
+				s.heightIndex[targetHeight] = block
+			} else {
+				logger.Error("DeleteBlocksAbove: rollback target block %s (height %d) has a known hash but failed to load from disk: %v",
+					newTipHash, targetHeight, err)
+			}
+		}
+	} else {
+		// This should not happen in practice: targetHeight is always the
+		// fork point returned by FindCommonAncestor, which only returns
+		// heights of blocks the local chain actually has. Fail loudly
+		// rather than silently leaving bestBlockHash pointing nowhere.
+		return fmt.Errorf("DeleteBlocksAbove: no known block for target height %d, refusing to leave bestBlockHash inconsistent", targetHeight)
+	}
+
+	// Persist the updated index and chain state so the purge survives a restart.
+	if err := s.saveBlockIndex(); err != nil {
+		return fmt.Errorf("DeleteBlocksAbove: failed to save block index: %w", err)
+	}
+	if err := s.saveChainState(); err != nil {
+		return fmt.Errorf("DeleteBlocksAbove: failed to save chain state: %w", err)
+	}
+
+	logger.Info("✅ Purged %d stored blocks above height %d (tip now %d, hash=%s)",
+		removed, targetHeight, targetHeight, s.bestBlockHash)
+	return nil
+}
+
+// lookupHashInPersistedIndex reads the on-disk block_index.json (hash ->
+// height map, same format written by saveBlockIndex) to find the hash for
+// a given height, for blocks that aren't currently loaded into
+// s.heightIndex. Returns ("", false) if the index file is missing, unreadable,
+// or has no entry for that height.
+func (s *Storage) lookupHashInPersistedIndex(height uint64) (string, bool) {
+	indexFile := filepath.Join(s.indexDir, "block_index.json")
+	data, err := os.ReadFile(indexFile)
+	if err != nil {
+		return "", false
+	}
+
+	var index struct {
+		Blocks map[string]uint64 `json:"blocks"` // hash -> height
+	}
+	if err := json.Unmarshal(data, &index); err != nil {
+		return "", false
+	}
+
+	for hash, h := range index.Blocks {
+		if h == height {
+			return hash, true
+		}
+	}
+	return "", false
+}
+
 // ReplaceGenesis overwrites the local genesis block with one received from a peer.
 // This is used by late-joining nodes that created a local genesis (with their own
 // wall-clock timestamp) and need to adopt the network's canonical genesis block.

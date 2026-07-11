@@ -1017,6 +1017,24 @@ func runBlockProductionLoop(
 	syncState *SyncState,
 	syncStateMu *sync.Mutex,
 ) {
+	// ★ FIX: SOLO_MODE must be exclusive to the bootstrap node — the one
+	// that created genesis locally, i.e. bc.IsLateJoiner() == false (set at
+	// startup from `seeds != ""`, see bind/nodes.go's core.NewBlockchain
+	// call: `seeds != ""` is passed as the lateJoiner argument). Previously
+	// *any* node that currently saw 0 peers would enter SOLO_MODE, including
+	// late joiners. If peer discovery took a couple of minutes, every node
+	// independently mined 15-16 blocks with divergent content from height 1
+	// onward — a fork the reorg path couldn't heal (see
+	// FindCommonAncestor/handleReorg fixes in sync.go).
+	//
+	// NOTE: this deliberately does NOT key off nodeIndex. In real-device
+	// mode, bind/nodes.go force-resets nodeIndex to 0 for EVERY node
+	// (`nodeIndex = 0` when usingRealAddress/userProvidedTCP — see
+	// StartNode), so nodeIndex cannot distinguish "the bootstrap node" from
+	// "any other real node" in production. IsLateJoiner (driven by whether
+	// --seeds was given at startup) is the only signal that's correct in
+	// both same-box and real-device deployments.
+	isBootstrapNode := !bc.IsLateJoiner()
 	const (
 		singleNodeInterval  = 10 * time.Second
 		multiNodeRoundDelay = 3 * time.Second
@@ -1097,8 +1115,8 @@ func runBlockProductionLoop(
 	// Each block is committed immediately via CommitBlock, not through PBFT
 	// voting. This is the correct behavior for the first node (Node-A) that
 	// starts with no peers — it should mine blocks without waiting for quorum.
-	if effectiveValidatorCount() == 1 {
-		logger.Info("[%s] 🟢 SOLO MODE — no peers detected, mining blocks independently", nodeID)
+	if isBootstrapNode && effectiveValidatorCount() == 1 {
+		logger.Info("[%s] 🟢 SOLO MODE — bootstrap node, no peers detected yet, mining blocks independently", nodeID)
 		blockTicker := time.NewTicker(singleNodeInterval)
 		defer blockTicker.Stop()
 		peerCheckTicker := time.NewTicker(5 * time.Second)
@@ -1126,9 +1144,40 @@ func runBlockProductionLoop(
 			case <-peerCheckTicker.C:
 				// Re‑evaluate validator count
 				if effectiveValidatorCount() >= 3 {
-					logger.Info("[%s] 🟢 %d validators now known — switching to PBFT", nodeID, effectiveValidatorCount())
-					// Break out of solo loop to fall through to PBFT section
-					goto afterSolo
+					// ★ CRITICAL FIX: Before switching to PBFT, sync to align with the network tip
+					// Without this, each node would switch based on its own solo-mined chain,
+					// causing divergent tip hashes when all nodes try to propose simultaneously.
+					logger.Info("[%s] 🔄 %d validators now known — syncing to network tip before PBFT transition", nodeID, effectiveValidatorCount())
+
+					// Wait for sync loop to catch us up to the network tip
+					syncTimeout := time.After(30 * time.Second)
+					for {
+						select {
+						case <-ctx.Done():
+							return
+						case <-syncTimeout:
+							logger.Warn("[%s] ⚠️ Timed out waiting to sync before PBFT transition", nodeID)
+							// Continue anyway - it's better than deadlocking forever
+							goto afterSolo
+						default:
+							// Simplify: just wait for syncState to become SyncStateCaughtUp
+							// The sync loop will catch us up to the network tip
+							syncStateMu.Lock()
+							currentSyncState := *syncState
+							syncStateMu.Unlock()
+
+							localTip := bc.GetLatestBlock()
+							localHeight := uint64(0)
+							if localTip != nil {
+								localHeight = localTip.GetHeight()
+							}
+							if currentSyncState == SyncStateCaughtUp {
+								logger.Info("[%s] ✅ Sync loop reports caught up (height %d) — now switching to PBFT", nodeID, localHeight)
+								goto afterSolo
+							}
+							time.Sleep(1 * time.Second)
+						}
+					}
 				}
 			}
 		}

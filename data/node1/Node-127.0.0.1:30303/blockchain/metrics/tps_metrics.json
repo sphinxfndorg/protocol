@@ -1,0 +1,425 @@
+{
+  "current_tps": 1.750624138450511,
+  "average_tps": 0.052941176470588235,
+  "peak_tps": 1.8,
+  "total_transactions": 9,
+  "blocks_processed": 34,
+  "last_updated": "2026-07-11T11:38:23.221811+07:00",
+  "current_window_count": 0,
+  "window_start_time": "2026-07-11T11:28:34.695686+07:00",
+  "window_duration_seconds": 5,
+  "tps_history": [
+    {
+      "timestamp": "2026-07-11T11:28:36.736642+07:00",
+      "tps": 1.8
+    },
+    {
+      "timestamp": "2026-07-11T11:28:57.283592+07:00",
+      "tps": 0,
+      "block_height": 1
+    },
+    {
+      "timestamp": "2026-07-11T11:29:07.870514+07:00",
+      "tps": 0,
+      "block_height": 2
+    },
+    {
+      "timestamp": "2026-07-11T11:29:18.123605+07:00",
+      "tps": 0,
+      "block_height": 3
+    },
+    {
+      "timestamp": "2026-07-11T11:29:28.25732+07:00",
+      "tps": 0,
+      "block_height": 4
+    },
+    {
+      "timestamp": "2026-07-11T11:29:38.215541+07:00",
+      "tps": 0,
+      "block_height": 5
+    },
+    {
+      "timestamp": "2026-07-11T11:29:48.395334+07:00",
+      "tps": 0,
+      "block_height": 6
+    },
+    {
+      "timestamp": "2026-07-11T11:29:58.848014+07:00",
+      "tps": 0,
+      "block_height": 7
+    },
+    {
+      "timestamp": "2026-07-11T11:30:45.073816+07:00",
+      "tps": 0,
+      "block_height": 8
+    },
+    {
+      "timestamp": "2026-07-11T11:31:03.613337+07:00",
+      "tps": 0,
+      "block_height": 9
+    },
+    {
+      "timestamp": "2026-07-11T11:31:21.81313+07:00",
+      "tps": 0,
+      "block_height": 10
+    },
+    {
+      "timestamp": "2026-07-11T11:31:41.722945+07:00",
+      "tps": 0,
+      "block_height": 11
+    },
+    {
+      "timestamp": "2026-07-11T11:32:01.293433+07:00",
+      "tps": 0,
+      "block_height": 12
+    },
+    {
+      "timestamp": "2026-07-11T11:32:20.492649+07:00",
+      "tps": 0,
+      "block_height": 13
+    },
+    {
+      "timestamp": "2026-07-11T11:32:39.49443+07:00",
+      "tps": 0,
+      "block_height": 14
+    },
+    {
+      "timestamp": "2026-07-11T11:32:56.789469+07:00",
+      "tps": 0,
+      "block_height": 15
+    },
+    {
+      "timestamp": "2026-07-11T11:33:14.464705+07:00",
+      "tps": 0,
+      "block_height": 16
+    },
+    {
+      "timestamp": "2026-07-11T11:33:32.180051+07:00",
+      "tps": 0,
+      "block_height": 17
+    },
+    {
+      "timestamp": "2026-07-11T11:33:49.715848+07:00",
+      "tps": 0,
+      "block_height": 18
+    },
+    {
+      "timestamp": "2026-07-11T11:34:07.651121+07:00",
+      "tps": 0,
+      "block_height": 19
+    },
+    {
+      "timestamp": "2026-07-11T11:34:25.269906+07:00",
+      "tps": 0,
+      "block_height": 20
+    },
+    {
+      "timestamp": "2026-07-11T11:34:43.055392+07:00",
+      "tps": 0,
+      "block_height": 21
+    },
+    {
+      "timestamp": "2026-07-11T11:35:00.900495+07:00",
+      "tps": 0,
+      "block_height": 22
+    },
+    {
+      "timestamp": "2026-07-11T11:35:18.264794+07:00",
+      "tps": 0,
+      "block_height": 23
+    },
+    {
+      "timestamp": "2026-07-11T11:35:36.210151+07:00",
+      "tps": 0,
+      "block_height": 24
+    },
+    {
+      "timestamp": "2026-07-11T11:35:54.465467+07:00",
+      "tps": 0,
+      "block_height": 25
+    },
+    {
+      "timestamp": "2026-07-11T11:36:13.492538+07:00",
+      "tps": 0,
+      "block_height": 26
+    },
+    {
+      "timestamp": "2026-07-11T11:36:32.716785+07:00",
+      "tps": 0,
+      "block_height": 27
+    },
+    {
+      "timestamp": "2026-07-11T11:36:50.544721+07:00",
+      "tps": 0,
+      "block_height": 28
+    },
+    {
+      "timestamp": "2026-07-11T11:37:08.7267+07:00",
+      "tps": 0,
+      "block_height": 29
+    },
+    {
+      "timestamp": "2026-07-11T11:37:27.387453+07:00",
+      "tps": 0,
+      "block_height": 30
+    },
+    {
+      "timestamp": "2026-07-11T11:37:45.354342+07:00",
+      "tps": 0,
+      "block_height": 31
+    },
+    {
+      "timestamp": "2026-07-11T11:38:03.500012+07:00",
+      "tps": 0,
+      "block_height": 32
+    },
+    {
+      "timestamp": "2026-07-11T11:38:23.216896+07:00",
+      "tps": 0,
+      "block_height": 33
+    }
+  ],
+  "transactions_per_block": [
+    {
+      "block_height": 0,
+      "block_hash": "GENESIS_742190428856f3f48412f688be56607c9363583c19e665850d441b62c545d9df",
+      "tx_count": 9,
+      "block_time": "2026-07-11T11:28:31+07:00",
+      "block_size_bytes": 2480
+    },
+    {
+      "block_height": 1,
+      "block_hash": "3d9c65d8231c9dbbdb8629f3d2911b77807679ef54e5998456921ff3a6cb4f58",
+      "tx_count": 0,
+      "block_time": "2026-07-11T11:28:52+07:00",
+      "block_size_bytes": 80
+    },
+    {
+      "block_height": 2,
+      "block_hash": "c076314b368652ba4cfc32a3e48bcac6bfdfa8b82c1367a8a08ecff3fef5e17b",
+      "tx_count": 0,
+      "block_time": "2026-07-11T11:29:02+07:00",
+      "block_size_bytes": 80
+    },
+    {
+      "block_height": 3,
+      "block_hash": "9b1b78c4924a1889c8d58dfce52a9ea17763873cf41f8ef5894ab6312c493a81",
+      "tx_count": 0,
+      "block_time": "2026-07-11T11:29:12+07:00",
+      "block_size_bytes": 80
+    },
+    {
+      "block_height": 4,
+      "block_hash": "77c8c952e155839bde20ae85f09591080052795323f1d9366555ce9db1223d4a",
+      "tx_count": 0,
+      "block_time": "2026-07-11T11:29:22+07:00",
+      "block_size_bytes": 80
+    },
+    {
+      "block_height": 5,
+      "block_hash": "1d5ff864e5aa7dd2cdc5d82d46145d8d39cd8efd5e71c2dc3b1e69f39939ef88",
+      "tx_count": 0,
+      "block_time": "2026-07-11T11:29:32+07:00",
+      "block_size_bytes": 80
+    },
+    {
+      "block_height": 6,
+      "block_hash": "0a5af19fdaaf1032c41ddce4fc1b27bf31f07ebca07a0dab82b20e9c4e958066",
+      "tx_count": 0,
+      "block_time": "2026-07-11T11:29:42+07:00",
+      "block_size_bytes": 80
+    },
+    {
+      "block_height": 7,
+      "block_hash": "c81fbcbfec691a49c886994d81b0a65948d72649c63a3f85d306c6f4bbbaf043",
+      "tx_count": 0,
+      "block_time": "2026-07-11T11:29:53+07:00",
+      "block_size_bytes": 80
+    },
+    {
+      "block_height": 8,
+      "block_hash": "4f2f930b50bf3797087115333a93de588bcedbb37a2873d46436abbe75e9ccb1",
+      "tx_count": 0,
+      "block_time": "2026-07-11T11:30:32+07:00",
+      "block_size_bytes": 80
+    },
+    {
+      "block_height": 9,
+      "block_hash": "0a9d7041f2cdee020edfba168c2de0104f8f1671504b1627840945473b4aef40",
+      "tx_count": 0,
+      "block_time": "2026-07-11T11:30:51+07:00",
+      "block_size_bytes": 80
+    },
+    {
+      "block_height": 10,
+      "block_hash": "124541aaacec264ff7c6373b677e23bf880561d3eef4828f0e7d3a28a4570ef3",
+      "tx_count": 0,
+      "block_time": "2026-07-11T11:31:09+07:00",
+      "block_size_bytes": 80
+    },
+    {
+      "block_height": 11,
+      "block_hash": "17146484df955819f8cf748d60fedc38e238f50ed3391bc21cf27f69f1b8f7a4",
+      "tx_count": 0,
+      "block_time": "2026-07-11T11:31:28+07:00",
+      "block_size_bytes": 80
+    },
+    {
+      "block_height": 12,
+      "block_hash": "56693e4e55457e5b2304fc59c5280f12020b9fd6dc4e54429e05d8e12d73a4d3",
+      "tx_count": 0,
+      "block_time": "2026-07-11T11:31:47+07:00",
+      "block_size_bytes": 80
+    },
+    {
+      "block_height": 13,
+      "block_hash": "100eb8212d0237dc5a64a66d2e8a07e3937be12c341af0b60dc532ea3b52b257",
+      "tx_count": 0,
+      "block_time": "2026-07-11T11:32:07+07:00",
+      "block_size_bytes": 80
+    },
+    {
+      "block_height": 14,
+      "block_hash": "6cce0b4cc7e60ca6c59acf9349c8a74dbefd3dfc13e92bbdd8bc3abe625b2301",
+      "tx_count": 0,
+      "block_time": "2026-07-11T11:32:27+07:00",
+      "block_size_bytes": 80
+    },
+    {
+      "block_height": 15,
+      "block_hash": "8dd65acb86666ea3edce1f8de6f48775bc91126a3e12d61ddf90e395db13564f",
+      "tx_count": 0,
+      "block_time": "2026-07-11T11:32:45+07:00",
+      "block_size_bytes": 80
+    },
+    {
+      "block_height": 16,
+      "block_hash": "c41a9b33abf34a78eb2c60547db106ecceb22b6dee608c7e10d893d74cb6b57f",
+      "tx_count": 0,
+      "block_time": "2026-07-11T11:33:02+07:00",
+      "block_size_bytes": 80
+    },
+    {
+      "block_height": 17,
+      "block_hash": "eec5e0af118b9cf2c04bdc39bbf4d7d85b7e4a1069f7df636865430478428044",
+      "tx_count": 0,
+      "block_time": "2026-07-11T11:33:20+07:00",
+      "block_size_bytes": 80
+    },
+    {
+      "block_height": 18,
+      "block_hash": "c2183a5603d08294c2bd59d37b33f43738a819dee804a726fc413509ca1e0b3c",
+      "tx_count": 0,
+      "block_time": "2026-07-11T11:33:38+07:00",
+      "block_size_bytes": 80
+    },
+    {
+      "block_height": 19,
+      "block_hash": "b046579ee6d6eb3d33eaae06a8dd2ad2a8e4d453fc67d6bc700da8b0363466cd",
+      "tx_count": 0,
+      "block_time": "2026-07-11T11:33:55+07:00",
+      "block_size_bytes": 80
+    },
+    {
+      "block_height": 20,
+      "block_hash": "3fdadc0ef1bd2a5d1591316fa101e0a58b77e28a93ad626987f1e489e0f7aa2b",
+      "tx_count": 0,
+      "block_time": "2026-07-11T11:34:13+07:00",
+      "block_size_bytes": 80
+    },
+    {
+      "block_height": 21,
+      "block_hash": "144aaf54bf98a76b49356995695ce15c4d09e17d263e364dddce770c4c37456b",
+      "tx_count": 0,
+      "block_time": "2026-07-11T11:34:31+07:00",
+      "block_size_bytes": 80
+    },
+    {
+      "block_height": 22,
+      "block_hash": "0449ebbfcf83ee5808087749795d4574bc7eabd4106333da695e6790aa70d224",
+      "tx_count": 0,
+      "block_time": "2026-07-11T11:34:48+07:00",
+      "block_size_bytes": 80
+    },
+    {
+      "block_height": 23,
+      "block_hash": "0c21e511f697e20ccc9c027ec10be662da8c86706a3115f0f04d784bab9a22d1",
+      "tx_count": 0,
+      "block_time": "2026-07-11T11:35:06+07:00",
+      "block_size_bytes": 80
+    },
+    {
+      "block_height": 24,
+      "block_hash": "f6620f6520eee3640330444fa710481c7280ee13e6ad306f65bf5b1692a8f3f6",
+      "tx_count": 0,
+      "block_time": "2026-07-11T11:35:23+07:00",
+      "block_size_bytes": 80
+    },
+    {
+      "block_height": 25,
+      "block_hash": "9190f547185048eebd1d6e1b86df2ac5379e81451c2bb16af2869f9e16f98d49",
+      "tx_count": 0,
+      "block_time": "2026-07-11T11:35:41+07:00",
+      "block_size_bytes": 80
+    },
+    {
+      "block_height": 26,
+      "block_hash": "79edd20c12f2a7db3f27114c86eed313c9e2222509bb67a2a72972cc6728e477",
+      "tx_count": 0,
+      "block_time": "2026-07-11T11:36:00+07:00",
+      "block_size_bytes": 80
+    },
+    {
+      "block_height": 27,
+      "block_hash": "0917540389e7f90ccf09968dcd2a723e797506963d894c4dc17f54e6f0a5536e",
+      "tx_count": 0,
+      "block_time": "2026-07-11T11:36:19+07:00",
+      "block_size_bytes": 80
+    },
+    {
+      "block_height": 28,
+      "block_hash": "ab6f127c920ba890a46412121c9f11189c221baf8ae008802f7e2d10607faf8e",
+      "tx_count": 0,
+      "block_time": "2026-07-11T11:36:38+07:00",
+      "block_size_bytes": 80
+    },
+    {
+      "block_height": 29,
+      "block_hash": "3c556a46470afca7ce41d4bb97aa9afed0f02589cf4811a0d6d254cc0cf387ee",
+      "tx_count": 0,
+      "block_time": "2026-07-11T11:36:56+07:00",
+      "block_size_bytes": 80
+    },
+    {
+      "block_height": 30,
+      "block_hash": "f86b4e267ef61c9644175aa200f6af6162428a4e57acf4e9922e82519d2c44dc",
+      "tx_count": 0,
+      "block_time": "2026-07-11T11:37:14+07:00",
+      "block_size_bytes": 80
+    },
+    {
+      "block_height": 31,
+      "block_hash": "0e0d539a71d75df03be9e49470d27cef0cd97fe01556c1ea528121d02ccfaf5e",
+      "tx_count": 0,
+      "block_time": "2026-07-11T11:37:33+07:00",
+      "block_size_bytes": 80
+    },
+    {
+      "block_height": 32,
+      "block_hash": "1df0be5f4699b201ebc1c075b6a703bc67435d6adf38beedbcd9b0355e71570c",
+      "tx_count": 0,
+      "block_time": "2026-07-11T11:37:51+07:00",
+      "block_size_bytes": 80
+    },
+    {
+      "block_height": 33,
+      "block_hash": "cd18f5f84866042ef0482405786eafe7dcf5a9a2dd3955c76d29da9d05650198",
+      "tx_count": 0,
+      "block_time": "2026-07-11T11:38:10+07:00",
+      "block_size_bytes": 80
+    }
+  ],
+  "avg_transactions_per_block": 0.2647058823529412,
+  "max_transactions_per_block": 9,
+  "min_transactions_per_block": 0
+}

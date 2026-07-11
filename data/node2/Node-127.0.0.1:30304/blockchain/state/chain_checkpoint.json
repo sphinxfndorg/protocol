@@ -1,0 +1,42 @@
+{
+  "phase": "devnet",
+  "chain_name": "Sphinx Devnet",
+  "genesis_hash": "GENESIS_742190428856f3f48412f688be56607c9363583c19e665850d441b62c545d9df",
+  "timestamp": "2026-07-11T04:37:57Z",
+  "supply": {
+    "max": {
+      "nspx": "5000000000000000000000000000",
+      "spx": "5000000000"
+    },
+    "genesis": {
+      "nspx": "1240000000000000000000000000",
+      "spx": "1240000000"
+    },
+    "minted": {
+      "nspx": "1240000165000000000000000000",
+      "spx": "1240000165"
+    },
+    "remaining": {
+      "nspx": "3759999835000000000000000000",
+      "spx": "3759999835"
+    }
+  },
+  "vault": {
+    "address": "0000000000000000000000000000000000000001",
+    "balance_nspx": "0",
+    "balance_spx": "0"
+  },
+  "rewards": {
+    "minted_nspx": "165000000000000000000",
+    "minted_spx": "165"
+  },
+  "distribution": {
+    "status": "complete",
+    "total_allocations": 9,
+    "total_allocated_spx": "1240000000"
+  },
+  "tip": {
+    "height": 33,
+    "hash": "011cefdf80a90337df9ad17320945effbedc991f0b61a392b84d6496da3ff4c6"
+  }
+}

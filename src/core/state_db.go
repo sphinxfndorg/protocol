@@ -30,15 +30,43 @@ func (db *StateDB) Close() error {
 	return nil
 }
 
-// GetLastTransactionTimestamp implements pool.StateDB
-func (db *StateDB) GetLastTransactionTimestamp(address string) (int64, error) {
-	db.mu.RLock()
-	defer db.mu.RUnlock()
+// transactionTimestampKey generates the storage key for the last transaction timestamp
+const transactionTimestampKey = "tx_ts_"
 
-	// For now, return 0 (no previous transactions)
-	// In a real implementation, you would store the last timestamp per address
-	// and retrieve it from the state
-	return 0, nil
+// GetLastTransactionTimestamp returns the timestamp of the most recent transaction
+// for the given address. It reads from both the state DB (committed transactions)
+// and the pending map (uncommitted transactions in the current batch).
+func (s *StateDB) GetLastTransactionTimestamp(address string) (int64, error) {
+	if address == "" {
+		return 0, errors.New("address cannot be empty")
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// First check if we have pending transactions for this address
+	// The pending map contains in-memory changes not yet flushed to disk
+	if entry, ok := s.pending[address]; ok && entry.lastTxTimestamp > 0 {
+		return entry.lastTxTimestamp, nil
+	}
+
+	// Check storage for the last transaction timestamp
+	// This key stores the timestamp in Unix seconds format
+	key := transactionTimestampKey + address
+	data, err := s.db.Get(key)
+	if err != nil {
+		// No timestamp stored yet for this address
+		return 0, nil
+	}
+
+	// Parse the timestamp
+	var ts int64
+	if _, err := fmt.Sscanf(string(data), "%d", &ts); err != nil {
+		logger.Warn("GetLastTransactionTimestamp: invalid timestamp format for %s: %v", address, err)
+		return 0, nil
+	}
+
+	return ts, nil
 }
 
 // GetLastNonce implements pool.StateDB
@@ -372,11 +400,32 @@ func (s *StateDB) SubBalance(address string, amount *big.Int) error {
 	return nil
 }
 
+// SetNonce sets the nonce of address to the specified value.
+// Used during rollback to restore previous nonce value.
+func (s *StateDB) SetNonce(address string, nonce uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.dirty(address).nonce = nonce
+}
+
 // IncrementNonce adds 1 to the nonce of address.
 func (s *StateDB) IncrementNonce(address string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.dirty(address).nonce++
+}
+
+// DeleteAccount removes an account from the state database.
+// Used during rollback when an account was created by the block being reverted.
+func (s *StateDB) DeleteAccount(address string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	delete(s.pending, address)
+	if err := s.db.Delete(accountPrefix + address); err != nil {
+		return fmt.Errorf("DeleteAccount: %w", err)
+	}
+	return nil
 }
 
 // IncrementTotalSupply adds amount to the tracked circulating supply.

@@ -17,6 +17,70 @@ import (
 	"github.com/syndtr/goleveldb/leveldb/opt"
 )
 
+// WriteBatch represents a batch of pending writes that can be applied atomically
+type WriteBatch struct {
+	db    *DB
+	batch *leveldb.Batch
+}
+
+// NewWriteBatch creates a new empty write batch for the given DB
+func (d *DB) NewWriteBatch() *WriteBatch {
+	return &WriteBatch{
+		db:    d,
+		batch: &leveldb.Batch{},
+	}
+}
+
+// Put adds a key-value pair to the batch
+func (wb *WriteBatch) Put(key string, value []byte) {
+	wb.batch.Put([]byte(key), value)
+}
+
+// Delete adds a deletion to the batch
+func (wb *WriteBatch) Delete(key string) {
+	wb.batch.Delete([]byte(key))
+}
+
+// Commit atomically applies all batched operations to the database.
+// This is durable - changes are written to disk before returning.
+// Returns error if commit fails, leaving database unchanged.
+func (wb *WriteBatch) Commit() error {
+	if wb.db == nil || wb.db.db == nil {
+		return fmt.Errorf("database is closed")
+	}
+	if wb.batch == nil {
+		return nil
+	}
+
+	// Write the batch using the underlying leveldb.DB
+	// This requires accessing the concrete *leveldb.DB through the interface
+	var ldb *leveldb.DB
+	switch v := wb.db.db.(type) {
+	case *leveldb.DB:
+		ldb = v
+	case *LevelDBAdapter:
+		v.mu.RLock()
+		ldb = v.db
+		v.mu.RUnlock()
+	default:
+		return fmt.Errorf("database type does not support batch writes")
+	}
+
+	// Apply batch atomically - this is a single write to the WAL
+	if err := ldb.Write(wb.batch, nil); err != nil {
+		logger.Error("Failed to commit write batch: %v", err)
+		return fmt.Errorf("failed to commit write batch: %w", err)
+	}
+
+	logger.Debug("Successfully committed write batch with %d operations", wb.batch.Len())
+	return nil
+}
+
+// Rollback discards the batch without applying changes
+func (wb *WriteBatch) Rollback() {
+	wb.batch.Reset()
+}
+
 // NewLevelDB initializes a new LevelDB instance at the specified path with retry logic.
 // Parameters:
 //   - path: File system path where the LevelDB database will be stored

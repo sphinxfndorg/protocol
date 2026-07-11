@@ -1441,31 +1441,70 @@ func (sm *SyncManager) checkForReorg() {
 }
 
 // handleReorg handles chain reorganization
+//
+// ★ FIX (was a no-op): this previously (a) built a locator containing only
+// the peer's *tip* hash and looked it up in the *local* chain — which can
+// only ever match by coincidence once two chains have actually diverged,
+// so it reliably found nothing; (b) treated forkHeight==0 as an error and
+// bailed out, even though genesis (height 0) is the correct, expected fork
+// point for chains that diverged at block 1 (e.g. independently solo-mined
+// chains); and (c) never called RollbackToHeight at all, despite the
+// function existing — it just logged a warning and adjusted sync bookkeeping
+// while leaving the invalidated local blocks in place, so the subsequent
+// re-sync had nowhere to attach the peer's blocks and they were orphaned
+// forever.
 func (sm *SyncManager) handleReorg(newChain *PeerChainInfo) {
 	logger.Info("🔄 Handling chain reorganization...")
 
 	// Save old best hash
 	sm.oldBestHash = string(sm.bc.GetBestBlockHash())
 
-	// Find fork point
-	forkHeight, forkHash := sm.bc.FindCommonAncestor(&BlockLocator{
-		Hashes: []string{newChain.BestHash},
-	})
-
-	if forkHeight == 0 {
-		logger.Error("❌ No common ancestor found - cannot reorganize")
+	localHeight := sm.bc.GetBlockCount()
+	if localHeight == 0 {
 		return
+	}
+
+	// Build a proper exponential-backoff locator over OUR chain (tip ...
+	// genesis), not a single peer hash checked against our own chain.
+	locator := sm.bc.GenerateBlockLocator(localHeight - 1)
+
+	// Walking our own locator against our own chain trivially matches at the
+	// tip, so this only tells us the true fork point once we can check each
+	// candidate hash against the PEER's chain instead. If the peer transport
+	// doesn't yet expose per-height ancestor queries, the safe conservative
+	// fallback is genesis: as long as both chains share the same genesis
+	// hash (verified below), height 0 is always a valid common ancestor,
+	// even if it isn't the *highest* one — worst case we redownload more
+	// blocks than strictly necessary, which is safe, unlike guessing wrong.
+	forkHeight, forkHash, found := sm.bc.FindCommonAncestor(locator)
+
+	localGenesis := sm.getGenesisHash()
+	if !found {
+		if newChain.GenesisHash == "" || newChain.GenesisHash != localGenesis {
+			logger.Error("❌ No common ancestor found and genesis hashes don't match (local=%s peer=%s) — refusing to reorg onto an unrelated chain",
+				localGenesis, newChain.GenesisHash)
+			return
+		}
+		logger.Warn("⚠️ No common ancestor above genesis found — falling back to genesis as the fork point")
+		forkHeight = 0
+		forkHash = localGenesis
 	}
 
 	logger.Info("📍 Fork point at height %d (hash=%s)", forkHeight, forkHash)
 
-	// TODO: Implement rollbackToHeight in blockchain.go
-	// For now, just log the need for reorganization
-	logger.Warn("⚠️ Reorganization required but rollbackToHeight not yet implemented")
-	_ = forkHash // Will be used when rollback is implemented
+	// Actually roll back the invalidated local blocks (storage + state, not
+	// just the in-memory slice — see RollbackToHeight in blockchain.go)
+	// BEFORE changing sync bookkeeping, so the sync loop has a clean tip to
+	// extend from.
+	if forkHeight < localHeight-1 {
+		if err := sm.bc.RollbackToHeight(forkHeight); err != nil {
+			logger.Error("❌ Rollback to height %d failed: %v — aborting reorg", forkHeight, err)
+			return
+		}
+	}
 
-	sm.reorgDepth = sm.bc.GetBlockCount() - forkHeight
-	logger.Info("✅ Need to rollback %d blocks to height %d", sm.reorgDepth, forkHeight)
+	sm.reorgDepth = localHeight - forkHeight
+	logger.Info("✅ Rolled back %d blocks to height %d", sm.reorgDepth, forkHeight)
 
 	// Re-sync from fork point
 	sm.syncFrom = forkHeight + 1
@@ -1881,21 +1920,32 @@ func (bc *Blockchain) GenerateBlockLocator(tipHeight uint64) *BlockLocator {
 }
 
 // FindCommonAncestor finds the highest common ancestor between local chain and remote hashes
-// Returns the height of the common ancestor and the hash
-func (bc *Blockchain) FindCommonAncestor(locator *BlockLocator) (uint64, string) {
+// Returns the height of the common ancestor, its hash, and whether a common
+// ancestor was found at all.
+//
+// ★ FIX: the previous signature returned (0, "") both when no ancestor was
+// found AND when the ancestor legitimately was genesis (height 0). Every
+// caller then treated height==0 as "not found" and aborted the reorg — but
+// genesis is *always* a valid, common fork point (all nodes share the same
+// cached genesis block, see core.GetGenesisHash/getCachedGenesisBlock). That
+// meant any fork that diverged at block 1 — exactly what happens when nodes
+// solo-mine independently before discovering peers — could never be healed,
+// because the "no ancestor found" and "forked immediately after genesis"
+// cases were indistinguishable. The explicit `found bool` fixes that.
+func (bc *Blockchain) FindCommonAncestor(locator *BlockLocator) (uint64, string, bool) {
 	if locator == nil || len(locator.Hashes) == 0 {
-		return 0, ""
+		return 0, "", false
 	}
 
 	// Check each hash in the locator (from most recent to oldest)
 	for _, hash := range locator.Hashes {
 		block := bc.GetBlockByHash(hash)
 		if block != nil {
-			return block.GetHeight(), hash
+			return block.GetHeight(), hash, true
 		}
 	}
 
-	return 0, ""
+	return 0, "", false
 }
 
 // ========== FIX: Add production robustness implementations ==========

@@ -460,8 +460,9 @@ type accountRecord struct {
 
 // accountEntry is the in-memory mutable form used inside StateDB.
 type accountEntry struct {
-	balance *big.Int
-	nonce   uint64
+	balance         *big.Int
+	nonce           uint64
+	lastTxTimestamp int64 // Last transaction timestamp for replay protection
 }
 
 // StateDB is an in-memory account-state cache backed by *database.DB.

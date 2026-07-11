@@ -155,6 +155,11 @@ func (blockchain *Blockchain) FinishInit(nodeID string) error {
 
 	// Load existing chain from storage or create genesis block if new chain
 	// This handles both existing chains and first-time initialization
+	// Initialize crash-safe storage journal manager
+	if err := InitJournalManager(blockchain.storage.GetStateDir()); err != nil {
+		logger.Warn("Warning: Failed to initialize journal manager: %v", err)
+	}
+
 	if err := blockchain.initializeChain(); err != nil {
 		return fmt.Errorf("failed to initialize chain: %w", err)
 	}
@@ -387,8 +392,24 @@ func (bc *Blockchain) SetChainTip(height uint64, hash string) error {
 }
 
 // RollbackToHeight rolls back the chain to the given height.
-// All blocks above the target height are removed from the chain and storage.
-// This is used during chain reorganization when a fork is detected.
+// All blocks above the target height are removed from the chain, from
+// persistent storage, and the account state is rebuilt so it matches
+// targetHeight exactly. This is used during chain reorganization when a
+// fork is detected (see handleReorg in sync.go).
+//
+// ★ FIX: this previously only trimmed the in-memory bc.chain slice. It left
+// (a) the orphaned blocks still sitting in persistent storage, so a restart
+// or a fresh GetBlockByNumber() call would resurrect the wrong chain, and
+// (b) the StateDB account records (acct:* keys — balances/nonces) computed
+// from the abandoned blocks completely untouched, so post-rollback state
+// would not match the rolled-back chain at all. Both are fixed below by
+// (1) deleting stored blocks above targetHeight, and (2) wiping and
+// replaying account state from genesis up to targetHeight via ExecuteBlock,
+// the same deterministic execution path used for normal block commits and
+// for checkpoint replay (see ApplyCheckpointBlocks in chain_maker.go).
+// Replay is only expensive for very deep rollbacks; for the shallow forks
+// this is meant to fix (a few dozen blocks at most) it's cheap and — unlike
+// trying to maintain incremental undo journals — always exactly correct.
 func (bc *Blockchain) RollbackToHeight(targetHeight uint64) error {
 	bc.lock.Lock()
 	defer bc.lock.Unlock()
@@ -404,15 +425,81 @@ func (bc *Blockchain) RollbackToHeight(targetHeight uint64) error {
 
 	logger.Info("🔄 Rolling back chain from height %d to %d", currentHeight, targetHeight)
 
-	// Remove blocks from in-memory chain
-	for i := len(bc.chain) - 1; i >= 0; i-- {
-		if bc.chain[i].GetHeight() <= targetHeight {
-			bc.chain = bc.chain[:i+1]
-			break
+	// 1. Remove blocks from the in-memory chain.
+	keptChain := make([]*types.Block, 0, targetHeight+1)
+	for _, blk := range bc.chain {
+		if blk.GetHeight() <= targetHeight {
+			keptChain = append(keptChain, blk)
+		}
+	}
+	bc.chain = keptChain
+
+	// 2. Delete the orphaned blocks from persistent storage so they don't
+	// resurface after a restart or a plain GetBlockByNumber() lookup.
+	// See Storage.DeleteBlocksAbove in src/state/state.go: removes each
+	// block's on-disk file and index/height-index entries for heights >
+	// targetHeight and resets the storage layer's recorded tip.
+	if err := bc.storage.DeleteBlocksAbove(targetHeight); err != nil {
+		return fmt.Errorf("RollbackToHeight: failed to purge storage above height %d: %w", targetHeight, err)
+	}
+
+	// 3. Rebuild account state so it matches targetHeight exactly. The
+	// abandoned blocks' balances/nonces/reward mints must not survive.
+	if err := bc.rebuildStateToHeight(targetHeight); err != nil {
+		return fmt.Errorf("RollbackToHeight: state rebuild failed: %w", err)
+	}
+
+	logger.Info("✅ Chain rolled back to height %d (storage purged, state rebuilt)", targetHeight)
+	return nil
+}
+
+// rebuildStateToHeight wipes all account state and deterministically
+// replays blocks 0..targetHeight through ExecuteBlock, so StateDB balances,
+// nonces, and supply counters exactly match the rolled-back chain tip.
+func (bc *Blockchain) rebuildStateToHeight(targetHeight uint64) error {
+	db, err := bc.storage.GetDB()
+	if err != nil {
+		return fmt.Errorf("rebuildStateToHeight: %w", err)
+	}
+
+	// Wipe existing account records (acct:*) plus the cached supply
+	// counters — ExecuteBlock/mintBlockReward will recompute all of it
+	// deterministically during replay.
+	keys, err := db.ListKeysWithPrefix(accountPrefix)
+	if err != nil {
+		return fmt.Errorf("rebuildStateToHeight: listing account keys: %w", err)
+	}
+	for _, k := range keys {
+		if err := db.Delete(k); err != nil {
+			return fmt.Errorf("rebuildStateToHeight: deleting %s: %w", k, err)
+		}
+	}
+	_ = db.Delete(totalSupplyKey)
+	_ = db.Delete(genesisSupplyKey)
+	_ = db.Delete(rewardsMintedKey)
+
+	for h := uint64(0); h <= targetHeight; h++ {
+		block := bc.getBlockByHeightLocked(h)
+		if block == nil {
+			return fmt.Errorf("rebuildStateToHeight: missing block at height %d during replay", h)
+		}
+		if _, err := bc.ExecuteBlock(block); err != nil {
+			return fmt.Errorf("rebuildStateToHeight: replaying block %d: %w", h, err)
 		}
 	}
 
-	logger.Info("✅ Chain rolled back to height %d (TODO: persistent storage cleanup)", targetHeight)
+	logger.Info("✅ State rebuilt via replay of %d blocks (0..%d)", targetHeight+1, targetHeight)
+	return nil
+}
+
+// getBlockByHeightLocked looks up a block from the in-memory chain (already
+// trimmed to targetHeight by the caller). Assumes bc.lock is already held.
+func (bc *Blockchain) getBlockByHeightLocked(height uint64) *types.Block {
+	for _, blk := range bc.chain {
+		if blk.GetHeight() == height {
+			return blk
+		}
+	}
 	return nil
 }
 
@@ -1243,9 +1330,34 @@ func (bc *Blockchain) ImportBlock(block *types.Block) BlockImportResult {
 			logger.Info("📊 Fork weight comparison: current_chain=%s competing_chain=%s",
 				oldWeight.String(), newWeight.String())
 
-			if newWeight.Cmp(oldWeight) > 0 {
-				logger.Info("🔄 Competing chain has higher weight (%s > %s) — reorganizing",
-					newWeight.String(), oldWeight.String())
+			// ★ FIX: attestation weight is 0 for every pre-consensus
+			// (solo-mined) block by design — PBFT hasn't started yet, so
+			// there are no attestations to sum. That meant two competing
+			// solo-mined chains always compared 0 == 0, newWeight.Cmp(oldWeight)
+			// was never > 0, and a node would NEVER adopt a peer's competing
+			// solo chain — each node just kept whichever chain it already
+			// had, and orphaned everything else forever. When weights tie,
+			// fall back to a rule every node computes identically: prefer
+			// the taller chain, and if heights also tie, prefer the
+			// lexicographically smaller hash. Same inputs -> same winner on
+			// every node, which is the actual requirement for convergence.
+			preferCompeting := newWeight.Cmp(oldWeight) > 0
+			if newWeight.Cmp(oldWeight) == 0 {
+				if latestTypeBlock == nil || block.GetHeight() > latestTypeBlock.GetHeight() {
+					preferCompeting = true
+				} else if block.GetHeight() == latestTypeBlock.GetHeight() && block.GetHash() < latestTypeBlock.GetHash() {
+					preferCompeting = true
+				}
+			}
+
+			if preferCompeting {
+				if newWeight.Cmp(oldWeight) > 0 {
+					logger.Info("🔄 Competing chain has higher weight (%s > %s) — reorganizing",
+						newWeight.String(), oldWeight.String())
+				} else {
+					logger.Info("🔄 Weights tied (%s == %s) — competing chain wins tie-break (height/hash) — reorganizing",
+						newWeight.String(), oldWeight.String())
+				}
 				if latestTypeBlock != nil {
 					if err := bc.reorganizeChain(block, latestTypeBlock); err != nil {
 						logger.Error("Reorg failed: %v", err)
@@ -1255,9 +1367,10 @@ func (bc *Blockchain) ImportBlock(block *types.Block) BlockImportResult {
 				}
 				return ImportedBest
 			}
-			// Our current chain is heavier — store the competing block as orphan
-			// so it can be promoted if the network eventually adopts it
-			logger.Info("Current chain is heavier (%s > %s), storing competing as orphan",
+			// Our current chain wins (by weight or tie-break) — store the
+			// competing block as orphan so it can be promoted if the network
+			// eventually adopts it
+			logger.Info("Current chain wins fork-choice (weight=%s vs %s), storing competing as orphan",
 				oldWeight.String(), newWeight.String())
 			bc.storeOrphanBlock(block)
 			return ImportedSide

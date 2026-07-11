@@ -1,0 +1,62 @@
+# CI Workflow for Sphinx Protocol
+# Runs on every push and pull request to ensure code quality
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    name: Build and Test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go-version: ['1.22', '1.23', '1.24']
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          go-version: ${{ matrix.go-version }}
+
+      - name: Run go fmt
+        run: go fmt ./...
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          args: --timeout=5m
+
+      - name: Run tests with race detection
+        run: go test -race -v ./...
+
+      - name: Verify build
+        run: go build -v ./...
+
+  go-version-check:
+    name: Go Version Monitor
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go (latest)
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Check for newer Go versions
+        run: |
+          CURRENT=$(go version | awk '{print $3}')
+          echo "Current Go version in use: $CURRENT"
+          echo "Checking if go.mod version needs update..."

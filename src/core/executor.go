@@ -1051,10 +1051,23 @@ func (bc *Blockchain) CreateBlock() (*types.Block, error) {
 	txsRoot := bc.calculateTransactionsRoot(selectedTxs)
 	stateRoot := bc.previewStateRoot(nextHeight, selectedTxs, proposerID)
 
-	currentTimestamp := common.GetCurrentTimestamp()
-	// Leader-provided timestamp. If unset, use local time, but timestamp must
-	// never be used inside execution/state-root computation in a way that makes
-	// consensus non-deterministic.
+	// ★ FIX: Use the parent block's timestamp + 1 second as the floor for the
+	// new block's timestamp, rather than always using the local wall clock.
+	// This ensures that:
+	//   1. Block timestamps are monotonically increasing (parent_timestamp <
+	//      child_timestamp), which is a consensus requirement.
+	//   2. All nodes that replay the same sequence of blocks arrive at the
+	//      same timestamps, because the timestamp is derived from the chain
+	//      itself, not from the local clock.
+	//   3. During PBFT, the leader's proposed timestamp is used verbatim
+	//      (the block arrives with a timestamp already set). This code path
+	//      is only reached during solo-mining (CreateBlock), where there is
+	//      no leader to provide a timestamp.
+	//
+	// Previously, each node used its own wall-clock time (common.GetCurrentTimestamp()),
+	// which meant two nodes solo-mining at the same height would produce blocks
+	// with different timestamps → different hashes → permanent fork.
+	currentTimestamp := prevBlock.Header.Timestamp + 1
 	if currentTimestamp == 0 {
 		currentTimestamp = time.Now().Unix()
 	}

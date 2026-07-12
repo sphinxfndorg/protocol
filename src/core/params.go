@@ -91,7 +91,7 @@ func GetSphinxChainParams() *SphinxChainParameters {
 		ChainID:       baseParams.ChainID,               // uint64
 		ChainName:     baseParams.ChainName,             // string
 		Symbol:        baseParams.Symbol,                // string
-		GenesisTime:   DefaultGenesisState().Timestamp,  // int64 — actual wall-clock time when genesis is minted (matches cached genesis block)
+		GenesisTime:   GetGenesisTimestamp(),            // int64 — frozen genesis timestamp (identical across all nodes)
 		GenesisHash:   genesisHash,                      // Genesis block hash
 		Version:       baseParams.Version,               // string
 		MagicNumber:   baseParams.MagicNumber,           // uint32
@@ -276,7 +276,16 @@ func GetDevnetChainParams() *SphinxChainParameters {
 	params.LedgerName = "Sphinx Devnet"
 
 	// Also change genesis hash to distinguish devnet
-	params.GenesisHash = "DEVNET_" + GetGenesisHash()
+	// NOTE: The genesis hash MUST remain identical across all network phases
+	// (devnet/testnet/mainnet) because:
+	//   1. VDF discriminant → RANDAO seed → leader election must be identical
+	//      on every node regardless of phase; a phase-specific hash would
+	//      produce different VDF parameters and permanently fork the chain.
+	//   2. Chain compatibility checks (ValidateChainCompatibility) compare
+	//      genesis hashes — peers on different phases must still agree.
+	//   3. All nodes share the same genesis block 0 regardless of phase.
+	// Do NOT add a "DEVNET_" prefix here or anywhere else.
+	params.GenesisHash = GetGenesisHash()
 
 	params.MaxBlockSize = 8 * 1024 * 1024
 	params.BlockGasLimit = big.NewInt(50000000)

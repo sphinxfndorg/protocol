@@ -211,6 +211,8 @@ PBFT only activates when **3 or more validators** are connected:
   → All subsequent blocks use PBFT
 ```
 
+> **Fixed:** The handoff from solo mining to PBFT is now coordinated rather than racy. Node-A (the bootstrap node) explicitly **stops solo mining → syncs to the latest confirmed tip → then enters PBFT** once the third validator connects. Previously, the bootstrap node could keep mining solo blocks after the validator set reached 3, producing a block that peers never voted on — this is the mechanism that caused forks like the one in the "Block N parent hash mismatch ... stopping batch" symptom.
+
 ### Sync State Machine
 
 ```
@@ -232,9 +234,11 @@ A node in `SYNCING` state will **never** participate in PBFT rounds. It waits un
 ### Seed Nodes
 
 Nodes discover each other through:
-1. **Static configuration** (same-box devnet: `--nodes=3` pre-registers all peers)
+1. **Static configuration** (Legacy Same-Box Mode only — no `--seeds`, no custom `--tcp-addr`: `--nodes=3` pre-registers the fixed-port peer addresses for that mode)
 2. **Seed addresses** (`--seeds=IP:PORT` — plain TCP addresses)
 3. **DNS discovery** (`--seeds=enrtree://...` — EIP-1459 authenticated peer lists)
+
+> **Fixed:** `--nodes=3` on its own no longer pre-registers peers as validators. A bootstrap node started without `--seeds` now stays genuinely solo (no phantom peer entries) until a real peer connects and completes key exchange. `--nodes=3` only tells the node how many validators to expect for PBFT quorum math — it does not add validators by itself.
 
 ### Key Exchange Handshake
 
@@ -253,6 +257,14 @@ Every peer connection includes a key exchange that verifies:
 
 After key exchange, nodes ask peers "who else do you know about?" and share their known peer lists. This allows the network to grow organically.
 
+### Validator Registration on Discovery
+
+> **Fixed:** Previously, a discovered peer was only added as a **network/gossip peer** — it was never added to the validator set unless it separately supplied a `RewardAddress` *and* that address had a verified on-chain balance. In test/permissioned setups (no `--reward-address`), neither condition was ever met, so every node's validator set silently stayed at size 1 forever — each node saw itself as the only validator, "won" 100% of its own quorum, and mined its own independent chain.
+>
+> Discovered peers are now granted **minimum validator stake immediately** upon successful key exchange, so the validator set grows to match the number of connected peers. This is what makes `validators=3` (and real 2-of-3 PBFT quorum) actually reachable in the Quick Test flow below.
+>
+> ⚠️ This immediate-stake grant is intended for local/test/permissioned networks. If this code path is ever exposed on a public network, it should be gated (e.g. behind a `--test-mode` flag) — as written, any peer that can complete a TCP key exchange gets voting power with no real stake behind it.
+
 ---
 
 ## Running Tests from Terminal
@@ -263,6 +275,8 @@ After key exchange, nodes ask peers "who else do you know about?" and share thei
 
 - **If you omit `--tcp-addr`** (or pass a value equal to the hardcoded default `32307 + node-index`), the node falls back to fully synthetic same-box addressing: fixed ports starting at **32307** (TCP) / **32418** (UDP), and `--datadir` is ignored — data always lands in `data/Node-127.0.0.1:<synthetic-port>/`. This is the **Legacy Same-Box Mode** described below.
 - **If you explicitly pass `--tcp-addr`** with a port that differs from that default (as in the Quick Test commands below), your address *and* your `--datadir` are both honored exactly as given. This is the normal, recommended mode.
+
+> **Fixed:** Passing a custom `--tcp-addr` (including a custom loopback port, as in the Quick Test commands below) used to also incorrectly collapse the node's internal validator/peer address list down to size 1 — as if it were a single, isolated node — even though the address itself was handled correctly. That collapse only happens now for a genuine public/real network address; custom loopback ports no longer trigger it. This was the actual root cause behind nodes never seeing each other as validators in the Quick Test flow, and is distinct from the address/datadir handling described above.
 
 > ⚠️ **The single most common setup mistake:** giving two or more terminals the **same `--datadir`**. Each node's data directory must be unique to that node — `data/node1` for node 1, `data/node2` for node 2, and so on. Reusing one `--datadir` across terminals doesn't corrupt anything (each node's data still lands in its own `Node-<address>` subfolder, since that subfolder is keyed by address, not by whatever base dir you gave it) — but it does mean you'll find every node's storage nested under one confusingly-named folder instead of separated the way you intended. Before starting multiple nodes, double check: **one terminal → one `--tcp-addr` → one matching, unique `--datadir`.**
 
@@ -348,6 +362,8 @@ go run src/cli/main.go node --role=validator \
 
 This mode uses hardcoded ports (32307, 32308, 32309) and auto-generated data directories (`data/Node-127.0.0.1:32307/`, etc.) regardless of `--datadir` and `--tcp-addr` flags. Each `--node-index` maps to a specific port.
 
+> **Fixed:** Each node's list of *peer* addresses in this mode used to be computed from a hardcoded base of `32307`, which broke if a node's own port didn't start from that base. Peer addresses are now derived as `port - node-index`, so the peer list is correct regardless of which port a given node actually bound to.
+
 **Terminal 1 — Node-index 0 (port 32307):**
 ```bash
 go run src/cli/main.go node --role=validator \
@@ -429,6 +445,27 @@ rm -rf data/
 | Disconnect during sync | Resumes from last committed height |
 | Different genesis hash | Connection rejected during key exchange |
 | Network partition | Reconnects and syncs missing blocks |
+
+---
+
+## Changelog: Validator Set Discovery Fix
+
+Earlier versions of this doc described the behavior below as intended, but two bugs in `src/bind/nodes.go` meant it never actually worked across more than one process: every node stayed in `validators=1` forever, each mined its own chain independently, and late joiners saw repeated `parent hash mismatch` / "stopping batch" errors trying to sync a chain that didn't match what they'd already committed themselves.
+
+Six fixes across `nodes.go` and `helpers.go` address this:
+
+| File | Bug | Fix |
+|------|-----|-----|
+| `nodes.go` | A custom `--tcp-addr` (including loopback) incorrectly collapsed the validator/address list to size 1 | Only a genuine public/real address collapses the count |
+| `nodes.go` | Legacy Same-Box Mode derived peer addresses from a hardcoded base port (`32307`) | Peer addresses are derived as `port - node-index` |
+| `nodes.go` | `registerDiscoveredPeer` added peers as network contacts only, never as validators | Discovered peers now get minimum validator stake immediately on key exchange |
+| `nodes.go` | A bootstrap node with `--nodes=3` (but no `--seeds`) pre-registered peers that hadn't actually connected | Pre-registration only happens when `--seeds` is explicitly provided |
+| `nodes.go` | The Legacy Same-Box fallback logic could still activate during seed-based (`--seeds=`) runs, interfering with peer discovery | Scoped so seed-based mode and Legacy Same-Box Mode no longer cross-interfere — **re-verify this one against a fresh test run**, since the exact condition wasn't fully confirmed against logs at the time of writing |
+| `helpers.go` | Bootstrap node could keep mining solo blocks after the 3rd validator joined, racing with the new PBFT round | Solo mining stops → node syncs to tip → then enters PBFT, as an explicit sequence |
+
+**Net effect:** the "Quick Test: Seed-Based Mode" flow below is the flow these fixes were built for — Terminal 1 stays genuinely solo with no `--seeds`, Terminals 2 and 3 join via `--seeds=127.0.0.1:30303`, and all three nodes should now converge on `validators=3` with real 2-of-3 PBFT quorum, instead of each silently voting alone.
+
+If you re-run the Quick Test commands below, confirm in the logs that all three nodes report `validators=3` (not `validators=1`), that no `parent hash mismatch` messages appear, and that view changes settle rather than climbing rapidly.
 
 ---
 

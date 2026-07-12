@@ -21,9 +21,10 @@ import (
 // genesisOnce ensures BuildBlock() runs exactly once per process.
 // argon2 takes ~134s — running it 3 times (one per node) would hang for 400s+.
 var (
-	genesisOnce      sync.Once
-	genesisHashValue string
-	genesisCached    *types.Block
+	genesisOnce           sync.Once
+	genesisHashValue      string
+	genesisTimestampValue int64
+	genesisCached         *types.Block
 )
 
 // GetGenesisTime returns the genesis block timestamp
@@ -146,7 +147,9 @@ func getCachedGenesisBlock() *types.Block {
 		gs := DefaultGenesisState()
 		genesisCached = gs.BuildBlock()
 		genesisHashValue = genesisCached.GetHash()
-		logger.Info("Genesis block computed once: %s", genesisHashValue)
+		genesisTimestampValue = gs.Timestamp
+		logger.Info("Genesis block computed once: %s at timestamp %d",
+			genesisHashValue, genesisTimestampValue)
 	})
 	return genesisCached
 }
@@ -155,6 +158,15 @@ func getCachedGenesisBlock() *types.Block {
 func GetGenesisHash() string {
 	getCachedGenesisBlock()
 	return genesisHashValue
+}
+
+// GetGenesisTimestamp returns the frozen genesis timestamp (computed once, cached forever).
+// This is the actual Unix timestamp used when building the genesis block, and is
+// identical across all nodes in the network because it is captured at the same
+// time as the genesis hash via sync.Once.
+func GetGenesisTimestamp() int64 {
+	getCachedGenesisBlock() // ensure computed
+	return genesisTimestampValue
 }
 
 // GenerateGenesisHash is deprecated - use GetGenesisHash instead for consistency

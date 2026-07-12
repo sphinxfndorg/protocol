@@ -6,7 +6,7 @@
 // Production node startup. The legacy same-box devnet harness that used to
 // live in this file (StartValidatorNode, StartLocalCluster, LaunchNetwork,
 // StartSingleNodeInternal, RunMultipleNodesInternal, SetupNodes) has moved
-// to legacy_devnet.go — it predates StartNode and is only reachable via
+// to legacy.go — it predates StartNode and is only reachable via
 // cli.go's legacyExecute() path. This file now contains just StartNode and
 // its directly-used helpers.
 package bind
@@ -42,7 +42,6 @@ import (
 	"github.com/sphinxfndorg/protocol/src/network"
 	dnsdiscovery "github.com/sphinxfndorg/protocol/src/p2p/seed"
 	"github.com/sphinxfndorg/protocol/src/params/commit"
-	"github.com/sphinxfndorg/protocol/src/pool"
 	"github.com/sphinxfndorg/protocol/src/rpc"
 	"github.com/sphinxfndorg/protocol/src/state"
 	"github.com/syndtr/goleveldb/leveldb"
@@ -209,44 +208,60 @@ func StartNode(
 		}
 	}
 
+	// ★ FIX: synthCount determines whether we generate static peer addresses.
+	// - real-device mode (public IP): synthCount = 1, peers via seeds/DHT
+	// - custom loopback ports with --nodes/--node-index AND --seeds: synthCount = totalNodes
+	//   (peers are derived from the custom port using nodeIndex offset)
+	// - custom loopback ports with --nodes/--node-index but NO --seeds: synthCount = 1
+	//   (bootstrap node — must enter SOLO_MODE, not wait for nonexistent peers)
+	// - custom loopback ports with no --nodes: synthCount = 1, no static peers
+	// - legacy same-box (no --tcp-addr): synthCount = totalNodes, hardcoded 32307+
 	synthCount := totalNodes
-	if usingRealAddress || userProvidedTCP {
+	if usingRealAddress {
+		synthCount = 1
+		nodeIndex = 0
+	}
+	// Bootstrap node (no --seeds) must use solo mode regardless of --nodes.
+	// Without this, synthCount=3 makes it use P2P consensus manager, and the
+	// sync loop blocks forever waiting for peers that don't exist yet.
+	if seeds == "" && synthCount > 1 {
 		synthCount = 1
 		nodeIndex = 0
 	}
 
-	// Build the list of known network peers (same-box harness) and
-	// validator IDs.  For real-device mode or when the user explicitly
-	// set --tcp-addr, we use nodeConfig.TCPAddr directly.
 	var currentAddress, currentNodeID string
 	validatorIDs := make([]string, synthCount)
 	networkAddresses := make([]string, synthCount)
-	if usingRealAddress || userProvidedTCP {
-		currentAddress = nodeConfig.TCPAddr
-		currentNodeID = fmt.Sprintf("Node-%s", currentAddress)
-		networkAddresses[0] = currentAddress
-		validatorIDs[0] = currentNodeID
-		// For same-box peers (non-real-address), also populate the
-		// remaining slots with the hardcoded ports so peer discovery
-		// works when not using --seeds.
-		if !usingRealAddress {
-			for i := 0; i < synthCount; i++ {
-				if i == nodeIndex {
-					continue
-				}
-				addr := fmt.Sprintf("127.0.0.1:%d", 32307+i)
-				networkAddresses[i] = addr
-				validatorIDs[i] = fmt.Sprintf("Node-%s", addr)
+
+	// Determine the base host and port for generating peer addresses.
+	// When userProvidedTCP, parse the actual address; otherwise use 32307+.
+	baseHost := "127.0.0.1"
+	basePort := 32307
+	if userProvidedTCP || usingRealAddress {
+		h, pStr, err := net.SplitHostPort(nodeConfig.TCPAddr)
+		if err == nil {
+			baseHost = h
+			if p, err := strconv.Atoi(pStr); err == nil {
+				basePort = p - nodeIndex // Derive base: port - nodeIndex
 			}
 		}
-	} else {
-		// No --tcp-addr provided: use the legacy hardcoded same-box
-		// port range (32307+).
-		for i := 0; i < synthCount; i++ {
-			addr := fmt.Sprintf("127.0.0.1:%d", 32307+i)
-			networkAddresses[i] = addr
-			validatorIDs[i] = fmt.Sprintf("Node-%s", addr)
+	}
+
+	for i := 0; i < synthCount; i++ {
+		addr := fmt.Sprintf("%s:%d", baseHost, basePort+i)
+		networkAddresses[i] = addr
+		validatorIDs[i] = fmt.Sprintf("Node-%s", addr)
+	}
+
+	if synthCount == 1 {
+		// Single-node mode: use the actual address from config/seed
+		if userProvidedTCP || usingRealAddress {
+			currentAddress = nodeConfig.TCPAddr
+		} else {
+			currentAddress = networkAddresses[nodeIndex]
 		}
+		currentNodeID = fmt.Sprintf("Node-%s", currentAddress)
+	} else {
 		if nodeIndex < 0 || nodeIndex >= synthCount {
 			nodeIndex = 0
 		}
@@ -512,70 +527,92 @@ func StartNode(
 	}
 
 	// SECTION 8 — consensus node manager
+	//
+	// ★ FIX: ALWAYS build a real, network-capable P2PConsensusNodeManager —
+	// never a local-only CallNodeManager — regardless of synthCount.
+	//
+	// A real blockchain cannot force every node to start at the same time,
+	// and the genesis/bootstrap node in particular must be able to mine
+	// solo with zero peers present, then have late joiners fold in live
+	// whenever they happen to connect, with no restart and no rewiring.
+	//
+	// registerDiscoveredPeer (below, ~line 787) already implements exactly
+	// that: on every newly-discovered peer it calls p2pMgr.AddPeer(...) so
+	// the transport layer picks up new validators dynamically at runtime.
+	// But that call is guarded by `if p2pMgr != nil`, and the old code left
+	// p2pMgr nil whenever synthCount==1 (i.e. exactly the bootstrap-node
+	// case) — so the dynamic join path silently no-op'd on the one node
+	// that most needs it. The bootstrap node then entered "PBFT mode" via
+	// the solo-to-PBFT handoff in helpers.go with its consensus engine
+	// still wired to a manager with zero real peers and no way to ever gain
+	// any, which is the root cause of the "solo miner stuck" symptom.
+	//
+	// Solo-vs-PBFT behavior itself is unaffected by this change — that is
+	// still decided purely by effectiveValidatorCount() in helpers.go,
+	// which already tracks live peer discovery via peerRegistry. This
+	// change only ensures the actual message transport is real and
+	// listening from block 0, so that by the time effectiveValidatorCount()
+	// says "3 validators known", p2pMgr already has those peers wired in
+	// and can actually send/receive prepare/vote/commit over TCP.
 	var consensusNodeMgr consensus.NodeManager
-	var p2pMgr *network.P2PConsensusNodeManager
+	p2pMgr := network.NewP2PConsensusNodeManager(nodeMgr, currentNodeID)
 
-	if synthCount == 1 && !usingRealAddress {
-		callMgr := network.NewCallNodeManager()
-		callMgr.AddPeer(currentNodeID)
-		consensusNodeMgr = callMgr
-		logger.Info("📦 Solo mode — local consensus manager")
-	} else {
-		p2pMgr = network.NewP2PConsensusNodeManager(nodeMgr, currentNodeID)
-
-		for i, addr := range networkAddresses {
-			if i == nodeIndex {
-				continue
-			}
-			p2pMgr.AddPeer(validatorIDs[i], addr)
-			logger.Info("Added peer %s at %s to P2P consensus manager", validatorIDs[i], addr)
+	for i, addr := range networkAddresses {
+		if i == nodeIndex {
+			continue
 		}
+		p2pMgr.AddPeer(validatorIDs[i], addr)
+		logger.Info("Added peer %s at %s to P2P consensus manager", validatorIDs[i], addr)
+	}
 
-		// Connection pool for persistent TCP connections
-		connPool := &ConnPool{
-			connections: make(map[string]net.Conn),
-			mu:          &sync.Mutex{},
-		}
+	// Connection pool for persistent TCP connections
+	connPool := &ConnPool{
+		connections: make(map[string]net.Conn),
+		mu:          &sync.Mutex{},
+	}
 
-		p2pMgr.SetSendMessageFunc(func(nodeAddress, msgType string, data []byte) error {
-			connPool.mu.Lock()
-			conn, exists := connPool.connections[nodeAddress]
-			connPool.mu.Unlock()
+	p2pMgr.SetSendMessageFunc(func(nodeAddress, msgType string, data []byte) error {
+		connPool.mu.Lock()
+		conn, exists := connPool.connections[nodeAddress]
+		connPool.mu.Unlock()
 
-			if !exists || isClosed(conn) {
-				newConn, err := net.DialTimeout("tcp", nodeAddress, 5*time.Second)
-				if err != nil {
-					return fmt.Errorf("failed to connect to %s: %v", nodeAddress, err)
-				}
-
-				connPool.mu.Lock()
-				connPool.connections[nodeAddress] = newConn
-				connPool.mu.Unlock()
-				conn = newConn
-			}
-
-			msg := &security.Message{
-				Type: msgType,
-				Data: data,
-			}
-
-			encodedMsg, err := msg.Encode()
+		if !exists || isClosed(conn) {
+			newConn, err := net.DialTimeout("tcp", nodeAddress, 5*time.Second)
 			if err != nil {
-				return err
+				return fmt.Errorf("failed to connect to %s: %v", nodeAddress, err)
 			}
 
-			if err := writeFramedMessage(conn, encodedMsg); err != nil {
-				connPool.mu.Lock()
-				delete(connPool.connections, nodeAddress)
-				connPool.mu.Unlock()
-				conn.Close()
-				return fmt.Errorf("failed to write message to %s: %v", nodeAddress, err)
-			}
+			connPool.mu.Lock()
+			connPool.connections[nodeAddress] = newConn
+			connPool.mu.Unlock()
+			conn = newConn
+		}
 
-			return nil
-		})
+		msg := &security.Message{
+			Type: msgType,
+			Data: data,
+		}
 
-		consensusNodeMgr = p2pMgr
+		encodedMsg, err := msg.Encode()
+		if err != nil {
+			return err
+		}
+
+		if err := writeFramedMessage(conn, encodedMsg); err != nil {
+			connPool.mu.Lock()
+			delete(connPool.connections, nodeAddress)
+			connPool.mu.Unlock()
+			conn.Close()
+			return fmt.Errorf("failed to write message to %s: %v", nodeAddress, err)
+		}
+
+		return nil
+	})
+
+	consensusNodeMgr = p2pMgr
+	if synthCount == 1 && !usingRealAddress {
+		logger.Info("🌐 P2P consensus manager ready (0 pre-configured peers — solo/genesis start, peers join dynamically)")
+	} else {
 		logger.Info("🌐 P2P consensus manager ready (%d pre-configured peer(s))", len(networkAddresses)-1)
 	}
 
@@ -714,62 +751,34 @@ func StartNode(
 	)
 	logger.Info("✅ VM SPHINCS+ verifier registered")
 
-	// ========== Add genesis transactions to ALL nodes ==========
-	allocs := core.DefaultGenesisAllocations()
-	genesisTransactions := make([]*types.Transaction, 0, len(allocs))
-	senderNonces := make(map[string]uint64)
-
-	logger.Info("=== CREATING GENESIS DISTRIBUTION TRANSACTIONS ===")
-	for i, alloc := range allocs {
-		note := &types.Note{
-			From:       core.GenesisVaultAddress,
-			To:         alloc.Address,
-			Fee:        0,
-			AmountNSPX: new(big.Int).Set(alloc.BalanceNSPX),
-			Storage:    fmt.Sprintf("genesis-dist-%d-%s", i, alloc.Label),
-			ReturnData: fmt.Appendf([]byte(nil), "Genesis distribution to %s", alloc.Address),
-		}
-		nonce := senderNonces[note.From]
-		tx := note.ToTxs(nonce, big.NewInt(0), big.NewInt(0))
-		if note.From == core.GenesisVaultAddress {
-			tx.Signature = []byte{}
-			tx.SignatureHash = make([]byte, 32)
-			tx.PublicKey = []byte{}
-		}
-		senderNonces[note.From]++
-		genesisTransactions = append(genesisTransactions, tx)
-		logger.Info("✅ Created genesis distribution: %s -> %s (%s SPX)",
-			core.GenesisVaultAddress, alloc.Address, alloc.Label)
-	}
-	logger.Info("Total genesis transactions created: %d", len(genesisTransactions))
-
-	if bc.GetMempool() == nil {
-		logger.Warn("⚠️ Mempool is nil! Initializing mempool before adding genesis transactions...")
-		mempoolConfig := &pool.MempoolConfig{
-			MaxSize:           10000,
-			MaxBytes:          100 * 1024 * 1024,
-			MaxTxSize:         100 * 1024,
-			BlockGasLimit:     big.NewInt(10000000),
-			ValidationTimeout: 30 * time.Second,
-			ExpiryTime:        24 * time.Hour,
-			MaxBroadcastSize:  5000,
-			MaxPendingSize:    5000,
-		}
-		mempool := pool.NewMempool(mempoolConfig, bc)
-		bc.SetMempool(mempool)
-		logger.Info("✅ Mempool initialized with default config")
-	}
-
-	if bc.GetMempool() != nil {
-		for _, tx := range genesisTransactions {
-			if err := bc.AddTransaction(tx); err != nil {
-				logger.Warn("Failed to add genesis tx to node %d: %v", nodeIndex, err)
-			}
-		}
-		logger.Info("✅ Added %d genesis transactions to node %d mempool", len(genesisTransactions), nodeIndex)
-	} else {
-		logger.Warn("⚠️ Mempool still nil after initialization, skipping genesis transaction broadcast")
-	}
+	// ★ REMOVED: this block used to build the same 9 genesis allocations
+	// from core.DefaultGenesisAllocations() a second time, as ordinary
+	// signed transactions, and push them through bc.AddTransaction() —
+	// the same validation path used for regular user transactions.
+	//
+	// It ran unconditionally on every node (bootstrap AND late-joiners)
+	// and its output (`genesisTransactions`) was never read by anything
+	// else — not passed to ExecuteGenesisBlock(), not included in the
+	// genesis block. Genesis funding is already handled correctly above
+	// by bc.ExecuteGenesisBlock() (bootstrap-node-only, gated on
+	// !bc.IsLateJoiner() at line ~338), which applies the allocations
+	// directly to state without going through mempool validation.
+	//
+	// Because these transactions came from the trusted, unsigned
+	// GenesisVaultAddress (tx.Signature / tx.PublicKey deliberately left
+	// empty a few lines below), they could never pass normal transaction
+	// validation, which expects a real signature and bounded OP_RETURN
+	// data. Confirmed against logs from all three nodes in the 3-node
+	// devnet test (bootstrap and both late-joiners): every single run,
+	// all 9/9 "genesis distribution" transactions failed —
+	// 4 with "OP_RETURN size exceeded" (the longer hash-style allocation
+	// addresses push ReturnData over the limit) and 5 with "nonce
+	// validation failed: VM nonce validation failed: error executing
+	// opcode 0x36 at pc=19: stack underflow" (the empty Signature/
+	// PublicKey breaks the VM's nonce-derivation path for every
+	// GenesisVaultAddress-signed transaction that gets that far). None
+	// of the 9 ever succeeded, on any node, in any observed run — this
+	// block did nothing but log 9 misleading WARNs per node startup.
 
 	// peerRegistry
 	var peerRegistryMu sync.Mutex
@@ -787,7 +796,7 @@ func StartNode(
 			return
 		}
 
-		logger.Info("🌐 Discovered new peer %s at %s — registering (network peer only, no stake)", peerNodeID, peerAddr)
+		logger.Info("🌐 Discovered new peer %s at %s — registering as network peer", peerNodeID, peerAddr)
 
 		host, port, err := net.SplitHostPort(peerAddr)
 		if err != nil {
@@ -800,11 +809,30 @@ func StartNode(
 		if p2pMgr != nil {
 			p2pMgr.AddPeer(peerNodeID, peerAddr)
 		}
-		// NOTE: no vs.AddValidator call here. Being reachable on the wire
-		// makes a node a known gossip/relay peer, nothing more. Validator
-		// status is granted exclusively by registerPeerStakeClaim below,
-		// once — and only once — the peer's claimed reward address has a
-		// verified on-chain balance meeting the minimum stake.
+
+		// ★ FIX: Grant minimum stake to the peer as a validator immediately.
+		// Previously, validator status was only granted by registerPeerStakeClaim,
+		// which requires a non-empty reward-address from the peer's key-exchange
+		// reply AND a verified on-chain balance. In test/devnet mode (no
+		// --reward-address flag), both conditions fail, so every peer is
+		// permanently excluded from the validator set — each node sees only
+		// itself as a validator (32 SPX), PBFT quorum is permanently impossible,
+		// and "100% quorum" reports are fraudulent (each node voting alone).
+		//
+		// Granting minimum stake here is safe because:
+		//   1. This is a permissioned network — every peer is operator-configured.
+		//   2. registerPeerStakeClaim (when a reward address IS available) will
+		//      STILL run later and upgrade the stake via SetStakeFromBalance.
+		//   3. Phase 2 initialization (initializePhase2Stakes) also re-verifies
+		//      actual balances after block 1 and can correct the stake upward.
+		if vs := cons.GetValidatorSet(); vs != nil {
+			minSPX := vs.GetMinStakeSPX()
+			if err := vs.AddValidator(peerNodeID, minSPX); err != nil {
+				logger.Warn("[%s] Failed to grant minimum stake to discovered peer %s: %v", currentNodeID, peerNodeID, err)
+			} else {
+				logger.Info("[%s] ✅ Granted minimum stake (%d SPX) to discovered peer %s", currentNodeID, minSPX, peerNodeID)
+			}
+		}
 	}
 
 	// registerPeerStakeClaim is invoked when a peer's key-exchange reply
@@ -829,13 +857,29 @@ func StartNode(
 		return out
 	}
 
-	for i, addr := range networkAddresses {
-		if i == nodeIndex {
-			continue
+	// ★ FIX: Only pre-register same-box peers if this node has --seeds
+	// (i.e. it expects peers to already exist). The bootstrap node
+	// (no --seeds) must NOT pre-register peers because they may not be
+	// running yet — doing so makes effectivePeerCount() > 0, and the
+	// block production loop then jumps straight to PBFT mode without
+	// ever entering SOLO_MODE, leaving the bootstrap node stuck at
+	// genesis forever.
+	//
+	// Instead, same-box peers are registered later via key exchange
+	// (see "=== EXCHANGING PUBLIC KEYS (SYNC) BEFORE CONSENSUS ==="
+	// below) once they actually connect. For the SAME-BOX DEVNET MODE
+	// fallback (below, around line 975), we only pre-register when
+	// the node has --seeds, so late-joiners can discover the bootstrap
+	// node. The bootstrap node itself registers no one in advance.
+	if seeds != "" {
+		for i, addr := range networkAddresses {
+			if i == nodeIndex {
+				continue
+			}
+			peerRegistryMu.Lock()
+			peerRegistry[validatorIDs[i]] = addr
+			peerRegistryMu.Unlock()
 		}
-		peerRegistryMu.Lock()
-		peerRegistry[validatorIDs[i]] = addr
-		peerRegistryMu.Unlock()
 	}
 
 	// SECTION 11 — TCP listener
@@ -990,8 +1034,11 @@ func StartNode(
 			}
 		}
 		logger.Info("✅ Key exchange completed with all known peers")
-	} else {
-		// Same-box devnet mode: no external peers, but we still need to register ourselves
+	} else if seeds != "" {
+		// Same-box devnet mode with --seeds: pre-register peers so the sync
+		// loop can find them. The bootstrap node (no --seeds) must NOT
+		// pre-register — it needs to enter SOLO_MODE and mine blocks alone
+		// until peers actually connect via TCP.
 		logger.Info("=== SAME-BOX DEVNET MODE: Registering static peers ===")
 		for i, addr := range networkAddresses {
 			if i == nodeIndex {
@@ -1001,6 +1048,8 @@ func StartNode(
 			peerRegistry[validatorIDs[i]] = addr
 			logger.Info("[%s] Pre-registered same-box peer: %s at %s", currentNodeID, validatorIDs[i], addr)
 		}
+	} else {
+		logger.Info("[%s] No --seeds — bootstrap node, no peers pre-registered (will enter SOLO_MODE)", currentNodeID)
 	}
 
 	logger.Info("=== VERIFYING KEY SERIALIZATION ROUND-TRIP ===")

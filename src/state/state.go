@@ -762,6 +762,12 @@ func (s *Storage) SaveCompleteChainState(chainState *ChainState, chainParams *Ch
 				node.ChainInfo["tps_current"] = fresh.ChainInfo["tps_current"]
 				node.ChainInfo["tps_average"] = fresh.ChainInfo["tps_average"]
 				node.ChainInfo["total_txs"] = fresh.ChainInfo["total_txs"]
+				// Preserve canonical genesis_hash — if fresh carries it, prefer it
+				// over any stale value (e.g. "DEVNET_GENESIS_…") that may have been
+				// written by an older version.
+				if gh, exists := fresh.ChainInfo["genesis_hash"]; exists {
+					node.ChainInfo["genesis_hash"] = gh
+				}
 			}
 		}
 	}
@@ -1130,6 +1136,12 @@ func (s *Storage) createNodeInfo(index int) *NodeInfo {
 	// Get TPS metrics for node info
 	tpsMetrics := s.GetTPSMetrics()
 
+	// Get actual genesis hash with GENESIS_ prefix for chain_info
+	genesisHash, _ := s.GetGenesisHash()
+	if genesisHash != "" && !strings.HasPrefix(genesisHash, "GENESIS_") {
+		genesisHash = "GENESIS_" + genesisHash
+	}
+
 	// FIX: Use correct port range (32307+) matching actual node configuration
 	// The actual nodes use ports 32307, 32308, 32309, not 32300, 32301, 32302
 	nodeAddress := fmt.Sprintf("127.0.0.1:%d", 32307+index)
@@ -1146,6 +1158,7 @@ func (s *Storage) createNodeInfo(index int) *NodeInfo {
 			"tps_average":   tpsMetrics.AverageTPS,
 			"total_txs":     tpsMetrics.TotalTransactions,
 			"blocks_height": blockHeight,
+			"genesis_hash":  genesisHash,
 		},
 		BlockHeight: blockHeight,
 		BlockHash:   blockHash,
@@ -1759,6 +1772,33 @@ func (s *Storage) FixChainStateGenesisHash() error {
 					needsUpdate = true
 				}
 			}
+		}
+	}
+
+	// ─── Fix per-node chain_info.genesis_hash ───────────────────────────────
+	// The FixChainStateGenesisHash function (above) already fixes the top-level
+	// ChainIdentification section, but the nodes[].chain_info map can also hold
+	// a stale / wrong genesis_hash string (e.g. "DEVNET_GENESIS_…" instead of
+	// "GENESIS_…").  Walk every node and correct it.
+	for _, node := range chainState.Nodes {
+		if node == nil || node.ChainInfo == nil {
+			continue
+		}
+		if gh, exists := node.ChainInfo["genesis_hash"]; exists {
+			if ghStr, ok := gh.(string); ok {
+				if ghStr != actualHash {
+					node.ChainInfo["genesis_hash"] = actualHash
+					logger.Info("Fixed node %s genesis_hash in chain_info: %s", node.NodeID, actualHash)
+					needsUpdate = true
+				}
+			}
+		} else {
+			// Add genesis_hash if it doesn't exist — ensures every node entry
+			// carries the canonical hash so downstream consumers (CLI, wallet,
+			// chain explorer) always see the correct value.
+			node.ChainInfo["genesis_hash"] = actualHash
+			logger.Info("Added genesis_hash to node %s chain_info: %s", node.NodeID, actualHash)
+			needsUpdate = true
 		}
 	}
 

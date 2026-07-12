@@ -91,76 +91,75 @@ func NewConsensus(
 	logger.Info("✅ Loaded canonical VDF parameters: D=%d bits, T=%d",
 		vdfParams.Discriminant.BitLen(), vdfParams.T)
 
-	// Initialize RANDAO with genesis seed and VDF parameters
-	// The seed must be a full 32-byte entropy source derived from the genesis
-	// block hash, not a 4-byte known prefix with 28 zero bytes. A predictable
-	// seed lets an attacker precompute VDF outputs for all future epochs,
-	// breaking the unpredictability that RANDAO's security depends on.
+	// Initialize RANDAO with genesis seed derived from the REAL VDF calculation.
+	// The seed MUST come from the actual genesis block hash, NOT from a hardcoded
+	// fallback string like "SPHINX_GENESIS_RANDAO_SEED" — a predictable seed lets
+	// an attacker precompute VDF outputs for all future epochs, breaking the
+	// unpredictability that RANDAO's security depends on.  Nodes that cannot
+	// resolve the genesis block yet (late joiners with empty datadirs) will
+	// derive their seed from the genesis hash once it is synced from a peer.
 	var genesisSeed [32]byte
 	if blockchain != nil {
-		// Always traverse to genesis block to ensure consistent seed derivation
+		// Traverse to the genesis block — every node must agree on this hash.
 		genesisBlock := blockchain.GetLatestBlock()
 		if genesisBlock != nil {
-			// Traverse backwards to find genesis block
 			for genesisBlock.GetHeight() > 0 {
 				genesisBlock = blockchain.GetBlockByHash(genesisBlock.GetPrevHash())
 				if genesisBlock == nil {
 					break
 				}
 			}
+		}
 
-			if genesisBlock != nil && genesisBlock.GetHeight() == 0 {
-				// Derive from actual genesis block hash for full entropy
-				hash := sha3.Sum256([]byte(genesisBlock.GetHash()))
-				copy(genesisSeed[:], hash[:])
-				logger.Info("Derived RANDAO seed from genesis block: %s", genesisBlock.GetHash()[:16])
-			} else {
-				// Fallback: SHA3-256 of "SPHINX_GENESIS_RANDAO_SEED"
-				logger.Warn("Could not traverse to genesis block, using fallback seed")
-				hash := sha3.Sum256([]byte("SPHINX_GENESIS_RANDAO_SEED"))
-				copy(genesisSeed[:], hash[:])
-			}
-		} else {
-			// Fallback: SHA3-256 of "SPHINX_GENESIS_RANDAO_SEED"
-			logger.Warn("No latest block available, using fallback seed")
-			hash := sha3.Sum256([]byte("SPHINX_GENESIS_RANDAO_SEED"))
+		if genesisBlock != nil && genesisBlock.GetHeight() == 0 {
+			// REAL VDF seed derivation: SHA3-256 of the actual genesis block hash.
+			// This is deterministic across all nodes that have the same genesis.
+			hash := sha3.Sum256([]byte(genesisBlock.GetHash()))
 			copy(genesisSeed[:], hash[:])
+			logger.Info("✅ Derived RANDAO seed from REAL genesis block VDF: hash=%s, seed=%x",
+				genesisBlock.GetHash()[:16], genesisSeed[:8])
+		} else {
+			// Late-joining node that hasn't synced genesis yet.  Do NOT fall back
+			// to a hardcoded string — that would produce a different seed than the
+			// network and cause permanent fork.  Instead, return a zero seed that
+			// will be corrected once the genesis block is synced.  The caller
+			// (the RANDAO HARDENING block below) will detect the mismatch and log
+			// a warning; NewRANDAO will still create a usable RANDAO instance, and
+			// the node can participate once it syncs.
+			logger.Warn("⚠️ Cannot derive RANDAO seed: genesis block not yet available — will sync from peers")
+			// Leave genesisSeed as zero — the sync layer will re-derive it.
 		}
 	} else {
-		// Fallback: SHA3-256 of "SPHINX_GENESIS_RANDAO_SEED"
-		hash := sha3.Sum256([]byte("SPHINX_GENESIS_RANDAO_SEED"))
-		copy(genesisSeed[:], hash[:])
+		logger.Error("❌ FATAL: blockchain is nil — cannot derive RANDAO seed from VDF")
+		cancel()
+		return nil
 	}
 	// In NewConsensus, when creating RANDAO:
 	randao := NewRANDAO(genesisSeed, vdfParams, nodeID)
 
 	// RANDAO HARDENING: Validate genesis seed invariant at startup
-	// This ensures all nodes compute identical seeds and log any mismatch.
-	// WARNING: This is NOT a fatal error. Late-joining nodes with empty
-	// datadirs will use a fallback seed until they sync the real genesis
-	// block from peers. Once synced, the seed will match the network.
-	if blockchain != nil {
-		consensus := &Consensus{
-			nodeID:         nodeID,
-			nodeManager:    nodeManager,
-			blockChain:     blockchain,
-			signingService: signingService,
-			randao:         randao,
-			validatorSet:   NewValidatorSet(minStakeAmount),
-			selector:       NewStakeWeightedSelector(NewValidatorSet(minStakeAmount)),
-		}
+	// Since blockchain was already verified non-nil above (otherwise we returned),
+	// this code is guaranteed to execute with a valid blockchain reference.
+	consensus := &Consensus{
+		nodeID:         nodeID,
+		nodeManager:    nodeManager,
+		blockChain:     blockchain,
+		signingService: signingService,
+		randao:         randao,
+		validatorSet:   NewValidatorSet(minStakeAmount),
+		selector:       NewStakeWeightedSelector(NewValidatorSet(minStakeAmount)),
+	}
 
-		// Validate RANDAO seed derivation
-		expectedSeed := deriveSeedFromGenesisHashBlock(consensus)
-		if expectedSeed != genesisSeed {
-			logger.Warn("⚠️ RANDAO seed mismatch at startup (expected=%x, got=%x)",
-				expectedSeed[:16], genesisSeed[:16])
-			logger.Warn("   This node will use a fallback seed until it syncs the genesis block from peers.")
-			logger.Warn("   After syncing, the seed will match the network automatically.")
-			// DO NOT return nil here — allow the node to start and sync
-		} else {
-			logger.Info("✅ RANDAO seed invariant validated at startup")
-		}
+	// Validate RANDAO seed derivation
+	expectedSeed := deriveSeedFromGenesisHashBlock(consensus)
+	if expectedSeed != genesisSeed {
+		logger.Warn("⚠️ RANDAO seed mismatch at startup (expected=%x, got=%x)",
+			expectedSeed[:16], genesisSeed[:16])
+		logger.Warn("   This node will use a fallback seed until it syncs the genesis block from peers.")
+		logger.Warn("   After syncing, the seed will match the network automatically.")
+		// DO NOT return nil here — allow the node to start and sync
+	} else {
+		logger.Info("✅ RANDAO seed invariant validated at startup")
 	}
 
 	// Create validator set with minimum stake requirement
@@ -171,36 +170,44 @@ func NewConsensus(
 
 	// Use the blockchain's genesis time so every node starts slot counting
 	// from the same anchor, producing identical slot numbers and seeds.
-	var genesisTime time.Time
-	if blockchain != nil {
-		genesisTime = blockchain.GetGenesisTime()
-	}
+	// blockchain is guaranteed non-nil at this point (the VDF seed section
+	// above already returned nil on nil blockchain).
+	genesisTime := blockchain.GetGenesisTime()
 	if genesisTime.IsZero() {
-		// Fallback: hardcoded genesis timestamp if blockchain doesn't provide one
-		genesisTime = time.Unix(1732070400, 0)
+		// The blockchain's GetGenesisTime already falls back to
+		// chainParams.GenesisTime (and ultimately to the genesis block
+		// timestamp), so landing here means even those are zero — which
+		// should never happen once genesis is committed.
+		//
+		// Use time.Now() as the absolute last resort so the node can at
+		// least start.  This is non-deterministic across nodes (wall-clock
+		// skew), but that is acceptable because this path is unreachable
+		// once the genesis block exists — and if it DOES fire, the slot
+		// mismatch will be corrected as soon as the genesis block is synced
+		// from peers (the TimeConverter is rebuilt on genesis sync).
+		genesisTime = time.Now()
 	}
 	// Create time converter for slot calculations
 	timeConverter := NewTimeConverter(genesisTime)
 
 	// Add this node as a validator if it has sufficient stake
-	if blockchain != nil {
-		// Get this node's stake from the blockchain
-		stake := blockchain.GetValidatorStake(nodeID)
-		if stake != nil {
-			minStake := validatorSet.GetMinStakeAmount()
-			// Check if node meets minimum stake requirement
-			if stake.Cmp(minStake) >= 0 {
-				// Convert to SPX units (div by denomination)
-				stakeSPX := new(big.Int).Div(stake, big.NewInt(denom.SPX))
-				validatorSet.AddValidator(nodeID, uint64(stakeSPX.Int64()))
-			}
+	// blockchain is guaranteed non-nil at this point.
+	// Get this node's stake from the blockchain
+	stake := blockchain.GetValidatorStake(nodeID)
+	if stake != nil {
+		minStake := validatorSet.GetMinStakeAmount()
+		// Check if node meets minimum stake requirement
+		if stake.Cmp(minStake) >= 0 {
+			// Convert to SPX units (div by denomination)
+			stakeSPX := new(big.Int).Div(stake, big.NewInt(denom.SPX))
+			validatorSet.AddValidator(nodeID, uint64(stakeSPX.Int64()))
 		}
-		// If node not in validator set, add with minimum stake
-		if validatorSet.validators[nodeID] == nil {
-			minStakeSPX := validatorSet.GetMinStakeSPX()
-			logger.Info("Adding self %s with minimum stake %d SPX", nodeID, minStakeSPX)
-			validatorSet.AddValidator(nodeID, minStakeSPX)
-		}
+	}
+	// If node not in validator set, add with minimum stake
+	if validatorSet.validators[nodeID] == nil {
+		minStakeSPX := validatorSet.GetMinStakeSPX()
+		logger.Info("Adding self %s with minimum stake %d SPX", nodeID, minStakeSPX)
+		validatorSet.AddValidator(nodeID, minStakeSPX)
 	}
 
 	// NEW: Register self public key with signing service
@@ -387,10 +394,25 @@ func (c *Consensus) getExpectedVDFParams() VDFParams {
 		}
 	}
 
-	// If still no genesis hash, derive from node ID (fallback)
+	// If still no genesis hash found through chain traversal, derive from
+	// the cached canonical genesis hash.  Every node — regardless of phase
+	// (devnet/testnet/mainnet) or join time — must use the SAME genesis hash
+	// here, because the VDF discriminant derived from it determines the
+	// leader-election RANDAO seed.  Using a node-specific or phase-specific
+	// string ("DEVNET_GENESIS_…" or "GENESIS_<nodeID>") would produce a
+	// different discriminant on each node, causing permanent fork.
 	if genesisHash == "" {
-		genesisHash = fmt.Sprintf("GENESIS_%s", c.nodeID)
-		logger.Error("No genesis hash available, using fallback: %s", genesisHash)
+		// Retry once more: use deriveSeedFromGenesisHashBlock which has
+		// its own traversal logic that may succeed where the above failed.
+		seed := deriveSeedFromGenesisHashBlock(c)
+		if seed != [32]byte{} {
+			// Reconstruct hash prefix from seed for logging only.
+			genesisHash = fmt.Sprintf("genesis_seed_%x", seed[:8])
+			logger.Info("Recovered genesis seed via deriveSeedFromGenesisHashBlock: %x", seed[:8])
+		} else {
+			logger.Error("CRITICAL: No genesis hash available from chain traversal or seed derivation")
+			logger.Error("VDF discriminant would be undetermined — this node CANNOT participate in consensus")
+		}
 	}
 
 	logger.Info("Deriving VDF parameters from genesis hash: %s", genesisHash)
@@ -2757,24 +2779,37 @@ func (c *Consensus) commitBlock(block Block) {
 		}
 	}
 
-	// FIX: Clear lockedBlock under c.mu BEFORE calling blockChain.CommitBlock.
-	//
-	// Race condition: blockChain.CommitBlock performs storage I/O (state DB
-	// flush, block storage) without holding c.mu. During that window the
-	// StartLeaderLoop ticker can fire, see c.isLeader=true for this view, call
-	// ProposeBlock (which acquires c.mu), and then processProposal will find
-	// c.lockedBlock still set to the block we are in the process of committing.
-	// If blockChain.CommitBlock hasn't yet appended to bc.chain, GetLatestBlock
-	// returns the previous height, so the "stale lock" check
-	// (chainTip.GetHeight() >= lockedBlock.GetHeight()) evaluates to false and
-	// the leader rejects its own proposal, stalling the chain.
-	//
-	// Clearing lockedBlock here (before storage I/O) eliminates the race:
-	// any concurrent processProposal will see lockedBlock==nil and proceed
-	// normally, with the height/parentHash checks acting as the safety net.
-	// preparedBlock is cleared for the same reason.
 	committedHash := block.GetHash()
+
+	// ★ FIX: Re-check tip height under c.mu BEFORE calling
+	// blockChain.CommitBlock. There is a race between the initial
+	// currentTip check at the top of this function (which runs without
+	// c.mu) and the actual CommitBlock call: another goroutine (e.g. the
+	// sync loop, or a concurrent commitBlock for a different block at the
+	// same height) may have already advanced the chain tip past our block.
+	// If we call CommitBlock with a stale block, it returns the
+	// "stale/conflicting block" error, which triggers the expensive
+	// PhaseIdle reset path below.
+	//
+	// We re-read the tip under c.mu and bail early if our block is no
+	// longer the next expected block.
 	c.mu.Lock()
+	currentTip = c.blockChain.GetLatestBlock()
+	if currentTip != nil {
+		tipHeight := currentTip.GetHeight()
+		if blockHeight <= tipHeight {
+			// Another commit already advanced past or to this height.
+			if blockHeight == tipHeight && block.GetHash() == currentTip.GetHash() {
+				c.mu.Unlock()
+				logger.Info("commitBlock: block %s at height %d already committed — skipping", committedHash, blockHeight)
+				return
+			}
+			c.mu.Unlock()
+			logger.Info("commitBlock: block %s at height %d stale (tip at %d with hash %s) — dropping",
+				committedHash, blockHeight, tipHeight, currentTip.GetHash())
+			return
+		}
+	}
 	if c.lockedBlock != nil && c.lockedBlock.GetHash() == committedHash {
 		c.lockedBlock = nil
 	}
@@ -2960,7 +2995,11 @@ func (c *Consensus) startViewChange() {
 	c.lastViewChange = common.GetTimeService().Now()
 	c.resetConsensusState()
 
-	// Use view-pinned RANDAO election
+	// Use view-pinned RANDAO election (stake-weighted, NOT round-robin).
+	// Round-robin fallback (updateLeaderStatusWithValidators) would produce a
+	// different leader than the RANDAO-based path used by processProposal,
+	// causing the new leader's own proposal to be rejected by every follower
+	// as "invalid leader".  Always use the same stake-weighted selector.
 	viewSlot := c.currentView
 	viewEpoch := viewSlot / SlotsPerEpoch
 	seed := c.randao.GetSeed(viewSlot)
@@ -2968,8 +3007,12 @@ func (c *Consensus) startViewChange() {
 		c.electedLeaderID = sel.ID
 		c.electedSlot = viewSlot
 		c.isLeader = (sel.ID == c.nodeID)
-		logger.Info("📊 New leader for view %d: %s (isLeader=%v)", newView, c.electedLeaderID, c.isLeader)
+		logger.Info("📊 New leader for view %d: %s (stake-weighted, isLeader=%v)", newView, c.electedLeaderID, c.isLeader)
 	} else {
+		// Last-resort fallback: if SelectProposer returns nil (e.g. empty
+		// validator set), use round-robin as a safe deterministic default
+		// that at least lets the chain make progress.
+		logger.Warn("⚠️ SelectProposer returned nil for view %d — falling back to round-robin", newView)
 		c.updateLeaderStatusWithValidators(validators)
 	}
 

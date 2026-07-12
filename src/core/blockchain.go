@@ -701,8 +701,18 @@ func (bc *Blockchain) StoreChainState(nodes []*storage.NodeInfo) error {
 	// ==================================================
 
 	// Convert genesis_time from Unix timestamp to ISO RFC format for output
-	// Use the actual genesis timestamp from chain parameters, not current time
-	genesisTimeISO := common.GetTimeService().GetTimeInfo(bc.chainParams.GenesisTime).ISOUTC
+	// Use the ACTUAL genesis block's timestamp, NOT chainParams.GenesisTime
+	// (which may be stale or per-node different before the frozen fix).
+	// This guarantees chain_state.json writes the exact same timestamp on
+	// every node — the one embedded in the consensus-agreed genesis block.
+	genesisTimeISO := "unknown"
+	if len(bc.chain) > 0 && bc.chain[0] != nil {
+		genesisTimeISO = common.GetTimeService().GetTimeInfo(bc.chain[0].Header.Timestamp).ISOUTC
+	} else {
+		// Fallback — use chainParams so we don't write "unknown" on a fresh
+		// node during initialization (before the genesis block is in memory).
+		genesisTimeISO = common.GetTimeService().GetTimeInfo(bc.chainParams.GenesisTime).ISOUTC
+	}
 
 	// Convert blockchain params to storage.ChainParams with ISO format
 	// Create storage-compatible chain parameters
@@ -2078,6 +2088,11 @@ func (bc *Blockchain) createGenesisBlock() error {
 	// missing them entirely).
 	if bc.tpsMonitor != nil {
 		txCount := uint64(len(genesis.Body.TxsList))
+		// Record each genesis transaction individually (same pattern as
+		// CommitBlock) so totalTransactions is consistent across all nodes.
+		for i := uint64(0); i < txCount; i++ {
+			bc.tpsMonitor.RecordTransaction()
+		}
 		bc.tpsMonitor.RecordBlock(txCount, 5*time.Second)
 		logger.Info("📊 Recorded genesis block in TPS monitor with %d transactions", txCount)
 	}

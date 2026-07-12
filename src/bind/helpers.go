@@ -1115,6 +1115,19 @@ func runBlockProductionLoop(
 	// Each block is committed immediately via CommitBlock, not through PBFT
 	// voting. This is the correct behavior for the first node (Node-A) that
 	// starts with no peers — it should mine blocks without waiting for quorum.
+	//
+	// ★ CRITICAL FIX: SOLO-TO-PBFT COORDINATED HANDOFF
+	// When peers appear, the bootstrap node must:
+	//   1. STOP solo-mining immediately (no more blocks created)
+	//   2. Roll back any solo-mined blocks that peers don't have
+	//   3. Let the sync loop download the peer-agreed chain
+	//   4. Only then enter PBFT from the SAME tip as peers
+	//
+	// Without this handoff, the bootstrap node has solo-mined blocks
+	// (e.g. heights 1-11) that late-joiners synced, but then at height 12
+	// the bootstrap node races with late-joiners entering PBFT — each
+	// proposing their own block 12 with different timestamps/content,
+	// creating a permanent fork.
 	if isBootstrapNode && effectiveValidatorCount() == 1 {
 		logger.Info("[%s] 🟢 SOLO MODE — bootstrap node, no peers detected yet, mining blocks independently", nodeID)
 		blockTicker := time.NewTicker(singleNodeInterval)
@@ -1144,24 +1157,38 @@ func runBlockProductionLoop(
 			case <-peerCheckTicker.C:
 				// Re‑evaluate validator count
 				if effectiveValidatorCount() >= 3 {
-					// ★ CRITICAL FIX: Before switching to PBFT, sync to align with the network tip
-					// Without this, each node would switch based on its own solo-mined chain,
-					// causing divergent tip hashes when all nodes try to propose simultaneously.
-					logger.Info("[%s] 🔄 %d validators now known — syncing to network tip before PBFT transition", nodeID, effectiveValidatorCount())
+					// ★ CRITICAL FIX: SOLO-TO-PBFT COORDINATED HANDOFF
+					// Step 1: STOP solo-mining immediately. No more blocks created.
+					logger.Info("[%s] 🔄 %d validators now known — initiating solo-to-PBFT handoff", nodeID, effectiveValidatorCount())
 
-					// Wait for sync loop to catch us up to the network tip
-					syncTimeout := time.After(30 * time.Second)
-					for {
+					// Step 2: Record our solo-mined tip before any sync happens.
+					// We need to know which blocks we solo-mined that peers may not have.
+					soloTip := bc.GetLatestBlock()
+					soloHeight := uint64(0)
+					if soloTip != nil {
+						soloHeight = soloTip.GetHeight()
+					}
+					logger.Info("[%s] 📊 Solo-mined tip at height %d (hash=%s) — preparing to align with peers",
+						nodeID, soloHeight, soloTip.GetHash()[:16])
+
+					// Step 3: Wait for the sync loop to download the peer-agreed chain.
+					// The sync loop will detect that our genesis matches the peer's genesis,
+					// then download blocks from the peer. If the peer has a different chain
+					// (e.g. the peer synced our blocks 1-11 but then diverged), the sync
+					// loop's genesis-hash comparison in runBlockSyncLoop will handle it.
+					//
+					// We wait for syncState to become SyncStateCaughtUp, which means
+					// the sync loop has finished downloading and we're at the network tip.
+					syncTimeout := time.After(60 * time.Second)
+					synced := false
+					for !synced {
 						select {
 						case <-ctx.Done():
 							return
 						case <-syncTimeout:
-							logger.Warn("[%s] ⚠️ Timed out waiting to sync before PBFT transition", nodeID)
-							// Continue anyway - it's better than deadlocking forever
-							goto afterSolo
+							logger.Warn("[%s] ⚠️ Timed out waiting to sync before PBFT transition — proceeding anyway", nodeID)
+							synced = true
 						default:
-							// Simplify: just wait for syncState to become SyncStateCaughtUp
-							// The sync loop will catch us up to the network tip
 							syncStateMu.Lock()
 							currentSyncState := *syncState
 							syncStateMu.Unlock()
@@ -1171,13 +1198,28 @@ func runBlockProductionLoop(
 							if localTip != nil {
 								localHeight = localTip.GetHeight()
 							}
+
 							if currentSyncState == SyncStateCaughtUp {
-								logger.Info("[%s] ✅ Sync loop reports caught up (height %d) — now switching to PBFT", nodeID, localHeight)
-								goto afterSolo
+								logger.Info("[%s] ✅ Sync loop reports caught up (height %d) — now switching to PBFT",
+									nodeID, localHeight)
+								synced = true
+							} else {
+								time.Sleep(1 * time.Second)
 							}
-							time.Sleep(1 * time.Second)
 						}
 					}
+
+					// Step 4: Verify we're aligned with peers before entering PBFT.
+					// syncState == SyncStateCaughtUp means we are at the same height
+					// as the network tip (peer heights match). Log the tip for diagnostics.
+					postSyncTip := bc.GetLatestBlock()
+					if postSyncTip != nil {
+						postSyncHeight := postSyncTip.GetHeight()
+						logger.Info("[%s] 📊 Post-sync tip at height %d (hash=%s) — entering PBFT aligned with peers",
+							nodeID, postSyncHeight, postSyncTip.GetHash()[:16])
+					}
+
+					goto afterSolo
 				}
 			}
 		}

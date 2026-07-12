@@ -44,11 +44,9 @@ jobs:
         run: go vet ./...
 
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v2
-        with:
-          version: latest
-          args: --timeout=5m
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+          golangci-lint run --timeout=5m
 
       - name: Run tests with race detection
         run: go test -race -v ./...

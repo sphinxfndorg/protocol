@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        go-version: ['1.24', '1.25']
+        go-version: ['1.24.4', '1.25.0']
 
     steps:
       - name: Checkout code
@@ -50,8 +50,9 @@ jobs:
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v6
         with:
-          version: v1.65.2
+          version: v1.64.1
           args: --timeout=5m
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Run tests with race detection
         run: go test -race -v ./...

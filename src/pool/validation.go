@@ -124,6 +124,10 @@ func (mp *Mempool) verifyTransactionSignature(tx *types.Transaction) error {
 	// Build the message that was signed
 	// Format: timestamp(8) || nonce(16) || txID
 	// This ensures each transaction has a unique signed message
+	const maxMsgSize = 1 << 20 // 1 MB maximum message size
+	if len(tx.ID) > maxMsgSize-24 {
+		return fmt.Errorf("transaction ID too large: %d bytes (max: %d)", len(tx.ID), maxMsgSize-24)
+	}
 	fullMsg := make([]byte, 0, 8+16+len(tx.ID))
 	fullMsg = append(fullMsg, tsBytes...)
 	fullMsg = append(fullMsg, nonceBytes...)

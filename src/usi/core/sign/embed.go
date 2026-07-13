@@ -637,7 +637,12 @@ func embedSignatureInFile(filePath string, meta *Meta) error {
 	sizeBuf := make([]byte, 4)
 	binary.BigEndian.PutUint32(sizeBuf, uint32(len(metaJSON)))
 
-	out := make([]byte, 0, len(documentData)+4+len(metaJSON)+len(magicMarker))
+	const maxEmbedSize = 1 << 20 // 1 MB maximum embedded signature size
+	totalSize := len(documentData) + 4 + len(metaJSON) + len(magicMarker)
+	if totalSize > maxEmbedSize {
+		return fmt.Errorf("embedded signature size %d exceeds maximum %d", totalSize, maxEmbedSize)
+	}
+	out := make([]byte, 0, totalSize)
 	out = append(out, documentData...)
 	out = append(out, sizeBuf...)
 	out = append(out, metaJSON...)

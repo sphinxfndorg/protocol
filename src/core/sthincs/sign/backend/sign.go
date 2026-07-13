@@ -263,7 +263,12 @@ func (sm *STHINCSManager) StoreTimestampNonce(timestamp, nonce []byte) error {
 	defer sm.mu.Unlock()
 	// FIX: safe concatenation — prevents append from extending timestamp's backing
 	// array into nonce's memory if timestamp has spare capacity.
-	key := make([]byte, 0, len(timestamp)+len(nonce))
+	const maxKeySize = 1 << 20 // 1 MB maximum key size
+	totalKeySize := len(timestamp) + len(nonce)
+	if totalKeySize > maxKeySize {
+		return fmt.Errorf("timestamp-nonce key size %d exceeds maximum %d", totalKeySize, maxKeySize)
+	}
+	key := make([]byte, 0, totalKeySize)
 	key = append(key, timestamp...)
 	key = append(key, nonce...)
 	return sm.db.Put(key, []byte("seen"), nil)

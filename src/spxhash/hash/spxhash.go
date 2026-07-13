@@ -357,7 +357,12 @@ func (s *SphinxHash) hashData(data []byte) []byte {
 	//
 	// FIX D: include saltEntropy alongside the salt so the random entropy
 	// generated at construction time actively influences the hash output.
-	combined := make([]byte, len(data)+len(s.salt)+len(s.saltEntropy))
+	const maxHashInputSize = 1 << 20 // 1 MB maximum hash input size
+	totalSize := len(data) + len(s.salt) + len(s.saltEntropy)
+	if totalSize > maxHashInputSize {
+		panic(fmt.Sprintf("spxhash: hash input size %d exceeds maximum %d", totalSize, maxHashInputSize))
+	}
+	combined := make([]byte, totalSize)
 	copy(combined, data)
 	copy(combined[len(data):], s.salt)
 	copy(combined[len(data)+len(s.salt):], s.saltEntropy)

@@ -360,6 +360,11 @@ func (sm *STHINCSManager) StoreSignatureHash(sigBytes []byte) error {
 
 	// Create the storage key with prefix to avoid collisions with other
 	// database entries (e.g., timestamp-nonce pairs, commitments, etc.)
+	// Guard against integer overflow in capacity calculation (CodeQL rule go/allocation-size-overflow).
+	const maxKeyOperandSize = 1 << 20 // 1 MiB sanity cap per operand
+	if len(signatureHashPrefix) > maxKeyOperandSize || len(sigHash) > maxKeyOperandSize {
+		return errors.New("signature hash key size exceeds maximum allowed size")
+	}
 	key := make([]byte, 0, len(signatureHashPrefix)+len(sigHash))
 	key = append(key, []byte(signatureHashPrefix)...)
 	key = append(key, sigHash...)
@@ -404,6 +409,11 @@ func (sm *STHINCSManager) CheckSignatureHash(sigBytes []byte) (bool, error) {
 	sigHash := common.SpxHash(sigBytes)
 
 	// Construct the same key format used in StoreSignatureHash
+	// Guard against integer overflow in capacity calculation (CodeQL rule go/allocation-size-overflow).
+	const maxKeyOperandSize = 1 << 20 // 1 MiB sanity cap per operand
+	if len(signatureHashPrefix) > maxKeyOperandSize || len(sigHash) > maxKeyOperandSize {
+		return false, errors.New("signature hash key size exceeds maximum allowed size")
+	}
 	key := make([]byte, 0, len(signatureHashPrefix)+len(sigHash))
 	key = append(key, []byte(signatureHashPrefix)...)
 	key = append(key, sigHash...)
@@ -842,7 +852,15 @@ func buildSigParts(sigBytes, commitment []byte) [][]byte {
 
 	// Prepend commitment to leaf[0] — binds the Merkle root to c.
 	// This ensures the root hash encodes the commitment value directly.
-	leaf0 := make([]byte, 0, len(commitment)+len(parts[0]))
+	// Guard against integer overflow in capacity calculation (CodeQL rule go/allocation-size-overflow).
+	// Each operand is bounds-checked individually *before* summing, so the
+	// addition itself is guaranteed not to overflow — not just the result.
+	const maxLeafOperandSize = 1 << 20 // 1 MiB sanity cap per operand
+	if len(commitment) > maxLeafOperandSize || len(parts[0]) > maxLeafOperandSize {
+		panic("signature leaf exceeds maximum allowed size")
+	}
+	totalSize := len(commitment) + len(parts[0])
+	leaf0 := make([]byte, 0, totalSize)
 	leaf0 = append(leaf0, commitment...)
 	leaf0 = append(leaf0, parts[0]...)
 	parts[0] = leaf0

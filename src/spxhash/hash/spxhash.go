@@ -268,10 +268,21 @@ func (s *SphinxHash) Clone() *SphinxHash {
 // for instance B, because the two instances produce different hashes for the
 // same input. The salt is now mixed into the key so each instance's entries
 // are distinct.
+//
+// FIX W (Weak cache key hashing):
+// The original used SHA-512/256 which is a fast hash function. For cache keys,
+// this makes collision attacks feasible. Now using Argon2id with moderate
+// parameters to make cache key derivation computationally expensive.
 func (s *SphinxHash) cacheKey(data []byte) uint64 {
+	// Use Argon2id for cache key derivation to make collision attacks infeasible
+	// Parameters are intentionally moderate (1 MB memory, 2 iterations) since
+	// this is called frequently and performance matters, but still expensive
+	// enough to prevent brute-force cache poisoning.
+	argon2Key := argon2.IDKey(data, s.salt, 2, 1024, 2, 64)
+
+	// Derive 64-bit cache key from the Argon2 output using SHA-512/256
 	h := sha512.New512_256()
-	h.Write(data)
-	h.Write(s.salt) // FIX F: bind key to this instance's salt
+	h.Write(argon2Key)
 	sum := h.Sum(nil)
 	return binary.LittleEndian.Uint64(sum[:8])
 }

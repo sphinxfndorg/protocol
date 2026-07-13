@@ -960,11 +960,9 @@ func (bc *Blockchain) StoreChainState(nodes []*storage.NodeInfo) error {
 		filepath.Join(bc.storage.GetStateDir(), "chain_state.json"))
 	logger.Info("Chain state saved with genesis hash: %s", bc.chainParams.GenesisHash)
 
-	// Log signature validation summary if available
-	if signatureValidation != nil {
-		logger.Info("Signature validation: %d/%d valid signatures",
-			signatureValidation.ValidSignatures, signatureValidation.TotalSignatures)
-	}
+	// Log signature validation summary
+	logger.Info("Signature validation: %d/%d valid signatures",
+		signatureValidation.ValidSignatures, signatureValidation.TotalSignatures)
 
 	return nil
 }

@@ -35,15 +35,15 @@ import (
 // The Kyber shared secret is XORed with the X25519 shared secret to form the
 // 32-byte AES key used to encrypt sessionKey.
 func EncryptSessionKeyForRecipient(sessionKey []byte, pub *HybridPublicKey) (*RecipientEntry, error) {
-	log.Printf("[INFO] EncryptSessionKeyForRecipient: starting hybrid KEM encryption for recipient: %.16s...", pub.Fingerprint[:16])
 	log.Printf("[DEBUG] EncryptSessionKeyForRecipient: session key length: %d bytes", len(sessionKey))
-	log.Printf("[DEBUG] EncryptSessionKeyForRecipient: X25519 public key length: %d bytes", len(pub.X25519Pub))
-	log.Printf("[DEBUG] EncryptSessionKeyForRecipient: Kyber public key length: %d bytes", len(pub.KyberPub))
 
 	if pub == nil {
 		log.Printf("[ERROR] EncryptSessionKeyForRecipient: nil public key")
 		return nil, errors.New("EncryptSessionKeyForRecipient: nil public key")
 	}
+	log.Printf("[INFO] EncryptSessionKeyForRecipient: starting hybrid KEM encryption for recipient: %.16s...", pub.Fingerprint[:16])
+	log.Printf("[DEBUG] EncryptSessionKeyForRecipient: X25519 public key length: %d bytes", len(pub.X25519Pub))
+	log.Printf("[DEBUG] EncryptSessionKeyForRecipient: Kyber public key length: %d bytes", len(pub.KyberPub))
 	if len(pub.X25519Pub) != 32 {
 		log.Printf("[ERROR] EncryptSessionKeyForRecipient: X25519 public key must be 32 bytes, got %d", len(pub.X25519Pub))
 		return nil, fmt.Errorf("EncryptSessionKeyForRecipient: X25519 public key must be 32 bytes, got %d", len(pub.X25519Pub))

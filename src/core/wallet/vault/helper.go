@@ -535,7 +535,7 @@ func removeHiddenFiles(dir string) error {
 	log.Printf("[INFO] removeHiddenFiles: removing hidden files from: %s", dir)
 
 	removedCount := 0
-	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+	err := filepath.Walk(dir, func(path string, _ os.FileInfo, err error) error {
 		if err != nil {
 			log.Printf("[ERROR] removeHiddenFiles: walk error at %s: %v", path, err)
 			return err

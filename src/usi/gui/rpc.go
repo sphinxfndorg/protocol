@@ -39,7 +39,8 @@ func NewWalletClient(nodeAddr string) *WalletClient {
 		if envAddr := os.Getenv("SPHINX_RPC_ADDR"); envAddr != "" {
 			nodeAddr = envAddr
 		} else {
-			nodeAddr = "127.0.0.1:30303"
+			// Default to HTTP RPC port (8545), not TCP P2P port (30303)
+			nodeAddr = "127.0.0.1:8545"
 		}
 	}
 	// No scheme – just the raw host:port

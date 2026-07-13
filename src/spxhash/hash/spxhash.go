@@ -377,7 +377,9 @@ func (s *SphinxHash) hashData(data []byte) []byte {
 	// Dynamically determine the length of the shake output based on the size.
 	shakeLength := s.Size()                // Use the Size function to dynamically set the output length for SHAKE256.
 	shakeHash := make([]byte, shakeLength) // Create a slice for the dynamically determined length.
-	shake.Read(shakeHash)                  // Read the resulting hash into shakeHash.
+	if _, err := shake.Read(shakeHash); err != nil {
+		panic(fmt.Sprintf("spxhash: failed to read SHAKE256 hash: %v", err))
+	} // Read the resulting hash into shakeHash.
 
 	// FIX #3 (Runtime panic for bitSize 384/512):
 	// sphinxHash panicked when len(hash1) != len(hash2). sha2Hash is always
@@ -393,7 +395,9 @@ func (s *SphinxHash) hashData(data []byte) []byte {
 		extShake := sha3.NewShake256()
 		extShake.Write(sha2Hash)
 		sha2Extended = make([]byte, shakeLength)
-		extShake.Read(sha2Extended)
+		if _, err := extShake.Read(sha2Extended); err != nil {
+			panic(fmt.Sprintf("spxhash: failed to read extended SHAKE256 hash: %v", err))
+		}
 	} else {
 		sha2Extended = sha2Hash
 	}
@@ -524,7 +528,9 @@ func (s *SphinxHash) sphinxHash(hash1, hash2 []byte, primeConstant uint64) []byt
 		roundShake := sha3.NewShake256()
 		roundShake.Write(sphinxHashState) // Re-hash the intermediate result.
 		newState := make([]byte, len(sphinxHashState))
-		roundShake.Read(newState)
+		if _, err := roundShake.Read(newState); err != nil {
+			panic(fmt.Sprintf("spxhash: failed to read round hash: %v", err))
+		}
 		sphinxHashState = newState // Update sphinxHashState with the new hash value after each round.
 	}
 
@@ -536,7 +542,9 @@ func (s *SphinxHash) sphinxHash(hash1, hash2 []byte, primeConstant uint64) []byt
 	finalShake := sha3.NewShake256()
 	finalShake.Write(sphinxHashState)
 	sphinxFinal := make([]byte, shakeLength)
-	finalShake.Read(sphinxFinal)
+	if _, err := finalShake.Read(sphinxFinal); err != nil {
+		panic(fmt.Sprintf("spxhash: failed to read final hash: %v", err))
+	}
 
 	for i := 0; i < len(sphinxFinal)/8; i++ {
 		// Calculate the offset for each 8-byte (64-bit) segment.

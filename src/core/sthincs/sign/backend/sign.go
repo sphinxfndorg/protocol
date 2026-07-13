@@ -293,7 +293,12 @@ func (sm *STHINCSManager) CheckTimestampNonce(timestamp, nonce []byte) (bool, er
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 	// FIX: safe concatenation — same reason as StoreTimestampNonce.
-	key := make([]byte, 0, len(timestamp)+len(nonce))
+	const maxKeySize = 1 << 20 // 1 MB maximum key size
+	totalKeySize := len(timestamp) + len(nonce)
+	if totalKeySize > maxKeySize {
+		return false, fmt.Errorf("timestamp-nonce key size %d exceeds maximum %d", totalKeySize, maxKeySize)
+	}
+	key := make([]byte, 0, totalKeySize)
 	key = append(key, timestamp...)
 	key = append(key, nonce...)
 	_, err := sm.db.Get(key, nil)

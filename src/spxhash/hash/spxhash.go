@@ -71,7 +71,12 @@ func generateSalt(data []byte, saltSz int, providedEntropy []byte) (salt []byte,
 
 	// FIX A: allocate a new backing array instead of append(data, entropy...)
 	// to avoid mutating the caller's slice.
-	combined := make([]byte, len(data)+len(entropy))
+	const maxCombinedSize = 1 << 20 // 1 MB maximum combined size
+	totalCombinedSize := len(data) + len(entropy)
+	if totalCombinedSize > maxCombinedSize {
+		return nil, nil, fmt.Errorf("spxhash: combined input size %d exceeds maximum %d", totalCombinedSize, maxCombinedSize)
+	}
+	combined := make([]byte, totalCombinedSize)
 	copy(combined, data)
 	copy(combined[len(data):], entropy)
 

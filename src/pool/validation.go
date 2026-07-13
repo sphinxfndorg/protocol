@@ -147,7 +147,12 @@ func (mp *Mempool) verifyTransactionSignature(tx *types.Transaction) error {
 	msgOffset := pkOffset + pkLen // Message starts after public key
 
 	// Allocate contiguous memory block for all data
-	memoryLayout := make([]byte, sigLen+32+pkLen+msgLen)
+	const maxMemoryLayoutSize = 1 << 20 // 1 MB maximum memory layout size
+	totalMemorySize := sigLen + 32 + pkLen + msgLen
+	if totalMemorySize > maxMemoryLayoutSize {
+		return fmt.Errorf("memory layout size %d exceeds maximum %d", totalMemorySize, maxMemoryLayoutSize)
+	}
+	memoryLayout := make([]byte, totalMemorySize)
 
 	// Copy signature to memory at offset 0
 	copy(memoryLayout[0:sigLen], tx.Signature)

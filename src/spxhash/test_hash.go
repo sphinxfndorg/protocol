@@ -23,8 +23,15 @@ func main() {
 	for i, data := range messages {
 		fmt.Printf("\nMessage %d: %s\n", i+1, data)
 
-		// Create a new SphinxHash instance for each message
-		sphinx, err := spxhash.NewSphinxHash(256, []byte{})
+		// FIX SALT-DEMO: NewSphinxHash requires a non-empty salt (see FIX DET
+		// in spxhash.go) — a deterministic hasher isn't meaningful without a
+		// fixed salt to derive from. Passing []byte{} here always returned an
+		// error, so this demo never got past message 1 before hitting
+		// log.Fatalf. ProtocolSalt is the package's canonical, public salt
+		// for exactly this kind of deterministic, reproducible hashing (the
+		// same one common.SpxHash uses), so it's the right value for a demo
+		// that hashes the same messages the same way on every run.
+		sphinx, err := spxhash.NewSphinxHash(256, spxhash.ProtocolSalt)
 		if err != nil {
 			log.Fatalf("Error creating SphinxHash for message %d: %v", i+1, err)
 		}

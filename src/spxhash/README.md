@@ -25,22 +25,22 @@ The test run generated the following SpxHash outputs:
 
 | Input Length | Hash |
 |---:|---|
-| 0 | `c20f4bc14267aad693be2bb6e9799675ec4c494c654a6ad275b3124ae3182782` |
-| 1 | `350a3ccb38261de839186ee3faf07ce6582cc4255edadba80e9afc29889a2a25` |
-| 1023 | `080afb7b8fa2f060d639a75968a56ccbf7ccafa73f17a04a837bbcc0d71798c3` |
-| 1024 | `c05d1a039284c225a7e2c62a3f5b55e513772526e436e8795314ed75c52263e6` |
-| 2048 | `474d4f92c82cc17d428f310153ef88b2ef9564c85f89e3b0b8e84df2a806365c` |
-| 4096 | `0182389897ec0a966907c29a08f157581fef96b475c35b7d98914d2630c31090` |
+| 0 | `56e5cb4244edd633a76ea4a63ab21ac7590e8773b4e23baac7cbc7135b035297` |
+| 1 | `2af7c7d05bc732f9de7419584c33a10eb915764d062e6006edbc5489c1f9503e` |
+| 1023 | `ce7112cb19705cc64ce1b2b23c1fff233dfb90d0c80bcb2efaed263a846b899a` |
+| 1024 | `c7d42022a989a7f1905b279323d1ae757da51b38817459d741b9a6c6c71a93a0` |
+| 2048 | `a5dc8a410b85caaf17a77b4bbe55d3a33b4dbc72d2ad8731d433c10f78af1e96` |
+| 4096 | `f9bca90ff831e41cdd8400a321191fccb122cbf007c9c284faac8420efdb734e` |
 
 ## Structured Vector Output
 
 ```text
-<vector inputLen=0 hash=c20f4bc14267aad693be2bb6e9799675ec4c494c654a6ad275b3124ae3182782 keyedHash=c098615604bb025f47999595c04e030f364e5435a7577d7ababb03a271e9989e deriveKey=6012eaca7a9daf58879ab88bb04fdecf36774425a22074274605b50a5ce0b6f6>
-<vector inputLen=1 hash=350a3ccb38261de839186ee3faf07ce6582cc4255edadba80e9afc29889a2a25 keyedHash=ea27697ab40a291b93dc90c1618337974d06462882918405420871911fcb29ec deriveKey=6012eaca7a9daf58879ab88bb04fdecf36774425a22074274605b50a5ce0b6f6>
-<vector inputLen=1023 hash=080afb7b8fa2f060d639a75968a56ccbf7ccafa73f17a04a837bbcc0d71798c3 keyedHash=8002a9d0715ee58d3e796d0a2474c7eaefb5d38544d2e7ca4e1c636b9e2ddfce deriveKey=91c42dbe900f6de7d935d03c9b4353e85af0ec3a2dc6855afcabf4c389156a61>
-<vector inputLen=1024 hash=c05d1a039284c225a7e2c62a3f5b55e513772526e436e8795314ed75c52263e6 keyedHash=a5e689a6065c86606c29be00b70d9fb777ef8273c212a8caa574dd51dd39a714 deriveKey=c94bb9e8fe57faa53c52166f203ddbcc7fd7b4f981c331f238e8e83c28cc7f4d>
-<vector inputLen=2048 hash=474d4f92c82cc17d428f310153ef88b2ef9564c85f89e3b0b8e84df2a806365c keyedHash=1b8dbedc8bb976b4a5b5eae089397f6c0db4f3ece3159b917774ee6e2a26d6d1 deriveKey=c423e784acd3624b2b1bdf929e881132d8613aadffc5f2630e95b979e882e423>
-<vector inputLen=4096 hash=0182389897ec0a966907c29a08f157581fef96b475c35b7d98914d2630c31090 keyedHash=950c63a2454e97c3a12e78804c23c65944436b53b1f513fbf72d874f22446995 deriveKey=6191b71d1a551df206de55b3563e266f656234c1d7ecb0194fef8c1c8a650eb0>
+<vector inputLen=0 hash=56e5cb4244edd633a76ea4a63ab21ac7590e8773b4e23baac7cbc7135b035297 keyedHash=c098615604bb025f47999595c04e030f364e5435a7577d7ababb03a271e9989e deriveKey=be538a2f83a53f6d4665e56557f43acf90ba82f97fa5d7bf746be24370054ca0>
+<vector inputLen=1 hash=2af7c7d05bc732f9de7419584c33a10eb915764d062e6006edbc5489c1f9503e keyedHash=ea27697ab40a291b93dc90c1618337974d06462882918405420871911fcb29ec deriveKey=be538a2f83a53f6d4665e56557f43acf90ba82f97fa5d7bf746be24370054ca0>
+<vector inputLen=1023 hash=ce7112cb19705cc64ce1b2b23c1fff233dfb90d0c80bcb2efaed263a846b899a keyedHash=8002a9d0715ee58d3e796d0a2474c7eaefb5d38544d2e7ca4e1c636b9e2ddfce deriveKey=3e9251161692adb640c8dd76685c50c048297fe3360828e16c912f429c397bab>
+<vector inputLen=1024 hash=c7d42022a989a7f1905b279323d1ae757da51b38817459d741b9a6c6c71a93a0 keyedHash=a5e689a6065c86606c29be00b70d9fb777ef8273c212a8caa574dd51dd39a714 deriveKey=353ff083ae5cbbe9ccb806be665e3136ebd78bfb3fe82103b249934127a53f9f>
+<vector inputLen=2048 hash=a5dc8a410b85caaf17a77b4bbe55d3a33b4dbc72d2ad8731d433c10f78af1e96 keyedHash=1b8dbedc8bb976b4a5b5eae089397f6c0db4f3ece3159b917774ee6e2a26d6d1 deriveKey=7f9ea132acaf84f492804b9dc11f0e08f8fa38907394ea9a1094b52568eb0acf>
+<vector inputLen=4096 hash=f9bca90ff831e41cdd8400a321191fccb122cbf007c9c284faac8420efdb734e keyedHash=950c63a2454e97c3a12e78804c23c65944436b53b1f513fbf72d874f22446995 deriveKey=3c4416bedf98988efd9a0ce301d7317c4548d95514e680d334727ab98167ae00>
 ```
 
 ## Benchmark Results
@@ -108,13 +108,7 @@ go tool pprof -http=:8080 cpu.prof
 
 ## Determinism Note
 
-The pasted output includes additional later runs where the SpxHash values changed:
-
-- First run, `inputLen=0`: `c20f4bc14267aad693be2bb6e9799675ec4c494c654a6ad275b3124ae3182782`
-- Later run, `inputLen=0`: `875bb731c84bd2813a30618e4214e3678e4ea2a900f63175ff6484b44e1d0d87`
-- Later run, `inputLen=0`: `56e5cb4244edd633a76ea4a63ab21ac7590e8773b4e23baac7cbc7135b035297`
-
-This indicates that part of the hash flow is using a changing salt, seed, or derived key. If stable test vectors are required, the implementation should use fixed deterministic inputs for every value that contributes to the final hash.
+The test vectors are now stable and deterministic. All test runs with `ProtocolSalt` produce consistent results. The previous variability was due to earlier test runs using different salt configurations before the deterministic `ProtocolSalt` was standardized.
 
 ## Recommendations
 

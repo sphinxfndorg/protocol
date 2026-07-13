@@ -723,7 +723,12 @@ func (sm *STHINCSManager) StoreTransactionReceipt(commitment, merkleRootHash, pr
 		return fmt.Errorf("failed to store transaction receipt: %w", err)
 	}
 
-	proofKey := make([]byte, 0, len("proof:")+len(commitment))
+	const maxProofKeySize = 1 << 20 // 1 MB maximum proof key size
+	totalProofKeySize := len("proof:") + len(commitment)
+	if totalProofKeySize > maxProofKeySize {
+		return fmt.Errorf("proof key size %d exceeds maximum %d", totalProofKeySize, maxProofKeySize)
+	}
+	proofKey := make([]byte, 0, totalProofKeySize)
 	proofKey = append(proofKey, []byte("proof:")...)
 	proofKey = append(proofKey, commitment...)
 	if err := sm.db.Put(proofKey, proof, nil); err != nil {
@@ -779,7 +784,12 @@ func VerifyCommitmentInRoot(rebuiltRoot *hashtree.HashTreeNode, expectedRoot *ha
 // Returns:
 //   - []byte: Concatenated timestamp || nonce || message in a fresh allocation
 func buildMessageWithTimestampAndNonce(timestamp, nonce, message []byte) []byte {
-	out := make([]byte, 0, len(timestamp)+len(nonce)+len(message))
+	const maxMessageSize = 1 << 20 // 1 MB maximum message size
+	totalSize := len(timestamp) + len(nonce) + len(message)
+	if totalSize > maxMessageSize {
+		panic(fmt.Sprintf("spxhash: message size %d exceeds maximum %d", totalSize, maxMessageSize))
+	}
+	out := make([]byte, 0, totalSize)
 	out = append(out, timestamp...)
 	out = append(out, nonce...)
 	out = append(out, message...)
@@ -808,6 +818,11 @@ func buildMessageWithTimestampAndNonce(timestamp, nonce, message []byte) []byte 
 //
 // Returns: [][]byte of 5 leaf values ready for Merkle tree construction
 func buildSigParts(sigBytes, commitment []byte) [][]byte {
+	const maxSigBytesSize = 1 << 20 // 1 MB maximum signature size
+	if len(sigBytes) > maxSigBytesSize {
+		panic(fmt.Sprintf("spxhash: signature size %d exceeds maximum %d", len(sigBytes), maxSigBytesSize))
+	}
+
 	chunkSize := len(sigBytes) / 4
 	parts := make([][]byte, 5)
 

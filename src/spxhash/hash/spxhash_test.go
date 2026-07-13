@@ -191,36 +191,53 @@ func TestNoInputMutation(t *testing.T) {
 }
 
 // TestLRUEviction — cache must respect capacity and evict LRU entries.
+//
+// FIX WIDE (test update): LRUCache is keyed on CacheKey ([32]byte), not
+// uint64, since cacheKey now returns the full HMAC-SHA-512/256 digest
+// instead of a truncated 8-byte value (see cacheKey in spxhash.go). Bare
+// int literals like 1, 2, 3 no longer convert to the key type, so this test
+// now builds distinct CacheKey values directly — their exact bytes don't
+// matter for exercising LRU eviction, only that the three are distinct.
 func TestLRUEviction(t *testing.T) {
 	cache := NewLRUCache(2)
-	cache.Put(1, []byte("one"))
-	cache.Put(2, []byte("two"))
-	cache.Put(3, []byte("three")) // should evict key 1 (LRU)
+	key1 := CacheKey{1}
+	key2 := CacheKey{2}
+	key3 := CacheKey{3}
 
-	if _, ok := cache.Get(1); ok {
+	cache.Put(key1, []byte("one"))
+	cache.Put(key2, []byte("two"))
+	cache.Put(key3, []byte("three")) // should evict key1 (LRU)
+
+	if _, ok := cache.Get(key1); ok {
 		t.Error("key 1 should have been evicted")
 	}
-	if _, ok := cache.Get(2); !ok {
+	if _, ok := cache.Get(key2); !ok {
 		t.Error("key 2 should still be present")
 	}
-	if _, ok := cache.Get(3); !ok {
+	if _, ok := cache.Get(key3); !ok {
 		t.Error("key 3 should be present")
 	}
 }
 
 // TestLRUSingleNodeEviction covers FIX #6 — evicting the only node must leave
 // the cache in a clean empty state (no dangling l.head pointer).
+//
+// FIX WIDE (test update): same CacheKey change as TestLRUEviction above.
 func TestLRUSingleNodeEviction(t *testing.T) {
 	cache := NewLRUCache(1)
-	cache.Put(1, []byte("one"))
-	cache.Put(2, []byte("two")) // evicts key 1; cache now has only key 2
+	key1 := CacheKey{1}
+	key2 := CacheKey{2}
+	key3 := CacheKey{3}
 
-	if _, ok := cache.Get(1); ok {
+	cache.Put(key1, []byte("one"))
+	cache.Put(key2, []byte("two")) // evicts key1; cache now has only key2
+
+	if _, ok := cache.Get(key1); ok {
 		t.Error("key 1 should have been evicted")
 	}
 	// Put a third entry — would corrupt the list if l.head was left dangling.
-	cache.Put(3, []byte("three"))
-	if _, ok := cache.Get(3); !ok {
+	cache.Put(key3, []byte("three"))
+	if _, ok := cache.Get(key3); !ok {
 		t.Error("key 3 should be present after single-node eviction + re-insert")
 	}
 }

@@ -14,7 +14,7 @@ func NewLRUCache(capacity int) *LRUCache {
 	}
 	return &LRUCache{
 		capacity: capacity,
-		cache:    make(map[uint64]*Node),
+		cache:    make(map[CacheKey]*Node),
 	}
 }
 
@@ -25,7 +25,7 @@ func NewLRUCache(capacity int) *LRUCache {
 // A caller that modified the returned slice would silently corrupt the cached
 // value, causing subsequent hits to return wrong data. Get now returns a copy
 // so the caller owns the bytes it receives.
-func (l *LRUCache) Get(key uint64) ([]byte, bool) {
+func (l *LRUCache) Get(key CacheKey) ([]byte, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -44,7 +44,7 @@ func (l *LRUCache) Get(key uint64) ([]byte, bool) {
 //
 // FIX G: Store a copy of value so that later mutations by the caller do not
 // corrupt the cached entry.
-func (l *LRUCache) Put(key uint64, value []byte) {
+func (l *LRUCache) Put(key CacheKey, value []byte) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 

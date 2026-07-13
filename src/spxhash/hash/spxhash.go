@@ -6,6 +6,7 @@ package spxhash
 
 import (
 	"bytes"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha512"
 	"encoding/binary"
@@ -246,8 +247,8 @@ func (s *SphinxHash) Clone() *SphinxHash {
 	}
 }
 
-// cacheKey builds a collision-resistant 64-bit cache key that is bound to both
-// the full input content and the instance's salt.
+// cacheKey builds a collision-resistant cache key that is bound to both the
+// full input content and the instance's salt.
 //
 // FIX #1 (Cache key collision):
 // The original code used binary.LittleEndian.Uint64(data[:8]) as the cache
@@ -256,35 +257,36 @@ func (s *SphinxHash) Clone() *SphinxHash {
 // returned the wrong hash silently, breaking correctness and making it
 // exploitable in integrity-checking contexts.
 //
-// Fix: hash the entire input with SHA-512/256 and derive the 64-bit key from
-// the first 8 bytes of THAT hash. The probability of two distinct inputs
-// producing the same key is now ≈2⁻⁶⁴ (birthday bound on the key space)
-// rather than certain for any shared prefix.
-//
 // FIX F (Cross-instance cache poisoning):
 // The key previously depended only on input data, not on the instance's salt.
 // If a cache were ever shared between two SphinxHash instances (e.g. via a
 // package-level singleton), a hit from instance A would return the wrong hash
 // for instance B, because the two instances produce different hashes for the
-// same input. The salt is now mixed into the key so each instance's entries
-// are distinct.
+// same input. The salt is mixed into the key (as the HMAC key, below) so each
+// instance's entries are distinct.
 //
-// FIX W (Weak cache key hashing):
-// The original used SHA-512/256 which is a fast hash function. For cache keys,
-// this makes collision attacks feasible. Now using Argon2id with moderate
-// parameters to make cache key derivation computationally expensive.
-func (s *SphinxHash) cacheKey(data []byte) uint64 {
-	// Use Argon2id for cache key derivation to make collision attacks infeasible
-	// Parameters are intentionally moderate (1 MB memory, 2 iterations) since
-	// this is called frequently and performance matters, but still expensive
-	// enough to prevent brute-force cache poisoning.
-	argon2Key := argon2.IDKey(data, s.salt, 2, 1024, 2, 64)
-
-	// Derive 64-bit cache key from the Argon2 output using SHA-512/256
-	h := sha512.New512_256()
-	h.Write(argon2Key)
-	sum := h.Sum(nil)
-	return binary.LittleEndian.Uint64(sum[:8])
+// FIX W (Weak cache key hashing) / FIX WIDE (supersedes FIX W):
+// FIX W originally swapped the fast SHA-512/256 keying for Argon2id, reasoning
+// that a fast hash made collision search on the key space "feasible." That
+// diagnosis was half right: an unkeyed, 64-bit-truncated key does have a weak
+// ~2^32 birthday bound. But the fix it applied — a memory-hard KDF — treated
+// the symptom (fast per-guess cost) rather than the cause (too-small key
+// space), and it paid that cost (~1ms) on every single call, hit or miss,
+// since cacheKey must run before the cache can even be checked.
+//
+// Fix: derive the key with HMAC-SHA-512/256, keyed on the instance's salt
+// (preserving FIX F's salt-binding), and keep the full 32-byte output as
+// CacheKey instead of truncating to 64 bits (preserving and strengthening
+// FIX #1's collision resistance: ~2^128 birthday bound instead of ~2^32).
+// HMAC is a fast pseudorandom function — microseconds, not milliseconds —
+// and widening the key space is what actually closes the collision-search
+// gap FIX W was reaching for, independent of how expensive a single guess is.
+func (s *SphinxHash) cacheKey(data []byte) CacheKey {
+	mac := hmac.New(sha512.New512_256, s.salt)
+	mac.Write(data)
+	var key CacheKey
+	copy(key[:], mac.Sum(nil))
+	return key
 }
 
 // GetHash retrieves or calculates the hash of the given data.

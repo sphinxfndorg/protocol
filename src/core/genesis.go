@@ -277,8 +277,8 @@ func (gs *GenesisState) BuildBlock() *types.Block {
 // the result is byte-for-byte identical to the TxsRoot produced by BuildBlock.
 func (gs *GenesisState) buildAllocationRoot() []byte {
 	if len(gs.Allocations) == 0 {
-		// Empty body → standard empty Merkle root.
-		return types.EmptyMerkleRoot
+		// Empty body → hash of empty input for consistency with SpxHash
+		return common.SpxHash([]byte{})
 	}
 
 	// Build the same transaction list that BuildBlock uses so the root matches.

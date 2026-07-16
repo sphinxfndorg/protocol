@@ -201,16 +201,16 @@ func main() {
 
 	// Validate SHA3-256 fingerprint
 	if vault.ValidateFingerprint(pkBytes, sha3Fingerprint) {
-		fmt.Println("✅ SHA3-256 fingerprint validation passed")
+		fmt.Println("SUCCESS SHA3-256 fingerprint validation passed")
 	} else {
-		fmt.Println("❌ SHA3-256 fingerprint validation failed")
+		fmt.Println("ERROR SHA3-256 fingerprint validation failed")
 	}
 
 	// Validate SPIF address fingerprint
 	if vault.ValidateAddressFingerprint(pkBytes, address, orgCode) {
-		fmt.Println("✅ SPIF address validation passed")
+		fmt.Println("SUCCESS SPIF address validation passed")
 	} else {
-		fmt.Println("❌ SPIF address validation failed")
+		fmt.Println("ERROR SPIF address validation failed")
 	}
 
 	// Normalize address for comparison
@@ -332,16 +332,16 @@ func main() {
 	if !ok {
 		log.Fatal("Decrypted secret key does not match the stored public key")
 	}
-	fmt.Println("✅ Verified: decrypted secret key matches stored public key.")
+	fmt.Println("SUCCESS Verified: decrypted secret key matches stored public key.")
 
 	// --- 16. Verify fingerprint from metadata ---
 	fmt.Println("\n--- Metadata Fingerprint Verification ---")
 	if loadedKeyPair.Metadata != nil {
 		if storedFP, ok := loadedKeyPair.Metadata["sha3_fingerprint"].(string); ok {
 			if vault.ValidateFingerprint(pkBytes, storedFP) {
-				fmt.Println("✅ Fingerprint verification from metadata passed")
+				fmt.Println("SUCCESS Fingerprint verification from metadata passed")
 			} else {
-				fmt.Println("❌ Fingerprint verification from metadata failed")
+				fmt.Println("ERROR Fingerprint verification from metadata failed")
 			}
 		}
 	}

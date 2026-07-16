@@ -7,18 +7,17 @@ package bind
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"net"
 	"strings"
 	"sync"
 
 	"github.com/sphinxfndorg/protocol/src/consensus"
+	logger "github.com/sphinxfndorg/protocol/src/console"
 	"github.com/sphinxfndorg/protocol/src/core"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
 	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/parameters"
 	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/sthincs"
 	security "github.com/sphinxfndorg/protocol/src/handshake"
-	logger "github.com/sphinxfndorg/protocol/src/log"
 	"github.com/sphinxfndorg/protocol/src/network"
 	"github.com/sphinxfndorg/protocol/src/rpc"
 	"github.com/sphinxfndorg/protocol/src/transport"
@@ -28,7 +27,7 @@ import (
 func BindTCPServers(configs []NodeConfig, wg *sync.WaitGroup) error {
 	for _, config := range configs {
 		if config.Address == "" || config.Name == "" || config.MessageCh == nil || config.RPCServer == nil || config.ReadyCh == nil {
-			logger.Errorf("Invalid configuration for %s: missing required fields", config.Name)
+			logger.Error("Invalid configuration for %s: missing required fields", config.Name)
 			return fmt.Errorf("invalid configuration for %s: missing required fields", config.Name)
 		}
 
@@ -37,11 +36,11 @@ func BindTCPServers(configs []NodeConfig, wg *sync.WaitGroup) error {
 		wg.Add(1)
 		go func(name, addr string, server *transport.TCPServer) {
 			defer wg.Done()
-			logger.Infof("Starting TCP server for %s on %s", name, addr)
+			logger.Info("Starting TCP server for %s on %s", name, addr)
 			if err := server.Start(); err != nil {
-				logger.Errorf("TCP server failed for %s: %v", name, err)
+				logger.Error("TCP server failed for %s: %v", name, err)
 			} else {
-				logger.Infof("TCP server for %s successfully started", name)
+				logger.Info("TCP server for %s successfully started", name)
 			}
 		}(config.Name, config.Address, tcpServer)
 	}
@@ -71,33 +70,33 @@ func handleIncomingConn(
 	// Read length-prefixed message from client
 	msgData, err := readFramedMessage(conn)
 	if err != nil {
-		log.Printf("[%s] Failed to read message: %v", selfID, err)
+		logger.Warn("[%s] Failed to read message: %v", selfID, err)
 		return
 	}
 
 	var msg security.Message
 	if err := json.Unmarshal(msgData, &msg); err != nil {
-		log.Printf("[%s] Failed to decode message: %v", selfID, err)
+		logger.Warn("[%s] Failed to decode message: %v", selfID, err)
 		return
 	}
 
-	log.Printf("[%s] Received message type: %s", selfID, msg.Type)
+	logger.Debug("[%s] Received message type: %s", selfID, msg.Type)
 
 	switch msg.Type {
 	case "key_exchange":
 		var kx peerKeyExchangeMsg
 		if err := json.Unmarshal(msg.Data, &kx); err != nil {
-			log.Printf("[%s] Failed to unmarshal key exchange: %v", selfID, err)
+			logger.Warn("[%s] Failed to unmarshal key exchange: %v", selfID, err)
 			return
 		}
 
 		pk, err := sthincs.DeserializePK(sthincsParams, kx.PublicKey)
 		if err != nil {
-			log.Printf("[%s] Failed to deserialize public key: %v", selfID, err)
+			logger.Warn("[%s] Failed to deserialize public key: %v", selfID, err)
 			return
 		}
 		signingService.RegisterPublicKey(kx.NodeID, pk)
-		logger.Info("✅ [%s] Registered public key from %s", selfID, kx.NodeID)
+		logger.Info("[%s] Registered public key from %s", selfID, kx.NodeID)
 
 		if onPeerDiscovered != nil && kx.NodeID != "" {
 			var peerAddr string
@@ -118,7 +117,7 @@ func handleIncomingConn(
 
 		ownPKBytes, err := signingService.GetPublicKey()
 		if err != nil {
-			log.Printf("[%s] Failed to get own public key: %v", selfID, err)
+			logger.Error("[%s] Failed to get own public key: %v", selfID, err)
 			return
 		}
 		reply := peerKeyExchangeMsg{NodeID: selfID, PublicKey: ownPKBytes, RewardAddress: ownRewardAddress}
@@ -126,13 +125,13 @@ func handleIncomingConn(
 		replyMsg := security.Message{Type: "key_exchange", Data: replyBytes}
 		encodedReply, _ := replyMsg.Encode()
 		if err := writeFramedMessage(conn, encodedReply); err != nil {
-			log.Printf("[%s] Failed to send key exchange reply: %v", selfID, err)
+			logger.Warn("[%s] Failed to send key exchange reply: %v", selfID, err)
 		}
 
 	case "peer_exchange":
 		var req peerExchangeMsg
 		if err := json.Unmarshal(msg.Data, &req); err != nil {
-			log.Printf("[%s] Failed to unmarshal peer exchange request: %v", selfID, err)
+			logger.Warn("[%s] Failed to unmarshal peer exchange request: %v", selfID, err)
 			return
 		}
 
@@ -145,29 +144,29 @@ func handleIncomingConn(
 			knownPeers = getKnownPeers()
 		}
 
-		logger.Info("[%s] 🔍 Peer exchange request from %s (%s) — sharing %d known peer(s)",
+		logger.Info("[%s] Peer exchange request from %s (%s) — sharing %d known peer(s)",
 			selfID, req.NodeID, req.Address, len(knownPeers))
 
 		reply := peerExchangeMsg{NodeID: selfID, Address: selfAddr, Peers: knownPeers}
 		replyBytes, err := json.Marshal(reply)
 		if err != nil {
-			log.Printf("[%s] Failed to marshal peer exchange reply: %v", selfID, err)
+			logger.Warn("[%s] Failed to marshal peer exchange reply: %v", selfID, err)
 			return
 		}
 		replyMsg := security.Message{Type: "peer_exchange", Data: replyBytes}
 		encodedReply, err := replyMsg.Encode()
 		if err != nil {
-			log.Printf("[%s] Failed to encode peer exchange reply: %v", selfID, err)
+			logger.Warn("[%s] Failed to encode peer exchange reply: %v", selfID, err)
 			return
 		}
 		if err := writeFramedMessage(conn, encodedReply); err != nil {
-			log.Printf("[%s] Failed to send peer exchange reply: %v", selfID, err)
+			logger.Warn("[%s] Failed to send peer exchange reply: %v", selfID, err)
 		}
 
 	case "checkpoint":
 		var cp consensus.CheckpointMessage
 		if err := json.Unmarshal(msg.Data, &cp); err != nil {
-			log.Printf("[%s] Failed to unmarshal checkpoint: %v", selfID, err)
+			logger.Warn("[%s] Failed to unmarshal checkpoint: %v", selfID, err)
 			return
 		}
 
@@ -176,20 +175,20 @@ func handleIncomingConn(
 
 		if cons != nil {
 			if err := cons.HandleCheckpointMessage(msg.Data, ""); err != nil {
-				log.Printf("[%s] Failed to handle checkpoint: %v", selfID, err)
+				logger.Warn("[%s] Failed to handle checkpoint: %v", selfID, err)
 			}
 		}
 
 	case "get_blocks":
 		var req GetBlocksRequest
 		if err := json.Unmarshal(msg.Data, &req); err != nil {
-			log.Printf("[%s] Failed to unmarshal get_blocks request: %v", selfID, err)
+			logger.Warn("[%s] Failed to unmarshal get_blocks request: %v", selfID, err)
 			return
 		}
 
 		// Validate request bounds
 		if req.FromHeight > req.ToHeight || req.ToHeight-req.FromHeight > 500 {
-			log.Printf("[%s] Invalid get_blocks range: %d -> %d", selfID, req.FromHeight, req.ToHeight)
+			logger.Warn("[%s] Invalid get_blocks range: %d -> %d", selfID, req.FromHeight, req.ToHeight)
 			return
 		}
 		if req.MaxResults == 0 || req.MaxResults > 500 {
@@ -223,51 +222,51 @@ func handleIncomingConn(
 		respMsg := security.Message{Type: "get_blocks", Data: respBytes}
 		encodedResp, _ := respMsg.Encode()
 		if err := writeFramedMessage(conn, encodedResp); err != nil {
-			log.Printf("[%s] Failed to send get_blocks response: %v", selfID, err)
+			logger.Warn("[%s] Failed to send get_blocks response: %v", selfID, err)
 		}
-		logger.Info("[%s] 📦 Served %d blocks (heights %d-%d) to peer", selfID, len(blocks), req.FromHeight, req.ToHeight)
+		logger.Debug("[%s] Served %d blocks (heights %d-%d) to peer", selfID, len(blocks), req.FromHeight, req.ToHeight)
 
 	case "proposal", "prepare", "vote", "timeout", "randao_sync":
 		if p2pMgr == nil {
-			log.Printf("[%s] P2P manager is nil, cannot handle consensus message", selfID)
+			logger.Warn("[%s] P2P manager is nil, cannot handle consensus message", selfID)
 			return
 		}
 
-		log.Printf("[%s] 📨 Processing consensus message type=%s", selfID, msg.Type)
+		logger.Debug("[%s] Processing consensus message type=%s", selfID, msg.Type)
 
 		if err := p2pMgr.HandleIncomingMessage(msg.Type, msg.Data, ""); err != nil {
-			log.Printf("[%s] consensus handling error: %v", selfID, err)
+			logger.Warn("[%s] consensus handling error: %v", selfID, err)
 		} else {
-			log.Printf("[%s] ✅ Successfully handled %s message", selfID, msg.Type)
+			logger.Debug("[%s] Successfully handled %s message", selfID, msg.Type)
 		}
 
 	case "rpc":
 		var rpcData []byte
 		if err := json.Unmarshal(msg.Data, &rpcData); err != nil {
-			log.Printf("[%s] Failed to unmarshal RPC data: %v", selfID, err)
+			logger.Warn("[%s] Failed to unmarshal RPC data: %v", selfID, err)
 			return
 		}
 		respData, err := rpcServer.HandleRequest(rpcData)
 		if err != nil {
-			log.Printf("[%s] RPC handler error: %v", selfID, err)
+			logger.Warn("[%s] RPC handler error: %v", selfID, err)
 		}
 		respPayload, err := json.Marshal(respData)
 		if err != nil {
-			log.Printf("[%s] Failed to marshal RPC response: %v", selfID, err)
+			logger.Warn("[%s] Failed to marshal RPC response: %v", selfID, err)
 			return
 		}
 		respMsg := security.Message{Type: "rpc", Data: respPayload}
 		encodedResp, err := respMsg.Encode()
 		if err != nil {
-			log.Printf("[%s] Failed to encode RPC response: %v", selfID, err)
+			logger.Warn("[%s] Failed to encode RPC response: %v", selfID, err)
 			return
 		}
 		if err := writeFramedMessage(conn, encodedResp); err != nil {
-			log.Printf("[%s] Failed to send RPC response: %v", selfID, err)
+			logger.Warn("[%s] Failed to send RPC response: %v", selfID, err)
 		}
 		return
 
 	default:
-		log.Printf("[%s] Unknown message type: %s", selfID, msg.Type)
+		logger.Warn("[%s] Unknown message type: %s", selfID, msg.Type)
 	}
 }

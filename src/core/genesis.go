@@ -14,8 +14,8 @@ import (
 	"time"
 
 	"github.com/sphinxfndorg/protocol/src/common"
+	logger "github.com/sphinxfndorg/protocol/src/console"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
-	logger "github.com/sphinxfndorg/protocol/src/log"
 )
 
 // NewGenesisValidatorStake converts a whole-SPX amount to the nSPX big.Int
@@ -25,6 +25,14 @@ import (
 func NewGenesisValidatorStake(spx int64) *big.Int {
 	return new(big.Int).Mul(big.NewInt(spx), big.NewInt(1e18))
 }
+
+// CanonicalGenesisTimestamp is the fixed Unix timestamp used for the genesis
+// block across ALL environments (devnet, testnet, mainnet). Using a hardcoded
+// constant instead of wall-clock time ensures every node produces the exact
+// same genesis block hash, regardless of when or where it starts.
+//
+// 2026-07-15 19:33:18 UTC
+const CanonicalGenesisTimestamp int64 = 1731375284
 
 // DefaultGenesisState returns the canonical genesis configuration used by all
 // nodes on the Sphinx Mainnet. Every field is deterministic so that independent
@@ -37,10 +45,11 @@ func DefaultGenesisState() *GenesisState {
 		ChainID:   7331,
 		ChainName: "Sphinx Mainnet",
 		Symbol:    "SPX",
-		// Genesis timestamp is set at runtime by the first genesis creator (NODE-A).
-		// Late joiners must NOT execute genesis locally; they will download block 0
-		// (including this timestamp) from peers.
-		Timestamp: common.GetCurrentTimestamp(),
+		// FIXED timestamp — NOT wall-clock time. Using a hardcoded constant
+		// guarantees that every node produces the identical genesis block hash.
+		// Late joiners that download block 0 from peers will get this same
+		// timestamp embedded in the block header.
+		Timestamp: CanonicalGenesisTimestamp,
 
 		ExtraData:         []byte("Sphinx: The personal ledger beyond it's economics participants. Privacy, sovereignty, and humanity."),
 		InitialDifficulty: big.NewInt(17179869184),
@@ -373,7 +382,7 @@ func ApplyGenesis(bc *Blockchain, gs *GenesisState) error {
 		logger.Warn("ApplyGenesis: failed to write genesis_state.json: %v", writeErr)
 	}
 
-	logger.Info("✅ ApplyGenesis: genesis block applied — hash=%s, allocations=%d, validators=%d, txs_in_body=%d",
+	logger.Info("SUCCESS ApplyGenesis: genesis block applied — hash=%s, allocations=%d, validators=%d, txs_in_body=%d",
 		block.GetHash(), len(gs.Allocations), len(gs.InitialValidators), len(block.Body.TxsList))
 
 	return nil
@@ -410,12 +419,30 @@ func ApplyGenesisWithCachedBlock(bc *Blockchain, gs *GenesisState, cachedBlock *
 			}
 			// Even on skip, rewrite genesis_state.json so ChainName is correct
 			// for the current environment (devnet/testnet/mainnet).
-			// With:
 			envGs := *gs // shallow copy
 			if bc.chainParams != nil {
 				envGs.ChainName = bc.chainParams.ChainName // stamp the actual running env
 				envGs.ChainID = bc.chainParams.ChainID
 			}
+			// FIX: stamp the block-derived fields from the block that is
+			// ACTUALLY on chain (`latest`/`cachedBlock`, same hash), not from
+			// gs (built from bc.chainParams.GenesisConfig). gs.Nonce can
+			// diverge from the real on-chain nonce because the genesis block
+			// is built via DefaultGenesisState().BuildBlock() inside
+			// getCachedGenesisBlock() — which hardcodes Nonce=1 and ignores
+			// GenesisConfig entirely — while gs comes from
+			// GenesisStateFromChainParams(), which honors
+			// GenesisConfig.GenesisNonce. Without this, genesis_state.json
+			// records a nonce that was never actually used to build the
+			// hashed block, while WriteGenesisStateFromBlock (used by late
+			// joiners syncing the real block) correctly reports the true
+			// value — producing a mismatch between the bootstrap node's own
+			// audit file and every late joiner's.
+			envGs.Timestamp = cachedBlock.Header.Timestamp
+			envGs.ExtraData = append([]byte{}, cachedBlock.Header.ExtraData...)
+			envGs.InitialDifficulty = new(big.Int).Set(cachedBlock.Header.Difficulty)
+			envGs.InitialGasLimit = new(big.Int).Set(cachedBlock.Header.GasLimit)
+			envGs.Nonce = cachedBlock.Header.Nonce
 			if writeErr := envGs.writeGenesisStateFile(bc.storage.GetStateDir()); writeErr != nil {
 				logger.Warn("ApplyGenesis (cached, skip): failed to rewrite genesis_state.json: %v", writeErr)
 			}
@@ -438,11 +465,20 @@ func ApplyGenesisWithCachedBlock(bc *Blockchain, gs *GenesisState, cachedBlock *
 		envGs.ChainName = bc.chainParams.ChainName
 		envGs.ChainID = bc.chainParams.ChainID
 	}
+	// FIX: see identical comment in the skip-path above — envGs's
+	// block-derived fields must come from cachedBlock (what was actually
+	// stored and hashed), not from gs (chain-params config), or the audit
+	// file can record a nonce/extra-data/etc. that was never really used.
+	envGs.Timestamp = cachedBlock.Header.Timestamp
+	envGs.ExtraData = append([]byte{}, cachedBlock.Header.ExtraData...)
+	envGs.InitialDifficulty = new(big.Int).Set(cachedBlock.Header.Difficulty)
+	envGs.InitialGasLimit = new(big.Int).Set(cachedBlock.Header.GasLimit)
+	envGs.Nonce = cachedBlock.Header.Nonce
 	if writeErr := envGs.writeGenesisStateFile(bc.storage.GetStateDir()); writeErr != nil {
 		logger.Warn("ApplyGenesis (cached): failed to write genesis_state.json: %v", writeErr)
 	}
 
-	logger.Info("✅ ApplyGenesis (cached): %s genesis applied — hash=%s, allocations=%d",
+	logger.Info("SUCCESS ApplyGenesis (cached): %s genesis applied — hash=%s, allocations=%d",
 		envGs.ChainName, cachedBlock.GetHash(), len(gs.Allocations))
 
 	return nil
@@ -513,7 +549,7 @@ func ApplyGenesisState(bc *Blockchain, gs *GenesisState) error {
 	bc.lock.Unlock()
 
 	totalSPX := new(big.Int).Div(totalMinted, big.NewInt(1e18))
-	logger.Info("✅ ApplyGenesisState: %d accounts, %s SPX, state_root=%x",
+	logger.Info("SUCCESS ApplyGenesisState: %d accounts, %s SPX, state_root=%x",
 		len(gs.Allocations), totalSPX.String(), stateRoot)
 	logger.Info("📊 GENESIS SUPPLY RECORDED: %s nSPX (%s SPX)",
 		totalMinted.String(), totalSPX.String())

@@ -25,8 +25,8 @@ import (
 	svm "github.com/sphinxfndorg/protocol/src/core/svm/opcodes"
 	vmachine "github.com/sphinxfndorg/protocol/src/core/svm/vm"
 
+	logger "github.com/sphinxfndorg/protocol/src/console"
 	security "github.com/sphinxfndorg/protocol/src/handshake"
-	logger "github.com/sphinxfndorg/protocol/src/log"
 	denom "github.com/sphinxfndorg/protocol/src/params/denom"
 	"github.com/sphinxfndorg/protocol/src/pool"
 )
@@ -115,7 +115,7 @@ func runCheckpointSyncLoop(
 				logger.Debug("[%s] Failed to sync checkpoint from %s: %v", nodeID, addr, err)
 				continue
 			}
-			logger.Info("[%s] ✅ Synced checkpoint from %s", nodeID, addr)
+			logger.Info("[%s] Synced checkpoint from %s", nodeID, addr)
 			break
 		}
 	}
@@ -132,7 +132,7 @@ func runCheckpointSyncLoop(
 				continue
 			}
 
-			logger.Info("[%s] 📊 Broadcasting checkpoint to peers", nodeID)
+			logger.Info("[%s] Broadcasting checkpoint to peers", nodeID)
 			if err := cons.BroadcastCheckpoint(); err != nil {
 				logger.Warn("[%s] Failed to broadcast checkpoint: %v", nodeID, err)
 				continue
@@ -159,7 +159,7 @@ func watchAndUpdateStakes(
 	validatorAddressMap map[string]string,
 	phase2State *phase2InitState,
 ) {
-	logger.Info("[%s] 🔍 Stake watcher started - waiting for Block 1", nodeID)
+	logger.Info("[%s] Stake watcher started - waiting for Block 1", nodeID)
 
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
@@ -177,12 +177,12 @@ func watchAndUpdateStakes(
 			height := latestBlock.GetHeight()
 
 			if height >= 1 {
-				logger.Info("[%s] 📊 Block %d detected - updating validator stakes from state DB", nodeID, height)
+				logger.Info("[%s] Block %d detected - updating validator stakes from state DB", nodeID, height)
 
 				time.Sleep(300 * time.Millisecond)
 
 				tryInitPhase2WithRetry(bc, cons, nodeID, validatorIDs, validatorAddressMap, phase2State)
-				logger.Info("[%s] ✅ Stake watcher done", nodeID)
+				logger.Info("[%s] Stake watcher done", nodeID)
 				return
 			}
 		}
@@ -229,7 +229,7 @@ func stakeIfSufficientBalance(vs *consensus.ValidatorSet, stateDB pool.StateDB, 
 		logger.Warn("[%s] Failed to stake %s from verified balance: %v", selfNodeID, validatorID, err)
 		return false
 	}
-	logger.Info("✅ [%s] Validator %s admitted with verified stake from %s", selfNodeID, validatorID, address)
+	logger.Info("[%s] Validator %s admitted with verified stake from %s", selfNodeID, validatorID, address)
 	return true
 }
 
@@ -279,15 +279,15 @@ func initializePhase2Stakes(
 	validatorIDs []string,
 	validatorAddressMap map[string]string,
 ) bool {
-	logger.Info("[%s] 🔓 PHASE 2 INITIALIZATION - Reading stakes from genesis allocations", nodeID)
+	logger.Info("[%s] PHASE 2 INITIALIZATION - Reading stakes from genesis allocations", nodeID)
 
 	vs := cons.GetValidatorSet()
 	if vs == nil {
-		logger.Error("[%s] ❌ ValidatorSet is nil!", nodeID)
+		logger.Error("[%s] ValidatorSet is nil!", nodeID)
 		return false
 	}
 	if len(validatorIDs) == 0 {
-		logger.Error("[%s] ❌ No validators found! Cannot initialize Phase 2 stakes.", nodeID)
+		logger.Error("[%s] No validators found! Cannot initialize Phase 2 stakes.", nodeID)
 		return false
 	}
 
@@ -304,7 +304,7 @@ func initializePhase2Stakes(
 		time.Sleep(time.Duration(100*(1<<attempt)) * time.Millisecond)
 	}
 	if stateDB == nil {
-		logger.Error("[%s] ❌ Failed to open StateDB after %d attempts", nodeID, maxRetries)
+		logger.Error("[%s] Failed to open StateDB after %d attempts", nodeID, maxRetries)
 		return false
 	}
 	defer stateDB.Close()
@@ -340,16 +340,16 @@ func initializePhase2Stakes(
 		successCount++
 	}
 
-	logger.Info("[%s] 📊 Phase 2: %d/%d validators staked", nodeID, successCount, len(validatorIDs))
+	logger.Info("[%s] Phase 2: %d/%d validators staked", nodeID, successCount, len(validatorIDs))
 
 	totalStake := vs.GetTotalStake()
 	if totalStake.Sign() == 0 {
-		logger.Error("[%s] ⚠️ CRITICAL: Total stake is 0 after Phase 2 init!", nodeID)
+		logger.Error("[%s] CRITICAL: Total stake is 0 after Phase 2 init!", nodeID)
 		return false
 	}
 
 	totalSPX := new(big.Int).Div(totalStake, big.NewInt(denom.SPX))
-	logger.Info("[%s] ✅ Phase 2 stakes initialized with %s SPX total", nodeID, totalSPX.String())
+	logger.Info("[%s] Phase 2 stakes initialized with %s SPX total", nodeID, totalSPX.String())
 	return true
 }
 
@@ -376,12 +376,12 @@ func tryInitPhase2(
 		logger.Info("[%s] Phase 2 initialization attempt finished (success=%v)", nodeID, succeeded)
 	}()
 
-	logger.Info("[%s] 🔓 BLOCK 1 COMMITTED — Initializing Phase 2 stakes", nodeID)
+	logger.Info("[%s] BLOCK 1 COMMITTED — Initializing Phase 2 stakes", nodeID)
 
 	time.Sleep(500 * time.Millisecond)
 
 	if !initializePhase2Stakes(bc, cons, nodeID, validatorIDs, validatorAddressMap) {
-		logger.Error("[%s] ❌ Phase 2 initialization failed!", nodeID)
+		logger.Error("[%s] Phase 2 initialization failed!", nodeID)
 		return false
 	}
 
@@ -391,15 +391,15 @@ func tryInitPhase2(
 	if err := bc.WriteChainCheckpoint(); err != nil {
 		logger.Warn("[%s] Failed to write checkpoint after Phase 2: %v", nodeID, err)
 	} else {
-		logger.Info("[%s] ✅ Checkpoint updated after Phase 2 initialization", nodeID)
+		logger.Info("[%s] Checkpoint updated after Phase 2 initialization", nodeID)
 	}
 
 	newLeader := cons.GetElectedLeaderID()
 	if newLeader != "" {
-		logger.Info("[%s] 📊 Phase 2 leader elected: %s (isLeader=%v)",
+		logger.Info("[%s] Phase 2 leader elected: %s (isLeader=%v)",
 			nodeID, newLeader, cons.IsLeader())
 	} else {
-		logger.Warn("[%s] ⚠️ No leader after Phase 2 init — will retry next loop", nodeID)
+		logger.Warn("[%s] No leader after Phase 2 init — will retry next loop", nodeID)
 	}
 	succeeded = true
 	return succeeded
@@ -414,7 +414,7 @@ func tryInitPhase2WithRetry(
 	validatorAddressMap map[string]string,
 	phase2State *phase2InitState,
 ) bool {
-	logger.Info("[%s] 🔍 Initializing Phase 2 with retry...", nodeID)
+	logger.Info("[%s] Initializing Phase 2 with retry...", nodeID)
 
 	maxAttempts := 15
 	baseBackoff := 200 * time.Millisecond
@@ -436,7 +436,7 @@ func tryInitPhase2WithRetry(
 		}
 
 		if tryInitPhase2(bc, cons, nodeID, validatorIDs, validatorAddressMap, phase2State) {
-			logger.Info("[%s] ✅ Phase 2 initialized on attempt %d", nodeID, attempt+1)
+			logger.Info("[%s] Phase 2 initialized on attempt %d", nodeID, attempt+1)
 			return true
 		}
 
@@ -447,7 +447,7 @@ func tryInitPhase2WithRetry(
 		}
 	}
 
-	logger.Error("[%s] ❌ Phase 2 initialization failed after %d attempts - applying fallback stakes",
+	logger.Error("[%s] Phase 2 initialization failed after %d attempts - applying fallback stakes",
 		nodeID, maxAttempts)
 
 	vs := cons.GetValidatorSet()
@@ -457,14 +457,14 @@ func tryInitPhase2WithRetry(
 			if err := vs.AddValidator(vid, minStake); err != nil {
 				logger.Warn("[%s] Failed to set fallback stake for %s: %v", nodeID, vid, err)
 			} else {
-				logger.Info("[%s] ✅ Set fallback stake %d SPX for %s", nodeID, minStake, vid)
+				logger.Info("[%s] Set fallback stake %d SPX for %s", nodeID, minStake, vid)
 			}
 		}
 
 		cons.UpdateLeaderStatus()
 		cons.StartViewChange()
 		phase2State.finish(true)
-		logger.Info("[%s] ✅ Fallback stakes applied, view change triggered", nodeID)
+		logger.Info("[%s] Fallback stakes applied, view change triggered", nodeID)
 		return true
 	}
 
@@ -580,11 +580,12 @@ func runBlockSyncLoop(
 	bc *core.Blockchain,
 	cons *consensus.Consensus,
 	nodeID string,
-	peerAddrs []string,
+	peerAddrsFunc func() []string,
 	syncState *SyncState,
 	syncStateMu *sync.Mutex,
+	progress *logger.BlockchainProgress, // NEW
 ) {
-	logger.Info("[%s] 🔄 Block sync loop started (state=%s)", nodeID, syncState.String())
+	logger.Info("[%s] Block sync loop started (state=%s)", nodeID, syncState.String())
 
 	const (
 		maxBatchSize        uint64 = 500
@@ -599,6 +600,20 @@ func runBlockSyncLoop(
 	lastPeerRefresh := time.Now()
 	peerFailureCount := make(map[string]int)
 
+	// Track sync progress for the dashboard
+	var syncStarted bool
+	var totalBlocksToSync int64 // blocks-behind delta, used only for the log line below
+	// syncTargetHeight is the absolute network tip height. Both arguments to
+	// progress.StartBlockSync/UpdateBlockSync must be absolute heights (see
+	// the solo-mining call site further down, which passes blk.GetHeight()
+	// for both current and total). Previously totalBlocksToSync (a relative
+	// "blocks behind" delta computed once when a sync pass started) was
+	// passed as the total while an absolute height was passed as current —
+	// that mismatch produced a "Height 13 / 1" / "Sync 1300.0%" dashboard
+	// corruption: current kept climbing to the real absolute height while
+	// total stayed frozen at whatever small delta existed when the pass began.
+	var syncTargetHeight int64
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -606,6 +621,24 @@ func runBlockSyncLoop(
 			return
 		default:
 		}
+
+		// ★ FIX: Re-read the peer list on every iteration instead of using a
+		// snapshot captured once at goroutine launch. The caller passes a
+		// closure backed by the live, mutex-protected peer registry (the same
+		// one runBlockProductionLoop's peerCountFunc reads from). Previously
+		// this loop was handed a plain []string snapshot taken at startup —
+		// for the bootstrap node (no --seeds) that snapshot is always empty,
+		// since peers only get registered later via inbound key exchange. The
+		// snapshot never changed for the lifetime of the goroutine, so the
+		// bootstrap node's "len(peerAddrs) == 0" branch below was taken
+		// forever: it correctly reached CAUGHT_UP once (so solo mining could
+		// start), but its ongoing catch-up mechanism — the whole point of a
+		// persistent sync loop — never actually ran for that node, even after
+		// it had live peers and had joined PBFT. Any block it then missed via
+		// direct gossip (dropped message, timing gap during the solo→PBFT
+		// handoff, etc.) could never be recovered, permanently stalling its
+		// height while peers with a working sync loop kept advancing.
+		peerAddrs := peerAddrsFunc()
 
 		localTip := bc.GetLatestBlock()
 		localHeight := uint64(0)
@@ -625,6 +658,9 @@ func runBlockSyncLoop(
 			if *syncState == SyncStateSyncing {
 				*syncState = SyncStateCaughtUp
 				logger.Info("[%s] No peer addresses configured — skipping sync, transitioning to CAUGHT_UP", nodeID)
+				if syncStarted {
+					syncStarted = false
+				}
 			}
 			syncStateMu.Unlock()
 			select {
@@ -669,7 +705,7 @@ func runBlockSyncLoop(
 		}
 
 		if reachablePeers == 0 {
-			logger.Warn("[%s] ⚠️ No peers reachable (tried %d peers) — backing off before retry",
+			logger.Warn("[%s] No peers reachable (tried %d peers) — backing off before retry",
 				nodeID, len(peerAddrs))
 			consecutiveFailures++
 			currentRetryInterval = time.Duration(float64(currentRetryInterval) * backoffMultiplier)
@@ -686,7 +722,7 @@ func runBlockSyncLoop(
 
 		// ── GENESIS HANDLING ──
 		if !hasGenesis {
-			logger.Info("[%s] 📥 No genesis block locally – fetching from peer %s", nodeID, bestPeerAddr)
+			logger.Info("[%s] No genesis block locally – fetching from peer %s", nodeID, bestPeerAddr)
 			resp, err := requestBlocksFromPeer(bestPeerAddr, 0, 0)
 			if err != nil || len(resp.Blocks) == 0 {
 				logger.Warn("[%s] Failed to fetch genesis from %s: %v", nodeID, bestPeerAddr, err)
@@ -731,7 +767,7 @@ func runBlockSyncLoop(
 				}
 				continue
 			}
-			logger.Info("[%s] ✅ Genesis block installed (hash=%s)", nodeID, genesisBlock.GetHash())
+			logger.Info("[%s] Genesis block installed (hash=%s)", nodeID, genesisBlock.GetHash())
 
 			// ════════════════════════════════════════════════════════════════════
 			// ★ FIX: Execute genesis right after installing it.
@@ -750,7 +786,17 @@ func runBlockSyncLoop(
 			if err := bc.ExecuteGenesisBlock(); err != nil {
 				logger.Error("[%s] Failed to execute genesis block: %v", nodeID, err)
 			} else {
-				logger.Info("[%s] ✅ Genesis block executed — vault funded and allocations distributed", nodeID)
+				logger.Info("[%s] Genesis block executed — vault funded and allocations distributed", nodeID)
+				// Late joiners only ever install genesis through this path, so
+				// without recording it here their TPS monitor permanently shows
+				// 0 genesis transactions while the bootstrap node shows N.
+				if tps := bc.GetTPSMonitor(); tps != nil {
+					txCount := uint64(len(genesisBlock.Body.TxsList))
+					for i := uint64(0); i < txCount; i++ {
+						tps.RecordTransaction()
+					}
+					tps.RecordBlock(txCount, 5*time.Second)
+				}
 			}
 			// ════════════════════════════════════════════════════════════════════
 
@@ -767,7 +813,7 @@ func runBlockSyncLoop(
 			if err := bc.WriteGenesisStateFromBlock(genesisBlock); err != nil {
 				logger.Warn("[%s] Failed to write genesis state file: %v", nodeID, err)
 			} else {
-				logger.Info("[%s] ✅ Genesis state file written after syncing genesis", nodeID)
+				logger.Info("[%s] Genesis state file written after syncing genesis", nodeID)
 			}
 
 			// ════════════════════════════════════════════════════════════════════
@@ -793,7 +839,7 @@ func runBlockSyncLoop(
 				if err := cons.ResetRANDAO(genesisBlock); err != nil {
 					logger.Error("[%s] Failed to reset RANDAO after genesis sync: %v", nodeID, err)
 				} else {
-					logger.Info("[%s] ✅ RANDAO re-initialized with new genesis", nodeID)
+					logger.Info("[%s] RANDAO re-initialized with new genesis", nodeID)
 				}
 			}
 			// ════════════════════════════════════════════════════════════════════
@@ -814,12 +860,12 @@ func runBlockSyncLoop(
 				peerGenesis := peerGenesisResp.Blocks[0]
 				localGenesis := bc.GetBlockByNumber(0)
 				if localGenesis != nil && peerGenesis != nil && localGenesis.GetHash() != peerGenesis.GetHash() {
-					logger.Info("[%s] ⚠️ Local genesis hash differs from peer %s — replacing genesis and clearing chain", nodeID, bestPeerAddr)
+					logger.Info("[%s] Local genesis hash differs from peer %s — replacing genesis and clearing chain", nodeID, bestPeerAddr)
 					if err := bc.ReplaceGenesis(peerGenesis); err != nil {
 						logger.Warn("[%s] Failed to replace genesis: %v", nodeID, err)
 					} else {
 						bc.ClearChainAfter(0)
-						logger.Info("[%s] ✅ Genesis replaced with peer's version — re-downloading chain from scratch", nodeID)
+						logger.Info("[%s] Genesis replaced with peer's version — re-downloading chain from scratch", nodeID)
 						// Same fix as the initial-install site above: a
 						// replaced genesis is unexecuted genesis. Fund the
 						// vault and apply the embedded distribution txs now,
@@ -827,7 +873,14 @@ func runBlockSyncLoop(
 						if err := bc.ExecuteGenesisBlock(); err != nil {
 							logger.Error("[%s] Failed to execute replaced genesis block: %v", nodeID, err)
 						} else {
-							logger.Info("[%s] ✅ Replaced genesis block executed — vault funded and allocations distributed", nodeID)
+							logger.Info("[%s] Replaced genesis block executed — vault funded and allocations distributed", nodeID)
+							if tps := bc.GetTPSMonitor(); tps != nil {
+								txCount := uint64(len(peerGenesis.Body.TxsList))
+								for i := uint64(0); i < txCount; i++ {
+									tps.RecordTransaction()
+								}
+								tps.RecordBlock(txCount, 5*time.Second)
+							}
 						}
 						// Reset local height so we re-download from block 1
 						localHeight = 0
@@ -841,7 +894,10 @@ func runBlockSyncLoop(
 			syncStateMu.Lock()
 			if *syncState == SyncStateSyncing {
 				*syncState = SyncStateCaughtUp
-				logger.Info("[%s] ✅ At genesis (height 0) — transitioning to CAUGHT_UP (fresh network)", nodeID)
+				logger.Info("[%s] At genesis (height 0) — transitioning to CAUGHT_UP (fresh network)", nodeID)
+				if syncStarted {
+					syncStarted = false
+				}
 			}
 			syncStateMu.Unlock()
 			// ★ FIX: Don't return — enter periodic sync check mode. The network
@@ -851,7 +907,7 @@ func runBlockSyncLoop(
 			// This implements "synchronization shouldn't happen only during startup"
 			// — the node continuously monitors the network tip and catches up
 			// whenever it falls behind.
-			logger.Info("[%s] 🔍 Entering periodic sync check mode — will re-check every 10s", nodeID)
+			logger.Info("[%s] Entering periodic sync check mode — will re-check every 10s", nodeID)
 			select {
 			case <-ctx.Done():
 				return
@@ -867,12 +923,15 @@ func runBlockSyncLoop(
 			syncStateMu.Lock()
 			if *syncState == SyncStateSyncing {
 				*syncState = SyncStateCaughtUp
-				logger.Info("[%s] ✅ Caught up at height %d (network tip %d) — entering periodic sync check",
+				logger.Info("[%s] Caught up at height %d (network tip %d) — entering periodic sync check",
 					nodeID, localHeight, networkTip)
+				if syncStarted {
+					syncStarted = false
+				}
 			}
 			syncStateMu.Unlock()
 			// Stay in loop, re-check periodically for new blocks
-			logger.Info("[%s] 🔍 Monitoring for new blocks — will re-check every 10s", nodeID)
+			logger.Info("[%s] Monitoring for new blocks — will re-check every 10s", nodeID)
 			select {
 			case <-ctx.Done():
 				return
@@ -881,13 +940,23 @@ func runBlockSyncLoop(
 			}
 		}
 
+		// ── START SYNCING ──
+		// If we are behind, start the sync progress bar if not already started
+		syncTargetHeight = int64(networkTip)
+		if !syncStarted {
+			totalBlocksToSync = int64(networkTip - localHeight)
+			progress.StartBlockSync(syncTargetHeight)
+			syncStarted = true
+			logger.Info("[%s] Started block sync: %d blocks behind", nodeID, totalBlocksToSync)
+		}
+
 		fromHeight := localHeight + 1
 		toHeight := networkTip
 		if toHeight-fromHeight+1 > maxBatchSize {
 			toHeight = fromHeight + maxBatchSize - 1
 		}
 
-		logger.Info("[%s] 🔄 Syncing blocks %d -> %d from %s (local=%d, network=%d)",
+		logger.Info("[%s] Syncing blocks %d -> %d from %s (local=%d, network=%d)",
 			nodeID, fromHeight, toHeight, bestPeerAddr, localHeight, networkTip)
 
 		resp, err := requestBlocksFromPeer(bestPeerAddr, fromHeight, toHeight)
@@ -945,30 +1014,19 @@ func runBlockSyncLoop(
 			}
 			if cons != nil && blk.GetHeight() > 0 {
 				// ── Attestation quorum check ──
-				// Blocks mined in solo mode (before PBFT was active, i.e. when there
-				// were fewer than 3 validators) have zero attestations.  This is by
-				// design — solo-mined blocks are trusted by parent-hash chain continuity
-				// alone, not by PBFT quorum.  Only blocks that actually went through
-				// PBFT carry attestations, and only those need quorum verification.
-				//
-				// Without this guard, a late-joiner (Node-B) that syncs from a solo-
-				// mining first node (Node-A) will reject every block because
-				// VerifyBlockAttestations requires ≥2/3 stake, but solo-mined blocks
-				// have zero attestations.  The sync loop then discards the entire batch
-				// and the late joiner never catches up.
 				if len(blk.Body.Attestations) > 0 {
 					vs := cons.GetValidatorSet()
 					if vs != nil {
 						blockEpoch := blk.GetHeight() / consensus.SlotsPerEpoch
 						if err := core.VerifyBlockAttestations(blk, vs, blockEpoch); err != nil {
-							logger.Error("[%s] ❌ Block %d failed attestation quorum check: %v — rejecting batch from peer %s",
+							logger.Error("[%s] Block %d failed attestation quorum check: %v — rejecting batch from peer %s",
 								nodeID, blk.GetHeight(), err, bestPeerAddr)
 							applied = 0
 							break
 						}
 					}
 				} else {
-					logger.Info("[%s] 📋 Block %d has no attestations (solo-mined before PBFT) — skipping quorum check, verified by chain continuity",
+					logger.Info("[%s] Block %d has no attestations (solo-mined before PBFT) — skipping quorum check, verified by chain continuity",
 						nodeID, blk.GetHeight())
 				}
 			}
@@ -978,11 +1036,21 @@ func runBlockSyncLoop(
 				break
 			}
 			applied++
+			// Update progress after each block (or batch)
+			if syncStarted {
+				latestLocal := bc.GetLatestBlock()
+				if latestLocal != nil {
+					progress.UpdateBlockSync(int64(latestLocal.GetHeight()), syncTargetHeight)
+				}
+			}
 		}
 
 		if applied > 0 {
-			logger.Info("[%s] ✅ Applied %d/%d synced blocks (now at height %d)",
-				nodeID, applied, len(resp.Blocks), bc.GetLatestBlock().GetHeight())
+			newLocal := bc.GetLatestBlock()
+			if newLocal != nil {
+				logger.Info("[%s] Applied %d/%d synced blocks (now at height %d)",
+					nodeID, applied, len(resp.Blocks), newLocal.GetHeight())
+			}
 		}
 
 		select {
@@ -1016,7 +1084,11 @@ func runBlockProductionLoop(
 	peerCountFunc func() int,
 	syncState *SyncState,
 	syncStateMu *sync.Mutex,
+	progress *logger.BlockchainProgress, // NEW
 ) {
+	// Set initial consensus status: PAUSED while syncing
+	progress.SetConsensusStatus("PAUSED — synchronizing")
+
 	// ★ FIX: SOLO_MODE must be exclusive to the bootstrap node — the one
 	// that created genesis locally, i.e. bc.IsLateJoiner() == false (set at
 	// startup from `seeds != ""`, see bind/nodes.go's core.NewBlockchain
@@ -1052,17 +1124,8 @@ func runBlockProductionLoop(
 	effectiveValidatorCount := func() int {
 		if peerCountFunc != nil {
 			known := peerCountFunc() + 1 // +1 for self
-			// totalNodes == 1 is the seed-based/real-device sentinel set by
-			// cli.go's runNodeCmd ("validator count derived from peer
-			// discovery" — see the *numNodes = 1 normalization there). It
-			// does NOT mean "there is exactly one validator"; it means
-			// "don't trust a static count, trust what we actually discover."
-			// Only apply the cap when totalNodes is a real, configured
-			// same-box upper bound (> 1) — otherwise a seed-based node would
-			// clamp its own discovered peer count back down to 1 forever
-			// and never leave solo mode even with 2+ peers connected.
 			if totalNodes > 1 && known > totalNodes {
-				known = totalNodes // never report more than the configured network size
+				known = totalNodes
 			}
 			return known
 		}
@@ -1071,10 +1134,6 @@ func runBlockProductionLoop(
 
 	// ──────────────────────────────────────────────────────────────────────
 	// SYNC STATE GATE: A node in SYNCING state must NOT participate in PBFT.
-	// This check MUST come BEFORE the validator count check, because a late
-	// joiner may have 0 validators and 0 peers but still needs to sync.
-	// If we check validator count first, the late joiner gets stuck in the
-	// "waiting for validators" loop forever, never reaching the sync gate.
 	// ──────────────────────────────────────────────────────────────────────
 	for {
 		syncStateMu.Lock()
@@ -1082,7 +1141,7 @@ func runBlockProductionLoop(
 		syncStateMu.Unlock()
 
 		if currentSyncState == SyncStateSyncing {
-			logger.Info("[%s] ⏳ Sync in progress — waiting to catch up before joining PBFT (state=%s)",
+			logger.Info("[%s] Sync in progress — waiting to catch up before joining PBFT (state=%s)",
 				nodeID, currentSyncState.String())
 			select {
 			case <-ctx.Done():
@@ -1097,12 +1156,13 @@ func runBlockProductionLoop(
 			syncStateMu.Lock()
 			*syncState = SyncStateConsensusParticipant
 			syncStateMu.Unlock()
-			// FIX: Enable PBFT participation by flipping the sync-ready gate
 			if cons != nil {
 				cons.SetSyncReady(true)
-				logger.Info("[%s] 🎉 Sync gate opened — node may now participate in PBFT", nodeID)
+				logger.Info("[%s] Sync gate opened — node may now participate in PBFT", nodeID)
+				// Update consensus status to ACTIVE
+				progress.SetConsensusStatus("ACTIVE — validating")
 			}
-			logger.Info("[%s] 🎉 Transitioning to CONSENSUS_PARTICIPANT — joining PBFT rounds", nodeID)
+			logger.Info("[%s] Transitioning to CONSENSUS_PARTICIPANT — joining PBFT rounds", nodeID)
 			break
 		}
 
@@ -1111,25 +1171,10 @@ func runBlockProductionLoop(
 	}
 
 	// ── SOLO MODE (no peers) ──
-	// If this node is the only validator, it mines blocks solo WITHOUT PBFT.
-	// Each block is committed immediately via CommitBlock, not through PBFT
-	// voting. This is the correct behavior for the first node (Node-A) that
-	// starts with no peers — it should mine blocks without waiting for quorum.
-	//
-	// ★ CRITICAL FIX: SOLO-TO-PBFT COORDINATED HANDOFF
-	// When peers appear, the bootstrap node must:
-	//   1. STOP solo-mining immediately (no more blocks created)
-	//   2. Roll back any solo-mined blocks that peers don't have
-	//   3. Let the sync loop download the peer-agreed chain
-	//   4. Only then enter PBFT from the SAME tip as peers
-	//
-	// Without this handoff, the bootstrap node has solo-mined blocks
-	// (e.g. heights 1-11) that late-joiners synced, but then at height 12
-	// the bootstrap node races with late-joiners entering PBFT — each
-	// proposing their own block 12 with different timestamps/content,
-	// creating a permanent fork.
 	if isBootstrapNode && effectiveValidatorCount() == 1 {
-		logger.Info("[%s] 🟢 SOLO MODE — bootstrap node, no peers detected yet, mining blocks independently", nodeID)
+		logger.Info("[%s] SOLO MODE — bootstrap node, no peers detected yet, mining blocks independently", nodeID)
+		progress.SetConsensusStatus("ACTIVE — solo mining")
+
 		blockTicker := time.NewTicker(singleNodeInterval)
 		defer blockTicker.Stop()
 		peerCheckTicker := time.NewTicker(5 * time.Second)
@@ -1152,33 +1197,28 @@ func runBlockProductionLoop(
 					continue
 				}
 				pending := bc.GetMempool().GetPendingTransactions()
-				logger.Info("[%s] ⛏ Solo-mined and committed block height=%d txs=%d", nodeID, blk.GetHeight(), len(pending))
+				logger.Info("[%s] Solo-mined and committed block height=%d txs=%d", nodeID, blk.GetHeight(), len(pending))
+
+				// NEW: keep the dashboard's Height/Sync fields in sync with reality —
+				// this is the only place a solo-mining node's tip advances, and the
+				// peer-sync path (StartBlockSync/UpdateBlockSync) never runs when
+				// there are no peers, so without this the UI stays frozen at 0/0
+				// forever even as blocks are actually being produced.
+				progress.UpdateBlockSync(int64(blk.GetHeight()), int64(blk.GetHeight()))
+
+				progress.UpdateMempoolActivity(len(pending), 0)
 
 			case <-peerCheckTicker.C:
-				// Re‑evaluate validator count
 				if effectiveValidatorCount() >= 3 {
-					// ★ CRITICAL FIX: SOLO-TO-PBFT COORDINATED HANDOFF
-					// Step 1: STOP solo-mining immediately. No more blocks created.
-					logger.Info("[%s] 🔄 %d validators now known — initiating solo-to-PBFT handoff", nodeID, effectiveValidatorCount())
-
-					// Step 2: Record our solo-mined tip before any sync happens.
-					// We need to know which blocks we solo-mined that peers may not have.
+					logger.Info("[%s] %d validators now known — initiating solo-to-PBFT handoff", nodeID, effectiveValidatorCount())
 					soloTip := bc.GetLatestBlock()
 					soloHeight := uint64(0)
 					if soloTip != nil {
 						soloHeight = soloTip.GetHeight()
 					}
-					logger.Info("[%s] 📊 Solo-mined tip at height %d (hash=%s) — preparing to align with peers",
+					logger.Info("[%s] Solo-mined tip at height %d (hash=%s) — preparing to align with peers",
 						nodeID, soloHeight, soloTip.GetHash()[:16])
 
-					// Step 3: Wait for the sync loop to download the peer-agreed chain.
-					// The sync loop will detect that our genesis matches the peer's genesis,
-					// then download blocks from the peer. If the peer has a different chain
-					// (e.g. the peer synced our blocks 1-11 but then diverged), the sync
-					// loop's genesis-hash comparison in runBlockSyncLoop will handle it.
-					//
-					// We wait for syncState to become SyncStateCaughtUp, which means
-					// the sync loop has finished downloading and we're at the network tip.
 					syncTimeout := time.After(60 * time.Second)
 					synced := false
 					for !synced {
@@ -1186,7 +1226,7 @@ func runBlockProductionLoop(
 						case <-ctx.Done():
 							return
 						case <-syncTimeout:
-							logger.Warn("[%s] ⚠️ Timed out waiting to sync before PBFT transition — proceeding anyway", nodeID)
+							logger.Warn("[%s] Timed out waiting to sync before PBFT transition — proceeding anyway", nodeID)
 							synced = true
 						default:
 							syncStateMu.Lock()
@@ -1199,41 +1239,52 @@ func runBlockProductionLoop(
 								localHeight = localTip.GetHeight()
 							}
 
-							if currentSyncState == SyncStateCaughtUp {
-								logger.Info("[%s] ✅ Sync loop reports caught up (height %d) — now switching to PBFT",
-									nodeID, localHeight)
+							// ★ FIX: was `currentSyncState == SyncStateCaughtUp`. By the
+							// time SOLO MODE detects peers and reaches this handoff, the
+							// SYNC STATE GATE at the top of this function has *already*
+							// advanced *syncState from SyncStateCaughtUp to
+							// SyncStateConsensusParticipant (it does that immediately at
+							// startup for a bootstrap node, before any peers exist) — so
+							// an exact match against CaughtUp can never be true again.
+							// This loop then always burned the full 60s syncTimeout
+							// before updating the dashboard, even though the real
+							// consensus engine (driven independently via the message
+							// handlers registered in consensusRegistry) kept proposing,
+							// voting, and committing blocks the entire time — the chain
+							// itself was fine, only the dashboard/status were stuck.
+							// Checking "not still syncing" covers both states the gate
+							// may have left us in and matches the comment's actual
+							// intent: don't proceed while SyncStateSyncing.
+							if currentSyncState != SyncStateSyncing {
+								logger.Info("[%s] Sync state is %s (not syncing, local height=%d) — now switching to PBFT",
+									nodeID, currentSyncState.String(), localHeight)
 								synced = true
 							} else {
 								time.Sleep(1 * time.Second)
 							}
 						}
 					}
-
-					// Step 4: Verify we're aligned with peers before entering PBFT.
-					// syncState == SyncStateCaughtUp means we are at the same height
-					// as the network tip (peer heights match). Log the tip for diagnostics.
 					postSyncTip := bc.GetLatestBlock()
 					if postSyncTip != nil {
 						postSyncHeight := postSyncTip.GetHeight()
-						logger.Info("[%s] 📊 Post-sync tip at height %d (hash=%s) — entering PBFT aligned with peers",
+						logger.Info("[%s] Post-sync tip at height %d (hash=%s) — entering PBFT aligned with peers",
 							nodeID, postSyncHeight, postSyncTip.GetHash()[:16])
 					}
-
+					// Update consensus status after handoff
+					progress.SetConsensusStatus("ACTIVE — validating")
 					goto afterSolo
 				}
 			}
 		}
 	afterSolo:
-		// continue to PBFT setup below (the code after the solo block)
+		// continue to PBFT setup below
 	}
 
 	// ── INSUFFICIENT VALIDATORS ──
-	// After sync is complete, check if we have enough validators for PBFT.
-	// If not, wait for more peers to connect. This is the correct place for
-	// this check — AFTER the sync gate, so late joiners can sync first.
 	if effectiveValidatorCount() < 3 {
 		logger.Warn("[%s] Block-production suspended (need ≥ 3 validators for PBFT, have %d — waiting for peers to connect)",
 			nodeID, effectiveValidatorCount())
+		progress.SetConsensusStatus("PAUSED — insufficient validators")
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
 		for {
@@ -1242,8 +1293,9 @@ func runBlockProductionLoop(
 				return
 			case <-ticker.C:
 				if effectiveValidatorCount() >= 3 {
-					logger.Info("[%s] ✅ %d validators now known — starting PBFT block production",
+					logger.Info("[%s] %d validators now known — starting PBFT block production",
 						nodeID, effectiveValidatorCount())
+					progress.SetConsensusStatus("ACTIVE — validating")
 					goto startPBFT
 				}
 				logger.Info("[%s] Waiting for validators (%d/3 minimum)…", nodeID, effectiveValidatorCount())
@@ -1253,17 +1305,7 @@ func runBlockProductionLoop(
 
 startPBFT:
 
-	// Even when the gate above passes on the very first check (all peers were
-	// already known at startup), give the P2P broadcast layer a brief moment
-	// to finish establishing persistent peer connections before this node's
-	// first leader election / proposal for view 0. Known-peer registration
-	// (via key exchange) does not itself guarantee the broadcast link is up.
-	//
-	// Instead of a fixed 2-second sleep, wait until either:
-	// 1. The sync loop has finished (syncState != SYNCING), OR
-	// 2. A minimum number of peers are connected (if still syncing)
-	// This makes the delay dynamic and adapts to actual network conditions.
-	logger.Info("[%s] ⏳ Waiting for P2P broadcast layer to stabilize before PBFT...", nodeID)
+	logger.Info("[%s] Waiting for P2P broadcast layer to stabilize before PBFT...", nodeID)
 
 	broadcastReadyTimeout := time.After(30 * time.Second)
 	broadcastReady := false
@@ -1273,28 +1315,24 @@ startPBFT:
 		case <-ctx.Done():
 			return
 		case <-broadcastReadyTimeout:
-			logger.Warn("[%s] ⚠️ Broadcast layer stabilization timeout (30s) — proceeding to PBFT", nodeID)
+			logger.Warn("[%s] Broadcast layer stabilization timeout (30s) — proceeding to PBFT", nodeID)
 			broadcastReady = true
 		default:
 			syncStateMu.Lock()
 			currentSync := *syncState
 			syncStateMu.Unlock()
 
-			// If sync is complete, we're ready
 			if currentSync != SyncStateSyncing {
-				logger.Info("[%s] ✅ Sync complete — P2P layer ready (syncState=%s)", nodeID, currentSync.String())
+				logger.Info("[%s] Sync complete — P2P layer ready (syncState=%s)", nodeID, currentSync.String())
 				broadcastReady = true
 				continue
 			}
 
-			// If we have enough peers and have been syncing for a bit, proceed
 			if peerCountFunc != nil && peerCountFunc() >= 2 {
-				// Give it at least 3 seconds even with peers connected
 				time.Sleep(500 * time.Millisecond)
 				continue
 			}
 
-			// Still waiting for peers
 			time.Sleep(1 * time.Second)
 		}
 	}
@@ -1307,31 +1345,30 @@ startPBFT:
 
 	logger.Info("[%s] Starting PBFT consensus. Current height: %d", nodeID, currentHeight)
 
+	// ★ FIX: seed the dashboard with the real height right away. The loop
+	// below only calls progress.UpdateBlockSync when chainHeight differs
+	// from currentHeight — but currentHeight was just set FROM the real
+	// chain a few lines up, so the very first iteration always sees "no
+	// change" and skips the update. That's harmless for a node starting
+	// fresh at height 0, but for a node arriving here after the solo→PBFT
+	// handoff (where the real chain may have already advanced past the
+	// dashboard's last solo-mining update via the independent
+	// consensus-message path) it left the dashboard permanently frozen at
+	// the stale pre-handoff height until the next block changed it.
+	progress.UpdateBlockSync(int64(currentHeight), int64(currentHeight))
+
 	phase2Initialized := false
 
-	// FIX: watchAndUpdateStakes is the one height-robust (`height >= 1`)
-	// trigger for Phase 2 peer-validator registration, but it previously had
-	// no caller anywhere in the codebase — only the fragile `currentHeight
-	// == 1` checks below were live, which silently no-op for a node that
-	// restarts from a checkpoint already past height 1, or whose sync loop
-	// jumps past height 1 in one batch. Run it here in parallel as a
-	// defense-in-depth belt-and-suspenders: it's idempotent via
-	// phase2State.begin()/isInitialized(), so having both this goroutine and
-	// the inline checks below race to register validators is safe — whichever
-	// gets there first wins and the other becomes a no-op.
 	go watchAndUpdateStakes(ctx, bc, cons, nodeID, validatorIDs, validatorAddressMap, phase2State)
 
-	// ------------------------------------------------------------------
-	// Liveness watchdog: PBFT must make progress even if the currently
-	// elected leader is unresponsive (crashed, hung, network-partitioned,
-	// or simply buggy). Without this, a follower would sit in the
-	// "FOLLOWER MODE" branch below forever re-checking the same
-	// (height, view, leader) tuple, and the chain would stall permanently
-	// at whatever height it last committed — exactly the height=1 stall
-	// this watchdog fixes. If the same round (height+view+leader) hasn't
-	// produced a new committed block within roundStallTimeout, force a
-	// view change so a new leader gets elected and block production
-	// (including empty 0-tx blocks) resumes.
+	// Update validator count on dashboard
+	if vs := cons.GetValidatorSet(); vs != nil {
+		validators := vs.GetValidators()
+		active := len(validators)
+		total := active // we don't have a separate total; active is the total known
+		progress.UpdateValidatorStatus(active, total)
+	}
+
 	const roundStallTimeout = 15 * time.Second
 	var (
 		stallHeight uint64
@@ -1353,27 +1390,34 @@ startPBFT:
 			if chainHeight != currentHeight {
 				currentHeight = chainHeight
 				cons.SetCurrentHeight(currentHeight)
-				logger.Info("[%s] 📊 Chain height synced to %d", nodeID, currentHeight)
-				// Chain progressed — the stall window no longer applies.
+				logger.Debug("[%s] Chain height synced to %d", nodeID, currentHeight)
 				stallHeight, stallView, stallLeader = 0, 0, ""
+
+				// NEW: mirror the solo-mining dashboard update here. Blocks a
+				// follower learns about between its own leader rounds are
+				// detected here; without this the dashboard froze at whatever
+				// height it last held while this node was only following.
+				progress.UpdateBlockSync(int64(currentHeight), int64(currentHeight))
 			}
 
-			// FIX: was `currentHeight == 1`, which only fires if this node's
-			// local loop observes height tick through exactly 1. A node that
-			// restarts from a checkpoint already past height 1 (see
-			// chain_checkpoint.json), or whose sync loop applies a batch that
-			// jumps straight from 0 to some height > 1, would never see an
-			// exact match and would permanently skip Phase 2 stake init —
-			// leaving validatorSet containing only this node's own
-			// self-registration from NewConsensus() forever ("validators=1"
-			// in SelectProposer logs, even at height 13/14). `>= 1` is
-			// idempotent thanks to phase2Initialized/phase2State, so it's
-			// safe to check every iteration once height has advanced at all.
 			if currentHeight >= 1 && !phase2Initialized {
 				if tryInitPhase2WithRetry(bc, cons, nodeID, validatorIDs, validatorAddressMap, phase2State) {
 					phase2Initialized = true
 				}
 			}
+		}
+
+		// Update mempool and validator counts periodically
+		if bc.GetMempool() != nil {
+			pending := bc.GetMempool().GetPendingTransactions()
+			// Estimate TPS: we don't have a real TPS counter, just pass 0 or compute from block times
+			progress.UpdateMempoolActivity(len(pending), 0)
+		}
+		if vs := cons.GetValidatorSet(); vs != nil {
+			validators := vs.GetValidators()
+			active := len(validators)
+			total := active
+			progress.UpdateValidatorStatus(active, total)
 		}
 
 		proposalView, electedLeader, isLeader := cons.RefreshLeaderStatus()
@@ -1392,15 +1436,21 @@ startPBFT:
 			}
 		}
 
-		// Track how long this exact round (height, view, elected leader)
-		// has gone without producing a new block. If a different round
-		// starts (view changed, leader changed, or we advanced height —
-		// handled above), reset the clock.
+		// Update consensus round info (if available)
+		if cons != nil {
+			// We don't have explicit round/totalRounds/quorum/totalValidators from the engine,
+			// but we can pass current view as round, and some defaults.
+			// For now, just pass 0 values to avoid breaking the UI; the status line will show
+			// "Consensus    ACTIVE — validating" which is sufficient.
+			// Alternatively, we could extract from the engine if it exposes these.
+			// We'll keep it simple.
+		}
+
 		if stallHeight != currentHeight || stallView != proposalView || stallLeader != electedLeader {
 			stallHeight, stallView, stallLeader = currentHeight, proposalView, electedLeader
 			stallSince = time.Now()
 		} else if time.Since(stallSince) > roundStallTimeout {
-			logger.Warn("[%s] ⏱️ No progress for %v at height=%d view=%d (leader=%s) — forcing view change",
+			logger.Warn("[%s] No progress for %v at height=%d view=%d (leader=%s) — forcing view change",
 				nodeID, roundStallTimeout, currentHeight, proposalView, electedLeader)
 			cons.StartViewChange()
 			stallHeight, stallView, stallLeader = 0, 0, ""
@@ -1413,7 +1463,7 @@ startPBFT:
 		}
 
 		if !isLeader {
-			logger.Info("👂 [%s] FOLLOWER MODE — waiting for leader proposal (height=%d, electedLeader=%s)",
+			logger.Debug("[%s] FOLLOWER MODE — waiting for leader proposal (height=%d, electedLeader=%s)",
 				nodeID, currentHeight, electedLeader)
 			select {
 			case <-ctx.Done():
@@ -1435,7 +1485,7 @@ startPBFT:
 
 		currentHeightCheck := bc.GetLatestBlock().GetHeight()
 		if currentHeightCheck != currentHeight {
-			logger.Info("[%s] ⚠️ Chain height changed from %d to %d, skipping proposal",
+			logger.Info("[%s] Chain height changed from %d to %d, skipping proposal",
 				nodeID, currentHeight, currentHeightCheck)
 			currentHeight = currentHeightCheck
 			cons.SetCurrentHeight(currentHeight)
@@ -1443,7 +1493,7 @@ startPBFT:
 		}
 
 		logger.Info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-		logger.Info("👑 [%s] LEADER MODE ACTIVE — proposing block for height %d", nodeID, currentHeight+1)
+		logger.Info("[%s] LEADER MODE ACTIVE — proposing block for height %d", nodeID, currentHeight+1)
 		logger.Info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 		pending := bc.GetMempool().GetPendingTransactions()
@@ -1528,7 +1578,7 @@ startPBFT:
 			continue
 		}
 
-		logger.Info("✅ [%s] Block proposed and broadcast, waiting for consensus...", nodeID)
+		logger.Info("[%s] Block proposed and broadcast, waiting for consensus...", nodeID)
 
 		commitTimeout := time.After(60 * time.Second)
 		commitTicker := time.NewTicker(1 * time.Second)
@@ -1540,7 +1590,7 @@ startPBFT:
 				commitTicker.Stop()
 				return
 			case <-commitTimeout:
-				logger.Warn("[%s] ⚠️ Timeout waiting for block commitment at height %d", nodeID, currentHeight+1)
+				logger.Warn("[%s] Timeout waiting for block commitment at height %d", nodeID, currentHeight+1)
 				committed = true
 			case <-commitTicker.C:
 				latest := bc.GetLatestBlock()
@@ -1550,19 +1600,26 @@ startPBFT:
 
 					if bc.GetTPSMonitor() != nil {
 						stats := bc.GetTPSMonitor().GetStats()
-						logger.Info("📊 [%s] TPS STATS after block %d: blocks_processed=%v, total_txs=%v, avg_txs_per_block=%.2f",
+						logger.Info("[%s] TPS STATS after block %d: blocks_processed=%v, total_txs=%v, avg_txs_per_block=%.2f",
 							nodeID, currentHeight,
 							stats["blocks_processed"],
 							stats["total_transactions"],
 							stats["avg_transactions_per_block"])
 					}
 
-					logger.Info("[%s] 🎉 Block committed! Height now: %d", nodeID, currentHeight)
+					logger.Info("[%s] Block committed! Height now: %d", nodeID, currentHeight)
 
-					// FIX: see matching comment at the other trigger site above —
-					// `== 1` silently skips Phase 2 for checkpoint restarts and
-					// batch syncs that jump past height 1. `>= 1` + phase2Initialized
-					// keeps this idempotent.
+					// NEW: this ticker loop is a third, independent place
+					// currentHeight advances — entirely separate from both the
+					// solo-mining branch and the top-of-loop follower check
+					// (both already patched). A node only hit this path while
+					// it was LEADER; without this call, the dashboard froze
+					// the moment a node started winning leader rounds, even
+					// though it kept committing blocks correctly (confirmed by
+					// "Block committed! Height now: 13" while the dashboard
+					// still showed 6/6).
+					progress.UpdateBlockSync(int64(currentHeight), int64(currentHeight))
+
 					if currentHeight >= 1 && !phase2Initialized {
 						if tryInitPhase2WithRetry(bc, cons, nodeID, validatorIDs, validatorAddressMap, phase2State) {
 							phase2Initialized = true
@@ -1582,16 +1639,16 @@ startPBFT:
 			if bc.IsDistributionComplete() {
 				phase = "mainnet/testnet"
 			}
-			logger.Info("[%s] ✅ Checkpoint saved at height %d (phase: %s, network: %s)",
+			logger.Info("[%s] Checkpoint saved at height %d (phase: %s, network: %s)",
 				nodeID, currentHeight, phase, networkType)
 		}
 
 		cons.UpdateLeaderStatus()
 		electedLeader = cons.GetElectedLeaderID()
 		if electedLeader == "" {
-			logger.Warn("[%s] ⚠️ No leader elected after commit, will retry next loop", nodeID)
+			logger.Warn("[%s] No leader elected after commit, will retry next loop", nodeID)
 		} else {
-			logger.Info("[%s] 📊 Next leader: %s (isLeader=%v)", nodeID, electedLeader, cons.IsLeader())
+			logger.Info("[%s] Next leader: %s (isLeader=%v)", nodeID, electedLeader, cons.IsLeader())
 		}
 
 		select {

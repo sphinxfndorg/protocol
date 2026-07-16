@@ -18,16 +18,21 @@ import (
 	"time"
 
 	"github.com/sphinxfndorg/protocol/src/common"
+	logger "github.com/sphinxfndorg/protocol/src/console"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
-	logger "github.com/sphinxfndorg/protocol/src/log"
 )
 
 // GetBlockByHeight returns a block by its height
 func (s *Storage) GetBlockByHeight(height uint64) (*types.Block, error) {
-	// Simple implementation - iterate through blocks to find by height
-	// In production, maintain a height index
+	// Try heightIndex first (fastest path)
+	s.mu.RLock()
+	if block, exists := s.heightIndex[height]; exists {
+		s.mu.RUnlock()
+		return block, nil
+	}
+	s.mu.RUnlock()
 
-	// Get all blocks (need to implement this)
+	// Fall back to GetAllBlocks (slower but comprehensive)
 	blocks, err := s.GetAllBlocks()
 	if err != nil {
 		return nil, err
@@ -35,6 +40,10 @@ func (s *Storage) GetBlockByHeight(height uint64) (*types.Block, error) {
 
 	for _, block := range blocks {
 		if block.GetHeight() == height {
+			// Cache in heightIndex for future lookups
+			s.mu.Lock()
+			s.heightIndex[height] = block
+			s.mu.Unlock()
 			return block, nil
 		}
 	}
@@ -175,7 +184,7 @@ func NewStorage(dataDir string) (*Storage, error) {
 	// DB will be set later via SetDB() to allow sharing
 	storage := &Storage{
 		dataDir:       dataDir,
-		stateDB:       nil, // ✅ Will be set later via SetDB()
+		stateDB:       nil, // SUCCESS Will be set later via SetDB()
 		blocksDir:     blocksDir,
 		indexDir:      indexDir,
 		stateDir:      stateDir,
@@ -224,7 +233,7 @@ func (s *Storage) initializeTPSMetrics() {
 			AverageTPS:              0,
 			PeakTPS:                 0,
 			TotalTransactions:       0,
-			BlocksProcessed:         s.totalBlocks, // ✅ Start with actual block count
+			BlocksProcessed:         s.totalBlocks, // SUCCESS Start with actual block count
 			LastUpdated:             time.Now(),
 			CurrentWindowCount:      0,
 			WindowStartTime:         time.Now(),
@@ -236,7 +245,7 @@ func (s *Storage) initializeTPSMetrics() {
 			MaxTransactionsPerBlock: 0,
 			MinTransactionsPerBlock: 0,
 		}
-		logger.Info("✅ TPS metrics initialized with BlocksProcessed=%d", s.totalBlocks)
+		logger.Info("TPS metrics initialized with BlocksProcessed=%d", s.totalBlocks)
 	}
 }
 
@@ -526,7 +535,7 @@ func (s *Storage) SaveTPSMetrics() error {
 		return fmt.Errorf("failed to rename TPS metrics file: %w", err)
 	}
 
-	logger.Debug("✅ TPS metrics saved to %s: current_tps=%.2f, total_txs=%d",
+	logger.Debug("TPS metrics saved to %s: current_tps=%.2f, total_txs=%d",
 		tpsFile, s.tpsMetrics.CurrentTPS, s.tpsMetrics.TotalTransactions)
 	return nil
 }
@@ -679,7 +688,7 @@ func (s *Storage) calculateBlockSizeMetrics(chainState *ChainState) error {
 		TotalSizeMB:     totalSizeMB,
 	}
 
-	logger.Info("Successfully calculated block size metrics for %d blocks", len(blocks))
+	logger.Success("Calculated block size metrics for %d blocks", len(blocks))
 	logger.Info("Block size stats: avg=%.2f MB, min=%.2f MB, max=%.2f MB, total=%.2f MB",
 		averageSizeMB, minSizeMB, maxSizeMB, totalSizeMB)
 	logger.Info("Size stats contains %d entries", len(sizeStats))
@@ -724,13 +733,13 @@ func (s *Storage) calculateBlockSize(block *types.Block) uint64 {
 func (s *Storage) SaveCompleteChainState(chainState *ChainState, chainParams *ChainParams, walletPaths map[string]string, blockchainTPSMetrics *TPSMetrics) error {
 	// CRITICAL: Check if chainState is nil
 	if chainState == nil {
-		logger.Error("❌ CRITICAL: chainState is nil in SaveCompleteChainState!")
+		logger.Error("chainState is nil in SaveCompleteChainState!")
 		return fmt.Errorf("chainState is nil")
 	}
 
 	// CRITICAL: Check if Nodes is nil
 	if chainState.Nodes == nil {
-		logger.Error("❌ CRITICAL: chainState.Nodes is nil in SaveCompleteChainState!")
+		logger.Error("chainState.Nodes is nil in SaveCompleteChainState!")
 		// Don't return error, create empty array to avoid null
 		chainState.Nodes = make([]*NodeInfo, 0)
 	} else {
@@ -854,7 +863,7 @@ func (s *Storage) SaveCompleteChainState(chainState *ChainState, chainParams *Ch
 			TotalSizeMB:     0,
 		}
 	} else {
-		logger.Info("Successfully calculated block size metrics for %d blocks",
+		logger.Success("Calculated block size metrics for %d blocks",
 			chainState.BlockSizeMetrics.TotalBlocks)
 	}
 
@@ -893,14 +902,14 @@ func (s *Storage) SaveCompleteChainState(chainState *ChainState, chainParams *Ch
 
 		tpsMetrics = existingMetrics
 
-		logger.Info("✅ Updated TPS metrics from blockchain: current=%.2f, avg=%.2f, peak=%.2f, total_txs=%d, history_size=%d, blocks_recorded=%d",
+		logger.Info("Updated TPS metrics from blockchain: current=%.2f, avg=%.2f, peak=%.2f, total_txs=%d, history_size=%d, blocks_recorded=%d",
 			tpsMetrics.CurrentTPS, tpsMetrics.AverageTPS, tpsMetrics.PeakTPS,
 			tpsMetrics.TotalTransactions, len(tpsMetrics.TPSHistory), len(tpsMetrics.TransactionsPerBlock))
 	} else {
 		// Fallback to storage's own metrics (as last resort)
 		tpsMetrics = s.GetTPSMetrics()
 		tpsMetrics.LastUpdated = time.Now()
-		logger.Warn("⚠️ No blockchain TPS metrics provided, falling back to storage TPS metrics (may be inaccurate)")
+		logger.Warn("No blockchain TPS metrics provided, falling back to storage TPS metrics (may be inaccurate)")
 	}
 
 	chainState.TPSMetrics = tpsMetrics
@@ -920,7 +929,7 @@ func (s *Storage) SaveCompleteChainState(chainState *ChainState, chainParams *Ch
 						oldHash := state.BlockHash
 						state.BlockHash = actualGenesisHash
 						fixedCount++
-						logger.Info("🔄 Fixed genesis block hash in final state %d: %s -> %s",
+						logger.Info("Fixed genesis block hash in final state %d: %s -> %s",
 							i, oldHash, actualGenesisHash)
 					}
 				}
@@ -928,7 +937,7 @@ func (s *Storage) SaveCompleteChainState(chainState *ChainState, chainParams *Ch
 			chainState.FinalStates[i] = s.ensureFinalStateValues(state)
 		}
 		if fixedCount > 0 {
-			logger.Info("✅ Fixed %d genesis block hashes in final states", fixedCount)
+			logger.Info("Fixed %d genesis block hashes in final states", fixedCount)
 		}
 	}
 
@@ -961,10 +970,10 @@ func (s *Storage) SaveCompleteChainState(chainState *ChainState, chainParams *Ch
 	if err := s.saveTPSSeparately(tpsMetrics); err != nil {
 		logger.Warn("Failed to save TPS metrics separately: %v", err)
 	} else {
-		logger.Info("✅ TPS metrics saved separately to tps_metrics.json")
+		logger.Info("TPS metrics saved separately to tps_metrics.json")
 	}
 
-	logger.Info("✅ Complete chain state saved: %s", stateFile)
+	logger.Info("Complete chain state saved: %s", stateFile)
 	logger.Info("Chain state includes:")
 	logger.Info("  - %d nodes", len(chainState.Nodes))
 	logger.Info("  - %d final states", len(chainState.FinalStates))
@@ -1042,7 +1051,7 @@ func (s *Storage) saveTPSSeparately(tpsMetrics *TPSMetrics) error {
 		return fmt.Errorf("failed to rename TPS metrics file: %w", err)
 	}
 
-	logger.Info("✅ TPS metrics saved to %s: current_tps=%.2f, total_txs=%d, history_size=%d, blocks_recorded=%d",
+	logger.Info("TPS metrics saved to %s: current_tps=%.2f, total_txs=%d, history_size=%d, blocks_recorded=%d",
 		tpsFile, tpsMetrics.CurrentTPS, tpsMetrics.TotalTransactions,
 		len(tpsMetrics.TPSHistory), len(tpsMetrics.TransactionsPerBlock))
 	return nil
@@ -1334,7 +1343,7 @@ func (s *Storage) StoreBlock(block *types.Block) error {
 		return fmt.Errorf("failed to save chain state: %w", err)
 	}
 
-	logger.Info("Successfully stored block: height=%d, hash=%s, TxsRoot=%x",
+	logger.Success("Stored block: height=%d, hash=%s, TxsRoot=%x",
 		height, blockHash, block.Header.TxsRoot)
 	return nil
 }
@@ -1436,7 +1445,7 @@ func (s *Storage) DeleteBlocksAbove(targetHeight uint64) error {
 		return fmt.Errorf("DeleteBlocksAbove: failed to save chain state: %w", err)
 	}
 
-	logger.Info("✅ Purged %d stored blocks above height %d (tip now %d, hash=%s)",
+	logger.Info("Purged %d stored blocks above height %d (tip now %d, hash=%s)",
 		removed, targetHeight, targetHeight, s.bestBlockHash)
 	return nil
 }
@@ -1514,7 +1523,7 @@ func (s *Storage) ReplaceGenesis(block *types.Block) error {
 		return fmt.Errorf("ReplaceGenesis: failed to save chain state: %w", err)
 	}
 
-	logger.Info("✅ ReplaceGenesis: genesis replaced with peer's version — hash=%s", blockHash)
+	logger.Info("ReplaceGenesis: genesis replaced with peer's version — hash=%s", blockHash)
 	return nil
 }
 
@@ -1804,7 +1813,7 @@ func (s *Storage) FixChainStateGenesisHash() error {
 
 	// Save the fixed chain state if changes were made
 	if needsUpdate {
-		logger.Info("Updating chain_state.json with correct genesis hash including GENESIS_ prefix")
+		logger.Info("Updating persisted chain_state.json with computed genesis hash: %s", actualHash)
 
 		// Save the fixed chain state
 		data, err := json.MarshalIndent(chainState, "", "  ")
@@ -1821,9 +1830,9 @@ func (s *Storage) FixChainStateGenesisHash() error {
 			return fmt.Errorf("failed to rename fixed chain state file: %w", err)
 		}
 
-		logger.Info("Successfully updated chain_state.json with genesis hash: %s", actualHash)
+		logger.Info("Persisted genesis hash in chain_state.json: %s", actualHash)
 	} else {
-		logger.Info("chain_state.json already has correct genesis hash: %s", actualHash)
+		logger.Info("chain_state.json already has correct persisted genesis hash: %s", actualHash)
 	}
 
 	return nil

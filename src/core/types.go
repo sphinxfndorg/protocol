@@ -499,6 +499,37 @@ type ValidatorSet struct {
 	minStakeAmount *big.Int
 }
 
+// GetTotalStake returns the total stake in nSPX (implements validatorSetProvider)
+func (vs *ValidatorSet) GetTotalStake() *big.Int {
+	vs.mu.RLock()
+	defer vs.mu.RUnlock()
+	if vs.totalStake == nil {
+		return big.NewInt(0)
+	}
+	return new(big.Int).Set(vs.totalStake)
+}
+
+// GetValidator returns a validator by ID (implements validatorSetProvider)
+// Returns interface{} to avoid import cycles with consensus package
+func (vs *ValidatorSet) GetValidator(id string) interface{} {
+	vs.mu.RLock()
+	defer vs.mu.RUnlock()
+	v, exists := vs.validators[id]
+	if !exists || v == nil {
+		return nil
+	}
+	// Return a copy to prevent external modification
+	return &StakedValidator{
+		ID:              v.ID,
+		StakeAmount:     new(big.Int).Set(v.StakeAmount),
+		ActivationEpoch: v.ActivationEpoch,
+		ExitEpoch:       v.ExitEpoch,
+		IsSlashed:       v.IsSlashed,
+		LastAttested:    v.LastAttested,
+		RewardAddress:   v.RewardAddress,
+	}
+}
+
 // validatorSetProvider is an interface for accessing validator set data
 // This allows VerifyBlockAttestations to work with both consensus.ValidatorSet
 // and core.ValidatorSet without creating circular dependencies

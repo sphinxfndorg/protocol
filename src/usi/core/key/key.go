@@ -347,7 +347,7 @@ func LoadKeyFromDisk(passphrase string) (*KeyPair, []byte, error) {
 					log.Printf("[DEBUG] LoadKeyFromDisk: KEM public key loaded from %s", id)
 				}
 			}
-			if _, ok := loadedKeyPair.Metadata["ledger"]; ok { // ✅ use _ instead of ledger
+			if _, ok := loadedKeyPair.Metadata["ledger"]; ok { // SUCCESS use _ instead of ledger
 				log.Printf("[DEBUG] LoadKeyFromDisk: Ledger headers loaded from %s", id)
 			}
 		}

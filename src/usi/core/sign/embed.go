@@ -200,7 +200,7 @@ func EmbedSignature(filePath string, meta *Meta, fingerprint, passphrase string)
 		if err := setRichXattrs(filePath, meta, fingerprint); err != nil {
 			log.Printf("Warning: xattr set failed: %v", err)
 		} else {
-			log.Printf("✅ Rich xattrs set for: %s", filepath.Base(filePath))
+			log.Printf("SUCCESS Rich xattrs set for: %s", filepath.Base(filePath))
 		}
 	}
 
@@ -1516,7 +1516,7 @@ func setRichXattrs(filePath string, meta *Meta, fingerprint string) error {
 	}
 skipAppleScript:
 	exec.Command("mdimport", absPath).Run()
-	log.Printf("✅ Rich xattrs written for: %s", filepath.Base(filePath))
+	log.Printf("SUCCESS Rich xattrs written for: %s", filepath.Base(filePath))
 	return nil
 }
 

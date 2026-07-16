@@ -31,7 +31,7 @@ func TestVerifyWithVM_EmptySignature(t *testing.T) {
 		t.Error("Expected false for empty signature, got true")
 	}
 
-	t.Log("✅ Empty signature correctly rejected")
+	t.Log("SUCCESS Empty signature correctly rejected")
 }
 
 // TestVerifyWithVM_NilInputs tests VM handles nil/empty gracefully
@@ -62,7 +62,7 @@ func TestVerifyWithVM_NilInputs(t *testing.T) {
 		})
 	}
 
-	t.Log("✅ Nil/empty inputs handled correctly")
+	t.Log("SUCCESS Nil/empty inputs handled correctly")
 }
 
 // TestVerifyWithVM_MemoryLayout tests the memory layout calculation
@@ -156,7 +156,7 @@ func TestVerifyWithVM_SignatureHashMismatch(t *testing.T) {
 		t.Error("Expected false for signature hash mismatch, got true")
 	}
 
-	t.Log("✅ Signature hash mismatch correctly rejected")
+	t.Log("SUCCESS Signature hash mismatch correctly rejected")
 }
 
 // TestVerifyWithVM_ValidSignatureHash tests that valid signature hash passes the hash check

@@ -19,7 +19,6 @@ package bind
 import (
 	"encoding/hex"
 	"fmt"
-	"log"
 	"math/big"
 	"net"
 	"os"
@@ -31,13 +30,13 @@ import (
 
 	"github.com/sphinxfndorg/protocol/src/common"
 	"github.com/sphinxfndorg/protocol/src/consensus"
+	logger "github.com/sphinxfndorg/protocol/src/console"
 	"github.com/sphinxfndorg/protocol/src/core"
 	config "github.com/sphinxfndorg/protocol/src/core/sthincs/config"
 	key "github.com/sphinxfndorg/protocol/src/core/sthincs/key/backend"
 	sign "github.com/sphinxfndorg/protocol/src/core/sthincs/sign/backend"
 	security "github.com/sphinxfndorg/protocol/src/handshake"
 	"github.com/sphinxfndorg/protocol/src/http"
-	logger "github.com/sphinxfndorg/protocol/src/log"
 	"github.com/sphinxfndorg/protocol/src/network"
 	"github.com/sphinxfndorg/protocol/src/p2p"
 	"github.com/sphinxfndorg/protocol/src/pool"
@@ -79,7 +78,7 @@ func LaunchNetwork(mode string) error {
 	case "cluster":
 		return StartLocalCluster()
 	default:
-		log.Printf("Unknown mode: %s. Use 'validator' or 'cluster'.", mode)
+		logger.Error("Unknown mode: %s. Use 'validator' or 'cluster'.", mode)
 		os.Exit(1)
 	}
 	return nil
@@ -172,9 +171,9 @@ func StartSingleNodeInternal(nodeConfig network.NodePortConfig, dataDir string) 
 
 		// Start consensus
 		if err := consensusEngine.Start(); err != nil {
-			logger.Errorf("Failed to start consensus: %v", err)
+			logger.Error("Failed to start consensus: %v", err)
 		} else {
-			logger.Info("✅ Consensus engine started successfully")
+			logger.Info("Consensus engine started successfully")
 		}
 
 		// Store consensus engine in blockchain
@@ -186,26 +185,26 @@ func StartSingleNodeInternal(nodeConfig network.NodePortConfig, dataDir string) 
 	// Set SPHINCS manager on mempool for transaction validation
 	if mempool := resources[0].Blockchain.GetMempool(); mempool != nil {
 		mempool.SetSTHINCSManager(sphincsMgr)
-		logger.Infof("Set STHINCS manager on mempool for %s", nodeConfig.Name)
+		logger.Info("Set STHINCS manager on mempool for %s", nodeConfig.Name)
 	}
 
 	// Start peer discovery after setup
 	go func() {
 		if err := resources[0].P2PServer.DiscoverPeers(); err != nil {
-			log.Printf("DiscoverPeers failed for %s: %v", nodeConfig.Name, err)
+			logger.Warn("DiscoverPeers failed for %s: %v", nodeConfig.Name, err)
 		}
 	}()
 
-	log.Printf("Node %s started with role %s on TCP %s, UDP %s, HTTP %s, WebSocket %s",
+	logger.Info("Node %s started with role %s on TCP %s, UDP %s, HTTP %s, WebSocket %s",
 		nodeConfig.Name, nodeConfig.Role, nodeConfig.TCPAddr, nodeConfig.UDPPort, nodeConfig.HTTPPort, nodeConfig.WSPort)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	<-sigCh
-	log.Printf("Shutting down node %s...", nodeConfig.Name)
+	logger.Info("Shutting down node %s...", nodeConfig.Name)
 
 	if err := Shutdown([]NodeResources{resources[0]}); err != nil {
-		log.Printf("Failed to shut down node %s: %v", nodeConfig.Name, err)
+		logger.Warn("Failed to shut down node %s: %v", nodeConfig.Name, err)
 	}
 	wg.Wait()
 	return nil
@@ -327,7 +326,7 @@ func RunMultipleNodesInternal() error {
 	// Wait briefly to ensure P2P servers are initialized
 	time.Sleep(2 * time.Second)
 	for i := 0; i < 3; i++ {
-		log.Printf("Checking P2P server for Node-%d: TCP=%s, UDP=%s", i, resources[i].P2PServer.LocalNode().Address, resources[i].P2PServer.LocalNode().UDPPort)
+		logger.Debug("Checking P2P server for Node-%d: TCP=%s, UDP=%s", i, resources[i].P2PServer.LocalNode().Address, resources[i].P2PServer.LocalNode().UDPPort)
 	}
 
 	// Set SphincsManager for each P2PServer and MEMPOOL
@@ -337,7 +336,7 @@ func RunMultipleNodesInternal() error {
 
 		if mempool := resources[i].Blockchain.GetMempool(); mempool != nil {
 			mempool.SetSTHINCSManager(sphincsMgrs[i])
-			logger.Infof("Set STHINCS manager on mempool for Node-%d", i)
+			logger.Info("Set STHINCS manager on mempool for Node-%d", i)
 		}
 	}
 
@@ -352,7 +351,7 @@ func RunMultipleNodesInternal() error {
 				if exists && seedConfig.UDPPort != "" {
 					seedAddr := fmt.Sprintf("127.0.0.1:%s", seedConfig.UDPPort)
 					if _, err := net.ResolveUDPAddr("udp", seedAddr); err != nil {
-						log.Printf("Invalid seed node address for Node-%d: %s, error: %v", j, seedAddr, err)
+						logger.Warn("Invalid seed node address for Node-%d: %s, error: %v", j, seedAddr, err)
 						continue
 					}
 					seedNodes = append(seedNodes, seedAddr)
@@ -360,22 +359,22 @@ func RunMultipleNodesInternal() error {
 			}
 		}
 		if len(seedNodes) == 0 {
-			log.Printf("Warning: No valid seed nodes for Node-%d", i)
+			logger.Warn("No valid seed nodes for Node-%d", i)
 		}
 		config.SeedNodes = seedNodes
 		network.UpdateNodeConfig(config)
 		resources[i].P2PServer.UpdateSeedNodes(config.SeedNodes)
-		log.Printf("Updated seed nodes for Node-%d: %v", i, seedNodes)
+		logger.Debug("Updated seed nodes for Node-%d: %v", i, seedNodes)
 	}
 
 	// NOW call DiscoverPeers for each node
 	for i := 0; i < 3; i++ {
 		go func(idx int) {
-			log.Printf("Starting DiscoverPeers for Node-%d", idx)
+			logger.Debug("Starting DiscoverPeers for Node-%d", idx)
 			if err := resources[idx].P2PServer.DiscoverPeers(); err != nil {
-				log.Printf("DiscoverPeers failed for Node-%d: %v", idx, err)
+				logger.Warn("DiscoverPeers failed for Node-%d: %v", idx, err)
 			} else {
-				log.Printf("DiscoverPeers completed successfully for Node-%d", idx)
+				logger.Debug("DiscoverPeers completed successfully for Node-%d", idx)
 			}
 		}(i)
 	}
@@ -385,7 +384,7 @@ func RunMultipleNodesInternal() error {
 		network.ClearNodeConfigs()
 		for i, db := range dbs {
 			if err := db.Close(); err != nil {
-				log.Printf("Failed to close LevelDB for Node-%d: %v", i, err)
+				logger.Warn("Failed to close LevelDB for Node-%d: %v", i, err)
 			}
 		}
 	}()
@@ -394,9 +393,9 @@ func RunMultipleNodesInternal() error {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	<-sigCh
-	log.Println("Shutting down servers...")
+	logger.Info("Shutting down servers...")
 	if err := Shutdown(resources); err != nil {
-		log.Printf("Failed to shut down servers: %v", err)
+		logger.Warn("Failed to shut down servers: %v", err)
 	}
 	wg.Wait()
 	return nil
@@ -449,31 +448,31 @@ func SetupNodes(configs []NodeSetupConfig, wg *sync.WaitGroup) ([]NodeResources,
 	for i, cfg := range configs {
 		parts := strings.Split(cfg.Address, ":")
 		if len(parts) != 2 {
-			logger.Errorf("Invalid address format for %s: %s", cfg.Name, cfg.Address)
+			logger.Error("Invalid address format for %s: %s", cfg.Name, cfg.Address)
 			return nil, fmt.Errorf("invalid address format for %s: %s", cfg.Name, cfg.Address)
 		}
 		ip, port := parts[0], parts[1]
 		if err := transport.ValidateIP(ip, port); err != nil {
-			logger.Errorf("Invalid IP or port for %s: %v", cfg.Name, err)
+			logger.Error("Invalid IP or port for %s: %v", cfg.Name, err)
 			return nil, fmt.Errorf("invalid IP or port for %s: %v", cfg.Name, err)
 		}
 
-		logger.Infof("Initializing blockchain for %s", cfg.Name)
+		logger.Info("Initializing blockchain for %s", cfg.Name)
 		dataDir := common.GetBlockchainDataDir(cfg.Name)
 		networkType := "devnet"
 		blockchain, err := core.NewBlockchain(dataDir, cfg.Name, allValidators, networkType, false)
 		if err != nil {
-			logger.Errorf("Failed to initialize blockchain for %s: %v", cfg.Name, err)
+			logger.Error("Failed to initialize blockchain for %s: %v", cfg.Name, err)
 			return nil, fmt.Errorf("failed to initialize blockchain for %s: %w", cfg.Name, err)
 		}
 		blockchains[i] = blockchain
-		logger.Infof("Genesis block created for %s, hash: %x", cfg.Name, blockchains[i].GetBestBlockHash())
+		logger.Info("Genesis block created for %s, hash: %x", cfg.Name, blockchains[i].GetBestBlockHash())
 
 		mempool := pool.NewMempool(nil, blockchains[i])
 		blockchains[i].SetMempool(mempool)
 
 		mempool.SetSTHINCSManager(sphincsMgrs[i])
-		logger.Infof("Set STHINCS manager on mempool for %s", cfg.Name)
+		logger.Info("Set STHINCS manager on mempool for %s", cfg.Name)
 
 		messageChans[i] = make(chan *security.Message, 1000)
 		rpcServers[i] = rpc.NewServer(messageChans[i], blockchains[i], sphincsMgrs[i])
@@ -488,7 +487,7 @@ func SetupNodes(configs []NodeSetupConfig, wg *sync.WaitGroup) ([]NodeResources,
 
 		db, err := leveldb.OpenFile(common.GetLevelDBPath(cfg.Name), nil)
 		if err != nil {
-			logger.Errorf("Failed to open LevelDB for %s: %v", cfg.Name, err)
+			logger.Error("Failed to open LevelDB for %s: %v", cfg.Name, err)
 			return nil, fmt.Errorf("failed to open LevelDB for %s: %w", cfg.Name, err)
 		}
 		dbs[i] = db
@@ -507,17 +506,17 @@ func SetupNodes(configs []NodeSetupConfig, wg *sync.WaitGroup) ([]NodeResources,
 		localNode := p2pServers[i].LocalNode()
 		localNode.ID = cfg.Name
 		localNode.UpdateRole(cfg.Role)
-		logger.Infof("Node %s initialized with ID %s and role %s", cfg.Name, localNode.ID, cfg.Role)
+		logger.Info("Node %s initialized with ID %s and role %s", cfg.Name, localNode.ID, cfg.Role)
 
 		if len(localNode.PublicKey) == 0 || len(localNode.PrivateKey) == 0 {
-			logger.Errorf("Key generation failed for %s", cfg.Name)
+			logger.Error("Key generation failed for %s", cfg.Name)
 			return nil, fmt.Errorf("key generation failed for %s", cfg.Name)
 		}
 
 		pubHex := hex.EncodeToString(localNode.PublicKey)
-		logger.Infof("Node %s public key: %s", cfg.Name, pubHex)
+		logger.Info("Node %s public key: %s", cfg.Name, pubHex)
 		if _, exists := publicKeys[pubHex]; exists {
-			logger.Errorf("Duplicate public key detected for %s: %s", cfg.Name, pubHex)
+			logger.Error("Duplicate public key detected for %s: %s", cfg.Name, pubHex)
 			return nil, fmt.Errorf("duplicate public key detected for %s: %s", cfg.Name, pubHex)
 		}
 		publicKeys[pubHex] = cfg.Name
@@ -529,23 +528,23 @@ func SetupNodes(configs []NodeSetupConfig, wg *sync.WaitGroup) ([]NodeResources,
 
 	// Bind TCP servers
 	if err := BindTCPServers(tcpConfigs, wg); err != nil {
-		logger.Errorf("Failed to bind TCP servers: %v", err)
+		logger.Error("Failed to bind TCP servers: %v", err)
 		return nil, err
 	}
 
 	// Wait for TCP servers to be ready
-	logger.Infof("Waiting for %d TCP servers to be ready", len(configs))
+	logger.Info("Waiting for %d TCP servers to be ready", len(configs))
 	for i := 0; i < len(configs); i++ {
 		select {
 		case <-tcpReadyCh:
-			logger.Infof("TCP server %d of %d ready", i+1, len(configs))
+			logger.Info("TCP server %d of %d ready", i+1, len(configs))
 		case <-time.After(10 * time.Second):
-			logger.Errorf("Timeout waiting for TCP server %d to be ready after 10s", i+1)
+			logger.Error("Timeout waiting for TCP server %d to be ready after 10s", i+1)
 			return nil, fmt.Errorf("timeout waiting for TCP server %d to be ready after 10s", i+1)
 		}
 	}
 	close(tcpReadyCh)
-	logger.Infof("All TCP servers are ready")
+	logger.Info("All TCP servers are ready")
 
 	// Start P2P servers and wait for UDP listeners to be ready
 	p2pReadyCh := make(chan struct{}, len(configs))
@@ -554,13 +553,13 @@ func SetupNodes(configs []NodeSetupConfig, wg *sync.WaitGroup) ([]NodeResources,
 	}
 
 	// Wait for all P2P servers to be ready or fail
-	logger.Infof("Waiting for %d P2P servers to be ready", len(configs))
+	logger.Info("Waiting for %d P2P servers to be ready", len(configs))
 	for i := 0; i < len(configs); i++ {
 		select {
 		case <-p2pReadyCh:
-			logger.Infof("P2P server %d of %d ready", i+1, len(configs))
+			logger.Info("P2P server %d of %d ready", i+1, len(configs))
 		case err := <-p2pErrorCh:
-			logger.Errorf("P2P server %d failed: %v", i+1, err)
+			logger.Error("P2P server %d failed: %v", i+1, err)
 			for i, db := range dbs {
 				if db != nil {
 					db.Close()
@@ -582,7 +581,7 @@ func SetupNodes(configs []NodeSetupConfig, wg *sync.WaitGroup) ([]NodeResources,
 			}
 			return nil, fmt.Errorf("P2P server %d failed: %v", i+1, err)
 		case <-time.After(10 * time.Second):
-			logger.Errorf("Timeout waiting for P2P server %d to be ready", i+1)
+			logger.Error("Timeout waiting for P2P server %d to be ready", i+1)
 			for i, db := range dbs {
 				if db != nil {
 					db.Close()
@@ -608,13 +607,13 @@ func SetupNodes(configs []NodeSetupConfig, wg *sync.WaitGroup) ([]NodeResources,
 	close(p2pReadyCh)
 
 	// Wait for UDP listeners to be ready
-	logger.Infof("Waiting for %d UDP listeners to be ready", len(configs))
+	logger.Info("Waiting for %d UDP listeners to be ready", len(configs))
 	for i := 0; i < len(configs); i++ {
 		select {
 		case <-udpReadyCh:
-			logger.Infof("UDP listener %d of %d ready", i+1, len(configs))
+			logger.Info("UDP listener %d of %d ready", i+1, len(configs))
 		case <-time.After(5 * time.Second):
-			logger.Errorf("Timeout waiting for UDP listener %d to be ready", i+1)
+			logger.Error("Timeout waiting for UDP listener %d to be ready", i+1)
 			for i, db := range dbs {
 				if db != nil {
 					db.Close()
@@ -643,9 +642,9 @@ func SetupNodes(configs []NodeSetupConfig, wg *sync.WaitGroup) ([]NodeResources,
 	for i, config := range configs {
 		go func(name string, server *p2p.Server) {
 			if err := server.DiscoverPeers(); err != nil {
-				logger.Errorf("Peer discovery failed for %s: %v", name, err)
+				logger.Warn("Peer discovery failed for %s: %v", name, err)
 			} else {
-				logger.Infof("Peer discovery completed for %s", name)
+				logger.Info("Peer discovery completed for %s", name)
 			}
 		}(config.Name, p2pServers[i])
 	}
@@ -657,13 +656,13 @@ func SetupNodes(configs []NodeSetupConfig, wg *sync.WaitGroup) ([]NodeResources,
 	}
 
 	// Wait for HTTP and WebSocket servers to be ready
-	logger.Infof("Waiting for %d servers to be ready", len(configs)*2)
+	logger.Info("Waiting for %d servers to be ready", len(configs)*2)
 	for i := 0; i < len(configs)*2; i++ {
 		select {
 		case <-readyCh:
-			logger.Infof("Server %d of %d ready", i+1, len(configs)*2)
+			logger.Info("Server %d of %d ready", i+1, len(configs)*2)
 		case <-time.After(10 * time.Second):
-			logger.Errorf("Timeout waiting for server %d to be ready after 10s", i+1)
+			logger.Error("Timeout waiting for server %d to be ready after 10s", i+1)
 			for i, db := range dbs {
 				if db != nil {
 					db.Close()
@@ -686,7 +685,7 @@ func SetupNodes(configs []NodeSetupConfig, wg *sync.WaitGroup) ([]NodeResources,
 			return nil, fmt.Errorf("timeout waiting for server %d to be ready after 10s", i+1)
 		}
 	}
-	logger.Infof("All servers are ready")
+	logger.Info("All servers are ready")
 
 	resources := make([]NodeResources, len(configs))
 	for i := range configs {

@@ -153,13 +153,13 @@ func MintAndAnchor(opts *MintAndAnchorOptions) (*MintAndAnchorResult, error) {
 	}
 
 	// Step 1: Create the signed receipt (local)
-	fmt.Printf("\n📝 Step 1/5: Creating signed MintReceipt...\n")
+	fmt.Printf("\n Step 1/5: Creating signed MintReceipt...\n")
 	mintResult, err := Mint(opts.Payload, opts.Subject, opts.Passphrase, opts.OrgCode, "", opts.MetadataURI)
 	if err != nil {
 		return nil, fmt.Errorf("create receipt: %w", err)
 	}
 	receipt := mintResult.Receipt
-	fmt.Printf("   ✅ Receipt signed! MintID: %s\n", receipt.MintID[:16]+"...")
+	fmt.Printf("   SUCCESS Receipt signed! MintID: %s\n", receipt.MintID[:16]+"...")
 
 	// Step 2: Upload payload to IPFS
 	fmt.Printf("📤 Step 2/5: Uploading to IPFS...\n")
@@ -171,12 +171,12 @@ func MintAndAnchor(opts *MintAndAnchorOptions) (*MintAndAnchorResult, error) {
 		ipfsClient := newIPFSClient(opts.IPFSAddr, opts.GatewayBaseURL)
 		cid, err = ipfsClient.AddBytesToIPFS(opts.Payload, "payload.bin")
 		if err != nil {
-			fmt.Printf("   ⚠️  IPFS upload failed: %v (continuing without CID)\n", err)
+			fmt.Printf("   WARNING  IPFS upload failed: %v (continuing without CID)\n", err)
 		} else {
 			cidHashHex = computeCIDHash(cid)
 			gatewayURL = ipfsClient.GetGatewayURL(cid)
 			receipt.CID = cid
-			fmt.Printf("   ✅ Uploaded to IPFS! CID: %s\n", cid)
+			fmt.Printf("   SUCCESS Uploaded to IPFS! CID: %s\n", cid)
 			fmt.Printf("   🌐 Gateway: %s\n", gatewayURL)
 		}
 	} else {
@@ -197,7 +197,7 @@ func MintAndAnchor(opts *MintAndAnchorOptions) (*MintAndAnchorResult, error) {
 		return nil, fmt.Errorf("compute receipt hash: %w", err)
 	}
 	anchorTag.ReceiptHash = hex.EncodeToString(anchorHash)
-	fmt.Printf("   ✅ Anchor built! ReceiptHash: %s\n", anchorTag.ReceiptHash[:16]+"...")
+	fmt.Printf("   SUCCESS Anchor built! ReceiptHash: %s\n", anchorTag.ReceiptHash[:16]+"...")
 
 	// Step 4: Create and broadcast blockchain transaction
 	fmt.Printf("⛓️  Step 4/5: Broadcasting on-chain transaction...\n")
@@ -210,9 +210,9 @@ func MintAndAnchor(opts *MintAndAnchorOptions) (*MintAndAnchorResult, error) {
 
 		txID, err = broadcastAnchorTransaction(opts.NodeAddr, opts.From, opts.KeyFile, anchorData)
 		if err != nil {
-			fmt.Printf("   ⚠️  Blockchain tx failed: %v (anchor saved to disk)\n", err)
+			fmt.Printf("   WARNING  Blockchain tx failed: %v (anchor saved to disk)\n", err)
 		} else {
-			fmt.Printf("   ✅ Transaction broadcast! TX ID: %s\n", txID)
+			fmt.Printf("   SUCCESS Transaction broadcast! TX ID: %s\n", txID)
 			fmt.Printf("   🔗 This TX will be included in a confirmed block (permanent anchor)\n")
 		}
 	} else {
@@ -225,13 +225,13 @@ func MintAndAnchor(opts *MintAndAnchorOptions) (*MintAndAnchorResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("save receipt: %w", err)
 	}
-	fmt.Printf("   ✅ Receipt saved: %s\n", receiptPath)
+	fmt.Printf("   SUCCESS Receipt saved: %s\n", receiptPath)
 
 	anchorPath, err := SaveAnchorTag(anchorTag, "")
 	if err != nil {
 		return nil, fmt.Errorf("save anchor: %w", err)
 	}
-	fmt.Printf("   ✅ Anchor saved: %s\n", anchorPath)
+	fmt.Printf("   SUCCESS Anchor saved: %s\n", anchorPath)
 
 	elapsed := time.Since(start)
 
@@ -248,17 +248,17 @@ func MintAndAnchor(opts *MintAndAnchorOptions) (*MintAndAnchorResult, error) {
 
 	// Print complete summary
 	fmt.Printf("\n══════════════════ MINT COMPLETE ══════════════════\n")
-	fmt.Printf("✅ Local receipt:     %s\n", receiptPath)
-	fmt.Printf("✅ Anchor tag:        %s\n", anchorPath)
+	fmt.Printf("SUCCESS Local receipt:     %s\n", receiptPath)
+	fmt.Printf("SUCCESS Anchor tag:        %s\n", anchorPath)
 	if cid != "" {
-		fmt.Printf("✅ IPFS upload:       %s\n", cid)
+		fmt.Printf("SUCCESS IPFS upload:       %s\n", cid)
 		fmt.Printf("   Gateway:           %s\n", gatewayURL)
 	}
 	if txID != "" {
-		fmt.Printf("✅ On-chain anchor:   %s\n", txID)
+		fmt.Printf("SUCCESS On-chain anchor:   %s\n", txID)
 	}
-	fmt.Printf("📋 Mint ID:          %s\n", receipt.MintID)
-	fmt.Printf("📋 Subject:          %s\n", receipt.Subject)
+	fmt.Printf(" Mint ID:          %s\n", receipt.MintID)
+	fmt.Printf(" Subject:          %s\n", receipt.Subject)
 	fmt.Printf("⏱️  Elapsed:          %v\n", elapsed)
 	fmt.Printf("══════════════════════════════════════════════════\n")
 

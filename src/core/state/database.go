@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	logger "github.com/sphinxfndorg/protocol/src/log"
+	logger "github.com/sphinxfndorg/protocol/src/console"
 	"github.com/syndtr/goleveldb/leveldb"
 	"github.com/syndtr/goleveldb/leveldb/errors"
 	"github.com/syndtr/goleveldb/leveldb/opt"
@@ -221,7 +221,7 @@ func (d *DB) Put(key string, value []byte) error {
 	}
 
 	// Log successful storage
-	logger.Info("Successfully stored key %s in LevelDB", key)
+	logger.Debug("Successfully stored key %s in LevelDB", key)
 	return nil
 }
 
@@ -282,7 +282,7 @@ func (d *DB) Delete(key string) error {
 	}
 
 	// Log successful deletion
-	logger.Info("Successfully deleted key %s from LevelDB", key)
+	logger.Debug("Successfully deleted key %s from LevelDB", key)
 	return nil
 }
 

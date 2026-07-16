@@ -9,7 +9,7 @@ import (
 	"math/big"
 	"sort"
 
-	logger "github.com/sphinxfndorg/protocol/src/log"
+	logger "github.com/sphinxfndorg/protocol/src/console"
 	denom "github.com/sphinxfndorg/protocol/src/params/denom"
 )
 
@@ -57,7 +57,7 @@ func (s *StakeWeightedSelector) SelectProposer(epoch uint64, seed [32]byte) *Sta
 	totalStake := s.validatorSet.GetTotalStake()
 
 	// ========== DEBUG: Log all validator stakes ==========
-	logger.Info("🔍 SelectProposer: epoch=%d, totalStake=%s SPX, validators=%d",
+	logger.Info("SelectProposer: epoch=%d, totalStake=%s SPX, validators=%d",
 		epoch,
 		new(big.Int).Div(totalStake, big.NewInt(denom.SPX)).String(),
 		len(active))
@@ -70,7 +70,7 @@ func (s *StakeWeightedSelector) SelectProposer(epoch uint64, seed [32]byte) *Sta
 	// Check if total stake is zero or nil - SINGLE CHECK
 	if totalStake == nil || totalStake.Sign() == 0 {
 		// No stake recorded — fall back to the first validator in sorted order.
-		logger.Warn("⚠️ Total stake is zero! Using round-robin fallback to first validator: %s", active[0].ID)
+		logger.Warn("Total stake is zero! Using round-robin fallback to first validator: %s", active[0].ID)
 		return active[0]
 	}
 

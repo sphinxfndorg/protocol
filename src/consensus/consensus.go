@@ -17,8 +17,8 @@ import (
 	"time"
 
 	"github.com/sphinxfndorg/protocol/src/common"
+	logger "github.com/sphinxfndorg/protocol/src/console"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
-	logger "github.com/sphinxfndorg/protocol/src/log"
 	denom "github.com/sphinxfndorg/protocol/src/params/denom"
 
 	"golang.org/x/crypto/sha3"
@@ -82,13 +82,13 @@ func NewConsensus(
 		// different leaders than its peers and can never reach consensus.
 		// This is a FATAL startup error — returning nil would let the node
 		// continue in a zombie state, silently forking from the network.
-		logger.Error("❌ FATAL: Could not load canonical VDF parameters: %v", err)
+		logger.Error("FATAL: Could not load canonical VDF parameters: %v", err)
 		logger.Error("   Ensure the genesis VDF parameters are correctly embedded.")
 		cancel()
 		logger.Error("   Consensus initialization failed — node cannot participate. Exiting.")
 		return nil
 	}
-	logger.Info("✅ Loaded canonical VDF parameters: D=%d bits, T=%d",
+	logger.Info("Loaded canonical VDF parameters: D=%d bits, T=%d",
 		vdfParams.Discriminant.BitLen(), vdfParams.T)
 
 	// Initialize RANDAO with genesis seed derived from the REAL VDF calculation.
@@ -98,69 +98,21 @@ func NewConsensus(
 	// unpredictability that RANDAO's security depends on.  Nodes that cannot
 	// resolve the genesis block yet (late joiners with empty datadirs) will
 	// derive their seed from the genesis hash once it is synced from a peer.
-	var genesisSeed [32]byte
-	if blockchain != nil {
-		// Traverse to the genesis block — every node must agree on this hash.
-		genesisBlock := blockchain.GetLatestBlock()
-		if genesisBlock != nil {
-			for genesisBlock.GetHeight() > 0 {
-				genesisBlock = blockchain.GetBlockByHash(genesisBlock.GetPrevHash())
-				if genesisBlock == nil {
-					break
-				}
-			}
-		}
-
-		if genesisBlock != nil && genesisBlock.GetHeight() == 0 {
-			// REAL VDF seed derivation: SHA3-256 of the actual genesis block hash.
-			// This is deterministic across all nodes that have the same genesis.
-			hash := sha3.Sum256([]byte(genesisBlock.GetHash()))
-			copy(genesisSeed[:], hash[:])
-			logger.Info("✅ Derived RANDAO seed from REAL genesis block VDF: hash=%s, seed=%x",
-				genesisBlock.GetHash()[:16], genesisSeed[:8])
-		} else {
-			// Late-joining node that hasn't synced genesis yet.  Do NOT fall back
-			// to a hardcoded string — that would produce a different seed than the
-			// network and cause permanent fork.  Instead, return a zero seed that
-			// will be corrected once the genesis block is synced.  The caller
-			// (the RANDAO HARDENING block below) will detect the mismatch and log
-			// a warning; NewRANDAO will still create a usable RANDAO instance, and
-			// the node can participate once it syncs.
-			logger.Warn("⚠️ Cannot derive RANDAO seed: genesis block not yet available — will sync from peers")
-			// Leave genesisSeed as zero — the sync layer will re-derive it.
-		}
-	} else {
-		logger.Error("❌ FATAL: blockchain is nil — cannot derive RANDAO seed from VDF")
+	if blockchain == nil {
+		logger.Error("FATAL: blockchain is nil — cannot derive RANDAO seed from VDF")
 		cancel()
 		return nil
 	}
+
+	genesisSeed := deriveSeedFromGenesisHashBlock(blockchain)
+	if genesisSeed == [32]byte{} {
+		logger.Warn("Cannot derive RANDAO seed: genesis block not yet available — will sync from peers")
+		// Leave genesisSeed as zero — the sync layer will re-derive it.
+	} else {
+		logger.Info("Derived RANDAO seed from genesis block: seed=%x", genesisSeed[:8])
+	}
 	// In NewConsensus, when creating RANDAO:
 	randao := NewRANDAO(genesisSeed, vdfParams, nodeID)
-
-	// RANDAO HARDENING: Validate genesis seed invariant at startup
-	// Since blockchain was already verified non-nil above (otherwise we returned),
-	// this code is guaranteed to execute with a valid blockchain reference.
-	consensus := &Consensus{
-		nodeID:         nodeID,
-		nodeManager:    nodeManager,
-		blockChain:     blockchain,
-		signingService: signingService,
-		randao:         randao,
-		validatorSet:   NewValidatorSet(minStakeAmount),
-		selector:       NewStakeWeightedSelector(NewValidatorSet(minStakeAmount)),
-	}
-
-	// Validate RANDAO seed derivation
-	expectedSeed := deriveSeedFromGenesisHashBlock(consensus)
-	if expectedSeed != genesisSeed {
-		logger.Warn("⚠️ RANDAO seed mismatch at startup (expected=%x, got=%x)",
-			expectedSeed[:16], genesisSeed[:16])
-		logger.Warn("   This node will use a fallback seed until it syncs the genesis block from peers.")
-		logger.Warn("   After syncing, the seed will match the network automatically.")
-		// DO NOT return nil here — allow the node to start and sync
-	} else {
-		logger.Info("✅ RANDAO seed invariant validated at startup")
-	}
 
 	// Create validator set with minimum stake requirement
 	validatorSet := NewValidatorSet(minStakeAmount)
@@ -215,9 +167,9 @@ func NewConsensus(
 		// Register self public key so the node can verify its own signatures
 		if selfPK := signingService.GetPublicKeyObject(); selfPK != nil {
 			signingService.RegisterPublicKey(nodeID, selfPK)
-			logger.Info("✅ Registered self public key for %s", nodeID)
+			logger.Info("Registered self public key for %s", nodeID)
 		} else {
-			logger.Warn("⚠️ Could not get self public key for %s", nodeID)
+			logger.Warn("Could not get self public key for %s", nodeID)
 		}
 	}
 
@@ -361,91 +313,37 @@ func (c *Consensus) initializeVDF() error {
 	return nil
 }
 
-// getExpectedVDFParams returns the expected VDF parameters derived from genesis
-// This ensures all nodes use the same parameters derived from the actual genesis block
+// getExpectedVDFParams returns the expected VDF parameters derived from
+// genesis. This delegates entirely to LoadCanonicalVDFParams (vdf.go) —
+// the single canonical derivation, keyed off canonicalHashBytes=128 and
+// canonicalT=2^20 — rather than re-deriving independently.
+//
+// A previous version of this function reimplemented the derivation by
+// hand: a 32-byte SHAKE-256 expansion (→ a ~256-bit prime) and a
+// hardcoded T=1024, instead of the canonical 128-byte expansion (→
+// ~1024-bit prime) and T=2^20. That meant its output could never equal
+// the real vdfParams this Consensus was actually constructed with at the
+// top of NewConsensus, no matter what genesis hash it started from. In
+// the normal startup path this was masked — LoadCanonicalVDFParams and
+// the old fallback both check preDerivedVDFParams first, and nodes.go
+// always sets that before NewConsensus runs — but any path that
+// constructs a Consensus without going through that exact sequence (a
+// test harness, an alternate bootstrap, a future refactor) would hit the
+// mismatched fallback, have initializeVDF report a spurious "VDF
+// parameter mismatch", and then ForceSyncParams would overwrite the
+// correct canonical discriminant/T with the wrong ones.
+//
+// LoadCanonicalVDFParams is safe to call again here: it's a sync.Once
+// cache (or an immediate return of preDerivedVDFParams when set), so this
+// costs nothing beyond the first call and can never disagree with the
+// vdfParams already loaded at the top of NewConsensus.
 func (c *Consensus) getExpectedVDFParams() VDFParams {
-	// First check if pre-derived parameters are available
-	if preDerivedVDFParams != nil {
-		logger.Info("Using pre-derived VDF parameters in getExpectedVDFParams")
-		return *preDerivedVDFParams
+	params, err := LoadCanonicalVDFParams()
+	if err != nil {
+		logger.Error("getExpectedVDFParams: failed to load canonical VDF parameters: %v", err)
+		return VDFParams{}
 	}
-
-	// Fall back to deriving from genesis hash
-	var genesisHash string
-
-	if c.blockChain != nil {
-		// Try to get genesis block by traversing from latest block
-		latestBlock := c.blockChain.GetLatestBlock()
-		if latestBlock != nil {
-			// Walk backwards to find genesis by checking parent chain
-			currentHash := latestBlock.GetHash()
-			for {
-				block := c.blockChain.GetBlockByHash(currentHash)
-				if block == nil {
-					break
-				}
-				if block.GetHeight() == 0 {
-					genesisHash = block.GetHash()
-					logger.Info("Found genesis hash by traversing chain: %s", genesisHash)
-					break
-				}
-				currentHash = block.GetPrevHash()
-			}
-		}
-	}
-
-	// If still no genesis hash found through chain traversal, derive from
-	// the cached canonical genesis hash.  Every node — regardless of phase
-	// (devnet/testnet/mainnet) or join time — must use the SAME genesis hash
-	// here, because the VDF discriminant derived from it determines the
-	// leader-election RANDAO seed.  Using a node-specific or phase-specific
-	// string ("DEVNET_GENESIS_…" or "GENESIS_<nodeID>") would produce a
-	// different discriminant on each node, causing permanent fork.
-	if genesisHash == "" {
-		// Retry once more: use deriveSeedFromGenesisHashBlock which has
-		// its own traversal logic that may succeed where the above failed.
-		seed := deriveSeedFromGenesisHashBlock(c)
-		if seed != [32]byte{} {
-			// Reconstruct hash prefix from seed for logging only.
-			genesisHash = fmt.Sprintf("genesis_seed_%x", seed[:8])
-			logger.Info("Recovered genesis seed via deriveSeedFromGenesisHashBlock: %x", seed[:8])
-		} else {
-			logger.Error("CRITICAL: No genesis hash available from chain traversal or seed derivation")
-			logger.Error("VDF discriminant would be undetermined — this node CANNOT participate in consensus")
-		}
-	}
-
-	logger.Info("Deriving VDF parameters from genesis hash: %s", genesisHash)
-
-	// Create a deterministic discriminant from genesis hash
-	shake := sha3.NewShake256()
-	shake.Write([]byte(genesisHash))
-	hashBytes := make([]byte, 32)
-	shake.Read(hashBytes)
-
-	// Create a prime from the hash (ensuring it's suitable for class group)
-	prime := new(big.Int).SetBytes(hashBytes)
-	prime.SetBit(prime, 0, 1) // Ensure odd
-	prime.SetBit(prime, 1, 1) // Ensure ≡ 3 mod 4
-
-	// Ensure it's a prime
-	for !prime.ProbablyPrime(20) {
-		prime.Add(prime, big.NewInt(4))
-	}
-
-	// Make it negative for discriminant
-	D := new(big.Int).Neg(prime)
-	T := uint64(1024)
-
-	logger.Info("Expected VDF parameters:")
-	logger.Info("  Discriminant D: %d bits, D mod 4 = %d", D.BitLen(), new(big.Int).Mod(D, big.NewInt(4)))
-	logger.Info("  T: %d", T)
-
-	return VDFParams{
-		Discriminant: D,
-		T:            T,
-		Lambda:       256,
-	}
+	return params
 }
 
 // UpdateLeaderStatus runs the stake-weighted RANDAO proposer selection for the
@@ -509,7 +407,7 @@ func (c *Consensus) updateLeaderStatusLocked() {
 	c.isLeader = (selected.ID == c.nodeID)
 
 	if c.isLeader {
-		logger.Info("✅ Node %s elected proposer for view %d (stake %.2f SPX)",
+		logger.Info("Node %s elected proposer for view %d (stake %.2f SPX)",
 			c.nodeID, viewSlot, selected.GetStakeInSPX())
 	} else {
 		logger.Info("   Node %s NOT proposer for view %d (elected: %s, stake %.2f SPX)",
@@ -518,21 +416,22 @@ func (c *Consensus) updateLeaderStatusLocked() {
 }
 
 // deriveSeedFromGenesisHashBlock derives the RANDAO seed from the genesis block hash
-// This ensures all nodes use identical seed derivation
-func deriveSeedFromGenesisHashBlock(c *Consensus) [32]byte {
-	if c.blockChain == nil {
+// This ensures all nodes use identical seed derivation. Accepts a BlockChain
+// interface to avoid import cycles and enable reuse from multiple call sites.
+func deriveSeedFromGenesisHashBlock(bc BlockChain) [32]byte {
+	if bc == nil {
 		return [32]byte{}
 	}
 
 	// Get genesis block
-	genesisBlock := c.blockChain.GetLatestBlock()
+	genesisBlock := bc.GetLatestBlock()
 	if genesisBlock == nil {
 		return [32]byte{}
 	}
 
 	// Traverse to genesis
 	for genesisBlock.GetHeight() > 0 {
-		genesisBlock = c.blockChain.GetBlockByHash(genesisBlock.GetPrevHash())
+		genesisBlock = bc.GetBlockByHash(genesisBlock.GetPrevHash())
 		if genesisBlock == nil {
 			return [32]byte{}
 		}
@@ -547,14 +446,6 @@ func deriveSeedFromGenesisHashBlock(c *Consensus) [32]byte {
 	copy(seed[:], hash[:])
 
 	return seed
-}
-
-// TimestampValidationConfig holds configuration for timestamp validation
-type TimestampValidationConfig struct {
-	MaxDrift          time.Duration // Maximum allowed timestamp drift (e.g., 10 seconds)
-	MinBlockInterval  time.Duration // Minimum time between blocks (e.g., 2 seconds)
-	MaxBlockInterval  time.Duration // Maximum time between blocks (e.g., 30 seconds)
-	RejectFutureBlock bool          // Reject blocks with future timestamps
 }
 
 // DefaultTimestampConfig returns sensible defaults for timestamp validation
@@ -631,7 +522,7 @@ func (c *Consensus) ValidateBlockTimestamp(block Block, parentBlock Block) error
 		}
 	}
 
-	logger.Debug("✅ Block timestamp validation passed: time=%v, parent=%v, now=%v",
+	logger.Debug("Block timestamp validation passed: time=%v, parent=%v, now=%v",
 		blockTime, parentTime, now)
 
 	return nil
@@ -716,17 +607,8 @@ func (c *Consensus) ValidateChainCompatibility(remoteChainID uint64, remoteGenes
 		return fmt.Errorf("genesis_hash mismatch: local=%s, remote=%s", localGenesisHash, remoteGenesisHash)
 	}
 
-	logger.Info("✅ Chain compatibility validated: chain_id=%d, genesis_hash=%s", localChainID, localGenesisHash[:16])
+	logger.Info("Chain compatibility validated: chain_id=%d, genesis_hash=%s", localChainID, localGenesisHash[:16])
 	return nil
-}
-
-// MessageReplayProtection tracks seen messages to prevent replay attacks
-// Each transaction/message has its own nonce to prevent replay
-type MessageReplayProtection struct {
-	mu           sync.RWMutex
-	seenNonces   map[string]map[uint64]bool // nodeID -> set of used nonces
-	seenMessages map[string]time.Time       // compositeKey -> timestamp
-	config       *ReplayProtectionConfig
 }
 
 // NewMessageReplayProtection creates a new replay protection instance
@@ -785,7 +667,7 @@ func (mrp *MessageReplayProtection) ValidateMessageReplay(
 		}
 	}
 
-	logger.Debug("✅ Message replay check passed: type=%s, view=%d, node=%s, nonce=%d",
+	logger.Debug("Message replay check passed: type=%s, view=%d, node=%s, nonce=%d",
 		messageType, view, nodeID, nonce)
 
 	return nil
@@ -879,7 +761,7 @@ func (c *Consensus) ProposeBlock(block interface{}) error {
 
 	// Use the slot from election time
 	proposalSlot := c.currentView
-	logger.Info("📝 Using view %d as proposal slot (view=%d, height=%d)",
+	logger.Info("Using view %d as proposal slot (view=%d, height=%d)",
 		proposalSlot, c.currentView, consensusBlock.GetHeight())
 
 	// Get the concrete block for serialization
@@ -910,7 +792,7 @@ func (c *Consensus) ProposeBlock(block interface{}) error {
 		Block:           consensusBlock, // Store locally for immediate use
 	}
 
-	logger.Info("📝 Creating proposal: slot=%d, view=%d, leader=%s, block=%s, data_size=%d",
+	logger.Info("Creating proposal: slot=%d, view=%d, leader=%s, block=%s, data_size=%d",
 		proposalSlot, c.currentView, c.nodeID, consensusBlock.GetHash(), len(blockData))
 
 	// Sign the proposal
@@ -924,7 +806,7 @@ func (c *Consensus) ProposeBlock(block interface{}) error {
 	// The leader needs preparedBlock set before prepare votes arrive.
 	// Process synchronously (this will set preparedBlock), then broadcast.
 	c.processProposal(proposal)
-	logger.Info("✅ Leader %s processed its own proposal locally", c.nodeID)
+	logger.Info("Leader %s processed its own proposal locally", c.nodeID)
 
 	// Broadcast the proposal to all peers
 	if err := c.broadcastProposal(proposal); err != nil {
@@ -932,7 +814,7 @@ func (c *Consensus) ProposeBlock(block interface{}) error {
 	}
 	// ====================================================================
 
-	logger.Info("✅ [%s] Block proposed and broadcast, waiting for consensus...", c.nodeID)
+	logger.Info("[%s] Block proposed and broadcast, waiting for consensus...", c.nodeID)
 	return nil
 }
 
@@ -1070,8 +952,9 @@ func (c *Consensus) consensusLoop() {
 	viewTimer := time.NewTimer(timeout)
 	defer viewTimer.Stop()
 
-	// Create ticker for cleaning up stale signatures (every 30 seconds)
-	cleanupTicker := time.NewTicker(30 * time.Second)
+	// was: 30 * time.Second — too slow relative to a 15s round-stall timeout,
+	// letting one dead round's leftovers poison the next round's reconciliation.
+	cleanupTicker := time.NewTicker(5 * time.Second)
 	defer cleanupTicker.Stop()
 
 	for {
@@ -1116,7 +999,7 @@ func (c *Consensus) consensusLoop() {
 // syncLoop listens for sync requests and fetches missing blocks from peers
 // This is the missing piece that connects syncNeededCh to actual block fetching
 func (c *Consensus) syncLoop() {
-	logger.Info("🔄 Sync loop started for node %s", c.nodeID)
+	logger.Info("Sync loop started for node %s", c.nodeID)
 
 	for {
 		select {
@@ -1132,8 +1015,8 @@ func (c *Consensus) syncLoop() {
 			// If we've already caught up due to checkpoint apply, don't block on
 			// block-sync RPCs.
 			localTip := c.blockChain.GetLatestBlock()
-			if localTip != nil && localTip.GetHeight() >= neededHeight-1 {
-				logger.Info("✅ Sync catch-up already satisfied: localTip=%d, requested=%d — skipping block fetch",
+			if localTip != nil && localTip.GetHeight() >= neededHeight {
+				logger.Info("Sync catch-up already satisfied: localTip=%d, requested=%d — skipping block fetch",
 					localTip.GetHeight(), neededHeight)
 				continue
 			}
@@ -1143,28 +1026,28 @@ func (c *Consensus) syncLoop() {
 			// Request the missing block from peers
 			block, err := c.fetchBlockFromPeers(neededHeight)
 			if err != nil {
-				logger.Warn("❌ Failed to fetch block at height %d: %v", neededHeight, err)
+				logger.Warn("Failed to fetch block at height %d: %v", neededHeight, err)
 				continue
 			}
 
 			if block == nil {
-				logger.Warn("❌ No block received for height %d", neededHeight)
+				logger.Warn("No block received for height %d", neededHeight)
 				continue
 			}
 
 			// Validate the fetched block
 			if err := c.blockChain.ValidateBlock(block); err != nil {
-				logger.Warn("❌ Fetched block validation failed for height %d: %v", neededHeight, err)
+				logger.Warn("Fetched block validation failed for height %d: %v", neededHeight, err)
 				continue
 			}
 
 			// Commit the block via FastForward
 			if err := c.FastForward(block); err != nil {
-				logger.Error("❌ FastForward failed for height %d: %v", neededHeight, err)
+				logger.Error("FastForward failed for height %d: %v", neededHeight, err)
 				continue
 			}
 
-			logger.Info("✅ Successfully synced block at height %d", neededHeight)
+			logger.Info("Successfully synced block at height %d", neededHeight)
 		}
 	}
 }
@@ -1190,7 +1073,7 @@ func (c *Consensus) HandleSyncResponse(height uint64, blockData []byte) error {
 	// Send the block to the waiting goroutine
 	select {
 	case request.response <- block:
-		logger.Info("✅ Delivered block %d to sync handler", height)
+		logger.Info("Delivered block %d to sync handler", height)
 	default:
 		logger.Warn("Response channel full for height %d", height)
 	}
@@ -1215,7 +1098,7 @@ func (c *Consensus) fetchBlockFromPeers(height uint64) (Block, error) {
 			continue
 		}
 
-		logger.Info("📥 Requesting block %d from peer %s via RPC", height, peerID)
+		logger.Info("Requesting block %d from peer %s via RPC", height, peerID)
 
 		// Call the already-registered RPC method for fetching a block by number.
 		// Note: CallRPC expects an address (host:port), method, params, target nodeID, and ttl.
@@ -1277,10 +1160,10 @@ func (c *Consensus) CleanupStaleSignatures() {
 		block := c.blockChain.GetBlockByHash(sig.BlockHash)
 		if block == nil {
 			// Don't remove signatures for blocks that are still being processed
-			// Only remove if the signature is older than 30 seconds
+			// Only remove if the signature is older than 8 seconds
 			sigTime, err := time.Parse(time.RFC3339, sig.Timestamp)
-			if err == nil && time.Since(sigTime) > 30*time.Second {
-				logger.Info("🧹 Removing stale signature for block %s (height=%d, type=%s, age=%v)",
+			if err == nil && time.Since(sigTime) > 8*time.Second {
+				logger.Info("Removing stale signature for block %s (height=%d, type=%s, age=%v)",
 					sig.BlockHash[:16], sig.BlockHeight, sig.MessageType, time.Since(sigTime))
 				removedCount++
 				continue
@@ -1293,7 +1176,7 @@ func (c *Consensus) CleanupStaleSignatures() {
 
 	c.consensusSignatures = cleaned
 	if removedCount > 0 {
-		logger.Info("✅ Cleaned up %d stale consensus signatures, %d remaining",
+		logger.Info("Cleaned up %d stale consensus signatures, %d remaining",
 			removedCount, len(c.consensusSignatures))
 	}
 }
@@ -1377,7 +1260,7 @@ func (c *Consensus) BroadcastProposal(proposal *Proposal) error {
 // onEpochTransition handles logic when moving to a new epoch
 func (c *Consensus) onEpochTransition(newEpoch uint64) {
 	// NOTE: c.mu is already held by the caller — do NOT lock here.
-	logger.Info("🔄 Entering epoch %d", newEpoch)
+	logger.Info("Entering epoch %d", newEpoch)
 	// Process attestations from the previous epoch
 	if newEpoch > 0 {
 		c.processEpochAttestations(newEpoch - 1)
@@ -1478,12 +1361,12 @@ func (c *Consensus) processProposal(proposal *Proposal) {
 	}
 
 	// Log proposal receipt
-	logger.Info("🔍 Processing proposal for block at height %d, view %d from %s, nonce: %s",
+	logger.Info("Processing proposal for block at height %d, view %d from %s, nonce: %s",
 		proposal.Block.GetHeight(), proposal.View, proposal.ProposerID, nonceStr)
 
 	localTip := c.blockChain.GetLatestBlock()
 	if localTip == nil {
-		logger.Warn("❌ Cannot validate proposal %s: local chain has no tip", proposal.Block.GetHash())
+		logger.Warn("Cannot validate proposal %s: local chain has no tip", proposal.Block.GetHash())
 		return
 	}
 	localTipHeight := localTip.GetHeight()
@@ -1520,7 +1403,7 @@ func (c *Consensus) processProposal(proposal *Proposal) {
 			default:
 			}
 		} else {
-			logger.Warn("❌ Proposal height not ready: expected %d from local tip %s, got height %d block %s",
+			logger.Warn("Proposal height not ready: expected %d from local tip %s, got height %d block %s",
 				expectedHeight, localTip.GetHash(), proposalHeight, proposal.Block.GetHash())
 		}
 		return
@@ -1555,7 +1438,7 @@ func (c *Consensus) processProposal(proposal *Proposal) {
 			// Parent exists but isn't the tip — our chain is stale.
 			// This shouldn't happen if the chain is properly maintained,
 			// but log it clearly and reject to avoid forks.
-			logger.Warn("❌ Proposal parent exists but is not local tip: local tip=%s (height %d), parent=%s (height %d), proposal=%s",
+			logger.Warn("Proposal parent exists but is not local tip: local tip=%s (height %d), parent=%s (height %d), proposal=%s",
 				localTip.GetHash(), localTipHeight,
 				proposal.Block.GetPrevHash(), parentBlock.GetHeight(),
 				proposal.Block.GetHash())
@@ -1565,7 +1448,7 @@ func (c *Consensus) processProposal(proposal *Proposal) {
 
 	// Validate the block itself
 	if err := c.blockChain.ValidateBlock(proposal.Block); err != nil {
-		logger.Warn("❌ Block validation failed: %v", err)
+		logger.Warn("Block validation failed: %v", err)
 		return
 	}
 
@@ -1616,33 +1499,33 @@ func (c *Consensus) processProposal(proposal *Proposal) {
 	// empty" path is only acceptable during bootstrap/testnet and MUST be
 	// turned off for mainnet. Empty signatures are rejected as invalid.
 	if c.signingService == nil {
-		logger.Error("❌ CRITICAL: No signing service available — rejecting proposal from %s (all messages must be signed in production)", proposal.ProposerID)
+		logger.Error("CRITICAL: No signing service available — rejecting proposal from %s (all messages must be signed in production)", proposal.ProposerID)
 		return
 	}
 
 	// Verify proposal signature — MUST be present and valid
 	if len(proposal.Signature) == 0 {
-		logger.Error("❌ CRITICAL: Proposal from %s has empty signature — rejecting (all proposals must be signed)", proposal.ProposerID)
+		logger.Error("CRITICAL: Proposal from %s has empty signature — rejecting (all proposals must be signed)", proposal.ProposerID)
 		return
 	}
 	valid, err := c.signingService.VerifyProposal(proposal)
 	if err != nil {
-		logger.Warn("❌ Error verifying proposal signature from %s: %v", proposal.ProposerID, err)
+		logger.Warn("Error verifying proposal signature from %s: %v", proposal.ProposerID, err)
 		return
 	}
 	if !valid {
-		logger.Warn("❌ Invalid proposal signature from %s", proposal.ProposerID)
+		logger.Warn("Invalid proposal signature from %s", proposal.ProposerID)
 		return
 	}
-	logger.Info("✅ Valid signature for proposal from %s", proposal.ProposerID)
+	logger.Debug("Valid signature for proposal from %s", proposal.ProposerID)
 
 	// Verify block header signature — MUST be present and valid
 	valid, err = c.signingService.VerifyBlockSignature(proposal.Block)
 	if err != nil || !valid {
-		logger.Warn("❌ Invalid block header signature from proposer %s: %v", proposal.ProposerID, err)
+		logger.Warn("Invalid block header signature from proposer %s: %v", proposal.ProposerID, err)
 		return
 	}
-	logger.Info("✅ Block header signature verified for block %s", proposal.Block.GetHash())
+	logger.Debug("Block header signature verified for block %s", proposal.Block.GetHash())
 
 	// Update block metadata for tracking
 	proposal.Block.SetSigValid(true)
@@ -1663,12 +1546,12 @@ func (c *Consensus) processProposal(proposal *Proposal) {
 		Status:       "proposed",
 	}
 	c.addConsensusSig(consensusSig)
-	logger.Info("✅ Added proposal signature for block %s", proposal.Block.GetHash())
+	logger.Info("Added proposal signature for block %s", proposal.Block.GetHash())
 
 	// Check for stale proposal
 	if proposal.View < c.currentView {
 		if proposal.View == c.currentView-1 {
-			logger.Info("⚠️ Proposal for view %d (current view %d) - catching up", proposal.View, c.currentView)
+			logger.Info("Proposal for view %d (current view %d) - catching up", proposal.View, c.currentView)
 			// This is a late retransmission from the previous round. If lockedBlock
 			// is still set from that round (commitBlock's second c.mu acquisition
 			// hasn't run yet), the equivocation guard below would fire and reject it.
@@ -1676,7 +1559,7 @@ func (c *Consensus) processProposal(proposal *Proposal) {
 			// equivocate — clear the stale lock so the height/parentHash checks
 			// decide whether this proposal is still actionable.
 			if c.lockedBlock != nil {
-				logger.Info("⚠️ Clearing stale lockedBlock %s from old view %d before catching-up processing",
+				logger.Info("Clearing stale lockedBlock %s from old view %d before catching-up processing",
 					c.lockedBlock.GetHash()[:16], proposal.View)
 				c.lockedBlock = nil
 			}
@@ -1690,7 +1573,7 @@ func (c *Consensus) processProposal(proposal *Proposal) {
 			}
 			// Don't return — continue processing; height check will discard if still not ready
 		} else {
-			logger.Warn("❌ Stale proposal for view %d, current view %d", proposal.View, c.currentView)
+			logger.Warn("Stale proposal for view %d, current view %d", proposal.View, c.currentView)
 			return
 		}
 	}
@@ -1698,7 +1581,7 @@ func (c *Consensus) processProposal(proposal *Proposal) {
 
 	// Handle view advancement if proposal is for a newer view.
 	if proposal.View > c.currentView {
-		logger.Info("🔄 Advancing view from %d to %d", c.currentView, proposal.View)
+		logger.Info("Advancing view from %d to %d", c.currentView, proposal.View)
 		c.currentView = proposal.View
 		c.resetConsensusState()
 		// Do NOT call updateLeaderStatus() here — it would deadlock because
@@ -1715,14 +1598,14 @@ func (c *Consensus) processProposal(proposal *Proposal) {
 		selected := c.selector.SelectProposer(slotEpoch, seed)
 		if selected != nil {
 			c.electedLeaderID = selected.ID
-			logger.Info("🔄 Follower re-derived electedLeaderID=%s for view-slot %d",
+			logger.Info("Follower re-derived electedLeaderID=%s for view-slot %d",
 				c.electedLeaderID, proposal.SlotNumber)
 		} else {
-			logger.Warn("⚠️ SelectProposer returned nil for slot %d, trusting signed proposal", proposal.SlotNumber)
+			logger.Warn("SelectProposer returned nil for slot %d, trusting signed proposal", proposal.SlotNumber)
 			c.electedLeaderID = proposal.ProposerID
 		}
 	} else if proposal.ElectedLeaderID != "" {
-		logger.Warn("⚠️ Proposal has no SlotNumber, using embedded ElectedLeaderID=%s", proposal.ElectedLeaderID)
+		logger.Warn("Proposal has no SlotNumber, using embedded ElectedLeaderID=%s", proposal.ElectedLeaderID)
 		c.electedLeaderID = proposal.ElectedLeaderID
 	} else {
 		// SlotNumber and ElectedLeaderID both absent — fall back to view-pinned election.
@@ -1736,7 +1619,7 @@ func (c *Consensus) processProposal(proposal *Proposal) {
 
 	// Validate that the proposer is the legitimate leader
 	if !c.isValidLeader(proposal.ProposerID, proposal.View) {
-		logger.Warn("❌ Invalid leader %s for view %d (electedLeaderID=%s)",
+		logger.Warn("Invalid leader %s for view %d (electedLeaderID=%s)",
 			proposal.ProposerID, proposal.View, c.electedLeaderID)
 		return
 	}
@@ -1745,7 +1628,7 @@ func (c *Consensus) processProposal(proposal *Proposal) {
 	isSelfProposal := (proposal.ProposerID == c.nodeID)
 
 	if isSelfProposal {
-		logger.Info("👑 [%s] LEADER: Processing own proposal for block %s", c.nodeID, proposal.Block.GetHash())
+		logger.Info("[%s] LEADER: Processing own proposal for block %s", c.nodeID, proposal.Block.GetHash())
 	}
 	// =========================================================================
 
@@ -1773,7 +1656,7 @@ func (c *Consensus) processProposal(proposal *Proposal) {
 		// clear lockedBlock). The chain tip has advanced past lockedHeight, so this
 		// new proposal is for a legitimately new height — not equivocation.
 		if chainTip != nil && chainTip.GetHeight() >= lockedHeight {
-			logger.Info("🔓 Clearing stale lockedBlock %s (height=%d, tip=%d) — committed mid-flight, not equivocation",
+			logger.Info("Clearing stale lockedBlock %s (height=%d, tip=%d) — committed mid-flight, not equivocation",
 				c.lockedBlock.GetHash()[:16], lockedHeight, chainTip.GetHeight())
 			c.lockedBlock = nil
 
@@ -1788,12 +1671,12 @@ func (c *Consensus) processProposal(proposal *Proposal) {
 			// If the node is still at the same currentView (e.g. catching-up branch), the
 			// lock may survive; preparedView is the reliable record of the view it was set in.
 		} else if c.preparedView < proposal.View {
-			logger.Info("🔓 Clearing cross-view lockedBlock %s (lockedAtView=%d, proposalView=%d, height=%d) — new view, not equivocation",
+			logger.Info("Clearing cross-view lockedBlock %s (lockedAtView=%d, proposalView=%d, height=%d) — new view, not equivocation",
 				c.lockedBlock.GetHash()[:16], c.preparedView, proposal.View, lockedHeight)
 			c.lockedBlock = nil
 
 		} else {
-			logger.Warn("❌ Rejecting conflicting proposal %s at height %d: already locked on %s (same view %d) — refusing to equivocate",
+			logger.Warn("Rejecting conflicting proposal %s at height %d: already locked on %s (same view %d) — refusing to equivocate",
 				proposal.Block.GetHash()[:16], proposal.Block.GetHeight(), c.lockedBlock.GetHash()[:16], c.preparedView)
 			return
 		}
@@ -1801,7 +1684,7 @@ func (c *Consensus) processProposal(proposal *Proposal) {
 
 	if c.preparedBlock != nil && c.preparedBlock.GetHash() != proposal.Block.GetHash() {
 		oldHash := c.preparedBlock.GetHash()
-		logger.Info("🔄 Resetting preparedBlock from %s to accept validated proposal %s from leader %s",
+		logger.Info("Resetting preparedBlock from %s to accept validated proposal %s from leader %s",
 			oldHash[:16], proposal.Block.GetHash()[:16], proposal.ProposerID)
 		c.preparedBlock = nil
 		c.preparedView = 0
@@ -1813,26 +1696,26 @@ func (c *Consensus) processProposal(proposal *Proposal) {
 		c.preparedBlock = proposal.Block
 		c.preparedView = proposal.View
 		c.preparedBlockHash = proposal.Block.GetHash()
-		logger.Info("🚀 Set preparedBlock for validated proposal %s at height %d",
+		logger.Info("Set preparedBlock for validated proposal %s at height %d",
 			proposal.Block.GetHash()[:16], proposal.Block.GetHeight())
 	}
 
 	// Accept the proposal
-	logger.Info("✅ Node %s accepting proposal for block %s at view %d (height %d, nonce: %s)",
+	logger.Info("Node %s accepting proposal for block %s at view %d (height %d, nonce: %s)",
 		c.nodeID, proposal.Block.GetHash(), proposal.View, proposal.Block.GetHeight(), nonceStr)
 
 	logger.Info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	if isSelfProposal {
-		logger.Info("👑 [%s] LEADER: Processed own proposal for block %s", c.nodeID, proposal.Block.GetHash())
+		logger.Info("[%s] LEADER: Processed own proposal for block %s", c.nodeID, proposal.Block.GetHash())
 	} else {
-		logger.Info("📬 [%s] FOLLOWER: Received proposal from leader %s for block %s",
+		logger.Info("[%s] FOLLOWER: Received proposal from leader %s for block %s",
 			c.nodeID, proposal.ProposerID, proposal.Block.GetHash())
 	}
 	logger.Info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 	// Ensure preparedBlock is still set (it should be from the beginning)
 	if c.preparedBlock == nil || c.preparedBlock.GetHash() != proposal.Block.GetHash() {
-		logger.Warn("⚠️ preparedBlock was lost! Re-setting for %s", proposal.Block.GetHash())
+		logger.Warn("preparedBlock was lost! Re-setting for %s", proposal.Block.GetHash())
 		c.preparedBlock = proposal.Block
 		c.preparedView = proposal.View
 		c.preparedBlockHash = proposal.Block.GetHash()
@@ -1844,12 +1727,12 @@ func (c *Consensus) processProposal(proposal *Proposal) {
 	if !isSelfProposal || !c.sentPrepareVotes[proposal.Block.GetHash()] {
 		c.sendPrepareVote(proposal.Block.GetHash(), proposal.View)
 		if isSelfProposal {
-			logger.Info("👑 [%s] LEADER: Sending prepare vote for own block", c.nodeID)
+			logger.Info("[%s] LEADER: Sending prepare vote for own block", c.nodeID)
 		} else {
-			logger.Info("✅ [%s] FOLLOWER: Proposal validated, sending prepare vote", c.nodeID)
+			logger.Info("[%s] FOLLOWER: Proposal validated, sending prepare vote", c.nodeID)
 		}
 	} else {
-		logger.Info("👑 [%s] LEADER: Already sent prepare vote for own block", c.nodeID)
+		logger.Info("[%s] LEADER: Already sent prepare vote for own block", c.nodeID)
 	}
 
 	// ========== FIX: catch quorum that arrived before this proposal ==========
@@ -1873,7 +1756,7 @@ func (c *Consensus) processProposal(proposal *Proposal) {
 	view := proposal.View
 	if c.phase != PhaseCommitted && c.hasQuorum(blockHash) {
 		blockToCommit := proposal.Block
-		logger.Info("🔄 Commit quorum was already reached for %s before proposal arrived — committing now", blockHash[:16])
+		logger.Info("Commit quorum was already reached for %s before proposal arrived — committing now", blockHash[:16])
 		// Transition to committed phase and lock the block before releasing the mutex.
 		c.phase = PhaseCommitted
 		c.lockedBlock = blockToCommit
@@ -1913,7 +1796,7 @@ func (c *Consensus) SetCurrentHeight(height uint64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.currentHeight = height
-	logger.Info("Consensus height updated to %d for node %s", height, c.nodeID)
+	logger.Debug("Consensus height updated to %d for node %s", height, c.nodeID)
 }
 
 // StatusFromMsgType returns the appropriate status string for a message type
@@ -1967,13 +1850,13 @@ func (c *Consensus) processPrepareVote(vote *Vote) {
 
 	// Log vote receipt with stake amount in SPX
 	stakeSPX := new(big.Float).Quo(new(big.Float).SetInt(stake), new(big.Float).SetFloat64(denom.SPX))
-	logger.Info("📊 Prepare vote: %s, block=%s, stake=%.2f SPX", vote.VoterID, vote.BlockHash, stakeSPX)
+	logger.Debug("Prepare vote: %s, block=%s, stake=%.2f SPX", vote.VoterID, vote.BlockHash, stakeSPX)
 
 	// Calculate current vote count and quorum requirements
 	totalVotes := len(c.prepareVotes[vote.BlockHash])
 	quorumSize := c.calculateQuorumSize(c.getTotalNodes())
 
-	logger.Info("📊 Prepare vote received: node=%s, from=%s, block=%s, votes=%d/%d, phase=%v, prepared=%v",
+	logger.Info("Prepare vote received: node=%s, from=%s, block=%s, votes=%d/%d, phase=%v, prepared=%v",
 		c.nodeID, vote.VoterID, vote.BlockHash, totalVotes, quorumSize, c.phase, c.preparedBlock != nil)
 
 	// Check if we've achieved quorum for this block. The actual
@@ -1981,7 +1864,7 @@ func (c *Consensus) processPrepareVote(vote *Vote) {
 	// handled by tryEnterPreparedPhase (see its doc comment for why that
 	// logic needs to live in one place callable from two sites).
 	if c.hasPrepareQuorum(vote.BlockHash) {
-		logger.Info("🎉 PREPARE QUORUM ACHIEVED for block %s at view %d", vote.BlockHash, vote.View)
+		logger.Info("PREPARE QUORUM ACHIEVED for block %s at view %d", vote.BlockHash, vote.View)
 	}
 	c.tryEnterPreparedPhase(vote.BlockHash, vote.View)
 }
@@ -2021,7 +1904,7 @@ func (c *Consensus) tryEnterPreparedPhase(blockHash string, view uint64) {
 	}
 	if c.phase == PhasePrepared || c.phase == PhaseCommitted {
 		// Already transitioned for this round — nothing to do.
-		logger.Info("⚠️ Quorum reached for %s but already in phase %v, skipping transition", blockHash, c.phase)
+		logger.Info("Quorum reached for %s but already in phase %v, skipping transition", blockHash, c.phase)
 		return
 	}
 	// PhaseIdle and PhasePrePrepared are both valid entry points:
@@ -2068,7 +1951,7 @@ func (c *Consensus) tryEnterPreparedPhase(blockHash string, view uint64) {
 	c.lockedBlock = c.preparedBlock
 	c.preparedBlock.SetCommitStatus("prepared")
 
-	logger.Info("[%s] 🔄 Entered PREPARED phase for block %s at height %d — sending commit vote",
+	logger.Info("[%s] Entered PREPARED phase for block %s at height %d — sending commit vote",
 		c.nodeID, blockHash, c.preparedBlock.GetHeight())
 
 	// Send our own commit vote for this block.
@@ -2080,7 +1963,7 @@ func (c *Consensus) addConsensusSig(sig *ConsensusSignature) {
 	c.signatureMutex.Lock()
 	defer c.signatureMutex.Unlock()
 
-	logger.Info("🔄 Adding consensus signature for block %s (type: %s)", sig.BlockHash, sig.MessageType)
+	logger.Info("Adding consensus signature for block %s (type: %s)", sig.BlockHash, sig.MessageType)
 
 	// Deduplicate before appending. Failed rounds can otherwise accumulate
 	// multiple proposal/prepare/commit entries for the same stale block, which
@@ -2112,14 +1995,14 @@ func (c *Consensus) addConsensusSig(sig *ConsensusSignature) {
 			}
 		} else {
 			sig.MerkleRoot = fmt.Sprintf("not_in_storage_%s", sig.BlockHash[:8])
-			logger.Warn("⚠️ Block not found in storage yet: %s", sig.BlockHash)
+			logger.Debug("Block has not been persisted yet (expected during proposal phase): %s", sig.BlockHash)
 		}
 	}
 
 	// Emergency fallback if merkle root still empty
 	if sig.MerkleRoot == "" {
 		sig.MerkleRoot = fmt.Sprintf("emergency_fallback_%s", sig.BlockHash[:8])
-		logger.Error("🚨 CRITICAL: Used emergency fallback for merkle root!")
+		logger.Error("CRITICAL: Used emergency fallback for merkle root!")
 	}
 
 	// Set status if not already set
@@ -2137,7 +2020,7 @@ func (c *Consensus) addConsensusSig(sig *ConsensusSignature) {
 
 	// Append to signatures collection
 	c.consensusSignatures = append(c.consensusSignatures, sig)
-	logger.Info("🎯 Added signature: block=%s, merkle_root=%s, status=%s", sig.BlockHash, sig.MerkleRoot, sig.Status)
+	logger.Debug("Added signature: block=%s, merkle_root=%s, status=%s", sig.BlockHash, sig.MerkleRoot, sig.Status)
 }
 
 // extractMerkleRootFromBlock attempts to extract the merkle root from a block
@@ -2172,9 +2055,9 @@ func (c *Consensus) DebugConsensusSignaturesDeep() {
 	c.signatureMutex.RLock()
 	defer c.signatureMutex.RUnlock()
 
-	logger.Info("🔍 DEEP DEBUG: Current consensus signatures (%d total):", len(c.consensusSignatures))
+	logger.Debug("Current consensus signatures (%d total):", len(c.consensusSignatures))
 	for i, sig := range c.consensusSignatures {
-		logger.Info("  Signature %d: block=%s, type=%s, merkle=%s, status=%s, valid=%t",
+		logger.Debug("  Signature %d: block=%s, type=%s, merkle=%s, status=%s, valid=%t",
 			i, sig.BlockHash, sig.MessageType, sig.MerkleRoot, sig.Status, sig.Valid)
 	}
 }
@@ -2184,7 +2067,7 @@ func (c *Consensus) ForcePopulateAllSignatures() {
 	c.signatureMutex.Lock()
 	defer c.signatureMutex.Unlock()
 
-	logger.Info("🔄 Force populating all consensus signatures")
+	logger.Info("Force populating all consensus signatures")
 
 	// Process each signature
 	for i, sig := range c.consensusSignatures {
@@ -2213,7 +2096,7 @@ func (c *Consensus) ForcePopulateAllSignatures() {
 			}
 		} else {
 			sig.MerkleRoot = fmt.Sprintf("block_not_found_%s", sig.BlockHash[:8])
-			logger.Warn("⚠️ Block not found for hash %s", sig.BlockHash)
+			logger.Debug("Block not found for hash %s (expected during sync)", sig.BlockHash)
 		}
 
 		// Set status based on message type if missing
@@ -2232,11 +2115,11 @@ func (c *Consensus) ForcePopulateAllSignatures() {
 			}
 		}
 
-		logger.Info("🔄 Signature %d: block=%s, merkle=%s->%s, status=%s->%s",
+		logger.Info("Signature %d: block=%s, merkle=%s->%s, status=%s->%s",
 			i, sig.BlockHash, originalMerkleRoot, sig.MerkleRoot, originalStatus, sig.Status)
 	}
 
-	logger.Info("✅ Force population completed for %d signatures", len(c.consensusSignatures))
+	logger.Info("Force population completed for %d signatures", len(c.consensusSignatures))
 }
 
 // GetConsensusSignatures returns a copy of all consensus signatures
@@ -2320,9 +2203,9 @@ func (c *Consensus) processVoteLocked(vote *Vote) Block {
 		if vote.VoterID == c.nodeID {
 			// Self stake fallback
 			stake = new(big.Int).Mul(big.NewInt(32), big.NewInt(denom.SPX))
-			logger.Info("⚠️ Self stake was zero, using default: 32 SPX")
+			logger.Info("Self stake was zero, using default: 32 SPX")
 		} else {
-			logger.Warn("⚠️ Vote from %s has zero stake", vote.VoterID)
+			logger.Warn("Vote from %s has zero stake", vote.VoterID)
 		}
 	}
 
@@ -2331,17 +2214,17 @@ func (c *Consensus) processVoteLocked(vote *Vote) Block {
 
 	// Log vote receipt with stake amount
 	stakeSPX := new(big.Float).Quo(new(big.Float).SetInt(stake), new(big.Float).SetFloat64(denom.SPX))
-	logger.Info("📊 Commit vote: %s, block=%s, stake=%.2f SPX", vote.VoterID, vote.BlockHash, stakeSPX)
+	logger.Debug("Commit vote: %s, block=%s, stake=%.2f SPX", vote.VoterID, vote.BlockHash, stakeSPX)
 
 	// Calculate current vote count and quorum requirements
 	totalVotes := len(c.receivedVotes[vote.BlockHash])
 	quorumSize := c.calculateQuorumSize(c.getTotalNodes())
-	logger.Info("📊 Commit vote received: node=%s, from=%s, block=%s, votes=%d/%d, phase=%v",
+	logger.Info("Commit vote received: node=%s, from=%s, block=%s, votes=%d/%d, phase=%v",
 		c.nodeID, vote.VoterID, vote.BlockHash, totalVotes, quorumSize, c.phase)
 
 	// In processVote, when commit quorum is achieved
 	if c.hasQuorum(vote.BlockHash) {
-		logger.Info("🎉 COMMIT QUORUM ACHIEVED for block %s at view %d", vote.BlockHash, vote.View)
+		logger.Info("COMMIT QUORUM ACHIEVED for block %s at view %d", vote.BlockHash, vote.View)
 
 		// Determine which block to commit
 		var blockToCommit Block
@@ -2359,7 +2242,7 @@ func (c *Consensus) processVoteLocked(vote *Vote) Block {
 			cached, ok := c.pendingProposals[vote.BlockHash]
 			c.proposalMutex.RUnlock()
 			if ok && cached != nil {
-				logger.Info("🔄 Recovering block %s from proposal cache for commit (lockedBlock/preparedBlock were nil)",
+				logger.Info("Recovering block %s from proposal cache for commit (lockedBlock/preparedBlock were nil)",
 					vote.BlockHash[:16])
 				blockToCommit = cached
 				// Re-lock so the equivocation guard holds for any straggler proposals.
@@ -2377,7 +2260,7 @@ func (c *Consensus) processVoteLocked(vote *Vote) Block {
 		// Move to committed phase if not already there
 		if c.phase != PhaseCommitted {
 			c.phase = PhaseCommitted
-			logger.Info("🚀 Moving to COMMITTED phase for block %s", vote.BlockHash)
+			logger.Info("Moving to COMMITTED phase for block %s", vote.BlockHash)
 		}
 
 		// ========== FIX: Attach attestations BEFORE commit ==========
@@ -2398,7 +2281,7 @@ func (c *Consensus) processVoteLocked(vote *Vote) Block {
 				for k, v := range votes {
 					votesSnapshot[k] = v
 				}
-				logger.Info("📸 Captured %d votes for attestations", len(votesSnapshot))
+				logger.Info("Captured %d votes for attestations", len(votesSnapshot))
 			}
 
 			// Attach attestations directly to the block
@@ -2421,7 +2304,7 @@ func (c *Consensus) processVoteLocked(vote *Vote) Block {
 						Signature:   signedMsg.Signature, // Extract raw SPHINCS+ signature bytes only
 					})
 				}
-				logger.Info("✅ Attached %d attestations to block BEFORE commit", len(tb.Body.Attestations))
+				logger.Info("Attached %d attestations to block BEFORE commit", len(tb.Body.Attestations))
 			}
 		}
 		// ============================================================
@@ -2450,7 +2333,7 @@ func (c *Consensus) processTimeout(timeout *TimeoutMsg) {
 	} else {
 		// In production this must never happen: timeouts drive view-change.
 		// Reject unsigned timeouts deterministically.
-		logger.Error("❌ CRITICAL: No signing service available — rejecting unsigned timeout from %s", timeout.VoterID)
+		logger.Error("CRITICAL: No signing service available — rejecting unsigned timeout from %s", timeout.VoterID)
 		return
 	}
 
@@ -2561,7 +2444,7 @@ func (c *Consensus) voteForBlock(blockHash string, view uint64) {
 	} else if c.preparedBlock != nil && c.preparedBlock.GetHash() == blockHash {
 		blockToVote = c.preparedBlock
 	} else {
-		logger.Warn("❌ No block found to vote for hash %s", blockHash)
+		logger.Warn("No block found to vote for hash %s", blockHash)
 		return
 	}
 
@@ -2601,7 +2484,7 @@ func (c *Consensus) voteForBlock(blockHash string, view uint64) {
 	// =====================================================================================
 
 	c.broadcastVote(vote)
-	logger.Info("🗳️ Node %s sent COMMIT vote for block %s (height %d) at view %d",
+	logger.Info("Node %s sent COMMIT vote for block %s (height %d) at view %d",
 		c.nodeID, blockHash, blockToVote.GetHeight(), view)
 }
 
@@ -2647,7 +2530,7 @@ func (c *Consensus) hasQuorum(blockHash string) bool {
 		if totalSPX.Cmp(big.NewFloat(0)) != 0 {
 			pct := new(big.Float).Quo(votedSPX, totalSPX)
 			pct.Mul(pct, big.NewFloat(100))
-			logger.Info("🎯 Quorum achieved: %.2f / %.2f SPX voted (%.1f%%)", votedSPX, totalSPX, pct)
+			logger.Info("Quorum achieved: %.2f / %.2f SPX voted (%.1f%%)", votedSPX, totalSPX, pct)
 		}
 	}
 	return hasQuorum
@@ -2726,7 +2609,7 @@ func (c *Consensus) getTotalNodes() int {
 
 // commitBlock commits a block to the blockchain
 func (c *Consensus) commitBlock(block Block) {
-	logger.Info("🚀 Node %s attempting to commit block %s at height %d",
+	logger.Info("Node %s attempting to commit block %s at height %d",
 		c.nodeID, block.GetHash(), block.GetHeight())
 
 	// Verify block height against current chain tip
@@ -2756,7 +2639,7 @@ func (c *Consensus) commitBlock(block Block) {
 	}
 
 	// Now blockHeight > currentHeight, proceed with normal commit
-	logger.Info("🚀 Node %s attempting to commit block %s at height %d (current tip %d)",
+	logger.Info("Node %s attempting to commit block %s at height %d (current tip %d)",
 		c.nodeID, block.GetHash(), blockHeight, currentHeight)
 
 	// Update block metadata using interface method
@@ -2773,9 +2656,9 @@ func (c *Consensus) commitBlock(block Block) {
 			tb.Header.SigValid = true
 		}
 		if len(tb.Body.Attestations) > 0 {
-			logger.Info("✅ Block already has %d attestations attached", len(tb.Body.Attestations))
+			logger.Info("Block already has %d attestations attached", len(tb.Body.Attestations))
 		} else {
-			logger.Warn("⚠️ No attestations attached to block before commit")
+			logger.Warn("No attestations attached to block before commit")
 		}
 	}
 
@@ -2822,7 +2705,7 @@ func (c *Consensus) commitBlock(block Block) {
 
 	// Commit block to blockchain
 	if err := c.blockChain.CommitBlock(block); err != nil {
-		logger.Error("❌ Error committing block: %v", err)
+		logger.Error("Error committing block: %v", err)
 
 		// FIX: This round did NOT actually complete on this node — c.phase was
 		// already advanced to PhaseCommitted (by whichever path detected quorum:
@@ -2845,8 +2728,23 @@ func (c *Consensus) commitBlock(block Block) {
 		// so the stuck quorum does not immediately re-trigger commit on the next
 		// incoming vote / proposal.
 		c.mu.Lock()
-		if tip := c.blockChain.GetLatestBlock(); tip != nil && tip.GetHeight() > c.currentHeight {
+		tip := c.blockChain.GetLatestBlock()
+		if tip != nil && tip.GetHeight() > c.currentHeight {
 			c.currentHeight = tip.GetHeight()
+		}
+		// blockHeight > currentHeight+1: this node is still missing one or
+		// more blocks between the tip and the block we just failed to
+		// commit (e.g. the live PBFT commit path raced ahead of the
+		// separate block-sync path — see the "current tip N-2" case).
+		// Signal the sync layer with the exact height it's missing instead
+		// of just dropping the block and waiting for the next proposal or
+		// a 10-15s view-change timeout to notice.
+		if tip != nil && block.GetHeight() > tip.GetHeight()+1 {
+			neededHeight := tip.GetHeight() + 1
+			select {
+			case c.syncNeededCh <- neededHeight:
+			default:
+			}
 		}
 		c.phase = PhaseIdle
 		c.lockedBlock = nil
@@ -2867,7 +2765,7 @@ func (c *Consensus) commitBlock(block Block) {
 		c.sentPrepareVotes = make(map[string]bool)
 		c.weightedPrepareVotes = make(map[string]*big.Int)
 		c.weightedCommitVotes = make(map[string]*big.Int)
-		logger.Warn("🔄 commitBlock: dropped stale block %s at height %d (chain tip already advanced) — reset to PhaseIdle at height %d",
+		logger.Warn("commitBlock: dropped stale block %s at height %d (chain tip already advanced) — reset to PhaseIdle at height %d",
 			block.GetHash(), block.GetHeight(), c.currentHeight)
 		c.mu.Unlock()
 		return
@@ -2876,7 +2774,7 @@ func (c *Consensus) commitBlock(block Block) {
 	// Execute commit callback if provided (c.mu NOT held here — callback may lock)
 	if c.onCommit != nil {
 		if err := c.onCommit(block); err != nil {
-			logger.Warn("⚠️ Error in commit callback: %v", err)
+			logger.Warn("Error in commit callback: %v", err)
 		}
 	}
 
@@ -2911,12 +2809,37 @@ func (c *Consensus) commitBlock(block Block) {
 	// Evict only proposals at or below the committed height.
 	// Proposals for the NEXT height may already be cached (arrived early)
 	// and must survive this commit so FastForward can replay them.
+	// Evict only proposals at or below the committed height.
+	// Proposals for the NEXT height may already be cached (arrived early)
+	// and must survive this commit so FastForward can replay them.
 	committedHeight := block.GetHeight()
 	for hash, b := range c.pendingProposals {
 		if b.GetHeight() <= committedHeight {
 			delete(c.pendingProposals, hash)
 		}
 	}
+
+	// NEW: Prune orphaned consensus signatures for this height now, not on
+	// the next cleanup tick. Any signature at or below the committed
+	// height whose hash isn't the block that actually won is a losing
+	// proposal from this round's leader race — its block will NEVER appear
+	// in storage. Left in c.consensusSignatures, it gets re-walked by every
+	// subsequent ForcePopulateAllSignatures/SMR reconciliation cycle, each
+	// of which burns several seconds retrying a lookup that can never
+	// succeed (see CleanupStaleSignatures' 8s age gate + 5s ticker — a
+	// dead signature can otherwise live for up to ~13s max, clearing well
+	// before the 15s round-stall timeout and giving the next leader a clean
+	// window to actually propose).
+	c.signatureMutex.Lock()
+	kept := c.consensusSignatures[:0]
+	for _, sig := range c.consensusSignatures {
+		if sig.BlockHeight <= committedHeight && sig.BlockHash != block.GetHash() {
+			continue // losing proposal for this height — drop it now
+		}
+		kept = append(kept, sig)
+	}
+	c.consensusSignatures = kept
+	c.signatureMutex.Unlock()
 
 	// Add self-commit signature while still under caller's c.mu.
 	commitSig := &ConsensusSignature{
@@ -2933,12 +2856,12 @@ func (c *Consensus) commitBlock(block Block) {
 	}
 	c.addConsensusSig(commitSig)
 
-	logger.Info("🎉 Node %s committed block %s at height %d (view now %d)",
+	logger.Info("Node %s committed block %s at height %d (view now %d)",
 		c.nodeID, block.GetHash(), newHeight, c.currentView)
 
-	logger.Info("🔄 Updating leader status for next round at height %d, view %d", newHeight, c.currentView)
+	logger.Info("Updating leader status for next round at height %d, view %d", newHeight, c.currentView)
 	c.updateLeaderStatusLocked()
-	logger.Info("📊 Leader status after commit: isLeader=%v, electedLeader=%s", c.isLeader, c.electedLeaderID)
+	logger.Info("Leader status after commit: isLeader=%v, electedLeader=%s", c.isLeader, c.electedLeaderID)
 }
 
 // StartViewChange initiates a view change process (public wrapper for startViewChange)
@@ -2988,7 +2911,7 @@ func (c *Consensus) startViewChange() {
 
 	// Calculate new view number
 	newView := c.currentView + 1
-	logger.Info("🔄 Node %s initiating view change to view %d", c.nodeID, newView)
+	logger.Info("Node %s initiating view change to view %d", c.nodeID, newView)
 
 	// Update consensus state
 	c.currentView = newView
@@ -3007,12 +2930,12 @@ func (c *Consensus) startViewChange() {
 		c.electedLeaderID = sel.ID
 		c.electedSlot = viewSlot
 		c.isLeader = (sel.ID == c.nodeID)
-		logger.Info("📊 New leader for view %d: %s (stake-weighted, isLeader=%v)", newView, c.electedLeaderID, c.isLeader)
+		logger.Info("New leader for view %d: %s (stake-weighted, isLeader=%v)", newView, c.electedLeaderID, c.isLeader)
 	} else {
 		// Last-resort fallback: if SelectProposer returns nil (e.g. empty
 		// validator set), use round-robin as a safe deterministic default
 		// that at least lets the chain make progress.
-		logger.Warn("⚠️ SelectProposer returned nil for view %d — falling back to round-robin", newView)
+		logger.Warn("SelectProposer returned nil for view %d — falling back to round-robin", newView)
 		c.updateLeaderStatusWithValidators(validators)
 	}
 
@@ -3081,7 +3004,7 @@ func (c *Consensus) updateLeaderStatusWithValidators(validators []string) {
 
 	// Log election result
 	if c.isLeader {
-		logger.Info("✅ Node %s elected as leader for view %d (index %d/%d)",
+		logger.Info("Node %s elected as leader for view %d (index %d/%d)",
 			c.nodeID, c.currentView, leaderIndex, len(validators))
 	} else {
 		logger.Debug("Node %s is NOT leader for view %d (leader: %s)",
@@ -3120,9 +3043,9 @@ func (c *Consensus) isValidLeader(nodeID string, view uint64) bool {
 	if c.electedLeaderID != "" {
 		isValid := c.electedLeaderID == nodeID
 		if isValid {
-			logger.Info("✅ Valid leader (RANDAO/elected): %s for view %d", nodeID, view)
+			logger.Info("Valid leader (RANDAO/elected): %s for view %d", nodeID, view)
 		} else {
-			logger.Info("❌ Invalid leader: expected elected=%s for view %d, got=%s",
+			logger.Info("Invalid leader: expected elected=%s for view %d, got=%s",
 				c.electedLeaderID, view, nodeID)
 		}
 		return isValid
@@ -3139,9 +3062,9 @@ func (c *Consensus) isValidLeader(nodeID string, view uint64) bool {
 	expectedLeader := validators[leaderIndex]
 	isValid := expectedLeader == nodeID
 	if isValid {
-		logger.Info("✅ Valid leader (round-robin fallback): %s for view %d", nodeID, view)
+		logger.Info("Valid leader (round-robin fallback): %s for view %d", nodeID, view)
 	} else {
-		logger.Info("❌ Invalid leader (round-robin fallback): expected %s for view %d, got %s",
+		logger.Info("Invalid leader (round-robin fallback): expected %s for view %d, got %s",
 			expectedLeader, view, nodeID)
 	}
 	return isValid
@@ -3162,9 +3085,9 @@ func (c *Consensus) getValidators() []string {
 	if c.isValidator() {
 		validatorSet[c.nodeID] = true
 		validators = append(validators, c.nodeID)
-		logger.Info("✅ Added self as validator: %s", c.nodeID)
+		logger.Info("Added self as validator: %s", c.nodeID)
 	} else {
-		logger.Warn("⚠️ Self is NOT a validator: %s", c.nodeID)
+		logger.Warn("Self is NOT a validator: %s", c.nodeID)
 	}
 
 	// Add validator peers
@@ -3175,12 +3098,12 @@ func (c *Consensus) getValidators() []string {
 			if !validatorSet[nodeID] && nodeID != "" {
 				validatorSet[nodeID] = true
 				validators = append(validators, nodeID)
-				logger.Info("✅ Added peer validator: %s", nodeID)
+				logger.Info("Added peer validator: %s", nodeID)
 			}
 		}
 	}
 
-	logger.Info("📊 Total validators found: %d", len(validators))
+	logger.Info("Total validators found: %d", len(validators))
 	return validators
 }
 
@@ -3237,26 +3160,26 @@ func (c *Consensus) AddConsensusSignature(sig interface{}) {
 func (c *Consensus) broadcastProposal(proposal *Proposal) error {
 	// Log the proposal JSON for debugging
 	jsonData, _ := json.Marshal(proposal)
-	logger.Info("Broadcasting proposal JSON (first 500 chars): %s", string(jsonData[:min(500, len(jsonData))]))
+	logger.Debug("Broadcasting proposal JSON (first 500 chars): %s", string(jsonData[:min(500, len(jsonData))]))
 
 	return c.nodeManager.BroadcastMessage("proposal", proposal)
 }
 
 // broadcastVote sends a commit vote to all peers
 func (c *Consensus) broadcastVote(vote *Vote) error {
-	logger.Info("Broadcasting commit vote for block %s at view %d", vote.BlockHash, vote.View)
+	logger.Debug("Broadcasting commit vote for block %s at view %d", vote.BlockHash, vote.View)
 	return c.nodeManager.BroadcastMessage("vote", vote)
 }
 
 // broadcastPrepareVote sends a prepare vote to all peers
 func (c *Consensus) broadcastPrepareVote(vote *Vote) error {
-	logger.Info("Broadcasting prepare vote for block %s at view %d", vote.BlockHash, vote.View)
+	logger.Debug("Broadcasting prepare vote for block %s at view %d", vote.BlockHash, vote.View)
 	return c.nodeManager.BroadcastMessage("prepare", vote)
 }
 
 // broadcastTimeout sends a timeout message to all peers
 func (c *Consensus) broadcastTimeout(timeout *TimeoutMsg) error {
-	logger.Info("Broadcasting timeout for view %d", timeout.View)
+	logger.Debug("Broadcasting timeout for view %d", timeout.View)
 	return c.nodeManager.BroadcastMessage("timeout", timeout)
 }
 
@@ -3455,7 +3378,7 @@ func (c *Consensus) AtomicCommit(height uint64, block Block, stateRoot string, c
 		return c.nonAtomicCommit(height, block, stateRoot, checkpoint)
 	}
 
-	logger.Info("🔄 Performing atomic commit for height %d", height)
+	logger.Info("Performing atomic commit for height %d", height)
 
 	// Validate inputs
 	if block == nil {
@@ -3533,14 +3456,14 @@ func (c *Consensus) AtomicCommit(height uint64, block Block, stateRoot string, c
 		}
 	}
 
-	logger.Info("✅ Atomic commit completed for height %d, block=%s, stateRoot=%s",
+	logger.Info("Atomic commit completed for height %d, block=%s, stateRoot=%s",
 		height, block.GetHash(), stateRoot[:16])
 	return nil
 }
 
 // nonAtomicCommit performs non-atomic commits (for testing or when atomic disabled)
 func (c *Consensus) nonAtomicCommit(height uint64, block Block, stateRoot string, checkpoint *CheckpointMessage) error {
-	logger.Info("⚠️  Performing non-atomic commit for height %d", height)
+	logger.Info("Performing non-atomic commit for height %d", height)
 
 	// Validate inputs
 	if block == nil {
@@ -3567,7 +3490,7 @@ func (c *Consensus) nonAtomicCommit(height uint64, block Block, stateRoot string
 		}
 	}
 
-	logger.Info("✅ Non-atomic commit completed for height %d, block=%s",
+	logger.Info("Non-atomic commit completed for height %d, block=%s",
 		height, block.GetHash())
 	return nil
 }
@@ -3575,7 +3498,7 @@ func (c *Consensus) nonAtomicCommit(height uint64, block Block, stateRoot string
 // commitStateToDatabase commits state to the database
 func (c *Consensus) commitStateToDatabase(height uint64, stateRoot string, blockHash string) error {
 	// In a real implementation, this would commit state to database
-	logger.Info("💾 Committing state to database: height=%d, stateRoot=%s, block=%s",
+	logger.Info("Committing state to database: height=%d, stateRoot=%s, block=%s",
 		height, stateRoot[:16], blockHash[:16])
 
 	// TODO: Implement actual state database commit
@@ -3587,7 +3510,7 @@ func (c *Consensus) commitStateToDatabase(height uint64, stateRoot string, block
 // storeBlockInDatabase stores block in the database
 func (c *Consensus) storeBlockInDatabase(height uint64, block Block) error {
 	// In a real implementation, this would store block in database
-	logger.Info("💾 Storing block in database: height=%d, block=%s",
+	logger.Info("Storing block in database: height=%d, block=%s",
 		height, block.GetHash())
 
 	// TODO: Implement actual block storage
@@ -3599,7 +3522,7 @@ func (c *Consensus) storeBlockInDatabase(height uint64, block Block) error {
 // updateCheckpointInDatabase updates checkpoint in the database
 func (c *Consensus) updateCheckpointInDatabase(height uint64, checkpoint *CheckpointMessage) error {
 	// In a real implementation, this would update checkpoint in database
-	logger.Info("💾 Updating checkpoint in database: height=%d, tip=%d",
+	logger.Info("Updating checkpoint in database: height=%d, tip=%d",
 		height, checkpoint.TipHeight)
 
 	// TODO: Implement actual checkpoint update
@@ -3620,7 +3543,7 @@ func (c *Consensus) BeginStorageOperation(opType string, height uint64, data map
 		Status:    "pending",
 	}
 
-	logger.Debug("📝 Began storage operation: id=%s, type=%s, height=%d", opID, opType, height)
+	logger.Debug("Began storage operation: id=%s, type=%s, height=%d", opID, opType, height)
 
 	return op, nil
 }
@@ -3628,14 +3551,14 @@ func (c *Consensus) BeginStorageOperation(opType string, height uint64, data map
 // CommitStorageOperation commits a storage operation atomically
 func (c *Consensus) CommitStorageOperation(opID string) error {
 	// In a real implementation, this would mark the operation as committed in database
-	logger.Debug("✅ Committed storage operation: id=%s", opID)
+	logger.Debug("Committed storage operation: id=%s", opID)
 	return nil
 }
 
 // RollbackStorageOperation rolls back a storage operation
 func (c *Consensus) RollbackStorageOperation(opID string) error {
 	// In a real implementation, this would rollback the operation in database
-	logger.Warn("⚠️  Rolled back storage operation: id=%s", opID)
+	logger.Warn("Rolled back storage operation: id=%s", opID)
 	return nil
 }
 
@@ -3646,7 +3569,7 @@ func (c *Consensus) RunCrashConsistencyTests() []*CrashConsistencyTestResult {
 		return []*CrashConsistencyTestResult{}
 	}
 
-	logger.Info("🧪 Running crash consistency tests...")
+	logger.Info("Running crash consistency tests...")
 
 	results := make([]*CrashConsistencyTestResult, 0)
 
@@ -3662,7 +3585,7 @@ func (c *Consensus) RunCrashConsistencyTests() []*CrashConsistencyTestResult {
 	// Test 4: Recovery after simulated crash
 	results = append(results, c.testRecoveryAfterCrash())
 
-	logger.Info("✅ Crash consistency tests completed: %d tests, %d passed",
+	logger.Info("Crash consistency tests completed: %d tests, %d passed",
 		len(results), c.countPassedTests(results))
 
 	return results
@@ -3785,7 +3708,7 @@ func (c *Consensus) PerformRecovery() error {
 		return fmt.Errorf("recovery already in progress")
 	}
 
-	logger.Warn("🔄 Starting crash recovery...")
+	logger.Warn("Starting crash recovery...")
 
 	c.recoveryState.IsRecovering = true
 	c.recoveryState.RecoveryStart = time.Now()
@@ -3799,13 +3722,13 @@ func (c *Consensus) PerformRecovery() error {
 		latestBlock := c.blockChain.GetLatestBlock()
 		if latestBlock != nil {
 			c.recoveryState.LastCheckpoint = latestBlock.GetHeight()
-			logger.Info("📍 Recovery checkpoint at height %d", latestBlock.GetHeight())
+			logger.Info("Recovery checkpoint at height %d", latestBlock.GetHeight())
 		}
 	}
 
 	c.recoveryState.IsRecovering = false
 
-	logger.Info("✅ Crash recovery completed (attempt %d)", c.recoveryState.RecoveryAttempt)
+	logger.Info("Crash recovery completed (attempt %d)", c.recoveryState.RecoveryAttempt)
 
 	return nil
 }
@@ -3895,7 +3818,7 @@ func (sm *SyncManager) StartSync(targetHeight uint64) error {
 	sm.targetHeight = targetHeight
 	sm.currentHeight = sm.consensus.GetCurrentHeight()
 
-	logger.Info("🔄 Starting sync: current=%d, target=%d", sm.currentHeight, targetHeight)
+	logger.Info("Starting sync: current=%d, target=%d", sm.currentHeight, targetHeight)
 
 	// Phase 1: Sync headers
 	if err := sm.syncHeaders(); err != nil {
@@ -3917,14 +3840,14 @@ func (sm *SyncManager) StartSync(targetHeight uint64) error {
 		return fmt.Errorf("transition to live consensus failed: %w", err)
 	}
 
-	logger.Info("✅ Sync completed successfully")
+	logger.Info("Sync completed successfully")
 	return nil
 }
 
 // syncHeaders syncs block headers from peers
 func (sm *SyncManager) syncHeaders() error {
 	sm.setState(SyncStateHeaders)
-	logger.Info("📥 Syncing headers from %d to %d", sm.currentHeight, sm.targetHeight)
+	logger.Info("Syncing headers from %d to %d", sm.currentHeight, sm.targetHeight)
 
 	// In a real implementation, this would:
 	// 1. Request headers from peers in batches
@@ -3951,14 +3874,14 @@ func (sm *SyncManager) syncHeaders() error {
 		sm.currentHeight = height
 	}
 
-	logger.Info("✅ Header sync completed")
+	logger.Info("Header sync completed")
 	return nil
 }
 
 // syncBodies syncs block bodies from peers
 func (sm *SyncManager) syncBodies() error {
 	sm.setState(SyncStateBodies)
-	logger.Info("📥 Syncing block bodies from height %d to %d", sm.currentHeight, sm.targetHeight)
+	logger.Info("Syncing block bodies from height %d to %d", sm.currentHeight, sm.targetHeight)
 
 	// In a real implementation, this would:
 	// 1. Request bodies for all headers we have
@@ -3978,14 +3901,14 @@ func (sm *SyncManager) syncBodies() error {
 		}
 	}
 
-	logger.Info("✅ Body sync completed for %d blocks", sm.targetHeight-sm.currentHeight+1)
+	logger.Info("Body sync completed for %d blocks", sm.targetHeight-sm.currentHeight+1)
 	return nil
 }
 
 // syncState syncs state/snapshot from peers
 func (sm *SyncManager) syncState() error {
 	sm.setState(SyncStateState)
-	logger.Info("📥 Syncing state/snapshot")
+	logger.Info("Syncing state/snapshot")
 
 	// In a real implementation, this would:
 	// 1. Download state trie/snapshot
@@ -3995,14 +3918,14 @@ func (sm *SyncManager) syncState() error {
 	// Simulate state sync
 	time.Sleep(100 * time.Millisecond)
 
-	logger.Info("✅ State sync completed")
+	logger.Info("State sync completed")
 	return nil
 }
 
 // transitionToLiveConsensus transitions from sync mode to live consensus
 func (sm *SyncManager) transitionToLiveConsensus() error {
 	sm.setState(SyncStateLive)
-	logger.Info("🔄 Transitioning to live consensus")
+	logger.Info("Transitioning to live consensus")
 
 	// Create pivot checkpoint for fast restart
 	if err := sm.createPivotCheckpoint(); err != nil {
@@ -4014,7 +3937,7 @@ func (sm *SyncManager) transitionToLiveConsensus() error {
 		return fmt.Errorf("failed to start consensus: %w", err)
 	}
 
-	logger.Info("✅ Transitioned to live consensus")
+	logger.Info("Transitioned to live consensus")
 	return nil
 }
 
@@ -4079,7 +4002,7 @@ func (sm *SyncManager) createPivotCheckpoint() error {
 	sm.checkpoints[sm.currentHeight] = checkpoint
 	sm.lastCheckpoint = sm.currentHeight
 
-	logger.Info("📍 Created pivot checkpoint at height %d", sm.currentHeight)
+	logger.Info("Created pivot checkpoint at height %d", sm.currentHeight)
 	return nil
 }
 
@@ -4093,7 +4016,7 @@ func (sm *SyncManager) FastRestart() error {
 		return fmt.Errorf("no checkpoint available for fast restart")
 	}
 
-	logger.Info("⚡ Performing fast restart from checkpoint at height %d", sm.lastCheckpoint)
+	logger.Info("Performing fast restart from checkpoint at height %d", sm.lastCheckpoint)
 
 	// Load state from checkpoint
 	checkpoint, exists := sm.checkpoints[sm.lastCheckpoint]
@@ -4105,7 +4028,7 @@ func (sm *SyncManager) FastRestart() error {
 	sm.currentHeight = checkpoint.TipHeight
 	sm.consensus.SetCurrentHeight(checkpoint.TipHeight)
 
-	logger.Info("✅ Fast restart completed from height %d", sm.lastCheckpoint)
+	logger.Info("Fast restart completed from height %d", sm.lastCheckpoint)
 	return nil
 }
 
@@ -4162,11 +4085,11 @@ func (sm *SyncManager) HandleIncomingBlock(height uint64, block interface{}) err
 	sm.storeHeader(block)
 	sm.currentHeight = height
 
-	logger.Info("📥 Received block at height %d", height)
+	logger.Info("Received block at height %d", height)
 
 	// Check if sync is complete
 	if sm.currentHeight >= sm.targetHeight {
-		logger.Info("✅ Sync target reached")
+		logger.Info("Sync target reached")
 	}
 
 	return nil

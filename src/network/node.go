@@ -6,13 +6,13 @@ package network
 
 import (
 	"fmt"
-	"log"
 	"sort"
 	"sync"
 	"time"
 
 	"github.com/sphinxfndorg/protocol/src/common"
 	"github.com/sphinxfndorg/protocol/src/consensus"
+	logger "github.com/sphinxfndorg/protocol/src/console"
 	database "github.com/sphinxfndorg/protocol/src/core/state"
 )
 
@@ -107,7 +107,7 @@ func (m *CallNodeManager) BroadcastMessage(messageType string, data interface{})
 	registryMu.RLock()
 	defer registryMu.RUnlock()
 
-	log.Printf("[CALL] Broadcasting %s message to %d peers", messageType, len(consensusRegistry))
+	logger.Info("[CALL] Broadcasting %s message to %d peers", messageType, len(consensusRegistry))
 
 	var wg sync.WaitGroup
 	deliveredCount := 0
@@ -121,46 +121,46 @@ func (m *CallNodeManager) BroadcastMessage(messageType string, data interface{})
 			case "proposal":
 				prop, ok := d.(*consensus.Proposal)
 				if !ok {
-					log.Printf("[CALL] Invalid proposal type: %T", d)
+					logger.Warn("[CALL] Invalid proposal type: %T", d)
 					return
 				}
 				err = c.HandleProposal(prop)
 			case "prepare":
 				vote, ok := d.(*consensus.Vote)
 				if !ok {
-					log.Printf("[CALL] Invalid prepare vote type: %T", d)
+					logger.Warn("[CALL] Invalid prepare vote type: %T", d)
 					return
 				}
 				err = c.HandlePrepareVote(vote)
 			case "vote":
 				vote, ok := d.(*consensus.Vote)
 				if !ok {
-					log.Printf("[CALL] Invalid commit vote type: %T", d)
+					logger.Warn("[CALL] Invalid commit vote type: %T", d)
 					return
 				}
 				err = c.HandleVote(vote)
 			case "timeout":
 				timeout, ok := d.(*consensus.TimeoutMsg)
 				if !ok {
-					log.Printf("[CALL] Invalid timeout type: %T", d)
+					logger.Warn("[CALL] Invalid timeout type: %T", d)
 					return
 				}
 				err = c.HandleTimeout(timeout)
 			default:
-				log.Printf("[CALL] Unknown message type: %s", typ)
+				logger.Warn("[CALL] Unknown message type: %s", typ)
 				return
 			}
 			if err != nil {
-				log.Printf("[CALL] Failed to deliver %s to %s: %v", typ, nid, err)
+				logger.Warn("[CALL] Failed to deliver %s to %s: %v", typ, nid, err)
 			} else {
-				log.Printf("[CALL] Successfully delivered %s to %s", typ, nid)
+				logger.Info("[CALL] Successfully delivered %s to %s", typ, nid)
 				deliveredCount++
 			}
 		}(cons, messageType, data, nodeID)
 	}
 
 	wg.Wait()
-	log.Printf("[CALL] Broadcast completed: %d/%d successful deliveries for %s",
+	logger.Info("[CALL] Broadcast completed: %d/%d successful deliveries for %s",
 		deliveredCount, len(consensusRegistry), messageType)
 	return nil
 }
@@ -169,32 +169,32 @@ func (m *CallNodeManager) AddPeer(id string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, exists := m.peers[id]; exists {
-		log.Printf("[CALL] Peer %s already exists, skipping duplicate", id)
+		logger.Warn("[CALL] Peer %s already exists, skipping duplicate", id)
 		return
 	}
 	m.peers[id] = &CallPeer{id: id}
-	log.Printf("[CALL] Added peer: %s (total peers: %d)", id, len(m.peers))
+	logger.Info("[CALL] Added peer: %s (total peers: %d)", id, len(m.peers))
 }
 
 func (m *CallNodeManager) RemovePeer(id string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.peers, id)
-	log.Printf("[CALL] Removed peer: %s", id)
+	logger.Info("[CALL] Removed peer: %s", id)
 }
 
 func RegisterConsensus(nodeID string, cons *consensus.Consensus) {
 	registryMu.Lock()
 	defer registryMu.Unlock()
 	consensusRegistry[nodeID] = cons
-	log.Printf("Registered consensus for node %s", nodeID)
+	logger.Info("Registered consensus for node %s", nodeID)
 }
 
 func UnregisterConsensus(nodeID string) {
 	registryMu.Lock()
 	defer registryMu.Unlock()
 	delete(consensusRegistry, nodeID)
-	log.Printf("Unregistered consensus for node %s", nodeID)
+	logger.Info("Unregistered consensus for node %s", nodeID)
 }
 
 func GetConsensusRegistry() map[string]*consensus.Consensus {
@@ -222,14 +222,14 @@ func NewNode(address, ip, port, udpPort string, isLocal bool, role NodeRole, db 
 		// Only invoked for LOCAL nodes — peers get their keys via key exchange.
 		nkm, err := NewNetworkKeyManager(db)
 		if err != nil {
-			log.Printf("NewNode: Failed to create NetworkKeyManager for %s: %v", nodeID, err)
+			logger.Error("NewNode: Failed to create NetworkKeyManager for %s: %v", nodeID, err)
 			return nil
 		}
 
 		// GetOrCreateKeys handles: config file → DB → generate fresh SPHINCS+ keys
 		privateKey, publicKey, err = nkm.GetOrCreateKeys(address)
 		if err != nil {
-			log.Printf("NewNode: Failed to get/create SPHINCS+ keys for %s: %v", nodeID, err)
+			logger.Error("NewNode: Failed to get/create SPHINCS+ keys for %s: %v", nodeID, err)
 			return nil
 		}
 
@@ -247,10 +247,10 @@ func NewNode(address, ip, port, udpPort string, isLocal bool, role NodeRole, db 
 			"created_at":  time.Now().Format(time.RFC3339),
 		}
 		if err := common.WriteNodeInfo(address, nodeInfo); err != nil {
-			log.Printf("NewNode: Failed to write node info for %s: %v", nodeID, err)
+			logger.Warn("NewNode: Failed to write node info for %s: %v", nodeID, err)
 		}
 	} else {
-		log.Printf("NewNode: Skipping key generation for peer node %s — keys will be received via key exchange", nodeID)
+		logger.Info("NewNode: Skipping key generation for peer node %s — keys will be received via key exchange", nodeID)
 	}
 
 	return &Node{
@@ -277,12 +277,12 @@ func (n *Node) GenerateNodeID() NodeID {
 func (n *Node) UpdateStatus(status NodeStatus) {
 	n.Status = status
 	n.LastSeen = time.Now()
-	log.Printf("Node %s (Role=%s) status updated to %s", n.ID, n.Role, status)
+	logger.Info("Node %s (Role=%s) status updated to %s", n.ID, n.Role, status)
 }
 
 func (n *Node) UpdateRole(role NodeRole) {
 	n.Role = role
-	log.Printf("Node %s updated role to %s", n.ID, role)
+	logger.Info("Node %s updated role to %s", n.ID, role)
 }
 
 func NewPeer(node *Node) *Peer {
@@ -301,7 +301,7 @@ func (p *Peer) ConnectPeer() error {
 	}
 	p.ConnectionStatus = "connected"
 	p.ConnectedAt = time.Now()
-	log.Printf("Peer %s (Role=%s) connected at %s", p.Node.ID, p.Node.Role, p.ConnectedAt)
+	logger.Info("Peer %s (Role=%s) connected at %s", p.Node.ID, p.Node.Role, p.ConnectedAt)
 	return nil
 }
 
@@ -310,17 +310,17 @@ func (p *Peer) DisconnectPeer() {
 	p.ConnectedAt = time.Time{}
 	p.LastPing = time.Time{}
 	p.LastPong = time.Time{}
-	log.Printf("Peer %s (Role=%s) disconnected", p.Node.ID, p.Node.Role)
+	logger.Info("Peer %s (Role=%s) disconnected", p.Node.ID, p.Node.Role)
 }
 
 func (p *Peer) SendPing() {
 	p.LastPing = time.Now()
-	log.Printf("Sent PING to peer %s (Role=%s)", p.Node.ID, p.Node.Role)
+	logger.Info("Sent PING to peer %s (Role=%s)", p.Node.ID, p.Node.Role)
 }
 
 func (p *Peer) ReceivePong() {
 	p.LastPong = time.Now()
-	log.Printf("Received PONG from peer %s (Role=%s)", p.Node.ID, p.Node.Role)
+	logger.Info("Received PONG from peer %s (Role=%s)", p.Node.ID, p.Node.Role)
 }
 
 func (p *Peer) GetPeerInfo() PeerInfo {
@@ -343,7 +343,7 @@ func (m *CallNodeManager) BroadcastRANDAOState(mix [32]byte, submissions map[uin
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	log.Printf("[CALL] Broadcasting RANDAO state to %d peers", len(consensusRegistry))
+	logger.Info("[CALL] Broadcasting RANDAO state to %d peers", len(consensusRegistry))
 
 	var wg sync.WaitGroup
 	deliveredCount := 0
@@ -353,16 +353,16 @@ func (m *CallNodeManager) BroadcastRANDAOState(mix [32]byte, submissions map[uin
 		go func(c *consensus.Consensus, nid string, mx [32]byte, subs map[uint64]map[string]*consensus.VDFSubmission) {
 			defer wg.Done()
 			if err := c.HandleRANDAOSync(mx, subs); err != nil {
-				log.Printf("[CALL] Failed to sync RANDAO state to %s: %v", nid, err)
+				logger.Warn("[CALL] Failed to sync RANDAO state to %s: %v", nid, err)
 			} else {
 				deliveredCount++
-				log.Printf("[CALL] Successfully synced RANDAO state to %s", nid)
+				logger.Info("[CALL] Successfully synced RANDAO state to %s", nid)
 			}
 		}(cons, nodeID, mix, submissions)
 	}
 
 	wg.Wait()
-	log.Printf("[CALL] RANDAO state broadcast completed: %d/%d successful deliveries",
+	logger.Info("[CALL] RANDAO state broadcast completed: %d/%d successful deliveries",
 		deliveredCount, len(consensusRegistry))
 	return nil
 }

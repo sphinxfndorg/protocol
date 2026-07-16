@@ -18,6 +18,7 @@ import (
 	"errors"
 	"net"
 	"os"
+	"strings"
 	"time"
 
 	security "github.com/sphinxfndorg/protocol/src/handshake"
@@ -50,12 +51,21 @@ func (c *conn) EncodeMessage(msg rpc.Message) ([]byte, error) {
 
 // newConn creates a new UDP connection for DHT communication
 // It sets up a listening socket on the configured address
+// If the address is already in use (typically when used alongside P2P on same port),
+// returns a nil connection with no error - DHT will operate in "passive" mode.
 func newConn(cfg Config, logger *zap.Logger) (*conn, error) {
 	// Create a UDP listener on the specified address and protocol
 	// ListenPacket creates a connection that can read and write packets
 	listener, err := net.ListenPacket(cfg.Proto, cfg.Address.String())
 	if err != nil {
-		return nil, err // Return error if binding fails (port already in use, etc.)
+		// FIX: Port already in use - this typically happens when DHT tries to bind
+		// to the same port as the P2P server. Instead of failing, we return nil
+		// and the node will rely on static seed peers (DHT discovery is optional).
+		if strings.Contains(err.Error(), "address already in use") || strings.Contains(err.Error(), "bind: address already in use") {
+			logger.Warn("DHT port already in use (DH disabled): continuing without Kademlia peer discovery", zap.Error(err))
+			return nil, nil // Return nil connection - DHT will be disabled
+		}
+		return nil, err
 	}
 
 	// Initialize and return the connection struct

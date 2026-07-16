@@ -7,8 +7,8 @@ package bind
 import (
 	"sync"
 
+	logger "github.com/sphinxfndorg/protocol/src/console"
 	security "github.com/sphinxfndorg/protocol/src/handshake"
-	logger "github.com/sphinxfndorg/protocol/src/log"
 	"github.com/sphinxfndorg/protocol/src/rpc"
 	"github.com/sphinxfndorg/protocol/src/transport"
 )
@@ -19,11 +19,11 @@ func startWebSocketServer(name, port string, messageCh chan *security.Message, r
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		logger.Infof("Starting WebSocket server for %s on %s", name, port)
+		logger.Info("Starting WebSocket server for %s on %s", name, port)
 		if err := wsServer.Start(readyCh); err != nil {
-			logger.Errorf("WebSocket server failed for %s: %v", name, err)
+			logger.Error("WebSocket server failed for %s: %v", name, err)
 			return
 		}
-		logger.Infof("WebSocket server for %s successfully started", name)
+		logger.Info("WebSocket server for %s successfully started", name)
 	}()
 }

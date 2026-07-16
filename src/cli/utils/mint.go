@@ -185,7 +185,7 @@ func RunMint(opts MintOptions) (*storage.MintReceipt, error) {
 	anchorPayload := buildAnchorPayload(mintID, opts.Subject, cid, cidHash)
 
 	// Step 3: Create and broadcast a REAL signed transaction with the CID in ReturnData
-	fmt.Printf("\n📦 Broadcasting on-chain transaction with CID commitment...\n")
+	fmt.Printf("\nINFO Broadcasting on-chain transaction with CID commitment...\n")
 	fmt.Printf("   From:       %s\n", opts.From)
 	fmt.Printf("   To:         %s (self — NFT anchor)\n", opts.From)
 	fmt.Printf("   ReturnData: %s\n", hex.EncodeToString(anchorPayload))
@@ -229,9 +229,9 @@ func RunMint(opts MintOptions) (*storage.MintReceipt, error) {
 
 	// Print the complete mint receipt
 	fmt.Printf("\n══════════════════ NFT MINTED ══════════════════\n")
-	fmt.Printf("✅ Content uploaded to IPFS\n")
-	fmt.Printf("✅ On-chain transaction broadcast\n")
-	fmt.Printf("\n📋 MINT RECEIPT:\n")
+	fmt.Printf("SUCCESS Content uploaded to IPFS\n")
+	fmt.Printf("SUCCESS On-chain transaction broadcast\n")
+	fmt.Printf("\n MINT RECEIPT:\n")
 	fmt.Printf("   Mint ID:    %s\n", mintID)
 	fmt.Printf("   Subject:    %s\n", opts.Subject)
 	fmt.Printf("   CID:        %s\n", cid)
@@ -240,7 +240,7 @@ func RunMint(opts MintOptions) (*storage.MintReceipt, error) {
 	fmt.Printf("   TX ID:      %s\n", txID)
 	fmt.Printf("\n🔗 ON-CHAIN ANCHOR (permanent, in a confirmed block):\n")
 	fmt.Printf("   Transaction: %s\n", txID)
-	fmt.Printf("\n📋 To verify later, use:\n")
+	fmt.Printf("\n To verify later, use:\n")
 	fmt.Printf("   sphinx-ipfs verify --mint-id=%s --rpc=%s\n", mintID, opts.RPCURL)
 	fmt.Printf("   sphinx-ipfs verify --txid=%s --rpc=%s\n", txID, opts.RPCURL)
 	fmt.Printf("════════════════════════════════════════════════\n")
@@ -275,12 +275,12 @@ func RunVerify(opts VerifyOptions) (*verifyResult, error) {
 
 	if opts.TxID != "" {
 		// Look up the on-chain transaction directly (this is the REAL anchor)
-		fmt.Printf("🔍 Querying on-chain transaction: %s\n", opts.TxID)
+		fmt.Printf("INFO Querying on-chain transaction: %s\n", opts.TxID)
 		tx, err := getTransactionByID(opts.RPCURL, opts.TxID)
 		if err != nil {
 			result.OnChainFound = false
 			result.Error = fmt.Sprintf("on-chain tx lookup failed: %v", err)
-			fmt.Printf("❌ %s\n", result.Error)
+			fmt.Printf("ERROR %s\n", result.Error)
 			return result, nil
 		}
 		result.OnChainFound = true
@@ -289,7 +289,7 @@ func RunVerify(opts VerifyOptions) (*verifyResult, error) {
 		// Extract the CID hash from ReturnData
 		if len(tx.ReturnData) == 0 {
 			result.Error = "transaction has no ReturnData — not an NFT anchor"
-			fmt.Printf("❌ %s\n", result.Error)
+			fmt.Printf("ERROR %s\n", result.Error)
 			return result, nil
 		}
 
@@ -297,7 +297,7 @@ func RunVerify(opts VerifyOptions) (*verifyResult, error) {
 		anchor, err := parseAnchorPayload(tx.ReturnData)
 		if err != nil {
 			result.Error = fmt.Sprintf("parse anchor payload: %v", err)
-			fmt.Printf("❌ %s\n", result.Error)
+			fmt.Printf("ERROR %s\n", result.Error)
 			return result, nil
 		}
 
@@ -307,20 +307,20 @@ func RunVerify(opts VerifyOptions) (*verifyResult, error) {
 		anchorType = "onchain_tx"
 		result.MintID = anchor.MintID
 
-		fmt.Printf("✅ On-chain anchor found in transaction %s\n", opts.TxID)
+		fmt.Printf("SUCCESS On-chain anchor found in transaction %s\n", opts.TxID)
 		fmt.Printf("   Mint ID:    %s\n", anchor.MintID)
 		fmt.Printf("   Subject:    %s\n", anchor.Subject)
 		fmt.Printf("   CID:        %s\n", anchor.CID)
 		fmt.Printf("   CID Hash:   %s\n", anchor.CIDHashHex)
 	} else {
 		// Fallback: look up by MintID in the node's KV store
-		fmt.Printf("🔍 Querying Sphinx node at %s for MintID: %s\n", opts.RPCURL, opts.MintID)
+		fmt.Printf("INFO Querying Sphinx node at %s for MintID: %s\n", opts.RPCURL, opts.MintID)
 		storageClient := storage.DefaultStorageClient(opts.RPCURL)
 		artifact, err := storageClient.GetMintArtifact(opts.MintID)
 		if err != nil {
 			result.OnChainFound = false
 			result.Error = fmt.Sprintf("on-chain lookup failed: %v", err)
-			fmt.Printf("❌ %s\n", result.Error)
+			fmt.Printf("ERROR %s\n", result.Error)
 			return result, nil
 		}
 
@@ -330,7 +330,7 @@ func RunVerify(opts VerifyOptions) (*verifyResult, error) {
 		subject = artifact.Subject
 		anchorType = artifact.AnchorTagType
 
-		fmt.Printf("✅ Artifact found in node storage!\n")
+		fmt.Printf("SUCCESS Artifact found in node storage!\n")
 		fmt.Printf("   Subject:    %s\n", artifact.Subject)
 		fmt.Printf("   CID:        %s\n", artifact.CID)
 		fmt.Printf("   CID Hash:   %s\n", artifact.CIDHashHex)
@@ -346,7 +346,7 @@ func RunVerify(opts VerifyOptions) (*verifyResult, error) {
 	if cidHashHex == "" {
 		result.IntegrityValid = false
 		result.Error = "artifact has empty CID hash"
-		fmt.Printf("❌ %s\n", result.Error)
+		fmt.Printf("ERROR %s\n", result.Error)
 		return result, nil
 	}
 
@@ -356,17 +356,17 @@ func RunVerify(opts VerifyOptions) (*verifyResult, error) {
 	if !result.CIDHashMatch {
 		result.IntegrityValid = false
 		result.Error = fmt.Sprintf("CID hash mismatch: stored=%s computed=%s", cidHashHex, computedCIDHash)
-		fmt.Printf("❌ %s\n", result.Error)
+		fmt.Printf("ERROR %s\n", result.Error)
 		return result, nil
 	}
-	fmt.Printf("✅ CID hash verified: %s\n", computedCIDHash)
+	fmt.Printf("SUCCESS CID hash verified: %s\n", computedCIDHash)
 
 	// Step 3: Fetch content from IPFS gateway (optional)
 	if opts.SkipContentFetch {
 		result.ContentFetched = false
 		result.ContentValid = false
 		result.IntegrityValid = true
-		fmt.Printf("\n📋 Verification result: INTEGRITY VERIFIED (content not fetched)\n")
+		fmt.Printf("\n Verification result: INTEGRITY VERIFIED (content not fetched)\n")
 		return result, nil
 	}
 
@@ -389,13 +389,13 @@ func RunVerify(opts VerifyOptions) (*verifyResult, error) {
 		result.ContentFetched = false
 		result.ContentValid = false
 		result.Error = fmt.Sprintf("IPFS fetch failed: %v", err)
-		fmt.Printf("❌ %s\n", result.Error)
+		fmt.Printf("ERROR %s\n", result.Error)
 		return result, nil
 	}
 
 	result.ContentFetched = true
 	result.ContentSize = len(content)
-	fmt.Printf("✅ Content fetched from IPFS (%d bytes)\n", len(content))
+	fmt.Printf("SUCCESS Content fetched from IPFS (%d bytes)\n", len(content))
 
 	// Step 4: Verify the actual content integrity
 	var meta storage.NFTMetadata
@@ -417,16 +417,16 @@ func RunVerify(opts VerifyOptions) (*verifyResult, error) {
 
 	// Print verification summary
 	fmt.Printf("\n══════════════════ VERIFICATION RESULT ══════════════════\n")
-	fmt.Printf("✅ On-chain record:       FOUND\n")
+	fmt.Printf("SUCCESS On-chain record:       FOUND\n")
 	if result.TxFound {
-		fmt.Printf("✅ Transaction anchor:    %s\n", opts.TxID)
+		fmt.Printf("SUCCESS Transaction anchor:    %s\n", opts.TxID)
 	}
-	fmt.Printf("✅ CID hash integrity:    PASS\n")
-	fmt.Printf("✅ IPFS content fetch:    SUCCESS (%d bytes)\n", result.ContentSize)
-	fmt.Printf("✅ Content verification:  PASS\n")
-	fmt.Printf("📋 Mint ID:              %s\n", result.MintID)
-	fmt.Printf("📋 CID:                  %s\n", cid)
-	fmt.Printf("📋 Gateway URL:          %s/ipfs/%s\n", gatewayURL, cid)
+	fmt.Printf("SUCCESS CID hash integrity:    PASS\n")
+	fmt.Printf("SUCCESS IPFS content fetch:    SUCCESS (%d bytes)\n", result.ContentSize)
+	fmt.Printf("SUCCESS Content verification:  PASS\n")
+	fmt.Printf(" Mint ID:              %s\n", result.MintID)
+	fmt.Printf(" CID:                  %s\n", cid)
+	fmt.Printf(" Gateway URL:          %s/ipfs/%s\n", gatewayURL, cid)
 	fmt.Printf("════════════════════════════════════════════════════════\n")
 
 	return result, nil
@@ -529,7 +529,7 @@ func sendReturnDataTransaction(opts SendTxOptions, returnData []byte) (string, e
 		txID = tx.ID
 	}
 
-	fmt.Printf("✅ Transaction broadcast! TX ID: %s\n", txID)
+	fmt.Printf("SUCCESS Transaction broadcast! TX ID: %s\n", txID)
 
 	// Wait for confirmation if requested
 	if opts.Wait {
@@ -541,7 +541,7 @@ func sendReturnDataTransaction(opts SendTxOptions, returnData []byte) (string, e
 		}); err != nil {
 			return txID, fmt.Errorf("wait for confirmation: %w", err)
 		}
-		fmt.Printf("✅ Transaction CONFIRMED in a block! (permanent on-chain anchor)\n")
+		fmt.Printf("SUCCESS Transaction CONFIRMED in a block! (permanent on-chain anchor)\n")
 	}
 
 	return txID, nil

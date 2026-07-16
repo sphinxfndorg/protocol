@@ -7,9 +7,9 @@ package state
 import (
 	"fmt"
 
+	logger "github.com/sphinxfndorg/protocol/src/console"
 	database "github.com/sphinxfndorg/protocol/src/core/state"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
-	logger "github.com/sphinxfndorg/protocol/src/log"
 )
 
 // SetDB sets the main database handle (for blocks and transactions)

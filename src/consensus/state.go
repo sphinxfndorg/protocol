@@ -7,7 +7,7 @@ package consensus
 import (
 	"time"
 
-	logger "github.com/sphinxfndorg/protocol/src/log"
+	logger "github.com/sphinxfndorg/protocol/src/console"
 )
 
 // NewConsensusState creates a new consensus state instance with initial values

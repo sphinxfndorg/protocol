@@ -488,3 +488,26 @@ type CheckpointMessage struct {
 	Phase           string `json:"phase"`
 	MintedSPX       string `json:"minted_spx"` // ADD THIS
 }
+
+// TimestampValidationConfig holds configuration for timestamp validation
+type TimestampValidationConfig struct {
+	MaxDrift          time.Duration // Maximum allowed timestamp drift (e.g., 10 seconds)
+	MinBlockInterval  time.Duration // Minimum time between blocks (e.g., 2 seconds)
+	MaxBlockInterval  time.Duration // Maximum time between blocks (e.g., 30 seconds)
+	RejectFutureBlock bool          // Reject blocks with future timestamps
+}
+
+// MessageReplayProtection tracks seen messages to prevent replay attacks
+// Each transaction/message has its own nonce to prevent replay
+type MessageReplayProtection struct {
+	mu           sync.RWMutex
+	seenNonces   map[string]map[uint64]bool // nodeID -> set of used nonces
+	seenMessages map[string]time.Time       // compositeKey -> timestamp
+	config       *ReplayProtectionConfig
+}
+
+// ClassGroupElement represents an element in a class group
+// Quadratic form: f(x,y) = ax² + bxy + cy² with discriminant D = b² - 4ac
+type ClassGroupElement struct {
+	A, B, C *big.Int // Coefficients of the quadratic form, stored as arbitrary-precision integers
+}

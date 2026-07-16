@@ -11,8 +11,8 @@ import (
 	"os"
 
 	"github.com/sphinxfndorg/protocol/src/common"
+	logger "github.com/sphinxfndorg/protocol/src/console"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
-	logger "github.com/sphinxfndorg/protocol/src/log"
 )
 
 // NOTE: WriteChainCheckpoint is now defined in executor.go
@@ -131,7 +131,7 @@ func (bc *Blockchain) ApplyCheckpointBlocks(blocks []*types.Block) error {
 		logger.Info("  applied block height=%d hash=%s", block.GetHeight(), block.GetHash())
 	}
 
-	logger.Info("✅ ApplyCheckpointBlocks: node now at height=%d", blocks[len(blocks)-1].GetHeight())
+	logger.Info("SUCCESS ApplyCheckpointBlocks: node now at height=%d", blocks[len(blocks)-1].GetHeight())
 	return nil
 }
 

@@ -1,0 +1,51 @@
+{
+  "header": {
+    "hash": "GENESIS_cb21693fb9798afca82177711213d62ff723bd206ae3db89b7a3b1e03d0878ef",
+    "txs_root": "949d49e92cb6a382b77a56c256a724c9af546359690e0fa2e3a76a691d7a0e97",
+    "state_root": "10c03078357849e356fcb7ade8ed39fa733df1f265842fc8d7c6f6b14043d001",
+    "parent_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "uncles_hash": "3916d45c66e84c612c8a4a403702ec44cc575fc2383dbe4e861dd29ef892bee3",
+    "extra_data": "Sphinx Network Genesis Block - Decentralized Future",
+    "miner": "0000000000000000000000000000000000000000",
+    "version": 1,
+    "nblock": 0,
+    "height": 0,
+    "timestamp": "2024-11-20T02:40:00Z",
+    "difficulty": "17179869184",
+    "nonce": "0000000000000001",
+    "gas_limit": "5000",
+    "gas_used": "0",
+    "proposer_signature": "",
+    "proposer_id": "0000000000000000000000000000000000000001",
+    "sig_data_hash": "cb21693fb9798afca82177711213d62ff723bd206ae3db89b7a3b1e03d0878ef",
+    "commit_status": "committed",
+    "signature_valid": false
+  },
+  "body": {
+    "txs_list": [
+      {
+        "amount": "50000000000000000000000000",
+        "gas_limit": "0",
+        "gas_price": "0",
+        "id": "d3a48c46c3d9faf8b89890371410f50d48db3049b4a7c95219755e5f72b89fcb",
+        "nonce": 0,
+        "receiver": "1000000000000000000000000000000000000001",
+        "sender": "0000000000000000000000000000000000000001",
+        "signature": "",
+        "timestamp": "2024-11-20T02:40:00Z"
+      },
+      {
+        "amount": "50000000000000000000000000",
+        "gas_limit": "0",
+        "gas_price": "0",
+        "id": "4332cd44cb1822166638883c801b56951a250a6ffc8d7ac873e06f28365e82bf",
+        "nonce": 1,
+        "receiver": "2000000000000000000000000000000000000001",
+        "sender": "0000000000000000000000000000000000000001",
+        "signature": "",
+        "timestamp": "2024-11-20T02:40:00Z"
+      }
+    ],
+    "uncles_hash": "3916d45c66e84c612c8a4a403702ec44cc575fc2383dbe4e861dd29ef892bee3"
+  }
+}

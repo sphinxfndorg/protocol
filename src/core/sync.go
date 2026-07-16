@@ -31,13 +31,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"reflect"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/sphinxfndorg/protocol/src/consensus"
+	logger "github.com/sphinxfndorg/protocol/src/console"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
-	logger "github.com/sphinxfndorg/protocol/src/log"
 	denom "github.com/sphinxfndorg/protocol/src/params/denom"
 )
 
@@ -108,7 +110,7 @@ func (sm *SyncManager) Start() error {
 	// Start download coordinator
 	go sm.downloadCoordinator()
 
-	logger.Info("✅ SyncManager started")
+	logger.Info("SUCCESS SyncManager started")
 	return nil
 }
 
@@ -135,12 +137,12 @@ func (sm *SyncManager) Stop() error {
 
 	select {
 	case <-done:
-		logger.Info("✅ All downloads completed")
+		logger.Info("SUCCESS All downloads completed")
 	case <-time.After(30 * time.Second):
-		logger.Warn("⚠️ Some downloads did not complete in time")
+		logger.Warn("WARNING Some downloads did not complete in time")
 	}
 
-	logger.Info("✅ SyncManager stopped")
+	logger.Info("SUCCESS SyncManager stopped")
 	return nil
 }
 
@@ -232,7 +234,7 @@ func (sm *SyncManager) handleStarting() {
 
 	// Load chain parameters
 	if sm.bc.GetChainParams() == nil {
-		logger.Error("❌ Chain parameters not loaded")
+		logger.Error("ERROR Chain parameters not loaded")
 		return
 	}
 
@@ -245,15 +247,15 @@ func (sm *SyncManager) handleStarting() {
 		// First node (Node-A): create genesis locally without waiting for peers
 		logger.Info("🔨 No genesis found - creating genesis locally (trusted setup)")
 		if err := sm.bc.createGenesisBlock(); err != nil {
-			logger.Error("❌ Failed to create genesis: %v", err)
+			logger.Error("ERROR Failed to create genesis: %v", err)
 			return
 		}
-		logger.Info("✅ Genesis block created locally (no quorum required)")
+		logger.Info("SUCCESS Genesis block created locally (no quorum required)")
 	} else if genesis == nil && sm.bc.IsLateJoiner() {
 		// Late joiner: will download genesis from peers during sync
 		logger.Info("📥 Late joiner mode - will download genesis from peers")
 	} else {
-		logger.Info("✅ Genesis block found: %s", sm.getGenesisHash())
+		logger.Info("SUCCESS Genesis block found: %s", sm.getGenesisHash())
 	}
 
 	// Transition to peer discovery
@@ -265,11 +267,11 @@ func (sm *SyncManager) handleDiscoveringPeers() {
 	peers := sm.p2pServer.GetNodeManager().GetPeers()
 
 	if len(peers) == 0 {
-		logger.Info("🔍 Still discovering peers... (found 0)")
+		logger.Info("INFO Still discovering peers... (found 0)")
 		return
 	}
 
-	logger.Info("✅ Found %d peers, moving to connection phase", len(peers))
+	logger.Info("SUCCESS Found %d peers, moving to connection phase", len(peers))
 	sm.setState(NodeConnecting)
 }
 
@@ -289,7 +291,7 @@ func (sm *SyncManager) handleConnecting() {
 		return
 	}
 
-	logger.Info("✅ Connected to %d peers, starting handshake", connected)
+	logger.Info("SUCCESS Connected to %d peers, starting handshake", connected)
 	sm.setState(NodeHandshaking)
 }
 
@@ -308,7 +310,7 @@ func (sm *SyncManager) handleHandshaking() {
 	// Analyze peer chain info
 	sm.analyzePeerChains()
 
-	logger.Info("✅ Handshake complete with %d peers", peerCount)
+	logger.Info("SUCCESS Handshake complete with %d peers", peerCount)
 	sm.setState(NodeSyncingHeaders)
 }
 
@@ -319,7 +321,7 @@ func (sm *SyncManager) handleSyncingHeaders() {
 	targetHeight := sm.getMaxPeerHeight()
 
 	if targetHeight <= localHeight {
-		logger.Info("✅ Chain headers synchronized (local=%d, target=%d)", localHeight, targetHeight)
+		logger.Info("SUCCESS Chain headers synchronized (local=%d, target=%d)", localHeight, targetHeight)
 		sm.setState(NodeVerifying)
 		return
 	}
@@ -341,7 +343,7 @@ func (sm *SyncManager) handleSyncingBlocks() {
 	localHeight := sm.bc.GetBlockCount()
 
 	if localHeight >= sm.syncHeight {
-		logger.Info("✅ All blocks downloaded (local=%d, target=%d)", localHeight, sm.syncHeight)
+		logger.Info("SUCCESS All blocks downloaded (local=%d, target=%d)", localHeight, sm.syncHeight)
 		sm.setState(NodeVerifying)
 		return
 	}
@@ -375,19 +377,19 @@ func (sm *SyncManager) handleSyncingBlocks() {
 
 // handleVerifying - Validating chain integrity
 func (sm *SyncManager) handleVerifying() {
-	logger.Info("🔍 Verifying chain integrity...")
+	logger.Info("INFO Verifying chain integrity...")
 
 	// Verify genesis hash
 	genesis := sm.bc.GetBlockByNumber(0)
 	if genesis == nil {
-		logger.Error("❌ Genesis block missing after sync")
+		logger.Error("ERROR Genesis block missing after sync")
 		sm.setState(NodeSyncingBlocks)
 		return
 	}
 
 	// Verify genesis hash matches expected value
 	if err := sm.verifyGenesisHash(); err != nil {
-		logger.Error("❌ Genesis hash verification failed: %v", err)
+		logger.Error("ERROR Genesis hash verification failed: %v", err)
 		sm.setState(NodeSyncingBlocks)
 		return
 	}
@@ -405,7 +407,7 @@ func (sm *SyncManager) handleVerifying() {
 	// the vault is already funded), so calling it here is safe for both
 	// the first node and late joiners.
 	if err := sm.bc.ExecuteGenesisBlock(); err != nil {
-		logger.Error("❌ Failed to execute genesis block: %v", err)
+		logger.Error("ERROR Failed to execute genesis block: %v", err)
 		sm.setState(NodeSyncingBlocks)
 		return
 	}
@@ -413,17 +415,17 @@ func (sm *SyncManager) handleVerifying() {
 
 	// Verify chain continuity
 	if err := sm.bc.verifyGenesisHashInIndex(); err != nil {
-		logger.Warn("⚠️ Genesis hash in index verification failed: %v", err)
+		logger.Warn("WARNING Genesis hash in index verification failed: %v", err)
 	}
 
 	// Verify all blocks are linked
 	if err := sm.verifyChainLinks(); err != nil {
-		logger.Error("❌ Chain link verification failed: %v", err)
+		logger.Error("ERROR Chain link verification failed: %v", err)
 		sm.setState(NodeSyncingBlocks)
 		return
 	}
 
-	logger.Info("✅ Chain verification passed")
+	logger.Info("SUCCESS Chain verification passed")
 	sm.setState(NodeReady)
 }
 
@@ -439,7 +441,7 @@ func (sm *SyncManager) handleSynchronized() {
 		return
 	}
 
-	logger.Info("✅ Node synchronized at height %d", localHeight)
+	logger.Info("SUCCESS Node synchronized at height %d", localHeight)
 
 	// Perform continuous sync check
 	sm.continuousSyncCheck()
@@ -469,11 +471,11 @@ func (sm *SyncManager) handleSynchronized() {
 				// If a checkpoint is available from peers, restore from it.
 				snapshotMgr := sm.bc.GetSnapshotManager()
 				if snapshotMgr != nil {
-					logger.Info("📦 Attempting state sync fallback...")
+					logger.Info("INFO Attempting state sync fallback...")
 					if err := snapshotMgr.PerformStateSync(); err != nil {
-						logger.Warn("⚠️ State sync fallback failed: %v — continuing with block-by-block sync", err)
+						logger.Warn("WARNING State sync fallback failed: %v — continuing with block-by-block sync", err)
 					} else {
-						logger.Info("✅ State sync fallback succeeded — chain tip set to checkpoint height")
+						logger.Info("SUCCESS State sync fallback succeeded — chain tip set to checkpoint height")
 						// After state sync, the chain tip is at the checkpoint height.
 						// The sync manager will continue downloading blocks from checkpoint to tip.
 						sm.syncHeight = targetHeight
@@ -481,7 +483,7 @@ func (sm *SyncManager) handleSynchronized() {
 						return
 					}
 				} else {
-					logger.Warn("⚠️ No snapshot manager available — cannot perform state sync fallback")
+					logger.Warn("WARNING No snapshot manager available — cannot perform state sync fallback")
 				}
 				// =====================================================
 			}
@@ -500,7 +502,7 @@ func (sm *SyncManager) handleSynchronized() {
 			return
 		}
 
-		logger.Info("✅ Late-joiner sync gate passed (local=%d, target=%d, fallback=%v)", localHeight, targetHeight, sm.lateJoinerFallbackToStateSync)
+		logger.Info("SUCCESS Late-joiner sync gate passed (local=%d, target=%d, fallback=%v)", localHeight, targetHeight, sm.lateJoinerFallbackToStateSync)
 	}
 
 	// Transition to consensus ready
@@ -526,7 +528,7 @@ func (sm *SyncManager) handleValidatorActive() {
 	targetHeight := sm.getMaxPeerHeight()
 
 	if targetHeight > localHeight+1 {
-		logger.Warn("⚠️ Validator node fell behind (local=%d, target=%d)", localHeight, targetHeight)
+		logger.Warn("WARNING Validator node fell behind (local=%d, target=%d)", localHeight, targetHeight)
 		sm.syncHeight = targetHeight
 		sm.setState(NodeSyncingHeaders)
 		return
@@ -554,7 +556,7 @@ func (sm *SyncManager) analyzePeerChains() {
 	for peerID, info := range sm.peerInfo {
 		// Verify chain compatibility
 		if info.GenesisHash != localGenesis {
-			logger.Warn("⚠️ Peer %s has different genesis (local=%s, remote=%s)",
+			logger.Warn("WARNING Peer %s has different genesis (local=%s, remote=%s)",
 				peerID, localGenesis[:16], info.GenesisHash[:16])
 			continue
 		}
@@ -567,7 +569,7 @@ func (sm *SyncManager) analyzePeerChains() {
 	}
 
 	if bestPeer == nil {
-		logger.Warn("⚠️ No compatible peers found")
+		logger.Warn("WARNING No compatible peers found")
 		return
 	}
 
@@ -583,7 +585,7 @@ func (sm *SyncManager) analyzePeerChains() {
 		logger.Info("📥 Sync needed: local=%d, target=%d", localHeight, bestPeer.Height)
 		sm.syncFrom = localHeight + 1
 	} else if bestPeer.Height < localHeight {
-		logger.Info("⚠️ Local chain is longer than peer (local=%d, peer=%d)", localHeight, bestPeer.Height)
+		logger.Info("WARNING Local chain is longer than peer (local=%d, peer=%d)", localHeight, bestPeer.Height)
 		// Potential fork - trigger reorganization check
 		sm.checkForReorg()
 	}
@@ -658,7 +660,7 @@ func (sm *SyncManager) startPipelinedDownload() {
 	// Select best peers for download
 	peerList := sm.selectBestPeersForDownload()
 	if len(peerList) == 0 {
-		logger.Warn("❌ No peers available for pipelined download")
+		logger.Warn("ERROR No peers available for pipelined download")
 		return
 	}
 
@@ -769,13 +771,13 @@ func (sm *SyncManager) collectPipelineResults(startHeight, totalBlocks uint64) {
 			return
 
 		case <-timeout:
-			logger.Error("❌ Pipeline collection timed out after 30 min (collected=%d/%d, next=%d)",
+			logger.Error("ERROR Pipeline collection timed out after 30 min (collected=%d/%d, next=%d)",
 				collected, totalBlocks, nextHeight)
 			return
 
 		case result := <-sm.blockResultCh:
 			if result.err != nil {
-				logger.Warn("⚠️ Pipeline error at height %d: %v", result.height, result.err)
+				logger.Warn("WARNING Pipeline error at height %d: %v", result.height, result.err)
 				// Clean up pending marker
 				sm.pipelineMu.Lock()
 				delete(sm.pendingPipeline, result.height)
@@ -784,7 +786,7 @@ func (sm *SyncManager) collectPipelineResults(startHeight, totalBlocks uint64) {
 			}
 
 			if result.block == nil {
-				logger.Warn("⚠️ Pipeline nil block at height %d", result.height)
+				logger.Warn("WARNING Pipeline nil block at height %d", result.height)
 				sm.pipelineMu.Lock()
 				delete(sm.pendingPipeline, result.height)
 				sm.pipelineMu.Unlock()
@@ -803,7 +805,7 @@ func (sm *SyncManager) collectPipelineResults(startHeight, totalBlocks uint64) {
 
 				// We have the next block in sequence — validate and commit
 				if err := sm.pipelineProcessBlock(buffered.block); err != nil {
-					logger.Error("❌ Pipeline block %d processing failed: %v", nextHeight, err)
+					logger.Error("ERROR Pipeline block %d processing failed: %v", nextHeight, err)
 					// Continue anyway — the block might be valid from another peer
 					// In production, we'd re-request from a different peer
 				}
@@ -820,7 +822,7 @@ func (sm *SyncManager) collectPipelineResults(startHeight, totalBlocks uint64) {
 		}
 	}
 
-	logger.Info("✅ Pipeline collection complete: %d blocks (heights %d-%d)",
+	logger.Info("SUCCESS Pipeline collection complete: %d blocks (heights %d-%d)",
 		collected, startHeight, startHeight+totalBlocks-1)
 }
 
@@ -934,7 +936,7 @@ func (sm *SyncManager) startParallelDownloads() {
 	// Select best peers for download (round-robin with peer scoring)
 	peerList := sm.selectBestPeersForDownload()
 	if len(peerList) == 0 {
-		logger.Warn("❌ No peers available for download")
+		logger.Warn("ERROR No peers available for download")
 		return
 	}
 
@@ -1033,7 +1035,7 @@ func (sm *SyncManager) downloadBatchFromPeer(peer PeerInterface, startHeight, en
 
 	invData, _ := json.Marshal(invRequest)
 	if err := sm.p2pServer.SendMessageToPeer(peer.GetID(), "getblocks", invData); err != nil {
-		logger.Warn("❌ Failed to request inventory from peer %s: %v", peer.GetID(), err)
+		logger.Warn("ERROR Failed to request inventory from peer %s: %v", peer.GetID(), err)
 		return
 	}
 
@@ -1050,50 +1052,99 @@ func (sm *SyncManager) downloadBatchFromPeer(peer PeerInterface, startHeight, en
 	}
 }
 
-// downloadBlock downloads a single block from peers
+// downloadBlock downloads a single block from peers with retry on validation failure
 func (sm *SyncManager) downloadBlock(height uint64) {
 	sm.mu.RLock()
 	peers := sm.peers
 	sm.mu.RUnlock()
 
 	if len(peers) == 0 {
-		logger.Warn("❌ No peers available to download block %d", height)
+		logger.Warn("ERROR No peers available to download block %d", height)
 		sm.unmarkDownloading(height)
 		return
 	}
 
-	// Try each peer until one succeeds
-	var lastErr error
-	for peerID, peer := range peers {
-		block, err := sm.fetchBlockFromPeer(peer, height)
-		if err != nil {
-			lastErr = err
-			logger.Warn("⚠️ Failed to download block %d from peer %s: %v", height, peerID, err)
-			continue
-		}
+	// Convert peers to slice for ordered iteration
+	peerList := make([]PeerInterface, 0, len(peers))
+	for _, peer := range peers {
+		peerList = append(peerList, peer)
+	}
 
-		if block != nil {
-			// Validate block with comprehensive verification
-			if err := sm.comprehensiveBlockVerification(block); err != nil {
-				logger.Warn("❌ Block %d validation failed: %v", height, err)
+	// Try each peer, with multiple attempts for attestation failures
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ { // Try up to 3 times
+		for _, peer := range peerList {
+			block, err := sm.fetchBlockFromPeer(peer, height)
+			if err != nil {
+				lastErr = err
+				logger.Warn("WARNING Failed to download block %d from peer %s: %v", height, peer.GetID(), err)
+				continue
+			}
+
+			if block != nil {
+				// Validate block with comprehensive verification
+				if err := sm.comprehensiveBlockVerification(block); err != nil {
+					// Check if this is an attestation quorum error (recoverable)
+					if isAttestationQuorumError(err) {
+						logger.Warn("ERROR Block %d attestation quorum failed from peer %s (attempt %d/3): %v — trying next peer",
+							height, peer.GetID(), attempt+1, err)
+						lastErr = err
+						sm.unmarkDownloading(height)
+						markFailedPeer(peer.GetID(), height)
+						continue // Try next peer on attestation failure
+					}
+					// Non-recoverable error (corrupt block, bad hash) - don't retry
+					logger.Error("ERROR Block %d validation failed: %v", height, err)
+					sm.unmarkDownloading(height)
+					return
+				}
+
+				// Store block
+				sm.downloadMutex.Lock()
+				sm.downloaded[height] = block
+				sm.downloadMutex.Unlock()
+
+				logger.Info("SUCCESS Downloaded block %d (hash=%s)", height, block.GetHash())
+				sm.blocksDownloaded++
 				sm.unmarkDownloading(height)
 				return
 			}
-
-			// Store block
-			sm.downloadMutex.Lock()
-			sm.downloaded[height] = block
-			sm.downloadMutex.Unlock()
-
-			logger.Info("✅ Downloaded block %d (hash=%s)", height, block.GetHash())
-			sm.blocksDownloaded++
-			sm.unmarkDownloading(height)
-			return
+		}
+		// Wait before retry to allow network state to change
+		if attempt < 2 {
+			time.Sleep(500 * time.Millisecond)
 		}
 	}
 
-	logger.Warn("❌ Failed to download block %d from all peers: %v", height, lastErr)
+	logger.Warn("ERROR Failed to download block %d from all peers after 3 attempts: %v", height, lastErr)
 	sm.unmarkDownloading(height)
+}
+
+// isAttestationQuorumError checks if an error is related to attestation quorum failure
+func isAttestationQuorumError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "attestation") ||
+		strings.Contains(err.Error(), "quorum") ||
+		strings.Contains(err.Error(), "SPX attested")
+}
+
+// failedPeers tracks peers that failed to provide valid blocks at specific heights
+// This prevents hammering the same peer for the same problematic block
+var failedPeers sync.Map // map[height]map[peerID]attemptCount
+
+// markFailedPeer records that a peer failed for a height
+func markFailedPeer(peerID string, height uint64) {
+	heightStr := fmt.Sprintf("%d", height)
+	peerMap, _ := failedPeers.LoadOrStore(heightStr, &sync.Map{})
+	if pm, ok := peerMap.(*sync.Map); ok {
+		var count int
+		if v, exists := pm.Load(peerID); exists {
+			count = v.(int)
+		}
+		pm.Store(peerID, count+1)
+	}
 }
 
 // fetchBlockFromPeer requests a block from a specific peer
@@ -1181,9 +1232,9 @@ func (sm *SyncManager) HandleBlockResponse(requestID string, block *types.Block)
 	// Send the block to the waiting goroutine
 	select {
 	case responseCh <- block:
-		logger.Info("✅ Delivered block response for request %s", requestID)
+		logger.Info("SUCCESS Delivered block response for request %s", requestID)
 	default:
-		logger.Warn("⚠️ Response channel full for request %s", requestID)
+		logger.Warn("WARNING Response channel full for request %s", requestID)
 	}
 
 	return nil
@@ -1237,12 +1288,12 @@ func (sm *SyncManager) processDownloadedBlocks() {
 		// Commit block
 		consensusBlock := NewBlockHelper(block)
 		if err := sm.bc.CommitBlock(consensusBlock); err != nil {
-			logger.Error("❌ Failed to commit block %d: %v", height, err)
+			logger.Error("ERROR Failed to commit block %d: %v", height, err)
 			delete(sm.downloaded, height)
 			continue
 		}
 
-		logger.Info("✅ Committed block %d (hash=%s)", height, block.GetHash())
+		logger.Info("SUCCESS Committed block %d (hash=%s)", height, block.GetHash())
 		delete(sm.downloaded, height)
 		localHeight++
 	}
@@ -1285,7 +1336,7 @@ func (sm *SyncManager) checkPeerHealth() {
 
 	// If we lost all peers, go back to discovery
 	if len(sm.peerInfo) == 0 && sm.state >= NodeHandshaking {
-		logger.Warn("⚠️ All peers lost, returning to discovery")
+		logger.Warn("WARNING All peers lost, returning to discovery")
 		sm.setState(NodeDiscoveringPeers)
 	}
 }
@@ -1381,7 +1432,7 @@ func (sm *SyncManager) HandleChainInfoResponse(peerID string, chainInfo map[stri
 		Timestamp:       time.Now().Unix(),
 	}
 
-	logger.Info("✅ Stored chain info for peer %s: height=%d, genesis=%s",
+	logger.Info("SUCCESS Stored chain info for peer %s: height=%d, genesis=%s",
 		peerID, uint64(height), genesisHash[:16])
 }
 
@@ -1411,7 +1462,7 @@ func (sm *SyncManager) getMaxPeerHeight() uint64 {
 
 // checkForReorg detects if local chain has forked from the network
 func (sm *SyncManager) checkForReorg() {
-	logger.Info("🔍 Checking for chain reorganization...")
+	logger.Info("INFO Checking for chain reorganization...")
 
 	localHeight := sm.bc.GetBlockCount()
 	if localHeight == 0 {
@@ -1430,7 +1481,7 @@ func (sm *SyncManager) checkForReorg() {
 
 	for peerID, info := range sm.peerInfo {
 		if info.Height >= localHeight && info.BestHash != localBest.GetHash() {
-			logger.Warn("⚠️ Fork detected with peer %s: local=%s, peer=%s at height %d",
+			logger.Warn("WARNING Fork detected with peer %s: local=%s, peer=%s at height %d",
 				peerID, localBest.GetHash()[:16], info.BestHash[:16], localHeight)
 
 			// Trigger reorganization
@@ -1481,11 +1532,11 @@ func (sm *SyncManager) handleReorg(newChain *PeerChainInfo) {
 	localGenesis := sm.getGenesisHash()
 	if !found {
 		if newChain.GenesisHash == "" || newChain.GenesisHash != localGenesis {
-			logger.Error("❌ No common ancestor found and genesis hashes don't match (local=%s peer=%s) — refusing to reorg onto an unrelated chain",
+			logger.Error("ERROR No common ancestor found and genesis hashes don't match (local=%s peer=%s) — refusing to reorg onto an unrelated chain",
 				localGenesis, newChain.GenesisHash)
 			return
 		}
-		logger.Warn("⚠️ No common ancestor above genesis found — falling back to genesis as the fork point")
+		logger.Warn("WARNING No common ancestor above genesis found — falling back to genesis as the fork point")
 		forkHeight = 0
 		forkHash = localGenesis
 	}
@@ -1498,13 +1549,13 @@ func (sm *SyncManager) handleReorg(newChain *PeerChainInfo) {
 	// extend from.
 	if forkHeight < localHeight-1 {
 		if err := sm.bc.RollbackToHeight(forkHeight); err != nil {
-			logger.Error("❌ Rollback to height %d failed: %v — aborting reorg", forkHeight, err)
+			logger.Error("ERROR Rollback to height %d failed: %v — aborting reorg", forkHeight, err)
 			return
 		}
 	}
 
 	sm.reorgDepth = localHeight - forkHeight
-	logger.Info("✅ Rolled back %d blocks to height %d", sm.reorgDepth, forkHeight)
+	logger.Info("SUCCESS Rolled back %d blocks to height %d", sm.reorgDepth, forkHeight)
 
 	// Re-sync from fork point
 	sm.syncFrom = forkHeight + 1
@@ -1538,7 +1589,7 @@ func (sm *SyncManager) verifyChainLinks() error {
 		}
 	}
 
-	logger.Info("✅ Chain links verified (%d blocks)", height)
+	logger.Info("SUCCESS Chain links verified (%d blocks)", height)
 	return nil
 }
 
@@ -1661,7 +1712,7 @@ func (sm *SyncManager) EnableStateSync(stateHash string) {
 	sm.stateSyncMode = true
 	sm.stateSyncHash = stateHash
 
-	logger.Info("📦 State sync enabled (hash=%s)", stateHash[:16])
+	logger.Info("INFO State sync enabled (hash=%s)", stateHash[:16])
 }
 
 // DisableStateSync disables state sync mode
@@ -1672,7 +1723,7 @@ func (sm *SyncManager) DisableStateSync() {
 	sm.stateSyncMode = false
 	sm.stateSyncHash = ""
 
-	logger.Info("📦 State sync disabled")
+	logger.Info("INFO State sync disabled")
 }
 
 // validatorSetHistory stores per-epoch snapshots of the validator set.
@@ -1771,7 +1822,7 @@ func VerifyBlockAttestations(block *types.Block, vs validatorSetProvider, epoch 
 	// by configuration, not by PBFT consensus. It is verified by hash/config
 	// match instead of attestation quorum.
 	if block.GetHeight() == 0 {
-		logger.Info("✅ Genesis block (height 0) — skipping attestation verification (verified by config/hash)")
+		logger.Info("SUCCESS Genesis block (height 0) — skipping attestation verification (verified by config/hash)")
 		return nil
 	}
 
@@ -1801,25 +1852,19 @@ func VerifyBlockAttestations(block *types.Block, vs validatorSetProvider, epoch 
 			}
 			return v
 		}
-		logger.Info("📋 Using epoch %d validator set snapshot (%d validators) for block %d verification",
+		logger.Info(" Using epoch %d validator set snapshot (%d validators) for block %d verification",
 			epoch, len(snap.Validators), block.GetHeight())
 	} else {
 		// Fall back to current live set via the interface
 		totalStake = vs.GetTotalStake()
 		validatorLookup = func(id string) *StakedValidator {
-			vAny := vs.GetValidator(id)
-			if vAny == nil {
-				return nil
-			}
-			if v, ok := vAny.(*StakedValidator); ok {
-				return v
-			}
-			// If a consensus.StakedValidator is returned, core can't type-assert
-			// without importing consensus. Treat as unknown.
-			return nil
+			// Use resolveValidatorID which tries alternative key formats
+			// (e.g. "Node-127.0.0.1:30303" vs bare address) before giving up.
+			_, val := resolveValidatorID(vs, id)
+			return val
 		}
 
-		logger.Info("📋 Using current validator set (no epoch %d snapshot) for block %d verification",
+		logger.Info(" Using current validator set (no epoch %d snapshot) for block %d verification",
 			epoch, block.GetHeight())
 	}
 
@@ -1869,7 +1914,7 @@ func VerifyBlockAttestations(block *types.Block, vs validatorSetProvider, epoch 
 	totalSPX := new(big.Float).Quo(new(big.Float).SetInt(totalStake), new(big.Float).SetFloat64(denom.SPX))
 	pct := new(big.Float).Quo(attestedSPX, totalSPX)
 	pct.Mul(pct, big.NewFloat(100))
-	logger.Info("✅ Block %d attestation quorum verified: %.2f / %.2f SPX (%.1f%%) from %d validators (epoch %d)",
+	logger.Info("SUCCESS Block %d attestation quorum verified: %.2f / %.2f SPX (%.1f%%) from %d validators (epoch %d)",
 		block.GetHeight(), attestedSPX, totalSPX, pct, len(seen), epoch)
 
 	return nil
@@ -2001,7 +2046,7 @@ func (sm *SyncManager) verifyGenesisHash() error {
 	sm.genesisVerified = true
 	sm.mu.Unlock()
 
-	logger.Info("✅ Genesis hash verified: %s", actualHash[:16])
+	logger.Info("SUCCESS Genesis hash verified: %s", actualHash[:16])
 	return nil
 }
 
@@ -2013,7 +2058,7 @@ func (sm *SyncManager) attemptReconnection(peerID string) {
 	sm.mu.Unlock()
 
 	if attempts >= sm.maxReconnectAttempts {
-		logger.Warn("⚠️ Max reconnection attempts reached for peer %s (%d/%d)",
+		logger.Warn("WARNING Max reconnection attempts reached for peer %s (%d/%d)",
 			peerID, attempts, sm.maxReconnectAttempts)
 		return
 	}
@@ -2091,7 +2136,10 @@ func (sm *SyncManager) comprehensiveBlockVerification(block *types.Block) error 
 	if block.GetHeight() > 0 && len(block.Body.Attestations) > 0 {
 		// Get validator set for this block's epoch
 		epoch := block.GetHeight() / 100 // Assuming 100 blocks per epoch
-		if err := VerifyBlockAttestations(block, nil, epoch); err != nil {
+		// FIX: Pass the actual validator set instead of nil
+		// VerifyBlockAttestations needs access to stake weights to verify quorum
+		vs := sm.bc.GetValidatorSet()
+		if err := VerifyBlockAttestations(block, vs, epoch); err != nil {
 			return fmt.Errorf("attestation verification failed: %w", err)
 		}
 	}
@@ -2105,6 +2153,94 @@ func (sm *SyncManager) comprehensiveBlockVerification(block *types.Block) error 
 		txIDs[tx.ID] = true
 	}
 
-	logger.Info("✅ Comprehensive block verification passed for height %d", block.GetHeight())
+	logger.Info("SUCCESS Comprehensive block verification passed for height %d", block.GetHeight())
 	return nil
+}
+
+// extractStakedValidator extracts stake information from a validator returned by GetValidator.
+// This function handles both core.StakedValidator and consensus.StakedValidator,
+// which have identical struct layouts but live in different packages.
+// It uses reflection to safely extract the StakeAmount field.
+func extractStakedValidator(v interface{}) *StakedValidator {
+	if v == nil {
+		return nil
+	}
+
+	// Handle direct core.StakedValidator (our own type)
+	if sv, ok := v.(*StakedValidator); ok {
+		return sv
+	}
+
+	// Handle consensus.StakedValidator via reflection
+	// Both types have identical field layout, so we can extract the data
+	val := reflect.ValueOf(v)
+	if val.Kind() == reflect.Ptr && !val.IsNil() {
+		val = val.Elem()
+	}
+
+	if val.Kind() != reflect.Struct {
+		return nil
+	}
+
+	// Extract StakeAmount field (both structs have this field)
+	stakeField := val.FieldByName("StakeAmount")
+	if !stakeField.IsValid() {
+		return nil
+	}
+
+	stakeAmount := stakeField.Interface()
+	if stakeInt, ok := stakeAmount.(*big.Int); ok && stakeInt != nil {
+		// Extract ID field (may be named "ID", "ValidatorID", or "NodeID")
+		var id string
+		for _, fieldName := range []string{"ID", "ValidatorID", "NodeID"} {
+			idField := val.FieldByName(fieldName)
+			if idField.IsValid() {
+				if idStr, ok := idField.Interface().(string); ok && idStr != "" {
+					id = idStr
+					break
+				}
+			}
+		}
+
+		return &StakedValidator{
+			ID:          id,
+			StakeAmount: stakeInt,
+		}
+	}
+
+	return nil
+}
+
+// resolveValidatorID attempts to find a validator in the validator set even
+// when the exact key format (e.g. "Node-127.0.0.1:30303" vs just the address)
+// doesn't match. This handles key-format mismatches between validator attestation
+// IDs and the consensus validator set keys.
+func resolveValidatorID(vs validatorSetProvider, rawID string) (string, *StakedValidator) {
+	// Try the raw ID first (exact match)
+	vAny := vs.GetValidator(rawID)
+	val := extractStakedValidator(vAny)
+	if val != nil && val.StakeAmount != nil && val.StakeAmount.Sign() > 0 {
+		return rawID, val
+	}
+
+	// Not found — try alternative formats.
+	// If the attestation carries just an address but the validator set keys
+	// include a "Node-" prefix, try prepending it.
+	alternatives := []string{
+		"Node-" + rawID,
+	}
+	// If it already has "Node-", try the suffix alone.
+	if len(rawID) > 5 && rawID[:5] == "Node-" {
+		alternatives = append(alternatives, rawID[5:])
+	}
+
+	for _, alt := range alternatives {
+		vAny := vs.GetValidator(alt)
+		val := extractStakedValidator(vAny)
+		if val != nil && val.StakeAmount != nil && val.StakeAmount.Sign() > 0 {
+			return alt, val
+		}
+	}
+
+	return rawID, nil
 }

@@ -13,13 +13,13 @@ import (
 	"fmt"
 
 	"github.com/holiman/uint256"
+	logger "github.com/sphinxfndorg/protocol/src/console"
 	key "github.com/sphinxfndorg/protocol/src/core/sthincs/key/backend"
 	sign "github.com/sphinxfndorg/protocol/src/core/sthincs/sign/backend"
 	svm "github.com/sphinxfndorg/protocol/src/core/svm/opcodes"
 	vmachine "github.com/sphinxfndorg/protocol/src/core/svm/vm"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
 	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/sthincs"
-	logger "github.com/sphinxfndorg/protocol/src/log"
 )
 
 // SigningService handles all signing and verification operations for consensus messages.
@@ -323,7 +323,7 @@ func (s *SigningService) VerifySignature(signedData []byte, nodeID string) (bool
 	}
 
 	// CRITICAL DEBUG: Log verification details for troubleshooting
-	logger.Info("🔍 Verifying signature for node %s:", nodeID)
+	logger.Info("Verifying signature for node %s:", nodeID)
 	logger.Info("   Public key length: %d bytes", len(pkBytes))
 	logger.Info("   Public key (first 8): %x", pkBytes[:min(8, len(pkBytes))])
 	logger.Info("   Signature length: %d bytes", len(signedMsg.Signature))
@@ -333,7 +333,7 @@ func (s *SigningService) VerifySignature(signedData []byte, nodeID string) (bool
 	// Validate public key length before proceeding
 	// Incorrect length will cause VM verification to fail
 	if len(pkBytes) != 32 {
-		logger.Error("❌ Invalid public key length for node %s: expected 32, got %d",
+		logger.Error("Invalid public key length for node %s: expected 32, got %d",
 			nodeID, len(pkBytes))
 		return false, fmt.Errorf("invalid public key length: %d", len(pkBytes))
 	}
@@ -353,10 +353,10 @@ func (s *SigningService) VerifySignature(signedData []byte, nodeID string) (bool
 	// Log the verification result
 	if result {
 		sigHashHex := hex.EncodeToString(signedMsg.SignatureHash)
-		logger.Info("✅ VM verification passed for node %s (signature hash: %s...)",
+		logger.Info("VM verification passed for node %s (signature hash: %s...)",
 			nodeID, sigHashHex[:min(16, len(sigHashHex))])
 	} else {
-		logger.Warn("❌ VM verification failed for node %s", nodeID)
+		logger.Warn("VM verification failed for node %s", nodeID)
 	}
 
 	return result, nil
@@ -436,7 +436,7 @@ func (s *SigningService) SignProposal(proposal *Proposal) error {
 		return fmt.Errorf("failed to hash proposal: %w", err)
 	}
 
-	logger.Info("🔐 SIGNING PROPOSAL for node %s - Hash (from VM): %x", s.nodeID, dataHash)
+	logger.Info("SIGNING PROPOSAL for node %s - Hash (from VM): %x", s.nodeID, dataHash)
 
 	// Sign the hash
 	signedData, err := s.SignMessage(dataHash)
@@ -446,7 +446,7 @@ func (s *SigningService) SignProposal(proposal *Proposal) error {
 	proposal.Signature = signedData
 
 	signatureHex := hex.EncodeToString(signedData)
-	logger.Info("🔐 CREATED PROPOSAL SIGNATURE for node %s: %s... (length: %d chars)",
+	logger.Info("CREATED PROPOSAL SIGNATURE for node %s: %s... (length: %d chars)",
 		s.nodeID,
 		signatureHex[:min(64, len(signatureHex))],
 		len(signatureHex))
@@ -475,7 +475,7 @@ func (s *SigningService) VerifyProposal(proposal *Proposal) (bool, error) {
 
 	// Verify that the signed data matches the proposal content
 	if string(signedMsg.Data) != string(expectedHash) {
-		logger.Error("❌ PROPOSAL HASH MISMATCH:")
+		logger.Error("PROPOSAL HASH MISMATCH:")
 		logger.Error("   Signed data: %s", string(signedMsg.Data))
 		logger.Error("   Expected:    %s", string(expectedHash))
 		return false, fmt.Errorf("signed data does not match proposal content")
@@ -489,7 +489,7 @@ func (s *SigningService) VerifyProposal(proposal *Proposal) (bool, error) {
 
 	if valid {
 		sigHashHex := hex.EncodeToString(signedMsg.SignatureHash)
-		logger.Info("✅ Valid signature for proposal from %s (signature hash: %s...)",
+		logger.Info("Valid signature for proposal from %s (signature hash: %s...)",
 			proposal.ProposerID, sigHashHex[:min(16, len(sigHashHex))])
 	}
 
@@ -507,7 +507,7 @@ func (s *SigningService) SignVote(vote *Vote) error {
 		return fmt.Errorf("failed to hash vote: %w", err)
 	}
 
-	logger.Info("🔐 SIGNING VOTE for node %s - Hash (from VM): %x", s.nodeID, dataHash)
+	logger.Info("SIGNING VOTE for node %s - Hash (from VM): %x", s.nodeID, dataHash)
 
 	signature, err := s.SignMessage(dataHash)
 	if err != nil {
@@ -516,7 +516,7 @@ func (s *SigningService) SignVote(vote *Vote) error {
 	vote.Signature = signature
 
 	signatureHex := hex.EncodeToString(signature)
-	logger.Info("🔐 CREATED VOTE SIGNATURE for node %s: %s... (length: %d chars)",
+	logger.Info("CREATED VOTE SIGNATURE for node %s: %s... (length: %d chars)",
 		s.nodeID,
 		signatureHex[:min(64, len(signatureHex))],
 		len(signatureHex))
@@ -539,10 +539,10 @@ func (s *SigningService) VerifyVote(vote *Vote) (bool, error) {
 		signedMsg, err := DeserializeSignedMessage(vote.Signature)
 		if err == nil && len(signedMsg.SignatureHash) > 0 {
 			sigHashHex := hex.EncodeToString(signedMsg.SignatureHash)
-			logger.Info("✅ Valid vote signature from %s (signature hash: %s...)",
+			logger.Info("Valid vote signature from %s (signature hash: %s...)",
 				vote.VoterID, sigHashHex[:min(16, len(sigHashHex))])
 		} else {
-			logger.Info("✅ Valid vote signature from %s", vote.VoterID)
+			logger.Info("Valid vote signature from %s", vote.VoterID)
 		}
 	}
 
@@ -559,7 +559,7 @@ func (s *SigningService) SignTimeout(timeout *TimeoutMsg) error {
 		return fmt.Errorf("failed to hash timeout: %w", err)
 	}
 
-	logger.Info("🔐 SIGNING TIMEOUT for node %s - Hash (from VM): %x", s.nodeID, dataHash)
+	logger.Info("SIGNING TIMEOUT for node %s - Hash (from VM): %x", s.nodeID, dataHash)
 
 	signature, err := s.SignMessage(dataHash)
 	if err != nil {
@@ -585,10 +585,10 @@ func (s *SigningService) VerifyTimeout(timeout *TimeoutMsg) (bool, error) {
 		signedMsg, err := DeserializeSignedMessage(timeout.Signature)
 		if err == nil && len(signedMsg.SignatureHash) > 0 {
 			sigHashHex := hex.EncodeToString(signedMsg.SignatureHash)
-			logger.Info("✅ Valid timeout signature from %s (signature hash: %s...)",
+			logger.Info("Valid timeout signature from %s (signature hash: %s...)",
 				timeout.VoterID, sigHashHex[:min(16, len(sigHashHex))])
 		} else {
-			logger.Info("✅ Valid timeout signature from %s", timeout.VoterID)
+			logger.Info("Valid timeout signature from %s", timeout.VoterID)
 		}
 	}
 
@@ -697,7 +697,7 @@ func (s *SigningService) serializeProposalForSigning(proposal *Proposal) ([]byte
 	// Format: SPEC_VERSION || VIEW || BLOCK_DATA
 	signingMsg := fmt.Sprintf("SPHINX_PROPOSAL_V1:%d:%s", proposal.View, string(blockData))
 
-	logger.Info("🔐 PROPOSAL SIGNING MESSAGE (view=%d, height=%d): %s",
+	logger.Info("PROPOSAL SIGNING MESSAGE (view=%d, height=%d): %s",
 		proposal.View, tb.Header.Height, signingMsg)
 
 	// Execute SphinxHash in VM on the canonical message
@@ -781,7 +781,7 @@ func (s *SigningService) SignBlock(block Block) error {
 		return fmt.Errorf("block hash not finalized")
 	}
 
-	logger.Info("🔐 Signing block height=%d hash=%s sig_data_hash=%x proposer=%s",
+	logger.Info("Signing block height=%d hash=%s sig_data_hash=%x proposer=%s",
 		tb.Header.Height, tb.GetHash(), rawHash, s.nodeID)
 
 	signedData, err := s.SignMessage(rawHash)
@@ -862,7 +862,7 @@ func (s *SigningService) VerifyBlockSignature(block Block) (bool, error) {
 
 	if valid {
 		sigHashHex := hex.EncodeToString(signedMsg.SignatureHash)
-		logger.Info("✅ Valid block signature from %s (signature hash: %s...)",
+		logger.Info("Valid block signature from %s (signature hash: %s...)",
 			tb.Header.ProposerID, sigHashHex[:min(16, len(sigHashHex))])
 	}
 

@@ -11,10 +11,10 @@ import (
 	"math/big"
 	"time"
 
+	logger "github.com/sphinxfndorg/protocol/src/console"
 	svm "github.com/sphinxfndorg/protocol/src/core/svm/opcodes"
 	vmachine "github.com/sphinxfndorg/protocol/src/core/svm/vm"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
-	logger "github.com/sphinxfndorg/protocol/src/log"
 )
 
 // uint32ToBytesPool converts uint32 to big-endian 4 bytes for VM PUSH4 operands.

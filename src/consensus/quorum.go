@@ -5,7 +5,11 @@
 package consensus
 
 import (
+	"fmt"
 	"math"
+	"time"
+
+	logger "github.com/sphinxfndorg/protocol/src/console"
 )
 
 // NewQuorumVerifier creates a new quorum verifier instance
@@ -128,4 +132,66 @@ func (qc *QuorumCalculator) CalculateMaxFaulty(totalNodes int) int {
 	}
 
 	return maxFaulty
+}
+
+// VerifyWithProgress runs the same safety reasoning as VerifySafety, but
+// renders it as an animated task tree through the logger package instead of
+// only returning a bool. Each of the three checks that make up BFT safety
+// (quorum fraction, fault tolerance, quorum intersection) is shown running
+// and then resolves individually, so the reasoning behind a safety verdict
+// is visible as it happens rather than collapsing straight to a single
+// final true/false.
+//
+// The brief pauses between checks exist purely so each step is visibly "in
+// flight" for a moment -- the underlying arithmetic is instantaneous, but a
+// safety verdict this important is worth watching happen rather than
+// flashing by unreadably.
+func (qv *QuorumVerifier) VerifyWithProgress() bool {
+	renderer := logger.Default()
+
+	root := logger.NewTask("Quorum safety verification")
+	fractionCheck := logger.NewTask(fmt.Sprintf("Quorum fraction >= 2/3 (have %.4f)", qv.quorumFraction))
+	toleranceCheck := logger.NewTask(fmt.Sprintf("Fault tolerance < N/3 (faulty=%d, total=%d)", qv.faultyNodes, qv.totalNodes))
+	intersectionCheck := logger.NewTask("Quorum intersection property")
+	root.AddChild(fractionCheck).AddChild(toleranceCheck).AddChild(intersectionCheck)
+
+	detach := renderer.Attach(root)
+	defer detach() // stops animating and leaves the final tree in scrollback
+
+	root.SetStatus(logger.TaskRunning)
+
+	fractionCheck.SetStatus(logger.TaskRunning)
+	time.Sleep(150 * time.Millisecond)
+	meetsQuorumRequirement := qv.quorumFraction >= 2.0/3.0
+	if meetsQuorumRequirement {
+		fractionCheck.SetStatus(logger.TaskSuccess)
+	} else {
+		fractionCheck.SetStatus(logger.TaskError)
+	}
+
+	toleranceCheck.SetStatus(logger.TaskRunning)
+	time.Sleep(150 * time.Millisecond)
+	meetsFaultTolerance := qv.faultyNodes < qv.totalNodes/3
+	if meetsFaultTolerance {
+		toleranceCheck.SetStatus(logger.TaskSuccess)
+	} else {
+		toleranceCheck.SetStatus(logger.TaskError)
+	}
+
+	intersectionCheck.SetStatus(logger.TaskRunning)
+	time.Sleep(150 * time.Millisecond)
+	if qv.VerifyQuorumIntersection() {
+		intersectionCheck.SetStatus(logger.TaskSuccess)
+	} else {
+		intersectionCheck.SetStatus(logger.TaskError)
+	}
+
+	safe := meetsQuorumRequirement && meetsFaultTolerance
+	if safe {
+		root.SetStatus(logger.TaskSuccess)
+	} else {
+		root.SetStatus(logger.TaskError)
+	}
+
+	return safe
 }

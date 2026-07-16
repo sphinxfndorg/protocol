@@ -9,7 +9,7 @@ import (
 	"math/big"
 	"sync"
 
-	logger "github.com/sphinxfndorg/protocol/src/log"
+	logger "github.com/sphinxfndorg/protocol/src/console"
 	"golang.org/x/crypto/sha3"
 )
 
@@ -91,7 +91,7 @@ func SetCanonicalVDFParameters(params *VDFParams) error {
 
 	preDerivedVDFParamsOnce.Do(func() {
 		preDerivedVDFParams = params
-		logger.Info("✅ Pre-derived VDF parameters set: D=%d bits, T=%d",
+		logger.Info("Pre-derived VDF parameters set: D=%d bits, T=%d",
 			params.Discriminant.BitLen(), params.T)
 	})
 	return nil
@@ -167,22 +167,10 @@ func deriveVDFParams() (VDFParams, error) {
 	p.SetBit(p, 0, 1) // force odd
 	p.SetBit(p, 1, 1) // force ≡ 3 mod 4
 
-	// Step 4: find the next prime from this starting point.
-	// We increment by 4 to preserve the ≡ 3 mod 4 property:
-	//   (3 mod 4) + 4 = 7 mod 4 = 3 mod 4  ✓
-	// Using +1 or +2 would destroy the property we just established.
-	// ProbablyPrime(20) gives a false-prime probability below 4^-20 ≈ 10^-12,
-	// which is acceptable for a public parameter derived from a public hash.
-	iterations := 0
-	for !p.ProbablyPrime(20) {
-		p.Add(p, big.NewInt(4)) // preserve ≡ 3 mod 4
-		iterations++
-		// Safety guard: if we iterate more than 10,000 times something is
-		// wrong with the input. In practice this loop runs < 1000 iterations.
-		if iterations > 10_000 {
-			return VDFParams{}, fmt.Errorf(
-				"prime search exceeded 10,000 iterations — genesis hash may be malformed")
-		}
+	// Step 4: find the next prime from this starting point, live.
+	p, iterations, err := searchForDiscriminantPrime(p)
+	if err != nil {
+		return VDFParams{}, err
 	}
 
 	// Step 5: negate to form the discriminant D = -p.
@@ -216,7 +204,7 @@ func deriveVDFParams() (VDFParams, error) {
 	}
 	// ─────────────────────────────────────────────────────────────────────────
 
-	logger.Info("✅ Canonical VDF parameters derived successfully:")
+	logger.Info("Canonical VDF parameters derived successfully:")
 	logger.Info("   Genesis hash  : %s", genesisHash)
 	logger.Info("   Prime p       : %d bits", p.BitLen())
 	logger.Info("   p mod 4       : %d (must be 3)", mod4.Int64())
@@ -229,6 +217,50 @@ func deriveVDFParams() (VDFParams, error) {
 		T:            canonicalT,
 		Lambda:       uint(canonicalLambda),
 	}, nil
+}
+
+// searchForDiscriminantPrime advances from candidate in steps of 4
+// (preserving p ≡ 3 mod 4: (3 mod 4) + 4 = 7 mod 4 = 3 mod 4 ✓ — +1 or +2
+// would destroy the property the caller already established) until
+// ProbablyPrime(20) accepts one. A false-prime probability below
+// 4^-20 ≈ 10^-12 is acceptable for a public parameter derived from a
+// public hash.
+//
+// This is the sequential, variable-duration part of VDF parameter
+// derivation -- typically under 1,000 iterations but occasionally more --
+// so it renders a live spinner through the logger package rather than
+// only surfacing the result once a suitable prime is found. Each
+// ProbablyPrime(20) round costs real modular exponentiation, so unlike
+// RepeatedSquareWithProgress's periodic sampling, the message is safe to
+// update every iteration without meaningfully slowing the search.
+//
+// Returns the found prime and the number of iterations it took. Safety
+// guard: if more than 10,000 candidates are rejected, something is wrong
+// with the input (in practice this runs well under 1,000 iterations).
+func searchForDiscriminantPrime(candidate *big.Int) (p *big.Int, iterations int, err error) {
+	p = new(big.Int).Set(candidate)
+
+	renderer := logger.Default()
+	spinner := logger.NewSpinner("Deriving VDF discriminant — searching for prime")
+	detach := renderer.Attach(spinner)
+	spinner.Start()
+	defer detach()
+
+	for !p.ProbablyPrime(20) {
+		p.Add(p, big.NewInt(4)) // preserve ≡ 3 mod 4
+		iterations++
+		spinner.UpdateMessage(fmt.Sprintf(
+			"Deriving VDF discriminant — searching for prime (attempt %d)", iterations))
+		if iterations > 10_000 {
+			spinner.Stop(logger.SpinnerError, "Prime search exceeded 10,000 iterations")
+			return nil, iterations, fmt.Errorf(
+				"prime search exceeded 10,000 iterations — genesis hash may be malformed")
+		}
+	}
+
+	spinner.Stop(logger.SpinnerSuccess,
+		fmt.Sprintf("VDF discriminant prime found after %d attempt(s)", iterations))
+	return p, iterations, nil
 }
 
 // GetRawGenesisHash returns the raw genesis hash without any prefix.

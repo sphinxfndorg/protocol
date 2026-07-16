@@ -201,14 +201,16 @@ func GetNodePortConfigs(numNodes int, roles []NodeRole, overrides map[string]str
 	// Pre-populate with currently used ports to avoid conflicts with
 	// already-running nodes
 	checkBasePorts := []int{baseTCPPort, baseUDPPort, baseHTTPPort, baseWSPort}
+	scannedCount := 0
 	for _, base := range checkBasePorts {
 		for port := base; port < base+numNodes*portStep+100; port++ {
+			scannedCount++
 			if isPortInUse(port) {
 				usedPorts[port] = true
-				log.Printf("GetNodePortConfigs: Port %d already in use, will skip", port)
 			}
 		}
 	}
+	log.Printf("GetNodePortConfigs: scanned %d candidate ports, %d already in use", scannedCount, len(usedPorts))
 
 	// Generate configuration for each node
 	for i := 0; i < numNodes; i++ {

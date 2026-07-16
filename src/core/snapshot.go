@@ -29,7 +29,7 @@ import (
 	"sort"
 	"time"
 
-	logger "github.com/sphinxfndorg/protocol/src/log"
+	logger "github.com/sphinxfndorg/protocol/src/console"
 	denom "github.com/sphinxfndorg/protocol/src/params/denom"
 )
 
@@ -214,7 +214,7 @@ func (sm *StateSnapshotManager) GenerateSnapshot(height uint64) (*StateSnapshotH
 	sm.checkpoints[height] = cp
 	sm.mu.Unlock()
 
-	logger.Info("✅ State snapshot generated at height %d: %d accounts, %d validators, %s SPX total, %s (%d MB)",
+	logger.Info("SUCCESS State snapshot generated at height %d: %d accounts, %d validators, %s SPX total, %s (%d MB)",
 		height, len(accounts), len(validators),
 		formatSPX(totalSupply), snapshotFile, fileSize/(1024*1024))
 
@@ -321,14 +321,14 @@ func (sm *StateSnapshotManager) writeSnapshot(data *StateSnapshotData) (string, 
 
 // RestoreFromSnapshot restores the blockchain state from a snapshot at the given height.
 func (sm *StateSnapshotManager) RestoreFromSnapshot(height uint64) error {
-	logger.Info("📦 Restoring from state snapshot at height %d...", height)
+	logger.Info("INFO Restoring from state snapshot at height %d...", height)
 
 	snapshot, err := sm.LoadSnapshot(height)
 	if err != nil {
 		return fmt.Errorf("failed to load snapshot at height %d: %w", height, err)
 	}
 
-	logger.Info("📦 Snapshot state root: %s", snapshot.StateRoot[:16])
+	logger.Info("INFO Snapshot state root: %s", snapshot.StateRoot[:16])
 
 	if err := sm.restoreAccounts(snapshot); err != nil {
 		return fmt.Errorf("failed to restore accounts: %w", err)
@@ -342,7 +342,7 @@ func (sm *StateSnapshotManager) RestoreFromSnapshot(height uint64) error {
 		return fmt.Errorf("failed to set chain tip: %w", err)
 	}
 
-	logger.Info("✅ State restored from snapshot at height %d: %d accounts, %d validators, %s SPX total",
+	logger.Info("SUCCESS State restored from snapshot at height %d: %d accounts, %d validators, %s SPX total",
 		height, len(snapshot.Accounts), len(snapshot.Validators),
 		formatSPX(snapshot.TotalSupply))
 
@@ -396,7 +396,7 @@ func (sm *StateSnapshotManager) restoreAccounts(snapshot *StateSnapshotData) err
 		stateDB.SetNonce(addr, acct.Nonce)
 	}
 
-	logger.Info("📦 Restored %d accounts to state DB", len(snapshot.Accounts))
+	logger.Info("INFO Restored %d accounts to state DB", len(snapshot.Accounts))
 	return nil
 }
 
@@ -432,7 +432,7 @@ func (sm *StateSnapshotManager) restoreValidators(snapshot *StateSnapshotData) e
 		vs.totalStake.Add(vs.totalStake, stake)
 	}
 
-	logger.Info("📦 Restored %d validators to validator set", len(snapshot.Validators))
+	logger.Info("INFO Restored %d validators to validator set", len(snapshot.Validators))
 	return nil
 }
 
@@ -554,7 +554,7 @@ func (sm *StateSnapshotManager) StoreReceivedSnapshot(data *StateSnapshotData) e
 		logger.Warn("Failed to save snapshot index: %v", err)
 	}
 
-	logger.Info("✅ Received snapshot stored at height %d: %s (%d MB)",
+	logger.Info("SUCCESS Received snapshot stored at height %d: %s (%d MB)",
 		data.BlockHeight, snapshotFile, fileSize/(1024*1024))
 
 	return nil
@@ -564,19 +564,19 @@ func (sm *StateSnapshotManager) StoreReceivedSnapshot(data *StateSnapshotData) e
 
 // PerformStateSync performs a full state sync from peers.
 func (sm *StateSnapshotManager) PerformStateSync() error {
-	logger.Info("📦 Starting state sync...")
+	logger.Info("INFO Starting state sync...")
 
 	cp := sm.GetLatestCheckpoint()
 	if cp == nil {
 		return fmt.Errorf("no checkpoints available from peers")
 	}
 
-	logger.Info("📦 Best checkpoint: height=%d, hash=%s, state_root=%s",
+	logger.Info("INFO Best checkpoint: height=%d, hash=%s, state_root=%s",
 		cp.BlockHeight, cp.BlockHash[:16], cp.StateRoot[:16])
 
 	existing := sm.GetSnapshotHeaderAtHeight(cp.BlockHeight)
 	if existing != nil {
-		logger.Info("📦 Snapshot already exists at height %d, restoring...", cp.BlockHeight)
+		logger.Info("INFO Snapshot already exists at height %d, restoring...", cp.BlockHeight)
 		return sm.RestoreFromSnapshot(cp.BlockHeight)
 	}
 

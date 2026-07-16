@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	logger "github.com/sphinxfndorg/protocol/src/log"
+	logger "github.com/sphinxfndorg/protocol/src/console"
 )
 
 // ============================================================================
@@ -99,7 +99,7 @@ func InitJournalManager(dataDir string) error {
 		logger.Warn("Journal recovery warning: %v", err)
 	}
 
-	logger.Info("✅ Journal manager initialized at %s", journalDir)
+	logger.Info("SUCCESS Journal manager initialized at %s", journalDir)
 	return nil
 }
 
@@ -132,7 +132,7 @@ func (jm *JournalManager) StartAtomicCommit(blockHash string, blockHeight uint64
 
 	jm.inProgress = true
 	jm.persistTx()
-	logger.Info("📝 Started atomic commit journal for block %s at height %d", blockHash[:16], blockHeight)
+	logger.Info(" Started atomic commit journal for block %s at height %d", blockHash[:16], blockHeight)
 }
 
 // RecordStateChange records an account state change for potential rollback
@@ -212,7 +212,7 @@ func (jm *JournalManager) Commit(previousWeight *big.Int) error {
 	jm.inProgress = false
 	jm.activeTx = nil
 
-	logger.Info("✅ Committed atomic transaction")
+	logger.Info("SUCCESS Committed atomic transaction")
 	return nil
 }
 
@@ -231,7 +231,7 @@ func (jm *JournalManager) Rollback() error {
 	jm.inProgress = false
 	jm.activeTx = nil
 
-	logger.Info("✅ Completed rollback of atomic transaction")
+	logger.Info("SUCCESS Completed rollback of atomic transaction")
 	return nil
 }
 

@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/sphinxfndorg/protocol/src/common"
-	logger "github.com/sphinxfndorg/protocol/src/log"
+	logger "github.com/sphinxfndorg/protocol/src/console"
 	"golang.org/x/crypto/sha3"
 )
 
@@ -217,7 +217,7 @@ func SetSphincsVerifier(
 	// Wire into the existing dispatch path so executeCheckSphincs and
 	// executeVerifySphincs both benefit from the real verifier automatically.
 	verifySphincsPlusFunc = sphincsVerifyFunc
-	logger.Info("✅ OP_CHECK_SPHINCS: real SPHINCS+ verifier registered")
+	logger.Info("SUCCESS OP_CHECK_SPHINCS: real SPHINCS+ verifier registered")
 }
 
 // verifySphincsPlus calls the registered verification function
@@ -1255,7 +1255,7 @@ func executeReturn(stack *Stack, memory []byte) error {
 	}
 
 	if isText && len(data) > 0 {
-		logger.Info("📝 OP_RETURN: Embedded %d bytes of text: %s", len(data), string(data))
+		logger.Info(" OP_RETURN: Embedded %d bytes of text: %s", len(data), string(data))
 	} else {
 		// Log first few bytes as hex for debugging
 		hexPreview := ""
@@ -1264,7 +1264,7 @@ func executeReturn(stack *Stack, memory []byte) error {
 		} else {
 			hexPreview = hex.EncodeToString(data)
 		}
-		logger.Info("📝 OP_RETURN: Embedded %d bytes of data (hex preview: %s)", len(data), hexPreview)
+		logger.Info(" OP_RETURN: Embedded %d bytes of data (hex preview: %s)", len(data), hexPreview)
 	}
 	// Push success onto stack
 	stack.Push(1)

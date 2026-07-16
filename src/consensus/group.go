@@ -7,16 +7,11 @@ package consensus
 import (
 	"math/big"
 
+	logger "github.com/sphinxfndorg/protocol/src/console"
 	"golang.org/x/crypto/sha3"
 )
 
 // sips0013 https://github.com/sphinxorg/SIPS/blob/main/.github/workflows/sips0013/sips0013.md
-
-// ClassGroupElement represents an element in a class group
-// Quadratic form: f(x,y) = ax² + bxy + cy² with discriminant D = b² - 4ac
-type ClassGroupElement struct {
-	A, B, C *big.Int // Coefficients of the quadratic form, stored as arbitrary-precision integers
-}
 
 // NewClassGroupElement creates a new element from a, b, c
 func NewClassGroupElement(a, b, c *big.Int) *ClassGroupElement {
@@ -309,6 +304,55 @@ func RepeatedSquare(x *ClassGroupElement, D *big.Int, T uint64) *ClassGroupEleme
 		// Square the result (creates a new element)
 		result = Square(result, D) // Squares current result
 	}
+	return result // Returns result after T squarings
+}
+
+// RepeatedSquareWithProgress performs the exact same T sequential squarings
+// as RepeatedSquare, but renders a live progress bar through the logger
+// package while it runs, instead of only surfacing the result once the
+// whole delay function has finished. T can be in the hundreds of thousands
+// (or millions) of squarings, so a caller running this live -- rather than
+// in a batch job -- benefits from seeing that the node is actively working
+// through the VDF rather than appearing to hang.
+//
+// label is used as the progress bar's title (e.g. "VDF evaluation",
+// "VDF proof"), so distinct RepeatedSquare calls are identifiable if more
+// than one is ever rendered at once.
+//
+// Progress is only sampled periodically, not on every squaring, so the act
+// of reporting progress does not itself slow down the sequential delay
+// function it is measuring.
+func RepeatedSquareWithProgress(x *ClassGroupElement, D *big.Int, T uint64, label string) *ClassGroupElement {
+	result := &ClassGroupElement{
+		A: new(big.Int).Set(x.A), // Copies input A value
+		B: new(big.Int).Set(x.B), // Copies input B value
+		C: new(big.Int).Set(x.C), // Copies input C value
+	}
+
+	if T == 0 {
+		return result
+	}
+
+	renderer := logger.Default()
+	bar := logger.NewProgressBar(label, int64(T), "sq")
+	detach := renderer.Attach(bar)
+	defer detach() // stops animating and does a final redraw once we return
+
+	// Sampling ~1000 times across the whole run gives smooth animation
+	// without meaningfully adding per-squaring overhead.
+	reportEvery := T / 1000
+	if reportEvery == 0 {
+		reportEvery = 1
+	}
+
+	for i := uint64(0); i < T; i++ { // Loop T times
+		result = Square(result, D) // Squares current result
+		if done := i + 1; done%reportEvery == 0 || done == T {
+			bar.Set(int64(done)) // Reports progress through the shared renderer
+		}
+	}
+	bar.Complete()
+
 	return result // Returns result after T squarings
 }
 

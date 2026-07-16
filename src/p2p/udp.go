@@ -201,9 +201,6 @@ func (s *Server) handleUDP() {
 				continue
 			}
 
-			log.Printf("handleUDP: Received UDP message from %s for %s: %s",
-				addr.String(), s.localNode.Address, string(buffer[:n]))
-
 			// Parse discovery message from JSON
 			var msg network.DiscoveryMessage
 			if err := json.Unmarshal(buffer[:n], &msg); err != nil {
@@ -221,14 +218,11 @@ func (s *Server) handleUDP() {
 // handleDiscoveryMessage processes discovery messages (PING, PONG, FINDNODE, NEIGHBORS).
 // This function handles the core Kademlia protocol messages with cryptographic verification.
 func (s *Server) handleDiscoveryMessage(msg *network.DiscoveryMessage, addr *net.UDPAddr) {
-	log.Printf("handleDiscoveryMessage: Received %s message from %s for node %s: Timestamp=%x, Nonce=%x",
-		msg.Type, addr.String(), s.localNode.Address, msg.Timestamp, msg.Nonce[:8])
-
 	// Log message size for debugging
 	msgBytes, _ := json.Marshal(msg)
-	log.Printf("handleDiscoveryMessage: Message size: %d bytes", len(msgBytes))
 	if len(msgBytes) > 1472 {
-		log.Printf("handleDiscoveryMessage: Warning: Message size (%d bytes) exceeds typical UDP MTU (1472 bytes)", len(msgBytes))
+		log.Printf("handleDiscoveryMessage: Warning: %s message from %s is %d bytes, exceeds typical UDP MTU (1472 bytes)",
+			msg.Type, addr.String(), len(msgBytes))
 	}
 
 	// Check timestamp freshness (5-minute window to prevent replay attacks)
@@ -348,12 +342,8 @@ func (s *Server) handleDiscoveryMessage(msg *network.DiscoveryMessage, addr *net
 				addr.String(), s.localNode.Address, err)
 			return
 		}
-		log.Printf("handleDiscoveryMessage: Received FINDNODE from %s for target %x",
-			addr.String(), findNodeData.TargetID[:8])
-
 		// Send NEIGHBORS response with closest nodes
 		s.sendUDPNeighbors(addr, findNodeData.TargetID, msg.Nonce)
-		log.Printf("handleDiscoveryMessage: Sent NEIGHBORS in response to FINDNODE from %s", addr.String())
 
 	case "PING":
 		// Handle PING request - verify liveness
@@ -396,13 +386,10 @@ func (s *Server) handleDiscoveryMessage(msg *network.DiscoveryMessage, addr *net
 			node.UDPPort = fmt.Sprintf("%d", addr.Port)
 			node.PublicKey = msg.PublicKey
 			s.nodeManager.UpdateNode(node)
-			log.Printf("handleDiscoveryMessage: Updated node: ID=%s, Address=%s, Role=%s, KademliaID=%x",
-				node.ID, node.Address, node.Role, node.KademliaID[:8])
 		}
 
 		// Send PONG response
 		s.sendUDPPong(addr, pingData.FromID, msg.Nonce)
-		log.Printf("handleDiscoveryMessage: Sent PONG to %s for PING from %s", addr.String(), s.localNode.Address)
 
 	case "PONG":
 		// Handle PONG response - update node information
@@ -412,8 +399,6 @@ func (s *Server) handleDiscoveryMessage(msg *network.DiscoveryMessage, addr *net
 				addr.String(), s.localNode.Address, err)
 			return
 		}
-		log.Printf("handleDiscoveryMessage: Received PONG from %s (KademliaID: %x) for %s",
-			addr.String(), pongData.FromID[:8], s.localNode.Address)
 
 		// Get TCP address
 		tcpAddr, tcpPort := getTCPAddress(fmt.Sprintf("%d", addr.Port))
@@ -446,8 +431,6 @@ func (s *Server) handleDiscoveryMessage(msg *network.DiscoveryMessage, addr *net
 			node.IP = addr.IP.String()
 			node.UDPPort = fmt.Sprintf("%d", addr.Port)
 			node.PublicKey = msg.PublicKey
-			log.Printf("handleDiscoveryMessage: Updated node: ID=%s, Address=%s, Role=%s, KademliaID=%x",
-				node.ID, node.Address, node.Role, node.KademliaID[:8])
 		}
 
 		// Mark node as active and create peer
@@ -459,8 +442,6 @@ func (s *Server) handleDiscoveryMessage(msg *network.DiscoveryMessage, addr *net
 		if err := s.nodeManager.AddPeer(node); err != nil {
 			log.Printf("handleDiscoveryMessage: Failed to add peer %s to nodeManager.peers for %s: %v",
 				node.ID, s.localNode.Address, err)
-		} else {
-			log.Printf("handleDiscoveryMessage: Added peer %s to nodeManager.peers for %s", node.ID, s.localNode.Address)
 		}
 
 		// Connect via TCP
@@ -468,18 +449,11 @@ func (s *Server) handleDiscoveryMessage(msg *network.DiscoveryMessage, addr *net
 			if err := s.peerManager.ConnectPeer(node); err != nil {
 				log.Printf("handleDiscoveryMessage: Failed to connect to peer %s via TCP for %s: %v",
 					node.ID, s.localNode.Address, err)
-			} else {
-				log.Printf("handleDiscoveryMessage: Successfully connected to peer %s via ConnectPeer for %s",
-					node.ID, s.localNode.Address)
 			}
 		}
 
 		// Send to response channel for discovery
-		log.Printf("handleDiscoveryMessage: Sending peer %s to ResponseCh for %s (ChannelLen=%d)",
-			node.ID, s.localNode.Address, len(s.nodeManager.ResponseCh))
 		s.nodeManager.ResponseCh <- []*network.Peer{peer}
-		log.Printf("handleDiscoveryMessage: Sent peer %s to ResponseCh for %s (ChannelLen=%d)",
-			node.ID, s.localNode.Address, len(s.nodeManager.ResponseCh))
 
 	case "NEIGHBORS":
 		// Handle NEIGHBORS response - process list of nearby nodes
@@ -519,11 +493,7 @@ func (s *Server) handleDiscoveryMessage(msg *network.DiscoveryMessage, addr *net
 		}
 
 		// Send discovered peers to response channel
-		log.Printf("handleDiscoveryMessage: Sending %d peers to ResponseCh for %s (ChannelLen=%d)",
-			len(peers), s.localNode.Address, len(s.nodeManager.ResponseCh))
 		s.nodeManager.ResponseCh <- peers
-		log.Printf("handleDiscoveryMessage: Sent %d peers to ResponseCh for %s (ChannelLen=%d)",
-			len(peers), s.localNode.Address, len(s.nodeManager.ResponseCh))
 	}
 }
 
@@ -536,9 +506,6 @@ func (s *Server) sendUDPPing(addr *net.UDPAddr, toID network.NodeID, nonce []byt
 		log.Printf("sendUDPPing: Failed to initialize KeyManager for %s: %v", s.localNode.Address, err)
 		return
 	}
-
-	log.Printf("sendUDPPing: Deserializing keys for node %s: PrivateKey length=%d, PublicKey length=%d",
-		s.localNode.Address, len(s.localNode.PrivateKey), len(s.localNode.PublicKey))
 
 	// Deserialize key pair.
 	// FIX: capture publicKey so it can be passed to SignMessage.
@@ -563,8 +530,6 @@ func (s *Server) sendUDPPing(addr *net.UDPAddr, toID network.NodeID, nonce []byt
 			s.localNode.Address, addr.String(), err)
 		return
 	}
-
-	log.Printf("sendUDPPing: PING data for %s to %s: %s", s.localNode.Address, addr.String(), string(dataBytes))
 
 	// Sign the message.
 	// FIX: pass publicKey as third arg; capture all 6 return values including commitment.
@@ -621,12 +586,7 @@ func (s *Server) sendUDPPing(addr *net.UDPAddr, toID network.NodeID, nonce []byt
 		Commitment: commitment,   // 32-byte commitment transmitted to receiver
 	}
 
-	log.Printf("sendUDPPing: Sending PING message from %s to %s: Type=%s, Nonce=%x, Timestamp=%x",
-		s.localNode.Address, addr.String(), msg.Type, msg.Nonce[:8], msg.Timestamp)
-
 	s.sendUDPMessage(addr, msg)
-	log.Printf("sendUDPPing: Sent PING to %s (KademliaID: %x) from %s",
-		addr.String(), toID[:8], s.localNode.Address)
 }
 
 // sendUDPPong sends a PONG message in response to a PING.
@@ -638,9 +598,6 @@ func (s *Server) sendUDPPong(addr *net.UDPAddr, toID network.NodeID, nonce []byt
 		log.Printf("sendUDPPong: Failed to initialize KeyManager for %s: %v", s.localNode.Address, err)
 		return
 	}
-
-	log.Printf("sendUDPPong: Deserializing keys for node %s: PrivateKey length=%d, PublicKey length=%d",
-		s.localNode.Address, len(s.localNode.PrivateKey), len(s.localNode.PublicKey))
 
 	// Deserialize key pair.
 	// FIX: capture publicKey so it can be passed to SignMessage.
@@ -665,8 +622,6 @@ func (s *Server) sendUDPPong(addr *net.UDPAddr, toID network.NodeID, nonce []byt
 			s.localNode.Address, addr.String(), err)
 		return
 	}
-
-	log.Printf("sendUDPPong: PONG data for %s to %s: %s", s.localNode.Address, addr.String(), string(dataBytes))
 
 	// Sign the message.
 	// FIX: pass publicKey as third arg; capture all 6 return values including commitment.
@@ -721,8 +676,6 @@ func (s *Server) sendUDPPong(addr *net.UDPAddr, toID network.NodeID, nonce []byt
 	}
 
 	s.sendUDPMessage(addr, msg)
-	log.Printf("sendUDPPong: Sent PONG to %s (KademliaID: %x) from %s",
-		addr.String(), toID[:8], s.localNode.Address)
 }
 
 // sendUDPNeighbors sends a NEIGHBORS message with closest peers.
@@ -738,7 +691,6 @@ func (s *Server) sendUDPNeighbors(addr *net.UDPAddr, targetID network.NodeID, no
 	if cacheValid && cacheFresh {
 		// Use cached neighbors
 		neighbors = cachedNeighbors
-		log.Printf("sendUDPNeighbors: Using cached neighbors for target %x", targetID[:8])
 	} else {
 		// Find closest peers from node manager
 		peers := s.nodeManager.FindClosestPeers(targetID, s.nodeManager.K)
@@ -769,9 +721,6 @@ func (s *Server) sendUDPNeighbors(addr *net.UDPAddr, targetID network.NodeID, no
 		log.Printf("sendUDPNeighbors: Failed to initialize KeyManager: %v", err)
 		return
 	}
-
-	log.Printf("sendUDPNeighbors: Deserializing keys for node %s: PrivateKey length=%d, PublicKey length=%d",
-		s.localNode.Address, len(s.localNode.PrivateKey), len(s.localNode.PublicKey))
 
 	// Deserialize key pair.
 	// FIX: capture publicKey so it can be passed to SignMessage.
@@ -852,7 +801,6 @@ func (s *Server) sendUDPNeighbors(addr *net.UDPAddr, targetID network.NodeID, no
 	}
 
 	s.sendUDPMessage(addr, msg)
-	log.Printf("sendUDPNeighbors: Sent NEIGHBORS to %s with %d peers", addr.String(), len(neighbors))
 }
 
 // sendUDPMessage sends a discovery message over UDP.
@@ -866,13 +814,8 @@ func (s *Server) sendUDPMessage(addr *net.UDPAddr, msg network.DiscoveryMessage)
 		return
 	}
 
-	log.Printf("sendUDPMessage: Sending message from %s to %s: %s",
-		s.localNode.Address, addr.String(), string(data))
-
-	// Log message size for MTU considerations
-	log.Printf("sendUDPMessage: Message size: %d bytes", len(data))
 	if len(data) > 1472 {
-		log.Printf("sendUDPMessage: Warning: Message size (%d bytes) exceeds typical UDP MTU (1472 bytes)", len(data))
+		log.Printf("sendUDPMessage: Warning: %s message size (%d bytes) exceeds typical UDP MTU (1472 bytes)", msg.Type, len(data))
 	}
 
 	// Write to UDP socket
@@ -882,9 +825,6 @@ func (s *Server) sendUDPMessage(addr *net.UDPAddr, msg network.DiscoveryMessage)
 			s.localNode.Address, addr.String(), err)
 		return
 	}
-
-	log.Printf("sendUDPMessage: Successfully sent message from %s to %s",
-		s.localNode.Address, addr.String())
 }
 
 // StoreDiscoveryMessage stores discovery message leaves in the database.

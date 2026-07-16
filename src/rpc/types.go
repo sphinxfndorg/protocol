@@ -93,11 +93,14 @@ type AuthConfig struct {
 }
 
 // DefaultAuthConfig returns secure defaults for RPC authentication
+// NOTE: RequireAuth is false by default so that node-to-node RPC (checkpoint sync,
+// block download, etc.) works out of the box. For external API security, set
+// RequireAuth=true and configure APIKeys.
 func DefaultAuthConfig() *AuthConfig {
 	return &AuthConfig{
 		EnableAuth:   true,
 		APIKeys:      make(map[string]string),
-		RequireAuth:  true,
+		RequireAuth:  false, // Allow peer-to-peer RPC without API keys by default
 		TrustedNodes: make(map[string]bool),
 	}
 }

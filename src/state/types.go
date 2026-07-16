@@ -231,7 +231,7 @@ type ChainState struct {
 	// Signature validation section (now simplified)
 	SignatureValidation *SignatureValidation `json:"signature_validation,omitempty"`
 
-	// ✅ CORRECT: Only one final_states array
+	// SUCCESS CORRECT: Only one final_states array
 	FinalStates []*FinalStateInfo `json:"final_states,omitempty"`
 }
 

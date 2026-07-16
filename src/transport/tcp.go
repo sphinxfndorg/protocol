@@ -137,14 +137,12 @@ func (s *TCPServer) handleConnection(conn net.Conn, nodeAddr string) {
 			}
 			return
 		}
-		log.Printf("Received raw data on %s, length: %d", nodeAddr, length)
 
 		msg, err := security.DecodeSecureMessage(data, enc)
 		if err != nil {
-			log.Printf("TCP decode error on %s: %v, raw data: %x", nodeAddr, err, data)
+			log.Printf("TCP decode error on %s: %v", nodeAddr, err)
 			continue
 		}
-		log.Printf("Decoded message on %s: Type=%s, Data=%v", nodeAddr, msg.Type, msg.Data)
 
 		// Handle version message and send verack response
 		if msg.Type == "version" {
@@ -187,7 +185,6 @@ func (s *TCPServer) handleConnection(conn net.Conn, nodeAddr string) {
 		// Forward message to messageCh
 		select {
 		case s.messageCh <- msg:
-			log.Printf("Forwarded message to messageCh: Type=%s, SourceAddr=%s", msg.Type, nodeAddr)
 		default:
 			log.Printf("Failed to forward message to messageCh: Type=%s, SourceAddr=%s, channel full", msg.Type, nodeAddr)
 		}
@@ -315,7 +312,6 @@ func ConnectTCP(address string, messageCh chan *security.Message) (net.Conn, err
 					}
 					select {
 					case messageCh <- respMsg:
-						log.Printf("Sent response to messageCh for %s, message type: %s", address, respMsg.Type)
 					default:
 						log.Printf("Failed to send response to messageCh for %s, channel full", address)
 					}

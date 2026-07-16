@@ -267,6 +267,6 @@ func main() {
 	}
 	verifyDuration := time.Since(verifyStart).Seconds()
 	fmt.Printf("  STARK proof verification time: %.3f sec\n", verifyDuration)
-	fmt.Printf("\n✅ Test Case 1 passed: All %d signatures verified, STARK proof valid (total time: %.3f sec)\n",
+	fmt.Printf("\nSUCCESS Test Case 1 passed: All %d signatures verified, STARK proof valid (total time: %.3f sec)\n",
 		numTxs, time.Since(start).Seconds())
 }

@@ -18,8 +18,8 @@ import (
 
 	"github.com/sphinxfndorg/protocol/src/common"
 	"github.com/sphinxfndorg/protocol/src/consensus"
+	logger "github.com/sphinxfndorg/protocol/src/console"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
-	logger "github.com/sphinxfndorg/protocol/src/log"
 	storage "github.com/sphinxfndorg/protocol/src/state"
 )
 

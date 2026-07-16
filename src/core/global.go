@@ -13,8 +13,8 @@ import (
 	"sync"
 	"time"
 
+	logger "github.com/sphinxfndorg/protocol/src/console"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
-	logger "github.com/sphinxfndorg/protocol/src/log"
 	denom "github.com/sphinxfndorg/protocol/src/params/denom"
 )
 

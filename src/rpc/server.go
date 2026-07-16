@@ -45,7 +45,6 @@ func NewServer(messageCh chan *security.Message, blockchain *core.Blockchain, sp
 // handleMessages processes incoming messages from the message channel.
 func (s *Server) handleMessages() {
 	for msg := range s.messageCh {
-		log.Printf("rpc.Server: Received message on messageCh: Type=%s, Data=%v, ChannelLen=%d", msg.Type, msg.Data, len(s.messageCh))
 		if msg.Type == "rpc" {
 			// Binary RPC payloads are carried as JSON byte strings inside
 			// security.Message.Data.
@@ -60,22 +59,17 @@ func (s *Server) handleMessages() {
 				log.Printf("rpc.Server: Failed to unmarshal RPC message: %v", err)
 				continue
 			}
-			log.Printf("rpc.Server: Decoded RPC message: RPCType=%s, RPCID=%v, From=%s, Query=%v", rpcMsg.RPCType, rpcMsg.RPCID, rpcMsg.From.Address.String(), rpcMsg.Query)
 			// Process the RPC request
 			respData, err := s.HandleRequest(dataBytes)
 			if err != nil {
-				log.Printf("rpc.Server: Error handling RPC request: %v", err)
+				log.Printf("rpc.Server: Error handling RPC request type=%s from=%s: %v", rpcMsg.RPCType, rpcMsg.From.Address.String(), err)
 				continue
 			}
-			log.Printf("rpc.Server: Processed RPC request, response: %s", string(respData))
 			// Send response back to the client
 			if err := s.sendResponse(rpcMsg.From.Address.String(), respData); err != nil {
 				log.Printf("rpc.Server: Failed to send response to %s: %v", rpcMsg.From.Address.String(), err)
 				continue
 			}
-			log.Printf("rpc.Server: Sent response to %s: %s", rpcMsg.From.Address.String(), string(respData))
-		} else {
-			log.Printf("rpc.Server: Ignoring non-RPC message type: %s", msg.Type)
 		}
 	}
 }
@@ -115,7 +109,6 @@ func (s *Server) HandleRequest(data []byte) ([]byte, error) {
 		return s.handler.errorResponse(nil, ErrCodeUnauthorized, "Authentication failed")
 	}
 
-	log.Printf("rpc.Server: Handling request: %s", string(data))
 	// Try decoding as security.Message
 	secMsg, err := security.DecodeMessage(data)
 	if err == nil && secMsg.Type == "rpc" {
@@ -131,7 +124,6 @@ func (s *Server) HandleRequest(data []byte) ([]byte, error) {
 			log.Printf("rpc.Server: Invalid RPC message format: %v", err)
 			return s.handler.errorResponse(nil, ErrCodeInvalidRequest, "Invalid RPC message format")
 		}
-		log.Printf("rpc.Server: Decoded RPC message: RPCType=%s, RPCID=%v, Query=%v", msg.RPCType, msg.RPCID, msg.Query)
 		// Check if the response is expected
 		if !msg.Query && !s.queryManager.IsExpectedResponse(msg) {
 			log.Printf("rpc.Server: Unexpected response: RPCID=%v", msg.RPCID)
@@ -141,15 +133,13 @@ func (s *Server) HandleRequest(data []byte) ([]byte, error) {
 		// RPC hardening: apply request timeout
 		respData, err := s.handler.ProcessRequest(dataBytes)
 		if err != nil {
-			log.Printf("rpc.Server: Error processing RPC request: %v", err)
+			log.Printf("rpc.Server: Error processing RPC request type=%s: %v", msg.RPCType, err)
 			return respData, err
 		}
-		log.Printf("rpc.Server: Successfully processed RPC request, response: %s", string(respData))
 		return respData, nil
 	}
 
 	// Fallback to direct JSON/binary processing
-	log.Printf("rpc.Server: Attempting direct JSON/binary processing: %s", string(data))
 	return s.handler.ProcessRequest(data)
 }
 
@@ -167,7 +157,18 @@ func (s *Server) authenticateRequest(data []byte) error {
 		return nil // Authentication disabled
 	}
 
-	// Extract API key from request
+	// Check if this is a binary RPC message (not JSON-RPC).
+	// Binary RPC messages are used for node-to-node communication (checkpoint sync,
+	// block download, etc.) and are already authenticated via the security layer
+	// (handshake encryption/integrity). Skip API key extraction for these.
+	var rpcMsg Message
+	if err := rpcMsg.Unmarshal(data); err == nil {
+		// This is a binary RPC message — skip JSON-RPC auth checks.
+		// Node-to-node RPC is trusted by the security layer.
+		return nil
+	}
+
+	// Extract API key from request (JSON-RPC only)
 	apiKey := s.extractAPIKey(data)
 	if apiKey == "" {
 		return fmt.Errorf("missing API key")

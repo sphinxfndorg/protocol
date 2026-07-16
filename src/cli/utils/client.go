@@ -17,16 +17,16 @@ import (
 	"strings"
 	"time"
 
+	logger "github.com/sphinxfndorg/protocol/src/console"
 	key "github.com/sphinxfndorg/protocol/src/core/sthincs/key/backend"
 	sign "github.com/sphinxfndorg/protocol/src/core/sthincs/sign/backend"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
-	logger "github.com/sphinxfndorg/protocol/src/log"
 	"github.com/sphinxfndorg/protocol/src/policy"
 )
 
 // SendTransaction sends a transaction via JSON-RPC
 func SendTransaction(opts SendTxOptions) error {
-	logger.Infof("Sending transaction from %s to %s amount %s SPX", opts.From, opts.To, opts.Amount)
+	logger.Info("Sending transaction from %s to %s amount %s SPX", opts.From, opts.To, opts.Amount)
 
 	// Convert amount to nSPX (assuming 1 SPX = 10^18 nSPX)
 	amountBig, ok := new(big.Int).SetString(opts.Amount, 10)
@@ -44,7 +44,7 @@ func SendTransaction(opts SendTxOptions) error {
 			logger.Warn("Failed to get nonce, using 0: %v", err)
 			nonce = 0
 		}
-		logger.Debugf("Using nonce: %d", nonce)
+		logger.Debug("Using nonce: %d", nonce)
 	}
 
 	if opts.KeyFile == "" {
@@ -71,7 +71,7 @@ func SendTransaction(opts SendTxOptions) error {
 	if txID == "" {
 		txID = tx.ID
 	}
-	logger.Infof("Transaction sent! TX ID: %s", txID)
+	logger.Info("Transaction sent! TX ID: %s", txID)
 
 	// Wait for confirmation if requested
 	if opts.Wait {
@@ -234,7 +234,7 @@ func decodeKeyBytes(value string) ([]byte, error) {
 
 // GetBalance queries the balance of an address
 func GetBalance(opts GetBalanceOptions) error {
-	logger.Infof("Querying balance for address: %s", opts.Address)
+	logger.Info("Querying balance for address: %s", opts.Address)
 
 	var balanceHex string
 	// Using spx_getBalance
@@ -260,13 +260,13 @@ func GetBalance(opts GetBalanceOptions) error {
 		new(big.Float).SetFloat64(1e18),
 	)
 
-	logger.Infof("Balance for %s: %.6f SPX", opts.Address, spxBalance)
+	logger.Info("Balance for %s: %.6f SPX", opts.Address, spxBalance)
 	return nil
 }
 
 // WatchTransaction polls until a transaction is confirmed
 func WatchTransaction(opts WatchTxOptions) error {
-	logger.Infof("Watching transaction: %s (timeout: %d seconds)", opts.TxID, opts.TimeoutSecs)
+	logger.Info("Watching transaction: %s (timeout: %d seconds)", opts.TxID, opts.TimeoutSecs)
 
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
@@ -282,7 +282,7 @@ func WatchTransaction(opts WatchTxOptions) error {
 			// Using spx_getTransactionReceipt
 			err := callRPC(opts.RPCURL, "spx_getTransactionReceipt", []interface{}{opts.TxID}, &receipt)
 			if err != nil {
-				logger.Debugf("Transaction not yet confirmed: %v", err)
+				logger.Debug("Transaction not yet confirmed: %v", err)
 				continue
 			}
 
@@ -298,7 +298,7 @@ func WatchTransaction(opts WatchTxOptions) error {
 				}
 				if status == 1 {
 					blockNum, _ := strconv.ParseInt(strings.TrimPrefix(receipt.BlockNumber, "0x"), 16, 64)
-					logger.Infof("✓ Transaction CONFIRMED in block %d! Hash: %s", blockNum, receipt.TransactionHash)
+					logger.Info("Transaction CONFIRMED in block %d! Hash: %s", blockNum, receipt.TransactionHash)
 					return nil
 				} else {
 					return fmt.Errorf("transaction failed with status %d", status)
@@ -343,7 +343,7 @@ func callRPC(rpcURL, method string, params []interface{}, result interface{}) er
 		return fmt.Errorf("failed to marshal request: %v", err)
 	}
 
-	logger.Debugf("RPC Request: %s", string(requestBody))
+	logger.Debug("RPC Request: %s", string(requestBody))
 
 	resp, err := http.Post(rpcURL, "application/json", bytes.NewBuffer(requestBody))
 	if err != nil {
@@ -356,7 +356,7 @@ func callRPC(rpcURL, method string, params []interface{}, result interface{}) er
 		return fmt.Errorf("failed to read response: %v", err)
 	}
 
-	logger.Debugf("RPC Response: %s", string(body))
+	logger.Debug("RPC Response: %s", string(body))
 
 	var rpcResp JSONRPCResponse
 	if err := json.Unmarshal(body, &rpcResp); err != nil {

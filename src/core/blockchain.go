@@ -22,11 +22,11 @@ import (
 
 	"github.com/sphinxfndorg/protocol/src/pool"
 
+	logger "github.com/sphinxfndorg/protocol/src/console"
 	sign "github.com/sphinxfndorg/protocol/src/core/sthincs/sign/backend"
 	svm "github.com/sphinxfndorg/protocol/src/core/svm/opcodes"
 	"github.com/sphinxfndorg/protocol/src/core/svm/vm"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
-	logger "github.com/sphinxfndorg/protocol/src/log"
 	storage "github.com/sphinxfndorg/protocol/src/state"
 )
 
@@ -175,7 +175,7 @@ func (blockchain *Blockchain) FinishInit(nodeID string) error {
 				if err := blockchain.WriteGenesisStateFromBlock(genesisBlock); err != nil {
 					logger.Warn("[%s] Failed to write genesis state file on startup: %v", nodeID, err)
 				} else {
-					logger.Info("[%s] ✅ Genesis state file written on startup from existing genesis block", nodeID)
+					logger.Info("[%s] SUCCESS Genesis state file written on startup from existing genesis block", nodeID)
 				}
 			}
 		}
@@ -382,7 +382,7 @@ func (bc *Blockchain) SetChainTip(height uint64, hash string) error {
 	bc.lock.Lock()
 	defer bc.lock.Unlock()
 
-	logger.Info("📦 Setting chain tip to height %d (hash=%s)", height, hash[:16])
+	logger.Info("INFO Setting chain tip to height %d (hash=%s)", height, hash[:16])
 
 	// Update in-memory chain state
 	// The storage layer will be updated when blocks are replayed from checkpoint to tip
@@ -449,7 +449,7 @@ func (bc *Blockchain) RollbackToHeight(targetHeight uint64) error {
 		return fmt.Errorf("RollbackToHeight: state rebuild failed: %w", err)
 	}
 
-	logger.Info("✅ Chain rolled back to height %d (storage purged, state rebuilt)", targetHeight)
+	logger.Info("SUCCESS Chain rolled back to height %d (storage purged, state rebuilt)", targetHeight)
 	return nil
 }
 
@@ -488,7 +488,7 @@ func (bc *Blockchain) rebuildStateToHeight(targetHeight uint64) error {
 		}
 	}
 
-	logger.Info("✅ State rebuilt via replay of %d blocks (0..%d)", targetHeight+1, targetHeight)
+	logger.Info("SUCCESS State rebuilt via replay of %d blocks (0..%d)", targetHeight+1, targetHeight)
 	return nil
 }
 
@@ -935,12 +935,12 @@ func (bc *Blockchain) StoreChainState(nodes []*storage.NodeInfo) error {
 			LastUpdated:             time.Now(),
 		}
 
-		logger.Info("✅ Retrieved blockchain TPS metrics: current_tps=%.2f, avg_tps=%.2f, peak_tps=%.2f, total_txs=%d, history_size=%d",
+		logger.Info("SUCCESS Retrieved blockchain TPS metrics: current_tps=%.2f, avg_tps=%.2f, peak_tps=%.2f, total_txs=%d, history_size=%d",
 			blockchainTPSMetrics.CurrentTPS, blockchainTPSMetrics.AverageTPS,
 			blockchainTPSMetrics.PeakTPS, blockchainTPSMetrics.TotalTransactions,
 			len(blockchainTPSMetrics.TPSHistory))
 	} else {
-		logger.Warn("⚠️ tpsMonitor is nil, cannot retrieve blockchain TPS metrics")
+		logger.Warn("WARNING tpsMonitor is nil, cannot retrieve blockchain TPS metrics")
 		blockchainTPSMetrics = bc.storage.GetTPSMetrics() // Fallback to storage
 	}
 
@@ -958,7 +958,7 @@ func (bc *Blockchain) StoreChainState(nodes []*storage.NodeInfo) error {
 	// Log successful state storage
 	logger.Info("Complete chain state saved with block size metrics: %s",
 		filepath.Join(bc.storage.GetStateDir(), "chain_state.json"))
-	logger.Info("Chain state saved with genesis hash: %s", bc.chainParams.GenesisHash)
+	logger.Info("Chain state saved (runtime genesis hash: %s)", bc.chainParams.GenesisHash)
 
 	// Log signature validation summary
 	logger.Info("Signature validation: %d/%d valid signatures",
@@ -1386,7 +1386,7 @@ func (bc *Blockchain) ImportBlock(block *types.Block) BlockImportResult {
 
 		// ── Block height > tip+1 → missing parent → orphan ──
 		if block.GetHeight() > latestBlock.GetHeight()+1 {
-			logger.Info("📦 Block %s at height %d ahead of tip %d — storing as orphan",
+			logger.Info("INFO Block %s at height %d ahead of tip %d — storing as orphan",
 				block.GetHash()[:16], block.GetHeight(), latestBlock.GetHeight())
 			bc.storeOrphanBlock(block)
 			return ImportedSide
@@ -1654,7 +1654,7 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 		}
 	}()
 
-	logger.Info("🔵 CommitBlock called at %s", time.Now().Format("15:04:05.000"))
+	logger.Info(" CommitBlock called at %s", time.Now().Format("15:04:05.000"))
 
 	// Extract the underlying types.Block from adapter
 	var typeBlock *types.Block
@@ -1697,18 +1697,18 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 		}
 	}
 
-	logger.Info("🔵 Processing block height=%d, txCount=%d",
+	logger.Info(" Processing block height=%d, txCount=%d",
 		typeBlock.GetHeight(), len(typeBlock.Body.TxsList))
 
 	// Check if tpsMonitor is nil before using it
 	if bc.tpsMonitor == nil {
-		logger.Error("❌ tpsMonitor is nil! Cannot record TPS metrics")
+		logger.Error("ERROR tpsMonitor is nil! Cannot record TPS metrics")
 		return fmt.Errorf("tpsMonitor not initialized")
 	}
 
 	// Check if blockchain is in running state
 	if bc.GetStatus() != StatusRunning {
-		logger.Warn("⚠️ Blockchain status is %s, but TPS already recorded", bc.StatusString(bc.GetStatus()))
+		logger.Warn("WARNING Blockchain status is %s, but TPS already recorded", bc.StatusString(bc.GetStatus()))
 		return fmt.Errorf("blockchain not ready to commit blocks, status: %s",
 			bc.StatusString(bc.GetStatus()))
 	}
@@ -1733,10 +1733,10 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 	// and that root must be in the header so light clients can verify.
 	stateRoot, err := bc.ExecuteBlock(typeBlock)
 	if err != nil {
-		logger.Error("❌ ExecuteBlock failed: %v", err)
+		logger.Error("ERROR ExecuteBlock failed: %v", err)
 		return fmt.Errorf("CommitBlock: execution failed: %w", err)
 	}
-	logger.Info("✅ Block executed, stateRoot=%x", stateRoot)
+	logger.Info("SUCCESS Block executed, stateRoot=%x", stateRoot)
 
 	// ════════════════════════════════════════════════════════════════════════
 	// CONSENSUS-SAFETY FIX: never silently rehash a divergent block
@@ -1766,7 +1766,7 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 	// error: refuse to commit, leave the tip where it was, and let the caller
 	// force a resync from a trusted peer instead of fabricating a new hash.
 	if !bytes.Equal(typeBlock.Header.StateRoot, stateRoot) {
-		logger.Error("❌ STATE DIVERGENCE DETECTED at height %d: header claims StateRoot=%x, local execution produced=%x — refusing to commit",
+		logger.Error("ERROR STATE DIVERGENCE DETECTED at height %d: header claims StateRoot=%x, local execution produced=%x — refusing to commit",
 			typeBlock.GetHeight(), typeBlock.Header.StateRoot, stateRoot)
 		return fmt.Errorf(
 			"CommitBlock: state root mismatch at height %d (header=%x, executed=%x) — local state has diverged from the network; refusing to commit rather than silently rehashing",
@@ -1781,36 +1781,36 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 	}
 	if bc.mempool != nil && len(txIDs) > 0 {
 		bc.mempool.RemoveTransactions(txIDs)
-		logger.Info("✅ Removed %d committed transactions from mempool after execution", len(txIDs))
+		logger.Info("SUCCESS Removed %d committed transactions from mempool after execution", len(txIDs))
 	}
 
 	// ========== PRODUCTION FIX: Force state DB flush ==========
 	// Get the state DB as concrete *StateDB type (which has Commit method)
 	stateDBInterface, err := bc.NewStateDB()
 	if err != nil {
-		logger.Error("❌ Failed to get state DB: %v", err)
+		logger.Error("ERROR Failed to get state DB: %v", err)
 		return fmt.Errorf("CommitBlock: failed to get state DB: %w", err)
 	}
 
 	// Type assert to *StateDB to access Commit method
 	stateDB, ok := stateDBInterface.(*StateDB)
 	if !ok {
-		logger.Error("❌ Failed to cast state DB to *StateDB")
+		logger.Error("ERROR Failed to cast state DB to *StateDB")
 		return fmt.Errorf("CommitBlock: state DB is not *StateDB")
 	}
 
 	// Force commit to flush all changes to disk
 	if _, err := stateDB.Commit(); err != nil {
-		logger.Error("❌ Failed to flush state DB: %v", err)
+		logger.Error("ERROR Failed to flush state DB: %v", err)
 		return fmt.Errorf("CommitBlock: failed to flush state DB: %w", err)
 	}
-	logger.Info("✅ State DB flushed successfully after block execution")
+	logger.Info("SUCCESS State DB flushed successfully after block execution")
 
 	// Also verify the state DB flush worked by checking vault balance
 	if typeBlock.GetHeight() >= 1 {
 		vaultBalance, err := stateDB.GetBalance(GenesisVaultAddress)
 		if err == nil && vaultBalance != nil {
-			logger.Info("✅ State DB verification: vault balance = %s nSPX", vaultBalance.String())
+			logger.Info("SUCCESS State DB verification: vault balance = %s nSPX", vaultBalance.String())
 		}
 	}
 	// ==========================================================
@@ -1857,7 +1857,7 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 				logger.Warn("Failed to store OP_RETURN data for tx %s: %v", tx.ID, err)
 			}
 
-			logger.Info("📝 OP_RETURN: Transaction %s embedded %d bytes: %s",
+			logger.Info(" OP_RETURN: Transaction %s embedded %d bytes: %s",
 				tx.ID, dataLen, string(tx.ReturnData))
 		}
 	}
@@ -1872,14 +1872,14 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 	}
 
 	// ========== PRODUCTION FIX: Store block in storage AFTER state flush ==========
-	logger.Info("📝 Storing block at height %d with hash %s to storage",
+	logger.Info(" Storing block at height %d with hash %s to storage",
 		typeBlock.GetHeight(), typeBlock.GetHash())
 
 	if err := bc.storage.StoreBlock(typeBlock); err != nil {
-		logger.Error("❌ Failed to store block: %v", err)
+		logger.Error("ERROR Failed to store block: %v", err)
 		return fmt.Errorf("failed to store block: %w", err)
 	}
-	logger.Info("✅ Block stored in storage successfully at %s", time.Now().Format("15:04:05.000"))
+	logger.Info("SUCCESS Block stored in storage successfully at %s", time.Now().Format("15:04:05.000"))
 
 	// Calculate actual block time and record TPS only after a successful commit.
 	blockTime := bc.calculateBlockTime(typeBlock)
@@ -1901,19 +1901,19 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 	bc.lock.Lock()
 	bc.chain = append(bc.chain, typeBlock)
 	bc.lock.Unlock()
-	logger.Info("✅ Block added to in-memory chain at height %d", typeBlock.GetHeight())
+	logger.Info("SUCCESS Block added to in-memory chain at height %d", typeBlock.GetHeight())
 	// ================================================================
 
 	if err := bc.validateBlockTransactionAuth(typeBlock, true); err != nil {
 		return fmt.Errorf("CommitBlock: failed to store canonical transaction evidence: %w", err)
 	}
-	logger.Info("✅ Canonical transaction replay and receipt evidence stored")
+	logger.Info("SUCCESS Canonical transaction replay and receipt evidence stored")
 
 	// ========== FIX: Write checkpoint immediately after block commit ==========
 	if err := bc.WriteChainCheckpoint(); err != nil {
 		logger.Warn("Failed to write checkpoint after block commit: %v", err)
 	} else {
-		logger.Info("✅ Checkpoint updated after block commit at height %d", typeBlock.GetHeight())
+		logger.Info("SUCCESS Checkpoint updated after block commit at height %d", typeBlock.GetHeight())
 	}
 	// ========================================================================
 
@@ -1933,7 +1933,7 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 		}
 
 		bc.consensusEngine.AddConsensusSignature(signature)
-		logger.Info("✅ Added commit signature for block %s to consensus engine", typeBlock.GetHash())
+		logger.Info("SUCCESS Added commit signature for block %s to consensus engine", typeBlock.GetHash())
 
 		signatures := bc.consensusEngine.GetConsensusSignatures()
 
@@ -1945,7 +1945,7 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 			if err := bc.SaveBasicChainState(); err != nil {
 				logger.Warn("Failed to save chain state after block commit: %v", err)
 			} else {
-				logger.Info("✅ Chain state saved after block commit with %d signatures", len(sigs))
+				logger.Info("SUCCESS Chain state saved after block commit with %d signatures", len(sigs))
 			}
 		} else {
 			logger.Warn("Invalid signature type returned from consensus")
@@ -1959,7 +1959,7 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 
 	// Log successful commit with final TPS stats
 	finalStats := bc.tpsMonitor.GetStats()
-	logger.Info("✅ Block committed: height=%d, hash=%s, transactions=%d, block_time=%v",
+	logger.Info("SUCCESS Block committed: height=%d, hash=%s, transactions=%d, block_time=%v",
 		typeBlock.GetHeight(), typeBlock.GetHash(), len(txIDs), blockTime)
 	logger.Info("📊 Final TPS stats: blocks_processed=%v, total_txs=%v, avg_txs_per_block=%.2f, current_tps=%.2f",
 		finalStats["blocks_processed"], finalStats["total_transactions"],
@@ -2128,7 +2128,7 @@ func (bc *Blockchain) createGenesisBlock() error {
 				storedHash, bc.chainParams.ChainName, actualHash,
 			)
 		}
-		logger.Info("✅ Chain continuity confirmed: genesis %s carries forward to %s",
+		logger.Info("SUCCESS Chain continuity confirmed: genesis %s carries forward to %s",
 			actualHash, bc.chainParams.ChainName)
 	}
 
@@ -2430,7 +2430,7 @@ func (bc *Blockchain) storeOrphanBlock(block *types.Block) {
 	}
 
 	bc.orphanBlocks[parentHash] = append(bc.orphanBlocks[parentHash], block)
-	logger.Info("📦 Stored orphan block %s (height=%d, parent=%s), total orphans=%d",
+	logger.Info("INFO Stored orphan block %s (height=%d, parent=%s), total orphans=%d",
 		blockHash[:16], block.GetHeight(), parentHash[:16], len(bc.orphanBlocks))
 
 	// Prune if the orphan pool grows too large to prevent memory exhaustion
@@ -2485,11 +2485,11 @@ func (bc *Blockchain) processOrphansAfterCommit(committedHash string) {
 
 		result := bc.ImportBlock(child)
 		if result == ImportedBest || result == ImportedSide {
-			logger.Info("✅ Orphan block %s processed successfully (%v)", child.GetHash()[:16], result)
+			logger.Info("SUCCESS Orphan block %s processed successfully (%v)", child.GetHash()[:16], result)
 			// Recursively process children of this orphan
 			bc.processOrphansAfterCommit(child.GetHash())
 		} else {
-			logger.Warn("⚠️ Orphan block %s failed to import: %v", child.GetHash()[:16], result)
+			logger.Warn("WARNING Orphan block %s failed to import: %v", child.GetHash()[:16], result)
 			// Re-store for later retry
 			bc.storeOrphanBlock(child)
 		}
@@ -2666,7 +2666,7 @@ func (bc *Blockchain) reorganizeChain(newForkBlock, oldTip *types.Block) error {
 		logger.Warn("Failed to write checkpoint after reorg: %v", err)
 	}
 
-	logger.Info("✅ Reorg complete: rolled back %d blocks, applied %d blocks, new_tip=%s at height %d, weight=%s",
+	logger.Info("SUCCESS Reorg complete: rolled back %d blocks, applied %d blocks, new_tip=%s at height %d, weight=%s",
 		len(oldBlocks), len(newBlocks), newForkBlock.GetHash()[:16], newForkBlock.GetHeight(), bc.chainWeight)
 	return nil
 }
@@ -2743,7 +2743,7 @@ func (bc *Blockchain) emergencyReorgRollback(oldBlocks, failedNewBlocks []*types
 	bc.chainWeight = bc.calculateChainWeight(oldBlocks[0])
 	bc.lock.Unlock()
 
-	logger.Info("✅ Emergency reorg rollback complete — original chain restored")
+	logger.Info("SUCCESS Emergency reorg rollback complete — original chain restored")
 }
 
 // ValidateBlock validates a block including TxsRoot = MerkleRoot verification
@@ -2797,7 +2797,7 @@ func (bc *Blockchain) ValidateBlock(block consensus.Block) error {
 			expectedParentHash := previousBlock.GetHash() // Expected parent hash
 			currentParentHash := b.GetPrevHash()          // Actual parent hash
 
-			logger.Info("🔍 DEBUG: ParentHash validation - expected: %s, current: %s",
+			logger.Info("INFO DEBUG: ParentHash validation - expected: %s, current: %s",
 				expectedParentHash, currentParentHash)
 
 			// For comparison, we need to normalize both hashes

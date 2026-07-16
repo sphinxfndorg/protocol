@@ -18,8 +18,8 @@ import (
 	"github.com/sphinxfndorg/protocol/src/bind"
 	"github.com/sphinxfndorg/protocol/src/common"
 	"github.com/sphinxfndorg/protocol/src/consensus"
+	logger "github.com/sphinxfndorg/protocol/src/console"
 	"github.com/sphinxfndorg/protocol/src/core"
-	logger "github.com/sphinxfndorg/protocol/src/log"
 	"github.com/sphinxfndorg/protocol/src/network"
 )
 
@@ -72,9 +72,9 @@ SUBCOMMANDS
 TOKENOMICS OVERVIEW
   Genesis Supply: 1,240,000,000 SPX (24.8% of 5B max supply)
   Funding Rounds:
-    👼 Angel Round: 30,000,000 SPX @ $0.06 = $1.8M
-    💎 Private Sale: 70,000,000 SPX @ $0.24 = $16.8M
-    🌍 Public ICO: 100,000,000 SPX @ $0.36 = $36.0M
+    Angel Round: 30,000,000 SPX @ $0.06 = $1.8M
+    Private Sale: 70,000,000 SPX @ $0.24 = $16.8M
+    Public ICO: 100,000,000 SPX @ $0.36 = $36.0M
     Total Raised: $54.6M (200,000,000 SPX sold, 16.1% of genesis)
 
 HYBRID CONSENSUS INFORMATION
@@ -106,7 +106,7 @@ REAL-DEVICE QUICK START (ETH/BTC style — no pre-agreed node count)
       --seeds=<PUBLIC_IP_1>:30303,<PUBLIC_IP_2>:30303 \
       --datadir=data --pbft
 
-  PBFT activates automatically once ≥ 3 validators are connected.
+  PBFT activates automatically once >= 3 validators are connected.
   Late-joining nodes sync automatically and join consensus when caught up.
   No --nodes or --node-index required.
 
@@ -244,7 +244,7 @@ func runNodeCmd(args []string) error {
 		nodeConfig.WSPort = *wsPort
 	}
 
-	logger.Infof("Starting node role=%s tcp=%s udp=%s rpc=%s seeds=%q data=%s pbft=%v mode=%s network=%s",
+	logger.Info("Starting node role=%s tcp=%s udp=%s rpc=%s seeds=%q data=%s pbft=%v mode=%s network=%s",
 		*role, nodeConfig.TCPAddr, nodeConfig.UDPPort, nodeConfig.HTTPPort, *seeds, *dataDir, *pbftMode, *mode, *networkFlag)
 
 	// ── Determine mode: real-device, seed-based, or same-box ──
@@ -289,7 +289,7 @@ func runNodeCmd(args []string) error {
 	// (non-loopback IP). This allows 3-node local testing with --seeds to work
 	// correctly.
 	if *pbftMode && isRealDevice && *numNodes > 1 {
-		logger.Info("ℹ️  Real-device mode (non-loopback IP): --nodes=%d ignored; validator count derived from peer discovery", *numNodes)
+		logger.Info("Real-device mode (non-loopback IP): --nodes=%d ignored; validator count derived from peer discovery", *numNodes)
 		*numNodes = 1 // normalise so same-box harness arrays aren't synthesised
 	}
 	// For seed-based mode on loopback, keep the user's --nodes value so that
@@ -302,12 +302,12 @@ func runNodeCmd(args []string) error {
 		logger.Info("=== STARTING HYBRID PBFT CONSENSUS MODE ===")
 		logger.Info("This node will participate in hybrid consensus with %d total validators", *numNodes)
 		logger.Info("")
-		logger.Info("🔓 PHASE 1 (Blocks 0-1): VDF-PBFT (no stake required)")
+		logger.Info("PHASE 1 (Blocks 0-1): VDF-PBFT (no stake required)")
 		logger.Info("   - All nodes can participate as validators")
 		logger.Info("   - VDF-based leader selection only")
 		logger.Info("   - Genesis block and Block 1 use this phase")
 		logger.Info("")
-		logger.Info("🔒 PHASE 2 (Blocks 2+): VDF+Stake PBFT")
+		logger.Info("PHASE 2 (Blocks 2+): VDF+Stake PBFT")
 		logger.Info("   - Validators must have minimum stake")
 		logger.Info("   - VDF + stake-based leader selection")
 		logger.Info("   - Secure consensus after initial distribution")
@@ -337,7 +337,7 @@ func runNodeCmd(args []string) error {
 		}
 		vdfParams = &vdfParamsTemp
 
-		logger.Info("✅ VDF parameters derived successfully:")
+		logger.Info("VDF parameters derived successfully:")
 		logger.Info("   Discriminant D: %d bits", vdfParams.Discriminant.BitLen())
 		logger.Info("   T (iterations): %d", vdfParams.T)
 
@@ -459,7 +459,7 @@ func legacyExecute() error {
 	flag.Parse()
 
 	if cfg.legacyCluster {
-		logger.Warn("⚠️  -legacy-cluster requested: using RunMultipleNodesInternal(), " +
+		logger.Warn("-legacy-cluster requested: using RunMultipleNodesInternal(), " +
 			"a same-process 3-node harness that does NOT support late joiners. " +
 			"Use the 'node' subcommand or -seeds for production multi-node networks.")
 		return bind.RunMultipleNodesInternal()
@@ -559,7 +559,7 @@ func runWalletInitCmd(args []string) error {
 		return fmt.Errorf("failed to initialize wallet: %w", err)
 	}
 
-	fmt.Printf("\n✅ Wallet initialized successfully!\n\n")
+	fmt.Printf("\nWallet initialized successfully!\n\n")
 	fmt.Printf("Address:        %s\n", info.Address)
 	fmt.Printf("Public Key:     %s...\n", info.PublicKeyHex[:32])
 	fmt.Printf("Network:        %s (ChainID: %d)\n", info.Network, info.ChainID)

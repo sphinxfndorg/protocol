@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/sphinxfndorg/protocol/src/common"
-	logger "github.com/sphinxfndorg/protocol/src/log"
+	logger "github.com/sphinxfndorg/protocol/src/console"
 	"golang.org/x/crypto/sha3"
 )
 
@@ -99,9 +99,11 @@ func (v *productionVDF) Eval(params VDFParams, x *big.Int) (*big.Int, *big.Int, 
 	xElement := BigIntToClassGroup(x, D) // Deserializes big integer to class group element
 
 	// Step 1: Compute y = x^(2^T) via sequential squaring
-	// This is the core VDF computation that takes time proportional to T
-	yElement := RepeatedSquare(xElement, D, T) // Performs T sequential squarings
-	y := ClassGroupToBigInt(yElement)          // Serializes result to big integer
+	// This is the core VDF computation that takes time proportional to T.
+	// Use the progress-reporting variant so the squaring process itself is
+	// visible (live progress bar) rather than only the final y value.
+	yElement := RepeatedSquareWithProgress(xElement, D, T, "VDF evaluation") // Performs T sequential squarings
+	y := ClassGroupToBigInt(yElement)                                        // Serializes result to big integer
 
 	// Step 2: Compute challenge l = H(D, T, x, y)
 	// This is a Fiat-Shamir transformation for the Wesolowski proof
@@ -116,7 +118,7 @@ func (v *productionVDF) Eval(params VDFParams, x *big.Int) (*big.Int, *big.Int, 
 	proof := ClassGroupToBigInt(proofElement)    // Serializes proof to big integer
 
 	elapsed := time.Since(startTime) // Calculates elapsed time for evaluation
-	logger.Info("🔮 Class Group VDF Eval: T=%d, time=%v, input=%x..., output=%x..., l=%x...",
+	logger.Info("Class Group VDF Eval: T=%d, time=%v, input=%x..., output=%x..., l=%x...",
 		T, elapsed, x.Bytes()[:8], y.Bytes()[:8], l.Bytes()[:8]) // Logs evaluation metrics
 
 	return y, proof, nil // Returns output value and proof
@@ -299,9 +301,9 @@ func (v *productionVDF) Verify(params VDFParams, x, y, proof *big.Int) bool {
 
 	elapsed := time.Since(startTime) // Calculates elapsed time for verification
 	if valid {                       // If verification succeeded
-		logger.Info("✅ Class Group VDF Verify: T=%d, time=%v, valid=true", T, elapsed) // Logs success
+		logger.Info("Class Group VDF Verify: T=%d, time=%v, valid=true", T, elapsed) // Logs success
 	} else { // If verification failed
-		logger.Warn("❌ Class Group VDF Verify: T=%d, time=%v, valid=false", T, elapsed) // Logs failure
+		logger.Warn("Class Group VDF Verify: T=%d, time=%v, valid=false", T, elapsed) // Logs failure
 
 		// Additional debug information for failed verification
 		logger.Debug("Verification details:")
@@ -322,30 +324,47 @@ func (v *productionVDF) Verify(params VDFParams, x, y, proof *big.Int) bool {
 // For production, these must come from a public trusted setup ceremony
 // This is only for development and testing purposes
 func GenerateClassGroupParameters(bits int, T uint64) (*VDFParams, error) {
-	logger.Info("🔐 Generating class group parameters: %d-bit discriminant, T=%d", bits, T) // Logs generation start
+	logger.Info("Generating class group parameters: %d-bit discriminant, T=%d", bits, T) // Logs generation start
 
 	// For class group VDF, we need a fundamental discriminant D
 	// D should be negative and ≡ 1 mod 4 for imaginary quadratic fields
 	// Common choice: D = -p where p is a large prime ≡ 3 mod 4
 
-	// Generate a prime p ≡ 3 mod 4
+	// Generate a prime p ≡ 3 mod 4. rand.Prime already searches internally,
+	// so most bit sizes resolve in a handful of outer attempts here -- but
+	// larger bit sizes (or an unlucky run) can take a visible moment, so
+	// this renders the same kind of live spinner as deriveVDFParams's
+	// canonical prime search rather than only logging once a prime is
+	// finally accepted.
+	renderer := logger.Default()
+	spinner := logger.NewSpinner(fmt.Sprintf("Searching for %d-bit discriminant prime", bits))
+	detach := renderer.Attach(spinner)
+	spinner.Start()
+
 	var p *big.Int // Declares variable for prime
 	var err error  // Declares error variable
-	for {          // Loops until suitable prime found
+	attempt := 0
+	for { // Loops until suitable prime found
+		attempt++
 		p, err = rand.Prime(rand.Reader, bits) // Generates random prime of specified bits
 		if err != nil {                        // If generation failed
+			spinner.Stop(logger.SpinnerError, fmt.Sprintf("Prime generation failed: %v", err))
+			detach()
 			return nil, err // Returns error
 		}
 		// Check if p ≡ 3 mod 4
 		if new(big.Int).Mod(p, big.NewInt(4)).Cmp(big.NewInt(3)) == 0 { // If p mod 4 equals 3
 			break // Found suitable prime, exit loop
 		}
+		spinner.UpdateMessage(fmt.Sprintf("Searching for %d-bit discriminant prime (attempt %d)", bits, attempt))
 	}
+	spinner.Stop(logger.SpinnerSuccess, fmt.Sprintf("%d-bit discriminant prime found after %d attempt(s)", bits, attempt))
+	detach()
 
 	// D = -p (negative fundamental discriminant)
 	D := new(big.Int).Neg(p) // Creates negative discriminant
 
-	logger.Info("✅ Class group parameters generated: D=%d bits, D mod 4 = %d",
+	logger.Info("Class group parameters generated: D=%d bits, D mod 4 = %d",
 		D.BitLen(), new(big.Int).Mod(D, big.NewInt(4))) // Logs generation completion
 
 	return &VDFParams{ // Returns parameters struct
@@ -524,7 +543,7 @@ func (r *RANDAO) Submit(slotInEpoch uint64, sub *VDFSubmission) error {
 	}
 
 	if _, already := r.submissions[sub.Epoch][sub.ValidatorID]; already { // If validator already submitted
-		logger.Info("ℹ️  Duplicate VDF submission ignored: validator=%s epoch=%d",
+		logger.Info("ℹ Duplicate VDF submission ignored: validator=%s epoch=%d",
 			sub.ValidatorID, sub.Epoch) // Logs duplicate submission
 		return nil // Returns without processing duplicate
 	}
@@ -537,9 +556,9 @@ func (r *RANDAO) Submit(slotInEpoch uint64, sub *VDFSubmission) error {
 		for i := range r.mix { // Iterates through mix bytes
 			r.mix[i] ^= fixed[i] // XORs output with mix
 		}
-		logger.Info("✅ First VDF submission for epoch %d: mix updated", sub.Epoch) // Logs mix update
+		logger.Info("First VDF submission for epoch %d: mix updated", sub.Epoch) // Logs mix update
 	} else { // If not first submission
-		logger.Info("✅ VDF submission accepted (additional) for epoch %d", sub.Epoch) // Logs acceptance
+		logger.Info("VDF submission accepted (additional) for epoch %d", sub.Epoch) // Logs acceptance
 	}
 
 	r.reveals[sub.Epoch] = append(r.reveals[sub.Epoch], fixed) // Adds to reveals list
@@ -610,7 +629,7 @@ func (r *RANDAO) FinaliseEpoch(epoch uint64, activeValidators []string) []string
 	r.epochFinalized[epoch] = true // Sets finalized flag
 
 	for _, id := range slashList { // Iterates through slashed validators
-		logger.Warn("⚠️  Validator %s did not submit VDF for epoch %d — slashing", id, epoch) // Logs slashing
+		logger.Warn("Validator %s did not submit VDF for epoch %d — slashing", id, epoch) // Logs slashing
 	}
 
 	return slashList // Returns list of validators to slash
@@ -837,6 +856,6 @@ func (c *Consensus) ResetRANDAO(genesisBlock Block) error {
 	}
 	// Update leader status immediately to reflect new RANDAO.
 	c.UpdateLeaderStatus()
-	logger.Info("✅ RANDAO reset with genesis hash %s", genesisBlock.GetHash())
+	logger.Info("RANDAO reset with genesis hash %s", genesisBlock.GetHash())
 	return nil
 }

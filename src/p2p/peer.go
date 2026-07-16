@@ -12,12 +12,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"math"
 	"math/big"
 	"net"
 	"time"
 
+	logger "github.com/sphinxfndorg/protocol/src/console"
 	security "github.com/sphinxfndorg/protocol/src/handshake"
 	"github.com/sphinxfndorg/protocol/src/network"
 	"github.com/sphinxfndorg/protocol/src/transport"
@@ -53,25 +53,25 @@ func (pm *PeerManager) ConnectPeer(node *network.Node) error {
 
 	// Check if peer is banned
 	if banExpiry, banned := pm.bans[node.ID]; banned && time.Now().Before(banExpiry) {
-		log.Printf("Peer %s is banned until %v", node.ID, banExpiry)
+		logger.Info("Peer %s is banned until %v", node.ID, banExpiry)
 		return fmt.Errorf("peer %s is banned until %v", node.ID, banExpiry)
 	}
 
 	// Check if we've reached maximum peer limit
 	if len(pm.peers) >= pm.maxPeers {
-		log.Printf("Maximum peer limit reached: %d", pm.maxPeers)
+		logger.Info("Maximum peer limit reached: %d", pm.maxPeers)
 		return errors.New("maximum peer limit reached")
 	}
 
-	log.Printf("Connecting to node %s via TCP: %s", node.ID, node.Address)
+	logger.Info("Connecting to node %s via TCP: %s", node.ID, node.Address)
 
 	// Establish TCP connection to the peer
 	_, err := transport.ConnectTCP(node.Address, pm.server.messageCh)
 	if err != nil {
-		log.Printf("Failed to connect to %s: %v", node.ID, err)
+		logger.Warn("Failed to connect to %s: %v", node.ID, err)
 		return fmt.Errorf("failed to connect to %s: %v", node.ID, err)
 	}
-	log.Printf("TCP connection established to %s", node.Address)
+	logger.Info("TCP connection established to %s", node.Address)
 
 	// Create peer object before handshake
 	peer := &network.Peer{
@@ -83,7 +83,7 @@ func (pm *PeerManager) ConnectPeer(node *network.Node) error {
 
 	// Add peer to node manager's peer list
 	if err := pm.server.nodeManager.AddPeer(node); err != nil {
-		log.Printf("Failed to add peer %s: %v", node.ID, err)
+		logger.Warn("Failed to add peer %s: %v", node.ID, err)
 		transport.DisconnectNode(node) // Clean up connection
 		return fmt.Errorf("failed to add peer %s: %v", node.ID, err)
 	}
@@ -94,7 +94,7 @@ func (pm *PeerManager) ConnectPeer(node *network.Node) error {
 
 	// Perform handshake after adding peer
 	if err := pm.performHandshake(node); err != nil {
-		log.Printf("Handshake failed with %s: %v", node.ID, err)
+		logger.Info("Handshake failed with %s: %v", node.ID, err)
 		transport.DisconnectNode(node) // Clean up connection
 		// Rollback peer addition
 		pm.server.nodeManager.RemovePeer(node.ID)
@@ -105,10 +105,10 @@ func (pm *PeerManager) ConnectPeer(node *network.Node) error {
 
 	// Store peer information in database for persistence
 	if err := pm.server.StorePeer(peer); err != nil {
-		log.Printf("Failed to store peer %s in DB: %v", node.ID, err)
+		logger.Warn("Failed to store peer %s in DB: %v", node.ID, err)
 	}
 
-	log.Printf("Connected to peer %s (Role=%s)", node.ID, node.Role)
+	logger.Info("Connected to peer %s (Role=%s)", node.ID, node.Role)
 
 	// Send initial ping to check liveness
 	peer.SendPing()
@@ -131,7 +131,7 @@ func (pm *PeerManager) ConnectPeer(node *network.Node) error {
 
 	peerInfoBytes, err := json.Marshal(peerInfo)
 	if err != nil {
-		log.Printf("Failed to marshal peer info: %v", err)
+		logger.Warn("Failed to marshal peer info: %v", err)
 		return fmt.Errorf("failed to marshal peer info: %v", err)
 	}
 
@@ -145,7 +145,7 @@ func (pm *PeerManager) ConnectPeer(node *network.Node) error {
 
 // performHandshake negotiates protocol version and capabilities.
 func (pm *PeerManager) performHandshake(node *network.Node) error {
-	log.Printf("Starting handshake with %s (ID=%s)", node.Address, node.ID)
+	logger.Info("Starting handshake with %s (ID=%s)", node.Address, node.ID)
 
 	// Ensure peer exists in our tracking maps before sending version
 	pm.mu.Lock()
@@ -156,7 +156,7 @@ func (pm *PeerManager) performHandshake(node *network.Node) error {
 			ConnectedAt:      time.Now(),
 			LastSeen:         time.Now(),
 		}
-		log.Printf("Added peer %s to nodeManager.peers before handshake", node.ID)
+		logger.Info("Added peer %s to nodeManager.peers before handshake", node.ID)
 	}
 	pm.mu.Unlock()
 
@@ -177,7 +177,7 @@ func (pm *PeerManager) performHandshake(node *network.Node) error {
 	// Marshal version data to JSON
 	versionBytes, err := json.Marshal(versionData)
 	if err != nil {
-		log.Printf("Failed to marshal version message: %v", err)
+		logger.Warn("Failed to marshal version message: %v", err)
 		return fmt.Errorf("failed to marshal version message: %v", err)
 	}
 
@@ -189,7 +189,7 @@ func (pm *PeerManager) performHandshake(node *network.Node) error {
 	// Get existing TCP connection
 	conn, err := transport.GetConnection(node.Address)
 	if err != nil {
-		log.Printf("No active connection to %s: %v", node.Address, err)
+		logger.Info("No active connection to %s: %v", node.Address, err)
 		return fmt.Errorf("no active connection to %s: %v", node.Address, err)
 	}
 
@@ -201,10 +201,10 @@ func (pm *PeerManager) performHandshake(node *network.Node) error {
 
 	// Send version message
 	if err := transport.SendMessage(node.Address, versionMsg); err != nil {
-		log.Printf("Failed to send version message to %s: %v", node.Address, err)
+		logger.Warn("Failed to send version message to %s: %v", node.Address, err)
 		return err
 	}
-	log.Printf("Version message sent to %s, waiting for verack response", node.Address)
+	logger.Info("Version message sent to %s, waiting for verack response", node.Address)
 
 	// Wait for verack response with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -213,20 +213,20 @@ func (pm *PeerManager) performHandshake(node *network.Node) error {
 	for {
 		select {
 		case msg := <-pm.server.messageCh:
-			log.Printf("Received message in handshake for %s: Type=%s, Data=%v, ChannelLen=%d",
+			logger.Info("Received message in handshake for %s: Type=%s, Data=%v, ChannelLen=%d",
 				node.Address, msg.Type, msg.Data, len(pm.server.messageCh))
 
 			if msg.Type == "verack" {
 				// Unmarshal verack data
 				var peerID string
 				if err := json.Unmarshal(msg.Data, &peerID); err != nil {
-					log.Printf("Failed to unmarshal verack data: %v", err)
+					logger.Warn("Failed to unmarshal verack data: %v", err)
 					continue
 				}
 
 				// Check if verack matches expected peer
 				if peerID == node.ID {
-					log.Printf("Received valid verack from %s for node_id: %s, Address: %s",
+					logger.Info("Received valid verack from %s for node_id: %s, Address: %s",
 						node.Address, peerID, node.Address)
 
 					// Update peer status to active
@@ -235,32 +235,38 @@ func (pm *PeerManager) performHandshake(node *network.Node) error {
 						peer.ConnectionStatus = "active"
 						peer.LastSeen = time.Now()
 					} else {
-						log.Printf("Peer %s not found in nodeManager.peers during verack", node.ID)
+						logger.Warn("Peer %s not found in nodeManager.peers during verack", node.ID)
 					}
 					pm.mu.Unlock()
 					return nil // Handshake successful
 				} else {
-					log.Printf("Invalid verack from %s: peerID=%v, expected=%s, Address: %s",
+					logger.Warn("Invalid verack from %s: peerID=%v, expected=%s, Address: %s",
 						node.Address, peerID, node.ID, node.Address)
 				}
 			} else {
-				log.Printf("Unexpected message type in handshake for %s: %s", node.Address, msg.Type)
+				logger.Info("Unexpected message type in handshake for %s: %s", node.Address, msg.Type)
 			}
 
 		case <-ctx.Done():
 			// Timeout waiting for verack
-			log.Printf("Timeout waiting for verack from %s: %v", node.Address, ctx.Err())
+			logger.Warn("Timeout waiting for verack from %s: %v", node.Address, ctx.Err())
 			return fmt.Errorf("timeout waiting for verack from %s", node.Address)
 		}
 	}
 }
 
 // DisconnectPeer terminates a peer connection.
-// Gracefully disconnects from a peer and cleans up all associated resources.
+// DisconnectPeer gracefully disconnects from a peer and cleans up all associated resources.
 func (pm *PeerManager) DisconnectPeer(peerID string) error {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
+	return pm.disconnectPeerLocked(peerID)
+}
 
+// disconnectPeerLocked does the actual disconnect work. Callers must already
+// hold pm.mu — sync.Mutex is not reentrant, so this must never be called from
+// a path that also tries to lock pm.mu.
+func (pm *PeerManager) disconnectPeerLocked(peerID string) error {
 	// Check if peer exists
 	peer, exists := pm.peers[peerID]
 	if !exists {
@@ -269,7 +275,7 @@ func (pm *PeerManager) DisconnectPeer(peerID string) error {
 
 	// Close the underlying connection
 	if err := transport.DisconnectNode(peer.Node); err != nil {
-		log.Printf("Failed to disconnect peer %s: %v", peerID, err)
+		logger.Warn("Failed to disconnect peer %s: %v", peerID, err)
 	}
 
 	// Remove from all tracking maps
@@ -277,7 +283,7 @@ func (pm *PeerManager) DisconnectPeer(peerID string) error {
 	delete(pm.scores, peerID)
 	pm.server.nodeManager.RemovePeer(peerID)
 
-	log.Printf("Disconnected peer %s", peerID)
+	logger.Info("Disconnected peer %s", peerID)
 	return nil
 }
 
@@ -286,7 +292,11 @@ func (pm *PeerManager) DisconnectPeer(peerID string) error {
 func (pm *PeerManager) BanPeer(peerID string, duration time.Duration) error {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
+	return pm.banPeerLocked(peerID, duration)
+}
 
+// banPeerLocked does the actual ban work. Callers must already hold pm.mu.
+func (pm *PeerManager) banPeerLocked(peerID string, duration time.Duration) error {
 	// Check if peer exists
 	if _, exists := pm.peers[peerID]; !exists {
 		return fmt.Errorf("peer %s not found", peerID)
@@ -296,10 +306,10 @@ func (pm *PeerManager) BanPeer(peerID string, duration time.Duration) error {
 	pm.bans[peerID] = time.Now().Add(duration)
 
 	// Disconnect the peer
-	return pm.DisconnectPeer(peerID)
+	return pm.disconnectPeerLocked(peerID)
 }
 
-// UpdatePeerScore adjusts a peer’s score based on behavior.
+// UpdatePeerScore adjusts a peer's score based on behavior.
 // Implements a reputation system to track peer reliability and trustworthiness.
 // Low scores can lead to automatic bans, high scores improve peer selection.
 func (pm *PeerManager) UpdatePeerScore(peerID string, delta int) {
@@ -318,12 +328,12 @@ func (pm *PeerManager) UpdatePeerScore(peerID string, delta int) {
 	if pm.scores[peerID] < 0 {
 		pm.scores[peerID] = 0
 		// Automatically ban peers with persistent low scores
-		pm.BanPeer(peerID, 1*time.Hour)
+		pm.banPeerLocked(peerID, 1*time.Hour)
 	} else if pm.scores[peerID] > 100 {
 		pm.scores[peerID] = 100 // Cap maximum score
 	}
 
-	log.Printf("Updated score for peer %s: %d", peerID, pm.scores[peerID])
+	logger.Info("Updated score for peer %s: %d", peerID, pm.scores[peerID])
 }
 
 // PropagateMessage implements gossip protocol for message propagation.
@@ -383,7 +393,7 @@ func (pm *PeerManager) PropagateMessage(msg *security.Message, originID string) 
 	for _, candidate := range candidates {
 		peer := candidate.peer
 		if err := transport.SendMessage(peer.Node.Address, msg); err != nil {
-			log.Printf("Failed to propagate %s to %s: %v", msg.Type, peer.Node.ID, err)
+			logger.Warn("Failed to propagate %s to %s: %v", msg.Type, peer.Node.ID, err)
 			// Penalize peer that failed to receive message
 			pm.UpdatePeerScore(peer.Node.ID, -10)
 		} else {
@@ -429,7 +439,7 @@ func (pm *PeerManager) SyncBlockchain(peerID string) error {
 		return fmt.Errorf("failed to request headers from %s: %v", peerID, err)
 	}
 
-	log.Printf("Requested headers from peer %s", peerID)
+	logger.Info("Requested headers from peer %s", peerID)
 	return nil
 }
 
@@ -445,7 +455,7 @@ func (pm *PeerManager) MaintainPeers() {
 		// Disconnect low-scoring peers if we have enough connections
 		for id, score := range pm.scores {
 			if score < 20 && len(pm.peers) > pm.maxPeers/2 {
-				pm.DisconnectPeer(id) // Drop underperforming peer
+				pm.disconnectPeerLocked(id) // Drop underperforming peer
 			}
 		}
 

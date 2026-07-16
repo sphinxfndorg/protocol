@@ -12,10 +12,10 @@ import (
 	"time"
 
 	"github.com/sphinxfndorg/protocol/src/consensus"
+	logger "github.com/sphinxfndorg/protocol/src/console"
 	"github.com/sphinxfndorg/protocol/src/core"
 	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/parameters"
 	security "github.com/sphinxfndorg/protocol/src/handshake"
-	logger "github.com/sphinxfndorg/protocol/src/log"
 	"github.com/sphinxfndorg/protocol/src/p2p"
 )
 
@@ -24,44 +24,44 @@ func startP2PServer(name string, server *p2p.Server, readyCh chan<- struct{}, er
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		logger.Infof("Starting P2P server for %s on %s", name, server.LocalNode().Address)
+		logger.Info("Starting P2P server for %s on %s", name, server.LocalNode().Address)
 		startCh := make(chan error, 1)
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
-					logger.Errorf("Panic in P2P server startup for %s: %v", name, r)
+					logger.Error("Panic in P2P server startup for %s: %v", name, r)
 					startCh <- fmt.Errorf("panic: %v", r)
 				}
 			}()
-			logger.Infof("Calling server.Start() for %s", name)
+			logger.Info("Calling server.Start() for %s", name)
 			err := server.Start()
-			logger.Infof("server.Start() for %s returned with error: %v", name, err)
+			logger.Info("server.Start() for %s returned with error: %v", name, err)
 			startCh <- err
 		}()
 		select {
 		case err := <-startCh:
 			if err != nil {
-				logger.Errorf("P2P server failed for %s: %v", name, err)
+				logger.Error("P2P server failed for %s: %v", name, err)
 				// Attempt to close the server on failure
 				if closeErr := server.Close(); closeErr != nil {
-					logger.Errorf("Failed to close P2P server for %s: %v", name, closeErr)
+					logger.Error("Failed to close P2P server for %s: %v", name, closeErr)
 				}
 				if closeErr := server.CloseDB(); closeErr != nil {
-					logger.Errorf("Failed to close DB for %s: %v", name, closeErr)
+					logger.Error("Failed to close DB for %s: %v", name, closeErr)
 				}
 				errorCh <- err
 				return
 			}
-			logger.Infof("P2P server for %s started successfully", name)
-			logger.Infof("Sending UDP ready signal for %s", name)
+			logger.Info("P2P server for %s started successfully", name)
+			logger.Info("Sending UDP ready signal for %s", name)
 			udpReadyCh <- struct{}{} // Signal UDP listener is ready
-			logger.Infof("Sending ready signal for P2P server %s", name)
+			logger.Info("Sending ready signal for P2P server %s", name)
 			readyCh <- struct{}{}
 		case <-time.After(10 * time.Second):
-			logger.Warnf("P2P server for %s took too long to start, assuming ready", name)
-			logger.Infof("Sending UDP ready signal for %s", name)
+			logger.Warn("P2P server for %s took too long to start, assuming ready", name)
+			logger.Info("Sending UDP ready signal for %s", name)
 			udpReadyCh <- struct{}{}
-			logger.Infof("Sending ready signal for P2P server %s", name)
+			logger.Info("Sending ready signal for P2P server %s", name)
 			readyCh <- struct{}{}
 		}
 	}()
@@ -120,6 +120,8 @@ func requestPeerListSync(peerAddr string, selfNodeID string, selfAddr string) (*
 // stakeValidatorFromRewardAddress). Discovery and validator admission are
 // intentionally decoupled: showing up on the wire earns you a spot in the
 // gossip graph, never a vote.
+//
+// progress: dashboard to update peer discovery progress.
 func discoverAndRegisterPeers(
 	seedAddrs []string,
 	selfNodeID string,
@@ -130,6 +132,7 @@ func discoverAndRegisterPeers(
 	maxHops int,
 	onPeerDiscovered func(nodeID, address string),
 	onPeerStakeClaim func(nodeID, rewardAddress string),
+	progress *logger.BlockchainProgress, // NEW
 ) {
 	if len(seedAddrs) == 0 {
 		logger.Info("discoverAndRegisterPeers: no seeds configured, skipping discovery")
@@ -139,6 +142,9 @@ func discoverAndRegisterPeers(
 		maxHops = 2
 	}
 
+	// Start the peer discovery spinner
+	progress.StartPeerDiscovery()
+
 	visited := map[string]bool{selfAddr: true}
 	frontier := make([]string, 0, len(seedAddrs))
 	for _, addr := range seedAddrs {
@@ -146,6 +152,9 @@ func discoverAndRegisterPeers(
 			frontier = append(frontier, addr)
 		}
 	}
+
+	totalFound := 0
+	totalConnected := 0
 
 	for hop := 0; hop < maxHops && len(frontier) > 0; hop++ {
 		logger.Info("discoverAndRegisterPeers: hop %d/%d, dialing %d address(es)", hop+1, maxHops, len(frontier))
@@ -170,11 +179,17 @@ func discoverAndRegisterPeers(
 			if err != nil {
 				logger.Warn("discoverAndRegisterPeers: peer exchange with %s failed: %v", addr, err)
 				onPeerDiscovered(addrToNodeIDFallback(addr), addr)
+				totalFound++
+				totalConnected++
+				progress.UpdatePeerDiscovery(totalFound, totalConnected)
 				continue
 			}
 
 			if pex.NodeID != "" {
 				onPeerDiscovered(pex.NodeID, addr)
+				totalFound++
+				totalConnected++
+				progress.UpdatePeerDiscovery(totalFound, totalConnected)
 			}
 
 			for _, p := range pex.Peers {
@@ -182,12 +197,17 @@ func discoverAndRegisterPeers(
 					continue
 				}
 				next = append(next, p.Address)
+				// We don't count these as connected yet, just discovered
+				// But we increment totalFound for discovered peers
+				totalFound++
+				progress.UpdatePeerDiscovery(totalFound, totalConnected)
 			}
 		}
 
 		frontier = next
 	}
 
+	progress.CompletePeerDiscovery(totalConnected)
 	logger.Info("discoverAndRegisterPeers: discovery complete, contacted %d address(es) total", len(visited)-1)
 }
 

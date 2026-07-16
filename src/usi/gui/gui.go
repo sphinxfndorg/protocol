@@ -195,7 +195,7 @@ func Run() {
 		}
 
 		statsRow := container.NewGridWithColumns(3,
-			makeStatCard("🔒", "Total Vaults", vaultCount, colText, "encrypted folders"),
+			makeStatCard("", "Total Vaults", vaultCount, colText, "encrypted folders"),
 			makeStatCard("✍", "Signed Docs", signedCount, colText, "with valid signatures"),
 			makeStatCard("🕐", "Last Activity", lastActivity, colWarn, "most recent operation"),
 		)
@@ -257,10 +257,10 @@ func Run() {
 				iconCol := colMuted
 				switch {
 				case strings.Contains(activity, "Encrypt"):
-					icon = "🔒"
+					icon = ""
 					iconCol = colAccent
 				case strings.Contains(activity, "Decrypt"):
-					icon = "🔓"
+					icon = ""
 					iconCol = colInfo
 				case strings.Contains(activity, "Sign"):
 					icon = "✍"
@@ -272,7 +272,7 @@ func Run() {
 					icon = "🔑"
 					iconCol = colInfo
 				case strings.Contains(activity, "Register"):
-					icon = "📝"
+					icon = ""
 					iconCol = colWarn
 				case strings.Contains(activity, "Logout"), strings.Contains(activity, "logged out"):
 					icon = "🚪"
@@ -388,7 +388,7 @@ func Run() {
 
 						fyne.Do(func() {
 							if err != nil {
-								statusText.Text = "❌ Transaction failed: " + err.Error()
+								statusText.Text = "ERROR Transaction failed: " + err.Error()
 								statusText.Color = colDanger
 								statusText.Refresh()
 								dialog.ShowError(fmt.Errorf("transaction failed: %w", err), window)
@@ -397,7 +397,7 @@ func Run() {
 
 							addActivity(fmt.Sprintf("Sent %.6f %s to %s (tx: %s)",
 								amount, chainHeader.Symbol, recipientEntry.Text[:16], txID[:8]+"..."))
-							statusText.Text = "✅ Transaction sent! TxID: " + txID[:16] + "..."
+							statusText.Text = "SUCCESS Transaction sent! TxID: " + txID[:16] + "..."
 							statusText.Color = colAccent
 							statusText.Refresh()
 
@@ -542,7 +542,7 @@ func Run() {
 		dropBg.StrokeWidth = 1
 		dropBg.SetMinSize(fyne.NewSize(0, 120))
 
-		dropIcon := canvas.NewText("📁", colMuted)
+		dropIcon := canvas.NewText("", colMuted)
 		dropIcon.TextSize = 28
 		dropMain := canvas.NewText("Select folder to message", colText)
 		dropMain.TextSize = 14
@@ -561,7 +561,7 @@ func Run() {
 		updateDropZone := func(path string) {
 			dropBg.FillColor = colAccentDim
 			dropBg.StrokeColor = colAccent
-			dropIcon.Text = "📂"
+			dropIcon.Text = ""
 			dropIcon.Color = colAccent
 			dropMain.Text = filepath.Base(path)
 			dropMain.Color = colAccent
@@ -576,7 +576,7 @@ func Run() {
 		resetDropZone := func() {
 			dropBg.FillColor = colSurface
 			dropBg.StrokeColor = colBorder2
-			dropIcon.Text = "📁"
+			dropIcon.Text = ""
 			dropIcon.Color = colMuted
 			dropMain.Text = "Select folder to message"
 			dropMain.Color = colText
@@ -781,7 +781,7 @@ func Run() {
 		dropBg.StrokeWidth = 1
 		dropBg.SetMinSize(fyne.NewSize(0, 120))
 
-		dropIcon := canvas.NewText("🔒", colMuted)
+		dropIcon := canvas.NewText("", colMuted)
 		dropIcon.TextSize = 28
 		dropMain := canvas.NewText("Select .vault file for inbox", colText)
 		dropMain.TextSize = 14
@@ -873,7 +873,7 @@ func Run() {
 		updateDropZone := func(path string) {
 			dropBg.FillColor = color.RGBA{96, 165, 250, 20}
 			dropBg.StrokeColor = colInfo
-			dropIcon.Text = "🔓"
+			dropIcon.Text = ""
 			dropIcon.Color = colInfo
 			dropMain.Text = filepath.Base(path)
 			dropMain.Color = colInfo
@@ -939,7 +939,7 @@ func Run() {
 		resetDropZone := func(preserveSenderInfo bool) {
 			dropBg.FillColor = colSurface
 			dropBg.StrokeColor = colBorder2
-			dropIcon.Text = "🔒"
+			dropIcon.Text = ""
 			dropIcon.Color = colMuted
 			dropMain.Text = "Select .vault file for inbox"
 			dropMain.Color = colText
@@ -1064,7 +1064,7 @@ func Run() {
 							statusText.Color = colAccent
 
 							dialog.ShowInformation("Unlocked",
-								fmt.Sprintf("Vault decrypted successfully.\n\n📤 Organization: SPIF\n🔑 Sender: %s\n\n📝 Embedded message recovered.",
+								fmt.Sprintf("Vault decrypted successfully.\n\n📤 Organization: SPIF\n🔑 Sender: %s\n\n Embedded message recovered.",
 									senderDisplay), window)
 						} else {
 							messageDisplay.SetText("(No embedded message in this vault)")
@@ -1135,7 +1135,7 @@ func Run() {
 		dropBg.StrokeWidth = 1
 		dropBg.SetMinSize(fyne.NewSize(0, 120))
 
-		dropIcon := canvas.NewText("📄", colMuted)
+		dropIcon := canvas.NewText("", colMuted)
 		dropIcon.TextSize = 28
 		dropMain := canvas.NewText("Select document to mint", colText)
 		dropMain.TextSize = 14
@@ -1163,7 +1163,7 @@ func Run() {
 		updateDropZone := func(path string) {
 			dropBg.FillColor = color.RGBA{255, 179, 71, 15}
 			dropBg.StrokeColor = colWarn
-			dropIcon.Text = "📝"
+			dropIcon.Text = ""
 			dropIcon.Color = colWarn
 			dropMain.Text = filepath.Base(path)
 			dropMain.Color = colWarn
@@ -1199,7 +1199,7 @@ func Run() {
 		resetDropZone := func() {
 			dropBg.FillColor = colSurface
 			dropBg.StrokeColor = colBorder2
-			dropIcon.Text = "📄"
+			dropIcon.Text = ""
 			dropIcon.Color = colMuted
 			dropMain.Text = "Select document to mint"
 			dropMain.Color = colText
@@ -1444,7 +1444,7 @@ func Run() {
 		dropBg.StrokeWidth = 1
 		dropBg.SetMinSize(fyne.NewSize(0, 120))
 
-		dropIcon := canvas.NewText("🔍", colMuted)
+		dropIcon := canvas.NewText("INFO", colMuted)
 		dropIcon.TextSize = 28
 		dropMain := canvas.NewText("Select file to verify", colText)
 		dropMain.TextSize = 14
@@ -1475,7 +1475,7 @@ func Run() {
 		updateDropZone := func(path string) {
 			dropBg.FillColor = color.RGBA{96, 165, 250, 15}
 			dropBg.StrokeColor = colInfo
-			dropIcon.Text = "📋"
+			dropIcon.Text = ""
 			dropIcon.Color = colInfo
 			dropMain.Text = filepath.Base(path)
 			dropMain.Color = colInfo
@@ -1496,7 +1496,7 @@ func Run() {
 		resetDropZone := func() {
 			dropBg.FillColor = colSurface
 			dropBg.StrokeColor = colBorder2
-			dropIcon.Text = "🔍"
+			dropIcon.Text = "INFO"
 			dropIcon.Color = colMuted
 			dropMain.Text = "Select file to verify"
 			dropMain.Color = colText
@@ -2200,7 +2200,7 @@ func Run() {
 					dlgHeight := float32(580)
 					if publishErr != nil {
 						offlineNote := widget.NewLabel(
-							"⚠  Key server offline — bundle not published. Start the server and re-login to sync.",
+							"WARNING  Key server offline — bundle not published. Start the server and re-login to sync.",
 						)
 						offlineNote.Wrapping = fyne.TextWrapWord
 						offlineNote.TextStyle = fyne.TextStyle{Italic: true}

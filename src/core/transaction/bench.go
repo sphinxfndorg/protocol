@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	logger "github.com/sphinxfndorg/protocol/src/log"
+	logger "github.com/sphinxfndorg/protocol/src/console"
 )
 
 // NewTPSMonitor creates a new TPS monitor
@@ -74,7 +74,7 @@ func (tm *TPSMonitor) RecordBlock(txCount uint64, blockTime time.Duration) {
 		const maxReasonableTPS = 10000.0
 		cappedBlockTPS := blockTPS
 		if blockTPS > maxReasonableTPS {
-			logger.Warn("⚠️ Capping unrealistic block TPS: %.2f -> %.2f", blockTPS, maxReasonableTPS)
+			logger.Warn("WARNING Capping unrealistic block TPS: %.2f -> %.2f", blockTPS, maxReasonableTPS)
 			cappedBlockTPS = maxReasonableTPS
 		}
 

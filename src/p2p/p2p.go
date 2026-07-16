@@ -961,7 +961,7 @@ func (s *Server) handleMessages() {
 			}
 			height, _ := errData["height"].(float64)
 			errMsg, _ := errData["error"].(string)
-			log.Printf("⚠️ Snapshot error from peer %s for height %d: %s", originID, uint64(height), errMsg)
+			log.Printf("WARNING Snapshot error from peer %s for height %d: %s", originID, uint64(height), errMsg)
 
 		case "checkpoint_sync":
 			// Peer is sharing checkpoint information for state sync discovery

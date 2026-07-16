@@ -15,7 +15,7 @@ import (
 	"math/big"
 
 	"github.com/sphinxfndorg/protocol/src/common"
-	logger "github.com/sphinxfndorg/protocol/src/log"
+	logger "github.com/sphinxfndorg/protocol/src/console"
 )
 
 // NewBlockHeader creates a new BlockHeader with proper parent-uncle relationships
@@ -389,7 +389,7 @@ func (b *Block) GetHash() string {
 	// If we get here, the hash contains non-printable characters
 	// Convert it to hex encoding for safety
 	hexHash := hex.EncodeToString(b.Header.Hash)
-	log.Printf("⚠️ Converted non-printable hash to hex: %s", hexHash)
+	log.Printf("WARNING Converted non-printable hash to hex: %s", hexHash)
 	return hexHash
 }
 
@@ -454,7 +454,7 @@ func (b *Block) FinalizeHash() {
 
 	b.Header.Hash = []byte(hexHash) // Store hex string for display
 
-	log.Printf("✅ Finalized block %d", b.Header.Height)
+	log.Printf("SUCCESS Finalized block %d", b.Header.Height)
 	log.Printf("   Raw hash (signed): %x", rawHash)
 	log.Printf("   Hex hash (display): %s", hexHash)
 	log.Printf("   ParentHash: %x", b.Header.ParentHash)

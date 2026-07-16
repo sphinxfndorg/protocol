@@ -14,8 +14,8 @@ import (
 	"time"
 
 	"github.com/sphinxfndorg/protocol/src/consensus"
+	logger "github.com/sphinxfndorg/protocol/src/console"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
-	logger "github.com/sphinxfndorg/protocol/src/log"
 	denom "github.com/sphinxfndorg/protocol/src/params/denom"
 )
 
@@ -49,7 +49,7 @@ func NewStateMachine(storage *Storage, nodeID string, validators []string) *Stat
 
 	// Load initial state
 	if err := sm.loadInitialState(); err != nil {
-		log.Printf("Warning: Could not load initial state: %v", err)
+		logger.Warn("Could not load initial state: %v", err)
 		sm.createInitialState()
 	}
 
@@ -76,7 +76,7 @@ func (sm *StateMachine) CleanupStaleFinalStates() {
 		// Check if block exists in storage
 		block, err := sm.storage.GetBlockByHash(state.BlockHash)
 		if err != nil || block == nil {
-			logger.Info("🧹 Removing stale final state for block %s (height=%d, status=%s)",
+			logger.Info("Removing stale final state for block %s (height=%d, status=%s)",
 				state.BlockHash, state.BlockHeight, state.Status)
 			removedCount++
 			continue
@@ -85,7 +85,7 @@ func (sm *StateMachine) CleanupStaleFinalStates() {
 		// Also fix empty merkle roots for existing states
 		if state.MerkleRoot == "" {
 			state.MerkleRoot = sm.extractMerkleRootFromBlock(block)
-			logger.Info("🔄 Fixed empty merkle_root for block %s: %s", state.BlockHash, state.MerkleRoot)
+			logger.Info("Fixed empty merkle_root for block %s: %s", state.BlockHash, state.MerkleRoot)
 		}
 
 		cleaned = append(cleaned, state)
@@ -93,7 +93,7 @@ func (sm *StateMachine) CleanupStaleFinalStates() {
 
 	sm.finalStates = cleaned
 	if removedCount > 0 {
-		logger.Info("✅ Cleaned up %d stale final states, %d remaining",
+		logger.Info("Cleaned up %d stale final states, %d remaining",
 			removedCount, len(sm.finalStates))
 	}
 }
@@ -287,28 +287,39 @@ func (sm *StateMachine) syncFinalStates() {
 
 	sm.consensus.ForcePopulateAllSignatures()
 
-	sm.stateMutex.Lock()
-	defer sm.stateMutex.Unlock()
-
 	rawSignatures := sm.consensus.GetConsensusSignatures()
-
-	// Type assert to get the actual slice
 	sigs, ok := rawSignatures.([]*consensus.ConsensusSignature)
 	if !ok {
 		logger.Error("Invalid signature type returned from consensus")
 		return
 	}
 
-	logger.Info("🔄 SMR: Processing %d signatures from consensus", len(sigs))
+	// ★ FIX: this whole function runs on a 2s ticker for the life of the
+	// node (see replicationLoop). It used to log one INFO line here plus
+	// one INFO line PER SIGNATURE below, every single tick, forever —
+	// reprinting the entire final-state set every 2 seconds even when
+	// nothing had changed since the last sync. That's the dominant source
+	// of the "excessive repeated logging" / duplicate log noise called out
+	// in the log review. None of this is a per-tick decision point for an
+	// operator watching INFO output, so it moves to Debug; only the
+	// summary line at the end stays at INFO, and only when the result
+	// actually differs from last time.
+	logger.Debug("🔄 SMR: Processing %d signatures from consensus", len(sigs))
 
-	sm.finalStates = make([]*FinalStateInfo, 0)
-
+	// FIX: resolve blocks BEFORE taking stateMutex, and never sleep while
+	// holding it. The old version held sm.stateMutex.Lock() across up to
+	// 10 retries x time.Sleep(100..900ms) PER signature — for a
+	// permanently-orphaned proposal (one that lost a PBFT leader race and
+	// will never reach storage), that's ~4.5s of stateMutex held solid,
+	// every single 2s replicationLoop tick, indefinitely. That starved
+	// GetFinalStates/DebugFinalStates/CleanupStaleFinalStates/etc. and
+	// produced the ~4.5s-cadence "stall" visible during every round where
+	// a dead signature was present.
+	newFinalStates := make([]*FinalStateInfo, 0, len(sigs))
 	for _, rawSig := range sigs {
-		// ========== FIX: Retry fetching block with backoff ==========
 		var block *types.Block
 		var err error
 
-		// Try up to 10 times with increasing delays
 		for attempt := 0; attempt < 10; attempt++ {
 			block, err = sm.storage.GetBlockByHash(rawSig.BlockHash)
 			if err == nil && block != nil {
@@ -320,13 +331,10 @@ func (sm *StateMachine) syncFinalStates() {
 			}
 		}
 
-		// If block still not found, create a placeholder state
 		if err != nil || block == nil {
-			logger.Warn("⚠️ Block %s not in storage, creating placeholder (height=%d, type=%s)",
+			logger.Debug("Block %s not in storage, creating placeholder (height=%d, type=%s)",
 				rawSig.BlockHash[:16], rawSig.BlockHeight, rawSig.MessageType)
-
-			// Create placeholder with available info
-			placeholder := &FinalStateInfo{
+			newFinalStates = append(newFinalStates, &FinalStateInfo{
 				BlockHash:       rawSig.BlockHash,
 				BlockHeight:     rawSig.BlockHeight,
 				MerkleRoot:      "pending_" + rawSig.BlockHash[:8],
@@ -338,28 +346,37 @@ func (sm *StateMachine) syncFinalStates() {
 				Status:          sm.determineFinalStateStatus(rawSig.MessageType, rawSig.Valid),
 				SignatureStatus: sm.mapValidToSignatureStatus(rawSig.Valid),
 				Timestamp:       time.Now().Format(time.RFC3339),
-			}
-
-			sm.finalStates = append(sm.finalStates, placeholder)
-			logger.Info("✅ SMR: Added placeholder final state for block %s", rawSig.BlockHash[:16])
+			})
+			logger.Debug("SMR: Added placeholder final state for block %s", rawSig.BlockHash[:16])
 			continue
 		}
 
-		// Block found - create proper final state
 		finalState := sm.convertToFinalStateInfo(rawSig)
 		if finalState == nil {
 			continue
 		}
-
 		finalState = sm.FinalStatePopulated(finalState)
 		finalState = sm.fixGenesisBlockHash(finalState)
-
-		sm.finalStates = append(sm.finalStates, finalState)
-		logger.Info("✅ SMR: Final state - block=%s, height=%d, merkle=%s, status=%s",
+		newFinalStates = append(newFinalStates, finalState)
+		logger.Debug("SMR: Final state - block=%s, height=%d, merkle=%s, status=%s",
 			finalState.BlockHash[:16], finalState.BlockHeight, finalState.MerkleRoot, finalState.Status)
 	}
 
-	logger.Info("✅ SMR: Successfully synced %d final states", len(sm.finalStates))
+	// Only the swap itself needs the lock, and only briefly.
+	sm.stateMutex.Lock()
+	previousCount := len(sm.finalStates)
+	sm.finalStates = newFinalStates
+	sm.stateMutex.Unlock()
+
+	// ★ FIX: only surface this at INFO when the set actually changed size —
+	// otherwise every idle 2s tick reprinted an identical "synced N final
+	// states" line forever. Debug still gets a line every tick for anyone
+	// actively tailing at that level.
+	if len(newFinalStates) != previousCount {
+		logger.Info("SMR: Synced %d final states (was %d)", len(newFinalStates), previousCount)
+	} else {
+		logger.Debug("SMR: Synced %d final states (unchanged)", len(newFinalStates))
+	}
 }
 
 // fixGenesisBlockHash ensures genesis block has correct GENESIS_ prefix hash
@@ -391,7 +408,7 @@ func (sm *StateMachine) fixGenesisBlockHash(state *FinalStateInfo) *FinalStateIn
 				}
 			}
 		} else {
-			logger.Warn("⚠️ Could not load genesis block to verify hash: %v", err)
+			logger.Warn("WARNING Could not load genesis block to verify hash: %v", err)
 		}
 	}
 	return state
@@ -470,11 +487,11 @@ func (sm *StateMachine) createGenesisFinalState(sig *consensus.ConsensusSignatur
 
 		// Ensure the genesis hash has GENESIS_ prefix
 		if !strings.HasPrefix(actualGenesisHash, "GENESIS_") {
-			logger.Warn("⚠️ Genesis block hash missing GENESIS_ prefix: %s", actualGenesisHash)
+			logger.Warn("WARNING Genesis block hash missing GENESIS_ prefix: %s", actualGenesisHash)
 			actualGenesisHash = "GENESIS_" + actualGenesisHash
 		}
 	} else {
-		logger.Warn("⚠️ Could not load genesis block: %v", err)
+		logger.Warn("WARNING Could not load genesis block: %v", err)
 		actualGenesisHash = "GENESIS_unknown"
 		merkleRoot = "genesis_not_found"
 		blockTimestamp = 0
@@ -546,14 +563,14 @@ func (sm *StateMachine) ValidateAndFixFinalStates() error {
 		// Check if anything was fixed
 		if state.BlockHash != originalHash || state.MerkleRoot != originalMerkle {
 			fixedCount++
-			logger.Info("✅ Fixed final state %d: block=%s->%s, merkle=%s->%s",
+			logger.Info("SUCCESS Fixed final state %d: block=%s->%s, merkle=%s->%s",
 				i, originalHash, state.BlockHash, originalMerkle, state.MerkleRoot)
 		}
 
 		sm.finalStates[i] = state
 	}
 
-	logger.Info("✅ Validated and fixed %d final states out of %d", fixedCount, len(sm.finalStates))
+	logger.Info("SUCCESS Validated and fixed %d final states out of %d", fixedCount, len(sm.finalStates))
 	return nil
 }
 
@@ -581,7 +598,7 @@ func (sm *StateMachine) ForcePopulateFinalStates() error {
 		}
 	}
 
-	logger.Info("✅ Force populated %d final states", len(sm.finalStates))
+	logger.Info("SUCCESS Force populated %d final states", len(sm.finalStates))
 	return nil
 }
 
@@ -681,9 +698,9 @@ func (sm *StateMachine) DebugFinalStates() {
 	sm.stateMutex.RLock()
 	defer sm.stateMutex.RUnlock()
 
-	logger.Info("🔍 DEBUG: Current final states (%d total):", len(sm.finalStates))
+	logger.Debug("Current final states (%d total):", len(sm.finalStates))
 	for i, state := range sm.finalStates {
-		logger.Info("  FinalState %d: block=%s, height=%d, type=%s, merkle_root=%s, status=%s, valid=%t",
+		logger.Debug("  FinalState %d: block=%s, height=%d, type=%s, merkle_root=%s, status=%s, valid=%t",
 			i, state.BlockHash, state.BlockHeight, state.MessageType, state.MerkleRoot, state.Status, state.Valid)
 	}
 }
@@ -705,7 +722,7 @@ func (sm *StateMachine) RepopulateFinalStates() {
 			if err == nil && block != nil {
 				if block.Header != nil && len(block.Header.TxsRoot) > 0 {
 					state.MerkleRoot = fmt.Sprintf("%x", block.Header.TxsRoot)
-					logger.Info("✅ Repopulated merkle_root for block %s: %s", state.BlockHash, state.MerkleRoot)
+					logger.Info("SUCCESS Repopulated merkle_root for block %s: %s", state.BlockHash, state.MerkleRoot)
 				} else {
 					state.MerkleRoot = fmt.Sprintf("storage_no_txs_%s", state.BlockHash[:8])
 				}
@@ -719,14 +736,14 @@ func (sm *StateMachine) RepopulateFinalStates() {
 
 		if state.Status == "" {
 			state.Status = mapMessageTypeToStatus(state.MessageType)
-			logger.Info("✅ Repopulated status for block %s: %s", state.BlockHash, state.Status)
+			logger.Info("SUCCESS Repopulated status for block %s: %s", state.BlockHash, state.Status)
 		}
 
 		logger.Info("🔄 FinalState %d: block=%s, merkle_root=%s->%s, status=%s->%s",
 			i, state.BlockHash, originalMerkleRoot, state.MerkleRoot, originalStatus, state.Status)
 	}
 
-	logger.Info("✅ Force repopulation completed for %d final states", len(sm.finalStates))
+	logger.Info("SUCCESS Force repopulation completed for %d final states", len(sm.finalStates))
 }
 
 // Helper function to map valid boolean to status string

@@ -418,8 +418,8 @@ func main() {
 	}
 
 	fmt.Printf("\n📊 Total parameter sets tested: %d\n", len(results))
-	fmt.Printf("   ✅ Successful: %d\n", successfulTests)
-	fmt.Printf("   ❌ Failed: %d\n", len(results)-successfulTests)
+	fmt.Printf("   SUCCESS Successful: %d\n", successfulTests)
+	fmt.Printf("   ERROR Failed: %d\n", len(results)-successfulTests)
 
 	// Print actual parameter ranges from test results
 	fmt.Printf("\n📈 Parameter ranges tested:\n")
@@ -447,7 +447,7 @@ func main() {
 	fmt.Printf("   - Signature: Varies by parameter set (see table)\n")
 
 	// Warning about signature limit (2^30 = 1,073,741,824 signatures)
-	fmt.Printf("\n⚠ WARNING: All key pairs are limited to 2^30 = 1,073,741,824 signatures!\n")
+	fmt.Printf("\nWARNING WARNING: All key pairs are limited to 2^30 = 1,073,741,824 signatures!\n")
 	fmt.Println("           Signature lifetime analysis:")
 	fmt.Println("             - 1 signature/second   → 34 years")
 	fmt.Println("             - 10 signatures/second  → 3.4 years")
@@ -458,7 +458,7 @@ func main() {
 
 	// Exit with error code if any test failed
 	if successfulTests < len(results) {
-		fmt.Println("\n❌ Some tests failed!")
+		fmt.Println("\nERROR Some tests failed!")
 		os.Exit(1)
 	}
 }

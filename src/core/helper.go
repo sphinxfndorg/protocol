@@ -11,9 +11,9 @@ import (
 	"strings"
 
 	"github.com/sphinxfndorg/protocol/src/consensus"
+	logger "github.com/sphinxfndorg/protocol/src/console"
 	database "github.com/sphinxfndorg/protocol/src/core/state"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
-	logger "github.com/sphinxfndorg/protocol/src/log"
 	"github.com/sphinxfndorg/protocol/src/policy"
 	"github.com/sphinxfndorg/protocol/src/pool"
 	storage "github.com/sphinxfndorg/protocol/src/state"
@@ -144,7 +144,7 @@ func (bc *Blockchain) ReplaceGenesis(block *types.Block) error {
 	// Replace in-memory chain
 	bc.chain = []*types.Block{block}
 
-	logger.Info("✅ ReplaceGenesis: local genesis replaced with peer's version — hash=%s", block.GetHash())
+	logger.Info("SUCCESS ReplaceGenesis: local genesis replaced with peer's version — hash=%s", block.GetHash())
 	return nil
 }
 

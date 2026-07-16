@@ -7,10 +7,10 @@ import (
 	"time"
 
 	"github.com/sphinxfndorg/protocol/src/consensus"
+	logger "github.com/sphinxfndorg/protocol/src/console"
 	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/parameters"
 	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/sthincs"
 	security "github.com/sphinxfndorg/protocol/src/handshake"
-	logger "github.com/sphinxfndorg/protocol/src/log"
 )
 
 // ============================================================================
@@ -94,6 +94,6 @@ func exchangeKeyWithPeerSync(peerAddr string, nodeID string, ownRewardAddress st
 	}
 
 	signingService.RegisterPublicKey(kx.NodeID, pk)
-	logger.Info("✅ Key exchange complete with %s (genesis=%s)", kx.NodeID, kx.GenesisHash)
+	logger.Info("Key exchange complete with %s (genesis=%s)", kx.NodeID, kx.GenesisHash)
 	return &kx, nil
 }

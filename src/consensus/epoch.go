@@ -8,7 +8,7 @@ import (
 	"math/big"
 	"time"
 
-	logger "github.com/sphinxfndorg/protocol/src/log"
+	logger "github.com/sphinxfndorg/protocol/src/console"
 	denom "github.com/sphinxfndorg/protocol/src/params/denom"
 )
 
@@ -117,7 +117,7 @@ func (c *Consensus) processEpochAttestations(epoch uint64) {
 			// epoch N-1 becomes finalized
 			if c.justifiedEpoch == epoch-1 {
 				c.finalizedEpoch = epoch - 1
-				logger.Info("🔒 Epoch %d FINALIZED!", epoch-1)
+				logger.Info(" Epoch %d FINALIZED!", epoch-1)
 			}
 
 			// Update justified epoch

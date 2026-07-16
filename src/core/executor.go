@@ -20,8 +20,8 @@ import (
 
 	"github.com/sphinxfndorg/protocol/src/common"
 	"github.com/sphinxfndorg/protocol/src/consensus"
+	logger "github.com/sphinxfndorg/protocol/src/console"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
-	logger "github.com/sphinxfndorg/protocol/src/log"
 	denom "github.com/sphinxfndorg/protocol/src/params/denom"
 	"github.com/sphinxfndorg/protocol/src/pool"
 )
@@ -51,6 +51,40 @@ var _ pool.BlockchainStateProvider = (*Blockchain)(nil)
 // its own process with its own Blockchain instance, so a package-level
 // mutex here is equivalent to a per-instance one.
 var rewardMapMu sync.RWMutex
+
+// uiProgress is the optional animated-terminal dashboard that CreateBlock
+// reports to (block production started/completed/failed, plus the merkle
+// root / state root / nonce sub-steps in between).
+//
+// This is a package-level var rather than a bc field for the same reason
+// as rewardMapMu above: it avoids editing wherever `type Blockchain
+// struct` is declared. The dashboard itself is constructed once in
+// bind.StartNode (package logger, *logger.BlockchainProgress) and crosses
+// the bind -> core package boundary via SetUIProgress. Each node runs as
+// its own process with one Blockchain instance, so a package-level var
+// here is equivalent to a per-instance field in practice.
+var (
+	uiProgressMu sync.RWMutex
+	uiProgress   *logger.BlockchainProgress
+)
+
+// SetUIProgress registers the dashboard CreateBlock reports to. Call once
+// during node startup (see bind.StartNode); passing nil disables the
+// animated feedback and CreateBlock falls back to its existing plain-text
+// logger.Info calls only.
+func SetUIProgress(bp *logger.BlockchainProgress) {
+	uiProgressMu.Lock()
+	defer uiProgressMu.Unlock()
+	uiProgress = bp
+}
+
+// currentUIProgress returns the registered dashboard, or nil if none has
+// been set (e.g. in tests, or tooling that never calls SetUIProgress).
+func currentUIProgress() *logger.BlockchainProgress {
+	uiProgressMu.RLock()
+	defer uiProgressMu.RUnlock()
+	return uiProgress
+}
 
 // newStateDB opens the StateDB for this blockchain node.
 // This is the internal version that returns *StateDB for internal use.
@@ -98,7 +132,7 @@ func (bc *Blockchain) IsDistributionComplete() bool {
 	}
 	complete := bal.Sign() == 0
 	if complete {
-		logger.Info("✅ IsDistributionComplete: vault %s funded with %s nSPX and fully drained, distribution done",
+		logger.Info("SUCCESS IsDistributionComplete: vault %s funded with %s nSPX and fully drained, distribution done",
 			GenesisVaultAddress, genesisSupply.String())
 	}
 	return complete
@@ -334,7 +368,7 @@ func (bc *Blockchain) WriteChainCheckpoint() error {
 	}
 
 	// Log checkpoint info with detailed breakdown
-	logger.Info("✅ CHECKPOINT: %s at height=%d", phase, latestBlock.GetHeight())
+	logger.Info("SUCCESS CHECKPOINT: %s at height=%d", phase, latestBlock.GetHeight())
 	logger.Info("📊 SUPPLY BREAKDOWN:")
 	logger.Info("   Genesis Allocation: %s SPX (%s nSPX)",
 		genesisSPX.String(), genesisSupply.String())
@@ -579,7 +613,7 @@ func (bc *Blockchain) mintBlockReward(block *types.Block, stateDB *StateDB) {
 			stateDB.IncrementRewardsMinted(big.NewInt(0))
 
 			totalSPX := new(big.Int).Div(totalAllocated, big.NewInt(1e18))
-			logger.Info("✅ GENESIS: vault %s funded with %s nSPX (%s SPX)",
+			logger.Info("SUCCESS GENESIS: vault %s funded with %s nSPX (%s SPX)",
 				GenesisVaultAddress, totalAllocated.String(), totalSPX.String())
 			logger.Info("📊 GENESIS SUPPLY: %s nSPX", totalAllocated.String())
 		} else {
@@ -632,7 +666,7 @@ func (bc *Blockchain) mintBlockReward(block *types.Block, stateDB *StateDB) {
 	rewardsMinted := stateDB.GetRewardsMinted()
 	remainingNSPX := new(big.Int).Sub(maxSupplyNSPX, totalMinted)
 
-	logger.Info("✅ REWARD: %.6f SPX → %s (block %d)", rewardSPX, proposerID, block.GetHeight())
+	logger.Info("SUCCESS REWARD: %.6f SPX → %s (block %d)", rewardSPX, proposerID, block.GetHeight())
 	logger.Info("📊 SUPPLY: Total=%s nSPX, Genesis=%s nSPX, Rewards=%s nSPX, Remaining=%s nSPX",
 		totalMinted.String(), genesisSupply.String(), rewardsMinted.String(), remainingNSPX.String())
 }
@@ -726,13 +760,19 @@ func (bc *Blockchain) ExecuteGenesisBlock() error {
 		logger.Error("ExecuteGenesisBlock: failed to open stateDB: %v", err)
 		return errors.New("failed to open stateDB")
 	}
-	bal, err := stateDB.GetBalance(GenesisVaultAddress)
+
+	// Use nonce, not balance, to detect prior execution: a *successful*
+	// genesis drains the vault to zero, so balance==0 is the expected
+	// steady state after distribution, not a signal that genesis hasn't
+	// run yet. Nonce only increases, so it's a reliable "already executed"
+	// marker across restarts.
+	nonce, err := stateDB.GetNonce(GenesisVaultAddress)
 	if err != nil {
-		logger.Error("ExecuteGenesisBlock: failed to get balance: %v", err)
-		return errors.New("failed to get balance")
+		logger.Error("ExecuteGenesisBlock: failed to get nonce: %v", err)
+		return errors.New("failed to get nonce")
 	}
-	if bal.Sign() > 0 {
-		logger.Info("ExecuteGenesisBlock: vault already funded, skipping")
+	if nonce > 0 {
+		logger.Info("ExecuteGenesisBlock: already executed (vault nonce=%d), skipping", nonce)
 		return nil
 	}
 
@@ -741,7 +781,7 @@ func (bc *Blockchain) ExecuteGenesisBlock() error {
 		return errors.New("ExecuteBlock failed")
 	}
 
-	logger.Info("✅ ExecuteGenesisBlock: vault %s funded", GenesisVaultAddress)
+	logger.Info("SUCCESS ExecuteGenesisBlock: vault %s funded", GenesisVaultAddress)
 	return nil
 }
 
@@ -785,7 +825,7 @@ func (bc *Blockchain) UpdateValidatorStakesFromState(validatorIDs []string, vali
 		if err := updater.UpdateStake(vid, uint64(stakeSPX.Int64())); err != nil {
 			logger.Warn("Failed to update stake for %s: %v", vid, err)
 		} else {
-			logger.Info("✅ Updated validator %s stake to %d SPX", vid, stakeSPX)
+			logger.Info("SUCCESS Updated validator %s stake to %d SPX", vid, stakeSPX)
 		}
 	}
 
@@ -960,7 +1000,7 @@ func (bc *Blockchain) SetValidatorRewardAddress(nodeID, spifAddr string) {
 	}
 	if spifAddr != "" && nodeID != "" {
 		bc.validatorRewardMap[nodeID] = spifAddr
-		logger.Info("✅ Validator reward mapping: %s → %s", nodeID, spifAddr)
+		logger.Info("SUCCESS Validator reward mapping: %s → %s", nodeID, spifAddr)
 	}
 }
 
@@ -985,7 +1025,7 @@ func (bc *Blockchain) GetRPCCaller() RPCCaller {
 // CreateBlock creates a new block with transactions from mempool
 // and iterates nonce until consensus using existing functions.
 // Returns: New block or error
-func (bc *Blockchain) CreateBlock() (*types.Block, error) {
+func (bc *Blockchain) CreateBlock() (block *types.Block, err error) {
 	// Validate prerequisites
 	if bc.mempool == nil {
 		return nil, fmt.Errorf("mempool not initialized")
@@ -993,6 +1033,23 @@ func (bc *Blockchain) CreateBlock() (*types.Block, error) {
 	if bc.chainParams == nil {
 		return nil, fmt.Errorf("chain parameters not initialized")
 	}
+
+	// ── UI dashboard: report block production start/stages/outcome ──
+	// A single deferred check covers every return path below (including
+	// the ones inside selectTransactionsForBlock's error wrapping) without
+	// having to touch each one individually.
+	bp := currentUIProgress()
+	if bp != nil {
+		bp.StartBlockProduction()
+		defer func() {
+			if err != nil {
+				bp.FailBlockProduction(err)
+			} else {
+				bp.CompleteBlockProduction(block.GetHash(), len(block.Body.TxsList))
+			}
+		}()
+	}
+
 	bc.lock.Lock() // Write lock for thread safety
 	defer bc.lock.Unlock()
 
@@ -1048,7 +1105,14 @@ func (bc *Blockchain) CreateBlock() (*types.Block, error) {
 	}
 
 	// Calculate roots for the block
+	if bp != nil {
+		bp.UpdateBlockProductionStage("calculating merkle root")
+	}
 	txsRoot := bc.calculateTransactionsRoot(selectedTxs)
+
+	if bp != nil {
+		bp.UpdateBlockProductionStage("calculating state root")
+	}
 	stateRoot := bc.previewStateRoot(nextHeight, selectedTxs, proposerID)
 
 	// ★ FIX: Use the parent block's timestamp + 1 second as the floor for the
@@ -1107,6 +1171,9 @@ func (bc *Blockchain) CreateBlock() (*types.Block, error) {
 
 	// CRITICAL: Increment nonce multiple times until consensus is achieved
 	logger.Info("Starting nonce iteration for consensus: initial nonce=%s", newBlock.Header.Nonce)
+	if bp != nil {
+		bp.UpdateBlockProductionStage("mining nonce")
+	}
 
 	maxAttempts := 1000000
 	for attempt := 0; attempt < maxAttempts; attempt++ {
@@ -1116,7 +1183,7 @@ func (bc *Blockchain) CreateBlock() (*types.Block, error) {
 		}
 		newBlock.FinalizeHash()
 		if bc.checkConsensusRequirements(newBlock) {
-			logger.Info("✅ Consensus achieved with nonce %s after %d attempts",
+			logger.Info("SUCCESS Consensus achieved with nonce %s after %d attempts",
 				newBlock.Header.Nonce, attempt+1)
 			break
 		}
@@ -1125,12 +1192,12 @@ func (bc *Blockchain) CreateBlock() (*types.Block, error) {
 				attempt+1, newBlock.Header.Nonce)
 		}
 		if attempt == maxAttempts-1 {
-			logger.Info("⚠️ Max nonce attempts reached, using nonce %s", newBlock.Header.Nonce)
+			logger.Info("WARNING Max nonce attempts reached, using nonce %s", newBlock.Header.Nonce)
 		}
 	}
 
 	if err := newBlock.ValidateHashFormat(); err != nil {
-		logger.Warn("❌ Block hash format validation failed: %v", err)
+		logger.Warn("ERROR Block hash format validation failed: %v", err)
 		newBlock.SetHash(hex.EncodeToString(newBlock.GenerateBlockHash()))
 		if err := newBlock.ValidateHashFormat(); err != nil {
 			return nil, fmt.Errorf("failed to generate valid block hash: %w", err)
@@ -1144,16 +1211,16 @@ func (bc *Blockchain) CreateBlock() (*types.Block, error) {
 	// Cache merkle root in consensus engine
 	merkleRoot := hex.EncodeToString(txsRoot)
 	blockHash := newBlock.GetHash()
-	logger.Info("✅ Pre-calculated merkle root for new block %s: %s", blockHash, merkleRoot)
+	logger.Info("SUCCESS Pre-calculated merkle root for new block %s: %s", blockHash, merkleRoot)
 
 	if bc.consensusEngine != nil {
 		bc.consensusEngine.CacheMerkleRoot(blockHash, merkleRoot)
-		logger.Info("✅ Cached merkle root in consensus engine")
+		logger.Info("SUCCESS Cached merkle root in consensus engine")
 	} else {
-		logger.Warn("⚠️ No consensus engine available for caching")
+		logger.Warn("WARNING No consensus engine available for caching")
 	}
 
-	logger.Info("✅ Created new PBFT block: height=%d, transactions=%d, hash=%s, final_nonce=%s",
+	logger.Info("SUCCESS Created new PBFT block: height=%d, transactions=%d, hash=%s, final_nonce=%s",
 		newBlock.GetHeight(), len(selectedTxs), newBlock.GetHash(), newBlock.Header.Nonce)
 
 	return newBlock, nil

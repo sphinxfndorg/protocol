@@ -21,7 +21,7 @@ import (
 	"github.com/sphinxfndorg/protocol/src/accounts/key"
 	keyUtils "github.com/sphinxfndorg/protocol/src/accounts/key/utils"
 	"github.com/sphinxfndorg/protocol/src/common"
-	logger "github.com/sphinxfndorg/protocol/src/log"
+	logger "github.com/sphinxfndorg/protocol/src/console"
 	keys "github.com/sphinxfndorg/protocol/src/usi/core/key"
 )
 
@@ -49,7 +49,7 @@ type WalletInfo struct {
 // stores the encrypted private key in the vault, and exports the
 // public key for use with the node.
 func InitWallet(cfg WalletConfig) (*WalletInfo, error) {
-	logger.Infof("Initializing SPIF wallet (network=%s, label=%s)", cfg.Network, cfg.Label)
+	logger.Info("Initializing SPIF wallet (network=%s, label=%s)", cfg.Network, cfg.Label)
 
 	if cfg.Passphrase == "" {
 		return nil, fmt.Errorf("passphrase is required to encrypt the wallet")
@@ -160,17 +160,17 @@ func InitWallet(cfg WalletConfig) (*WalletInfo, error) {
 	allocPath := filepath.Join(cfg.DataDir, fmt.Sprintf("%s.alloc.json", spifAddress[:16]))
 	os.WriteFile(allocPath, allocJSON, 0644)
 
-	logger.Infof("✅ Wallet created successfully!")
-	logger.Infof("   Address:      %s", spifAddress)
-	logger.Infof("   Public Key:   %s...", pubKeyHex[:32])
-	logger.Infof("   Key File:     %s", keyFilePath)
-	logger.Infof("   Public File:  %s", pubKeyFilePath)
-	logger.Infof("   Derivation:   %s", derivationPath)
-	logger.Infof("   Network:      %s (ChainID: %d)", cfg.Network, chainID)
-	logger.Infof("")
-	logger.Infof("To use this wallet with the node:")
-	logger.Infof("  sphinx-cli send-tx --from %s --to <RECIPIENT> --amount <AMOUNT> --key %s", spifAddress, keyFilePath)
-	logger.Infof("  sphinx-cli node --reward-address=%s", spifAddress)
+	logger.Info("Wallet created successfully!")
+	logger.Info("   Address:      %s", spifAddress)
+	logger.Info("   Public Key:   %s...", pubKeyHex[:32])
+	logger.Info("   Key File:     %s", keyFilePath)
+	logger.Info("   Public File:  %s", pubKeyFilePath)
+	logger.Info("   Derivation:   %s", derivationPath)
+	logger.Info("   Network:      %s (ChainID: %d)", cfg.Network, chainID)
+	logger.Info("")
+	logger.Info("To use this wallet with the node:")
+	logger.Info("  sphinx-cli send-tx --from %s --to <RECIPIENT> --amount <AMOUNT> --key %s", spifAddress, keyFilePath)
+	logger.Info("  sphinx-cli node --reward-address=%s", spifAddress)
 
 	return &WalletInfo{
 		Address:        spifAddress,
@@ -223,7 +223,7 @@ func ListWallets(dataDir string) ([]WalletInfo, error) {
 
 		// Validate address using common utility
 		if !common.ValidateSPIFAddress(info.Address) {
-			logger.Warnf("Skipping invalid SPIF address in %s: %s", entry.Name(), info.Address)
+			logger.Warn("Skipping invalid SPIF address in %s: %s", entry.Name(), info.Address)
 			continue
 		}
 

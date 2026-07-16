@@ -12,9 +12,9 @@ import (
 	"sort"
 
 	"github.com/sphinxfndorg/protocol/src/common"
+	logger "github.com/sphinxfndorg/protocol/src/console"
 	database "github.com/sphinxfndorg/protocol/src/core/state"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
-	logger "github.com/sphinxfndorg/protocol/src/log"
 	"github.com/sphinxfndorg/protocol/src/pool"
 )
 

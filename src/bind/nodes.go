@@ -27,6 +27,7 @@ import (
 
 	"github.com/sphinxfndorg/protocol/src/common"
 	"github.com/sphinxfndorg/protocol/src/consensus"
+	logger "github.com/sphinxfndorg/protocol/src/console"
 	"github.com/sphinxfndorg/protocol/src/core"
 	database "github.com/sphinxfndorg/protocol/src/core/state"
 	config "github.com/sphinxfndorg/protocol/src/core/sthincs/config"
@@ -38,7 +39,6 @@ import (
 	"github.com/sphinxfndorg/protocol/src/dht"
 	security "github.com/sphinxfndorg/protocol/src/handshake"
 	"github.com/sphinxfndorg/protocol/src/http"
-	logger "github.com/sphinxfndorg/protocol/src/log"
 	"github.com/sphinxfndorg/protocol/src/network"
 	dnsdiscovery "github.com/sphinxfndorg/protocol/src/p2p/seed"
 	"github.com/sphinxfndorg/protocol/src/params/commit"
@@ -140,19 +140,35 @@ func StartNode(
 	// ════════════════════════════════════════════════════════════════════
 	common.SetDataDir(dataDir)
 
+	// ── Create interactive dashboard ──
+	r := logger.Default()
+	log := logger.NewLogger(r)
+	progress := logger.NewBlockchainProgress(r, log)
+	progress.Status().SetTitle("SPHINX Node")
+	progress.StartNodeStartup()
+	defer progress.Stop()
+
+	// Let core.CreateBlock report block production / merkle root / state
+	// root / nonce mining to this dashboard, regardless of which path
+	// invokes it (solo mining, PBFT leader loop, ...). See
+	// core.SetUIProgress for why this crosses the bind -> core package
+	// boundary as a registration call rather than a constructor argument.
+	core.SetUIProgress(progress)
+	defer core.SetUIProgress(nil)
+
 	logger.Info("=== STARTING NODE ===")
 
 	isProduction := totalNodes > 100
 
 	switch {
 	case totalNodes == 1:
-		logger.Info("⚠️  SINGLE NODE / REAL-DEVICE MODE — peers discovered dynamically via --seeds")
+		logger.Info("SINGLE NODE / REAL-DEVICE MODE — peers discovered dynamically via --seeds")
 	case totalNodes == 2:
-		logger.Warn("⚠️  2-NODE CLUSTER — PBFT requires ≥ 3 validators")
+		logger.Warn("2-NODE CLUSTER — PBFT requires ≥ 3 validators")
 	case isProduction:
-		logger.Info("🚀 PRODUCTION MODE — Large network with %d nodes (using optimized peer connections)", totalNodes)
+		logger.Info("PRODUCTION MODE — Large network with %d nodes (using optimized peer connections)", totalNodes)
 	default:
-		logger.Info("✅ FULL PBFT CONSENSUS (same-box) — %d validators", totalNodes)
+		logger.Info("FULL PBFT CONSENSUS (same-box) — %d validators", totalNodes)
 	}
 
 	// SECTION 1 — chain identification
@@ -173,7 +189,7 @@ func StartNode(
 		return fmt.Errorf("failed to create shared STHINCS parameters: %w", err)
 	}
 	sthincsParams := sharedSphincsParams.Params
-	logger.Info("✅ Shared STHINCS parameters created")
+	logger.Info("Shared STHINCS parameters created")
 
 	// SECTION 3 — node identity
 	// ── Determine real-device vs same-box mode ──
@@ -329,7 +345,7 @@ func StartNode(
 
 	rpcCaller := rpc.NewRPCCaller(nodeID)
 	bc.SetRPCCaller(rpcCaller)
-	logger.Info("✅ RPC Caller set for blockchain")
+	logger.Info("RPC Caller set for blockchain")
 
 	// Late joiners MUST NOT execute/patch genesis locally.
 	// genesis execution (vault funding) must happen only on the first node that
@@ -338,16 +354,16 @@ func StartNode(
 		if err := bc.ExecuteGenesisBlock(); err != nil {
 			logger.Warn("ExecuteGenesisBlock: %v", err)
 		} else {
-			logger.Info("✅ Genesis vault funded")
+			logger.Info("Genesis vault funded")
 		}
 
 		if cpErr := bc.WriteChainCheckpoint(); cpErr != nil {
 			logger.Warn("Failed to write initial checkpoint: %v", cpErr)
 		} else {
-			logger.Info("✅ Initial checkpoint saved after genesis")
+			logger.Info("Initial checkpoint saved after genesis")
 		}
 	} else {
-		logger.Info("📥 Late-joiner mode: skipping ExecuteGenesisBlock() and initial checkpoint; will sync genesis+blocks from peers")
+		logger.Info("Late-joiner mode: skipping ExecuteGenesisBlock() and initial checkpoint; will sync genesis+blocks from peers")
 	}
 
 	// VDF genesis-hash provider
@@ -375,7 +391,7 @@ func StartNode(
 		return fmt.Errorf("VDF parameters are invalid (nil discriminant or zero iterations) — refusing to start with a weak or placeholder VDF")
 	}
 
-	logger.Info("✅ VDF parameters ready: Discriminant=%d bits, T=%d", vdfParams.Discriminant.BitLen(), vdfParams.T)
+	logger.Info("VDF parameters ready: Discriminant=%d bits, T=%d", vdfParams.Discriminant.BitLen(), vdfParams.T)
 	if err := consensus.SetCanonicalVDFParameters(vdfParams); err != nil {
 		return fmt.Errorf("failed to set canonical VDF parameters: %w", err)
 	}
@@ -386,17 +402,17 @@ func StartNode(
 
 	if selfPK := signingService.GetPublicKeyObject(); selfPK != nil {
 		signingService.RegisterPublicKey(currentNodeID, selfPK)
-		logger.Info("✅ Self public key registered")
+		logger.Info("Self public key registered")
 	}
 
 	pkBytes, err := signingService.GetPublicKey()
 	if err != nil {
 		return fmt.Errorf("cannot serialize self public key: %w", err)
 	}
-	logger.Info("✅ Self public key size: %d bytes", len(pkBytes))
+	logger.Info("Self public key size: %d bytes", len(pkBytes))
 
 	rpcServer := rpc.NewServer(nil, bc, sphincsMgr)
-	logger.Info("✅ RPC server created (synchronous mode)")
+	logger.Info("RPC server created (synchronous mode)")
 
 	// SECTION 7 — network node manager
 	// ── Parse TCP/UDP addresses first (needed for local node + DHT) ──
@@ -481,13 +497,13 @@ func StartNode(
 		// Non-fatal: fall back to static seeds + PEX gossip
 		dhtInstance = nil
 	} else {
-		logger.Info("🌐 Kademlia DHT initialised on %s with %d router(s)", localUDPAddr.String(), len(dhtRouters))
+		logger.Info("Kademlia DHT initialised on %s with %d router(s)", localUDPAddr.String(), len(dhtRouters))
 
 		// Start the DHT in a background goroutine
 		if startErr := dhtInstance.Start(); startErr != nil {
 			logger.Warn("Failed to start DHT: %v — continuing without Kademlia", startErr)
 		} else {
-			logger.Info("✅ Kademlia DHT started — iterative peer lookup/routing is now active")
+			logger.Info("Kademlia DHT started — iterative peer lookup/routing is now active")
 		}
 	}
 
@@ -611,9 +627,9 @@ func StartNode(
 
 	consensusNodeMgr = p2pMgr
 	if synthCount == 1 && !usingRealAddress {
-		logger.Info("🌐 P2P consensus manager ready (0 pre-configured peers — solo/genesis start, peers join dynamically)")
+		logger.Info("P2P consensus manager ready (0 pre-configured peers — solo/genesis start, peers join dynamically)")
 	} else {
-		logger.Info("🌐 P2P consensus manager ready (%d pre-configured peer(s))", len(networkAddresses)-1)
+		logger.Info("P2P consensus manager ready (%d pre-configured peer(s))", len(networkAddresses)-1)
 	}
 
 	// SECTION 9 — consensus engine
@@ -641,7 +657,7 @@ func StartNode(
 		if err := vs.AddValidator(currentNodeID, minSPX); err != nil {
 			logger.Warn("Failed to add self validator: %v", err)
 		} else {
-			logger.Info("✅ Self validator registered")
+			logger.Info("Self validator registered")
 		}
 	}
 
@@ -734,7 +750,7 @@ func StartNode(
 	// the method existing, but must not be launched from here.
 
 	network.RegisterConsensus(currentNodeID, cons)
-	logger.Info("✅ Consensus engine registered")
+	logger.Info("Consensus engine registered")
 
 	// SECTION 10 — VM verifier
 	svm.SetSphincsVerifier(
@@ -749,7 +765,7 @@ func StartNode(
 			)
 		},
 	)
-	logger.Info("✅ VM SPHINCS+ verifier registered")
+	logger.Info("VM SPHINCS+ verifier registered")
 
 	// ★ REMOVED: this block used to build the same 9 genesis allocations
 	// from core.DefaultGenesisAllocations() a second time, as ordinary
@@ -780,23 +796,40 @@ func StartNode(
 	// of the 9 ever succeeded, on any node, in any observed run — this
 	// block did nothing but log 9 misleading WARNs per node startup.
 
-	// peerRegistry
+	// peerRegistry is the address book: nodeID -> address, used for
+	// effectivePeerCount()/getKnownPeers() bookkeeping and gossip. It may
+	// be pre-populated (see the static same-box registration below) before
+	// a peer's real key exchange completes, so it must NOT be used as the
+	// dedup guard for one-time side effects (AddNode/AddPeer/stake grant)
+	// — otherwise a pre-registered peer's real registration silently
+	// no-ops the very first (and only) time it would actually run.
 	var peerRegistryMu sync.Mutex
 	peerRegistry := make(map[string]string)
+
+	// registeredPeers tracks which peer IDs have already had their
+	// one-time side effects (AddNode/p2pMgr.AddPeer/stake grant) applied.
+	// This is intentionally a separate set from peerRegistry — see above.
+	var registeredMu sync.Mutex
+	registeredPeers := make(map[string]bool)
 
 	registerDiscoveredPeer := func(peerNodeID, peerAddr string) {
 		if peerNodeID == "" || peerAddr == "" || peerAddr == currentAddress {
 			return
 		}
 		peerRegistryMu.Lock()
-		_, already := peerRegistry[peerNodeID]
 		peerRegistry[peerNodeID] = peerAddr
+		peerCount := len(peerRegistry)
 		peerRegistryMu.Unlock()
+
+		registeredMu.Lock()
+		already := registeredPeers[peerNodeID]
+		registeredPeers[peerNodeID] = true
+		registeredMu.Unlock()
 		if already {
 			return
 		}
 
-		logger.Info("🌐 Discovered new peer %s at %s — registering as network peer", peerNodeID, peerAddr)
+		logger.Info("Discovered new peer %s at %s — registering as network peer", peerNodeID, peerAddr)
 
 		host, port, err := net.SplitHostPort(peerAddr)
 		if err != nil {
@@ -809,6 +842,9 @@ func StartNode(
 		if p2pMgr != nil {
 			p2pMgr.AddPeer(peerNodeID, peerAddr)
 		}
+
+		// Update dashboard with peer count
+		progress.CheckNetworkHealth(true, peerCount)
 
 		// ★ FIX: Grant minimum stake to the peer as a validator immediately.
 		// Previously, validator status was only granted by registerPeerStakeClaim,
@@ -830,7 +866,7 @@ func StartNode(
 			if err := vs.AddValidator(peerNodeID, minSPX); err != nil {
 				logger.Warn("[%s] Failed to grant minimum stake to discovered peer %s: %v", currentNodeID, peerNodeID, err)
 			} else {
-				logger.Info("[%s] ✅ Granted minimum stake (%d SPX) to discovered peer %s", currentNodeID, minSPX, peerNodeID)
+				logger.Info("[%s] Granted minimum stake (%d SPX) to discovered peer %s", currentNodeID, minSPX, peerNodeID)
 			}
 		}
 	}
@@ -890,7 +926,7 @@ func StartNode(
 	if err != nil {
 		return fmt.Errorf("failed to bind TCP listener: %w", err)
 	}
-	logger.Info("✅ TCP listener bound on %s", currentAddress)
+	logger.Info("TCP listener bound on %s", currentAddress)
 
 	var wg sync.WaitGroup
 
@@ -919,7 +955,7 @@ func StartNode(
 			}(conn)
 		}
 	}()
-	logger.Info("✅ TCP inbound listener running")
+	logger.Info("TCP inbound listener running")
 
 	// SECTION 11b — dynamic peer discovery via --seeds with DNS support
 	//
@@ -944,7 +980,7 @@ func StartNode(
 		plainSeeds, dnsResolver := dnsdiscovery.FilterDNSTrees(seeds)
 
 		if dnsResolver.HasTrees() {
-			logger.Info("🌐 Resolving DNS discovery trees for peer bootstrap...")
+			logger.Info("Resolving DNS discovery trees for peer bootstrap...")
 			ctxDNS, cancelDNS := context.WithTimeout(context.Background(), 30*time.Second)
 			dnsPeers, err := dnsResolver.ResolvePeers(ctxDNS)
 			cancelDNS()
@@ -956,7 +992,7 @@ func StartNode(
 					logger.Warn("DNS discovery failed: %v (no plain seeds configured; relying on statically-registered peers)", err)
 				}
 			} else if len(dnsPeers) > 0 {
-				logger.Info("🌱 DNS discovery returned %d peer(s) — registering them", len(dnsPeers))
+				logger.Info("DNS discovery returned %d peer(s) — registering them", len(dnsPeers))
 				for _, peer := range dnsPeers {
 					if peer.Address != "" && peer.Address != currentAddress {
 						registerDiscoveredPeer(peer.NodeID, peer.Address)
@@ -968,7 +1004,7 @@ func StartNode(
 		}
 
 		if len(plainSeeds) > 0 {
-			logger.Info("🌱 Discovering peers via %d plain seed address(es)", len(plainSeeds))
+			logger.Info("Discovering peers via %d plain seed address(es)", len(plainSeeds))
 			discoverAndRegisterPeers(
 				plainSeeds,
 				currentNodeID,
@@ -979,6 +1015,7 @@ func StartNode(
 				2,
 				registerDiscoveredPeer,
 				registerPeerStakeClaim,
+				progress, // pass dashboard
 			)
 		} else if !dnsResolver.HasTrees() {
 			logger.Info("No --seeds configured; relying on statically-registered peers only")
@@ -1005,10 +1042,6 @@ func StartNode(
 				continue
 			}
 			logger.Info("Exchanging keys with same-box peer: %s", addr)
-			// FIX: Register same-box peers in peerRegistry so effectivePeerCount() works correctly
-			peerRegistryMu.Lock()
-			peerRegistry[validatorIDs[0]] = addr // Will be overwritten below with correct ID
-			peerRegistryMu.Unlock()
 			if kx, err := exchangeKeyWithPeerSync(addr, currentNodeID, rewardAddress, core.GetGenesisHash(), signingService, sthincsParams); err != nil {
 				logger.Warn("Failed to exchange keys with %s: %v", addr, err)
 			} else {
@@ -1033,7 +1066,7 @@ func StartNode(
 				registerPeerStakeClaim(kx.NodeID, kx.RewardAddress)
 			}
 		}
-		logger.Info("✅ Key exchange completed with all known peers")
+		logger.Info("Key exchange completed with all known peers")
 	} else if seeds != "" {
 		// Same-box devnet mode with --seeds: pre-register peers so the sync
 		// loop can find them. The bootstrap node (no --seeds) must NOT
@@ -1060,9 +1093,9 @@ func StartNode(
 	if _, err := sthincs.DeserializePK(sthincsParams, pkBytes); err != nil {
 		return fmt.Errorf("self public key serialization failed: %v", err)
 	}
-	logger.Info("✅ Key serialization verified")
+	logger.Info("Key serialization verified")
 
-	logger.Info("✅ Self-stake and key exchange complete; remaining validator admission happens per-peer as reward addresses are verified")
+	logger.Info("Self-stake and key exchange complete; remaining validator admission happens per-peer as reward addresses are verified")
 
 	if effectivePeerCount() > 0 && nodeIndex == 0 {
 		logger.Info("Waiting for genesis transactions to propagate (2 seconds)...")
@@ -1077,7 +1110,10 @@ func StartNode(
 		defer wg.Done()
 		runCheckpointSyncLoop(ctx, bc, cons, currentNodeID, networkAddresses, nodeIndex)
 	}()
-	logger.Info("✅ Consensus engine started AFTER key exchange")
+	logger.Info("Consensus engine started AFTER key exchange")
+
+	// Node initialization is complete; mark startup as done
+	progress.CompleteNodeStartup()
 
 	phase2State := &phase2InitState{}
 
@@ -1124,34 +1160,45 @@ func StartNode(
 	var syncState SyncState = SyncStateSyncing
 	var syncStateMu sync.Mutex
 
-	// Collect peer addresses for the sync loop
-	peerRegistryMu.Lock()
-	peerAddrs := make([]string, 0, len(peerRegistry))
-	for _, addr := range peerRegistry {
-		peerAddrs = append(peerAddrs, addr)
-	}
-	peerRegistryMu.Unlock()
+	// ★ FIX: Build a live peer-address accessor instead of a one-time
+	// snapshot. A static []string captured here reflects peerRegistry only
+	// as of THIS instant — for the bootstrap node (no --seeds) that's always
+	// empty, since peers connect in and get added to peerRegistry afterward.
+	// The old snapshot never grew again for the sync goroutine's lifetime,
+	// so the bootstrap node could join PBFT (which does read peerRegistry
+	// live via effectivePeerCount) but could never actually sync/catch-up
+	// against those same peers. peerAddrsFunc re-reads the mutex-protected
+	// registry plus same-box network addresses on every call, so the sync
+	// loop always sees currently-known peers.
+	peerAddrsFunc := func() []string {
+		peerRegistryMu.Lock()
+		addrs := make([]string, 0, len(peerRegistry)+len(networkAddresses))
+		for _, addr := range peerRegistry {
+			addrs = append(addrs, addr)
+		}
+		peerRegistryMu.Unlock()
 
-	// Also add same-box network addresses if available
-	for _, addr := range networkAddresses {
-		if addr != currentAddress {
-			found := false
-			for _, existing := range peerAddrs {
-				if existing == addr {
-					found = true
-					break
+		for _, addr := range networkAddresses {
+			if addr != currentAddress {
+				found := false
+				for _, existing := range addrs {
+					if existing == addr {
+						found = true
+						break
+					}
+				}
+				if !found {
+					addrs = append(addrs, addr)
 				}
 			}
-			if !found {
-				peerAddrs = append(peerAddrs, addr)
-			}
 		}
+		return addrs
 	}
 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		runBlockSyncLoop(ctx, bc, cons, currentNodeID, peerAddrs, &syncState, &syncStateMu)
+		runBlockSyncLoop(ctx, bc, cons, currentNodeID, peerAddrsFunc, &syncState, &syncStateMu, progress)
 	}()
 
 	// SECTION 13 — genesis verification (after sync loop has run)
@@ -1175,7 +1222,7 @@ func StartNode(
 	// Check if genesis is already available (solo node or first node)
 	genesisBlock = bc.GetLatestBlock()
 	if genesisBlock != nil && genesisBlock.GetHeight() == 0 {
-		logger.Info("✅ Genesis block already present: %s", expectedGenesisHash)
+		logger.Info("Genesis block already present: %s", expectedGenesisHash)
 		genesisVerified = true
 	}
 
@@ -1183,7 +1230,7 @@ func StartNode(
 	// the sync loop to fetch genesis. We wait indefinitely with periodic
 	// logging so the operator can see progress.
 	if !genesisVerified && effectivePeerCount() > 0 {
-		logger.Info("⏳ Waiting for sync loop to fetch genesis from peers (will wait indefinitely)...")
+		logger.Info("Waiting for sync loop to fetch genesis from peers (will wait indefinitely)...")
 		checkTicker := time.NewTicker(1 * time.Second)
 		defer checkTicker.Stop()
 		lastLog := time.Now()
@@ -1191,7 +1238,7 @@ func StartNode(
 		for {
 			genesisBlock = bc.GetLatestBlock()
 			if genesisBlock != nil && genesisBlock.GetHeight() == 0 {
-				logger.Info("✅ Genesis hash verified: %s", expectedGenesisHash)
+				logger.Info("Genesis hash verified: %s", expectedGenesisHash)
 				genesisVerified = true
 				break genesisLoop
 			}
@@ -1200,18 +1247,18 @@ func StartNode(
 			currentSync := syncState
 			syncStateMu.Unlock()
 			if currentSync == SyncStateCaughtUp {
-				logger.Info("✅ Sync completed — network at genesis (no blocks produced yet)")
+				logger.Info("Sync completed — network at genesis (no blocks produced yet)")
 				genesisVerified = true
 				break genesisLoop
 			}
 			if time.Since(lastLog) > 10*time.Second {
-				logger.Info("⏳ Still waiting for genesis from peers (syncState=%s)...", currentSync.String())
+				logger.Info("Still waiting for genesis from peers (syncState=%s)...", currentSync.String())
 				lastLog = time.Now()
 			}
 			select {
 			case <-checkTicker.C:
 			case <-ctx.Done():
-				logger.Warn("⚠️ Context cancelled while waiting for genesis")
+				logger.Warn("Context cancelled while waiting for genesis")
 				genesisVerified = false
 				break genesisLoop
 			}
@@ -1219,14 +1266,16 @@ func StartNode(
 	}
 
 	if !genesisVerified {
-		logger.Warn("⚠️ Genesis not verified — proceeding anyway (sync loop will handle it)")
+		logger.Warn("Genesis not verified — proceeding anyway (sync loop will handle it)")
 	}
 
 	// SECTION 15 — block production loop (now gated by sync state)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		runBlockProductionLoop(ctx, bc, cons, currentNodeID, totalNodes, networkType, validatorIDs, validatorAddressMap, phase2State, effectivePeerCount, &syncState, &syncStateMu)
+		runBlockProductionLoop(ctx, bc, cons, currentNodeID, totalNodes, networkType,
+			validatorIDs, validatorAddressMap, phase2State, effectivePeerCount,
+			&syncState, &syncStateMu, progress)
 	}()
 
 	// SECTION 15 — state persistence loop
@@ -1252,9 +1301,9 @@ func StartNode(
 	}
 
 	if knownPeers >= 2 {
-		logger.Info("✅ PBFT CONSENSUS ACTIVE with %d known validators", knownPeers+1)
+		logger.Info("PBFT CONSENSUS ACTIVE with %d known validators", knownPeers+1)
 	} else if usingRealAddress {
-		logger.Info("ℹ️  Real-device mode: consensus activates as peers join via --seeds discovery")
+		logger.Info("Real-device mode: consensus activates as peers join via --seeds discovery")
 	}
 
 	logger.Info("Press Ctrl+C to stop")
@@ -1270,7 +1319,7 @@ func StartNode(
 	wg.Wait()
 	flushNodeState(bc, currentNodeID, currentAddress)
 
-	logger.Info("✅ Node %d stopped cleanly", nodeIndex+1)
+	logger.Info("Node %d stopped cleanly", nodeIndex+1)
 	return nil
 }
 
@@ -1368,7 +1417,7 @@ func flushNodeState(bc *core.Blockchain, nodeID, address string) {
 	}(); err != nil {
 		logger.Warn("[%s] StoreChainState: %v", nodeID, err)
 	} else {
-		logger.Info("[%s] 💾 Chain state persisted — height=%d", nodeID, latest.GetHeight())
+		logger.Info("[%s] Chain state persisted — height=%d", nodeID, latest.GetHeight())
 	}
 
 }

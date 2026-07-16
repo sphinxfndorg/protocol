@@ -13,9 +13,9 @@ import (
 	"time"
 
 	"github.com/sphinxfndorg/protocol/src/common"
+	logger "github.com/sphinxfndorg/protocol/src/console"
 	sign "github.com/sphinxfndorg/protocol/src/core/sthincs/sign/backend"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
-	logger "github.com/sphinxfndorg/protocol/src/log"
 )
 
 // NewMempool creates a new comprehensive mempool instance

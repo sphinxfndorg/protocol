@@ -10,7 +10,7 @@ import (
 	"math/big"
 	"sort"
 
-	logger "github.com/sphinxfndorg/protocol/src/log"
+	logger "github.com/sphinxfndorg/protocol/src/console"
 
 	denom "github.com/sphinxfndorg/protocol/src/params/denom"
 )
@@ -69,7 +69,7 @@ func (vs *ValidatorSet) AddValidator(id string, stakeSPX uint64) error {
 		vs.totalStake.Sub(vs.totalStake, val.StakeAmount)
 		val.StakeAmount = stakeNSPX
 		vs.totalStake.Add(vs.totalStake, stakeNSPX)
-		logger.Info("✅ Validator %s updated to %d SPX stake", id, stakeSPX)
+		logger.Info("Validator %s updated to %d SPX stake", id, stakeSPX)
 	} else {
 		// Add new validator
 		vs.validators[id] = &StakedValidator{
@@ -77,7 +77,7 @@ func (vs *ValidatorSet) AddValidator(id string, stakeSPX uint64) error {
 			StakeAmount: stakeNSPX,
 		}
 		vs.totalStake.Add(vs.totalStake, stakeNSPX)
-		logger.Info("✅ Validator %s added with %d SPX stake", id, stakeSPX)
+		logger.Info("Validator %s added with %d SPX stake", id, stakeSPX)
 	}
 
 	return nil
@@ -127,6 +127,19 @@ func (vs *ValidatorSet) GetActiveValidators(epoch uint64) []*StakedValidator {
 	})
 
 	return active
+}
+
+// GetValidators returns all validators in the set (for dashboard/status queries).
+// This returns all validators regardless of epoch status.
+func (vs *ValidatorSet) GetValidators() []*StakedValidator {
+	vs.mu.RLock()
+	defer vs.mu.RUnlock()
+
+	validators := make([]*StakedValidator, 0, len(vs.validators))
+	for _, v := range vs.validators {
+		validators = append(validators, v)
+	}
+	return validators
 }
 
 // ActiveValidatorIDs is a convenience wrapper used by the VDF epoch finaliser.
@@ -293,7 +306,7 @@ func (vs *ValidatorSet) UpdateStake(id string, stakeSPX uint64) error {
 	vs.totalStake.Add(vs.totalStake, stakeNSPX)
 
 	oldSPX := new(big.Int).Div(oldStake, big.NewInt(denom.SPX))
-	logger.Info("✅ Validator %s stake updated from %d SPX to %d SPX",
+	logger.Info("Validator %s stake updated from %d SPX to %d SPX",
 		id, oldSPX.Uint64(), stakeSPX)
 
 	return nil
@@ -353,7 +366,7 @@ func (vs *ValidatorSet) SetStakeFromBalance(validatorID string, balanceNSPX *big
 	v.StakeAmount = stakeNSPX
 	vs.totalStake.Add(vs.totalStake, stakeNSPX)
 
-	logger.Info("✅ Validator %s stake set to %d SPX from balance",
+	logger.Info("Validator %s stake set to %d SPX from balance",
 		validatorID, stakeSPXUint)
 	return nil
 }

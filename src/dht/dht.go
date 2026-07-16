@@ -93,13 +93,20 @@ func NewDHT(cfg Config, logger *zap.Logger) (*DHT, error) {
 
 // Start begins the DHT operation by launching all worker goroutines
 func (d *DHT) Start() error {
-	// Start message receiver loop
-	d.stopper.RunWorker(func() {
-		if err := d.conn.ReceiveMessageLoop(d.stopper.ShouldStop()); err != nil {
-			d.log.Error("ReceiveMessageLoop failed", zap.Error(err))
-			return
-		}
-	})
+	// ── FIX: DHT may have a nil conn if the port was already in use ──
+	// When newConn returns nil, nil (e.g. port collision), DHT is still
+	// created but cannot send/receive on UDP. Start the stub workers
+	// anyway so the DHT lifecycle is consistent, but skip the receiver
+	// loop (which would panic on a nil conn).
+	if d.conn != nil {
+		// Start message receiver loop
+		d.stopper.RunWorker(func() {
+			if err := d.conn.ReceiveMessageLoop(d.stopper.ShouldStop()); err != nil {
+				d.log.Error("ReceiveMessageLoop failed", zap.Error(err))
+				return
+			}
+		})
+	}
 
 	// Start message sender worker
 	d.stopper.RunWorker(func() {
@@ -111,13 +118,16 @@ func (d *DHT) Start() error {
 		d.loop()
 	})
 
-	// Send initial join request to bootstrap into the network
-	d.requestToJoin()
-
-	// Schedule periodic join requests (every second)
-	d.schedule(time.Second, func() {
+	// Only send join request if we have a connection (port not in use)
+	if d.conn != nil {
+		// Send initial join request to bootstrap into the network
 		d.requestToJoin()
-	})
+
+		// Schedule periodic join requests (every second)
+		d.schedule(time.Second, func() {
+			d.requestToJoin()
+		})
+	}
 
 	return nil
 }
@@ -127,7 +137,11 @@ func (d *DHT) Close() error {
 	d.log.Debug("Stopping DHT")
 	d.stopper.Stop() // Stop all worker goroutines
 	d.log.Debug("Stopper stopped")
-	return d.conn.Close() // Close the UDP connection
+	// ── FIX: d.conn may be nil if port was already in use ──
+	if d.conn != nil {
+		return d.conn.Close() // Close the UDP connection
+	}
+	return nil
 }
 
 // Put implements network.DHT.Put.
@@ -286,13 +300,18 @@ func (d *DHT) Join() {
 
 // sendMessageWorker processes outgoing messages from the sendMsgCh channel
 func (d *DHT) sendMessageWorker() {
+	// ── FIX: If conn is nil (port collision), silently drain sendMsgCh ──
+	// Without this, any code path that tries to send a DHT message will
+	// panic on nil pointer dereference of d.conn.
 	for {
 		select {
 		case <-d.stopper.ShouldStop():
-			// DHT is stopping, exit worker
 			return
 		case req := <-d.sendMsgCh:
-			// Send the encoded message over UDP
+			if d.conn == nil {
+				// DHT disabled (port in use) — just drop the message
+				continue
+			}
 			if err := d.conn.SendMessage(req.EncodedData, req.Addr); err != nil {
 				d.log.Debug("Failed to send message", zap.Error(err))
 			}
@@ -305,6 +324,19 @@ func (d *DHT) sendMessageWorker() {
 func (d *DHT) loop() {
 	// Add random jitter to timers to prevent thundering herd
 	ri := time.Duration(rand.Uint64()%5000) * time.Millisecond
+
+	// ── FIX: If conn is nil (port collision), create a closed channel so the
+	// select below never blocks on d.conn.ReceivedCh — otherwise the main
+	// loop would spin forever waiting for a nil channel that will never close.
+	var receivedCh chan rpc.Message
+	if d.conn != nil {
+		receivedCh = d.conn.ReceivedCh
+	} else {
+		// Use a closed channel that immediately returns zero values
+		// (which are ignored by handleMessage since they have no sender).
+		receivedCh = make(chan rpc.Message)
+		close(receivedCh)
+	}
 
 	// Initialize timers with jitter
 	storeGCTicker := time.NewTicker(storeGCInterval + ri)
@@ -359,7 +391,7 @@ func (d *DHT) loop() {
 			// Periodic ping of stale remote nodes
 			d.pingStaleRemotes()
 
-		case msg := <-d.conn.ReceivedCh:
+		case msg := <-receivedCh:
 			// Handle incoming message from network
 			d.handleMessage(msg)
 
@@ -550,6 +582,11 @@ func (d *DHT) toLocalNode(addr net.UDPAddr) bool {
 
 // sendMessage encodes and sends an RPC message to a remote node
 func (d *DHT) sendMessage(m rpc.Message, addr net.UDPAddr) {
+	// ── FIX: Silently drop messages if DHT is disabled (port collision) ──
+	if d.conn == nil {
+		return
+	}
+
 	// Set the secret before marshaling/encoding so it is actually included on the wire
 	m.Secret = d.cfg.Secret
 

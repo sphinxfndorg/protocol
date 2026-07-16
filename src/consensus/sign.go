@@ -14,10 +14,10 @@ import (
 
 	"github.com/holiman/uint256"
 	logger "github.com/sphinxfndorg/protocol/src/console"
+	svm "github.com/sphinxfndorg/protocol/src/core/kernel/opcodes"
+	vmachine "github.com/sphinxfndorg/protocol/src/core/kernel/vm"
 	key "github.com/sphinxfndorg/protocol/src/core/sthincs/key/backend"
 	sign "github.com/sphinxfndorg/protocol/src/core/sthincs/sign/backend"
-	svm "github.com/sphinxfndorg/protocol/src/core/svm/opcodes"
-	vmachine "github.com/sphinxfndorg/protocol/src/core/svm/vm"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
 	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/sthincs"
 )

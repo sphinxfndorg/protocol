@@ -14,11 +14,11 @@ import (
 	"github.com/holiman/uint256"
 	"github.com/sphinxfndorg/protocol/src/common"
 	"github.com/sphinxfndorg/protocol/src/core/hashtree"
+	svm "github.com/sphinxfndorg/protocol/src/core/kernel/opcodes"
+	vmachine "github.com/sphinxfndorg/protocol/src/core/kernel/vm"
 	sigproof "github.com/sphinxfndorg/protocol/src/core/proof"
 	key "github.com/sphinxfndorg/protocol/src/core/sthincs/key/backend"
 	sign "github.com/sphinxfndorg/protocol/src/core/sthincs/sign/backend"
-	svm "github.com/sphinxfndorg/protocol/src/core/svm/opcodes"
-	vmachine "github.com/sphinxfndorg/protocol/src/core/svm/vm"
 	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/sthincs"
 
 	"github.com/syndtr/goleveldb/leveldb"

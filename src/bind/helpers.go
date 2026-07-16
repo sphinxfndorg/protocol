@@ -22,8 +22,8 @@ import (
 	"github.com/sphinxfndorg/protocol/src/common"
 	"github.com/sphinxfndorg/protocol/src/consensus"
 	"github.com/sphinxfndorg/protocol/src/core"
-	svm "github.com/sphinxfndorg/protocol/src/core/svm/opcodes"
-	vmachine "github.com/sphinxfndorg/protocol/src/core/svm/vm"
+	svm "github.com/sphinxfndorg/protocol/src/core/kernel/opcodes"
+	vmachine "github.com/sphinxfndorg/protocol/src/core/kernel/vm"
 
 	logger "github.com/sphinxfndorg/protocol/src/console"
 	security "github.com/sphinxfndorg/protocol/src/handshake"

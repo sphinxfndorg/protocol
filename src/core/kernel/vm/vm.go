@@ -7,7 +7,7 @@ package vm
 import (
 	"fmt"
 
-	svm "github.com/sphinxfndorg/protocol/src/core/svm/opcodes"
+	svm "github.com/sphinxfndorg/protocol/src/core/kernel/opcodes"
 )
 
 // NewVM initializes a new VM instance with the given bytecode

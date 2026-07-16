@@ -12,8 +12,8 @@ import (
 	"time"
 
 	logger "github.com/sphinxfndorg/protocol/src/console"
-	svm "github.com/sphinxfndorg/protocol/src/core/svm/opcodes"
-	vmachine "github.com/sphinxfndorg/protocol/src/core/svm/vm"
+	svm "github.com/sphinxfndorg/protocol/src/core/kernel/opcodes"
+	vmachine "github.com/sphinxfndorg/protocol/src/core/kernel/vm"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
 )
 

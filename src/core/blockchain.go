@@ -23,9 +23,9 @@ import (
 	"github.com/sphinxfndorg/protocol/src/pool"
 
 	logger "github.com/sphinxfndorg/protocol/src/console"
+	svm "github.com/sphinxfndorg/protocol/src/core/kernel/opcodes"
+	"github.com/sphinxfndorg/protocol/src/core/kernel/vm"
 	sign "github.com/sphinxfndorg/protocol/src/core/sthincs/sign/backend"
-	svm "github.com/sphinxfndorg/protocol/src/core/svm/opcodes"
-	"github.com/sphinxfndorg/protocol/src/core/svm/vm"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
 	storage "github.com/sphinxfndorg/protocol/src/state"
 )

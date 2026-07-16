@@ -348,17 +348,17 @@ func (b *Block) GenerateBlockHash() []byte {
 	// This makes genesis blocks easily identifiable
 	if b.Header.Height == 0 {
 		genesisHash := "GENESIS_" + hexHash
-		log.Printf("🔷 Genesis block hash created: %s", genesisHash)
-		log.Printf("🔷 Genesis ParentHash: %x (empty)", b.Header.ParentHash)
-		log.Printf("🔷 Genesis UnclesHash: %x", b.Header.UnclesHash)
+		log.Printf("⛏️ Genesis block hash created: %s", genesisHash)
+		log.Printf("⫘ Genesis ParentHash: %x (empty)", b.Header.ParentHash)
+		log.Printf("⫘ Genesis UnclesHash: %x", b.Header.UnclesHash)
 		return []byte(genesisHash)
 	}
 
 	// For all other blocks, return hex-encoded hash
 	// Log hash creation details for debugging
-	log.Printf("🔷 Normal block %d hash created", b.Header.Height)
-	log.Printf("🔷 ParentHash: %x", b.Header.ParentHash)
-	log.Printf("🔷 UnclesHash: %x (%d uncles)", b.Header.UnclesHash, len(b.Body.Uncles))
+	log.Printf("⛏️ Normal block %d hash created", b.Header.Height)
+	log.Printf("⫘ ParentHash: %x", b.Header.ParentHash)
+	log.Printf("⫘ UnclesHash: %x (%d uncles)", b.Header.UnclesHash, len(b.Body.Uncles))
 	return []byte(hexHash)
 }
 

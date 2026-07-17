@@ -31,8 +31,8 @@ func NewGenesisValidatorStake(spx int64) *big.Int {
 // constant instead of wall-clock time ensures every node produces the exact
 // same genesis block hash, regardless of when or where it starts.
 //
-// 2026-07-15 19:33:18 UTC
-const CanonicalGenesisTimestamp int64 = 1731375284
+// 2026-07-15 19:33:18 UTC — canonical genesis timestamp for ALL environments.
+const CanonicalGenesisTimestamp int64 = 1784143998
 
 // DefaultGenesisState returns the canonical genesis configuration used by all
 // nodes on the Sphinx Mainnet. Every field is deterministic so that independent
@@ -269,6 +269,7 @@ func (gs *GenesisState) BuildBlock() *types.Block {
 	}
 
 	block := types.NewBlock(header, body)
+	block.PopulateLogsBloom()
 	block.FinalizeHash()
 
 	logger.Info("GenesisState.BuildBlock: hash=%s, height=0, vault=%s, txs=%d",

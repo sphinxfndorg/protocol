@@ -1,0 +1,12 @@
+{
+  "block_hash": "842a1c7aa06177cc8cbb693ed7f2ac3e642553b85d576c0cf2e7121ebdbd71cc",
+  "block_height": 1,
+  "phase": "committed",
+  "state_changes": [],
+  "committed": true,
+  "previous_tip_hash": "GENESIS_9a0a5a65b87b32be4e8e6963b49102ca1ffd39155d47e9f322a0ad44c0f78e1f",
+  "started_at": "2026-07-17T16:55:29.029013+07:00",
+  "committed_at": "2026-07-17T16:55:29.038124+07:00",
+  "block_file_written": true,
+  "index_updated": true
+}

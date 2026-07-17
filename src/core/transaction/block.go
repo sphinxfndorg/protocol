@@ -182,7 +182,7 @@ func CalculateUnclesHash(uncles []*BlockHeader, blockHeight uint64) []byte {
 	if blockHeight == 0 {
 		// Decode the hardcoded genesis uncles hash from hex string
 		genesisUnclesHash, _ := hex.DecodeString("3916d45c66e84c612c8a4a403702ec44cc575fc2383dbe4e861dd29ef892bee3")
-		log.Printf("🔷 Genesis block %d - Using hardcoded uncles hash: %x", blockHeight, genesisUnclesHash)
+		log.Printf("⛏️ Genesis block %d - Using hardcoded uncles hash: %x", blockHeight, genesisUnclesHash)
 		return genesisUnclesHash
 	}
 
@@ -191,7 +191,7 @@ func CalculateUnclesHash(uncles []*BlockHeader, blockHeight uint64) []byte {
 	if len(uncles) == 0 {
 		// Use a different hash for non-genesis empty uncles
 		emptyHash := common.SpxHash([]byte("empty_uncles_list"))
-		log.Printf("🔷 Block %d - Using standard empty uncles hash: %x", blockHeight, emptyHash)
+		log.Printf("⛏️ Block %d - Using standard empty uncles hash: %x", blockHeight, emptyHash)
 		return emptyHash
 	}
 

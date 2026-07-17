@@ -10,73 +10,20 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
-	"sync"
 	"time"
 
 	logger "github.com/sphinxfndorg/protocol/src/console"
 )
 
-// ============================================================================
-// ROLLBACK JOURNAL - Records state changes for crash-safe rollback
-// ============================================================================
-
-// StateChangeJournal records a single account state change for potential rollback
-type StateChangeJournal struct {
-	Address         string `json:"address"`
-	PreviousBalance string `json:"previous_balance"`
-	PreviousNonce   uint64 `json:"previous_nonce"`
-}
-
-// AtomicCommitJournal records all state changes for a single block commit
-// This enables exact rollback if the commit is interrupted
-type AtomicCommitJournal struct {
-	BlockHash         string               `json:"block_hash"`
-	BlockHeight       uint64               `json:"block_height"`
-	Phase             string               `json:"phase"` // "started", "state_applied", "block_stored", "committed"
-	StateChanged      []StateChangeJournal `json:"state_changes"`
-	Committed         bool                 `json:"committed"`
-	PreviousTipHash   string               `json:"previous_tip_hash,omitempty"`
-	PreviousTipHeight uint64               `json:"previous_tip_height,omitempty"`
-	PreviousWeight    *big.Int             `json:"previous_weight,omitempty"`
-	StartedAt         time.Time            `json:"started_at"`
-	CommittedAt       time.Time            `json:"committed_at,omitempty"`
-	StateRootBefore   string               `json:"state_root_before,omitempty"`
-	BlockFileWritten  bool                 `json:"block_file_written,omitempty"`
-	IndexUpdated      bool                 `json:"index_updated,omitempty"`
-}
-
-// ReorgJournal records chain reorganization state for crash recovery
-type ReorgJournal struct {
-	OldTipHash         string    `json:"old_tip_hash"`
-	OldTipHeight       uint64    `json:"old_tip_height"`
-	OldTipStateRoot    string    `json:"old_tip_state_root,omitempty"`
-	ForkHash           string    `json:"fork_hash"`
-	ForkHeight         uint64    `json:"fork_height"`
-	BlocksToDisconnect []string  `json:"blocks_to_disconnect"`
-	BlocksToConnect    []string  `json:"blocks_to_connect"`
-	Phase              string    `json:"phase"` // "started", "disconnecting", "connecting", "complete"
-	StartedAt          time.Time `json:"started_at"`
-	// For proper rollback, store the pre-reorg state
-	DisconnectedBlocks []string `json:"disconnected_blocks,omitempty"`
-}
-
-// ============================================================================
-// JOURNAL MANAGER - Manages crash-safe journals
-// ============================================================================
-
-// JournalManager manages rollback journals for atomic commits and reorganizations
-type JournalManager struct {
-	mu sync.Mutex
-
-	dataDir    string
-	journalDir string
-
-	activeTx   *AtomicCommitJournal
-	inProgress bool
-
-	// For reorg crash recovery
-	reorgTx         *ReorgJournal
-	reorgInProgress bool
+// AttachBlockchain wires the blockchain instance into the journal manager so
+// recovery can actually replay state, instead of only detecting and logging
+// an incomplete commit. Call this once, after NewBlockchain/FinishInit has
+// loaded bc.chain from storage, and before the node starts accepting new
+// commits.
+func (jm *JournalManager) AttachBlockchain(bc *Blockchain) {
+	jm.mu.Lock()
+	defer jm.mu.Unlock()
+	jm.bc = bc
 }
 
 // Global journal manager
@@ -216,20 +163,57 @@ func (jm *JournalManager) Commit(previousWeight *big.Int) error {
 	return nil
 }
 
-// Rollback reverts all changes made in the current transaction
-// This is called when a commit fails - actual state restoration happens in blockchain
+// Rollback reverts all changes made in the current transaction.
+// Called synchronously from CommitBlock when something after the state DB
+// flush fails (e.g. StoreBlock). At that point stateDB.Commit() has already
+// written the new block's balance/nonce/supply changes to LevelDB, but the
+// block itself never made it to storage — so state and storage now disagree
+// about the chain tip. This used to just clear jm's in-memory pointer and
+// log "success" without touching the state DB at all, silently leaving that
+// divergence in place. Now it actually replays state back to the journal's
+// recorded PreviousTipHeight via bc.rebuildStateToHeight, the same primitive
+// RollbackToHeight and the new reorg path use.
 func (jm *JournalManager) Rollback() error {
 	jm.mu.Lock()
-	defer jm.mu.Unlock()
+	tx := jm.activeTx
+	bc := jm.bc
+	jm.mu.Unlock()
 
-	if jm.activeTx == nil {
+	if tx == nil {
 		return fmt.Errorf("no active transaction")
 	}
 
-	logger.Info("🔄 Rolling back atomic commit for block %s", jm.activeTx.BlockHash[:16])
+	logger.Info("🔄 Rolling back atomic commit for block %s (restoring state to height %d)",
+		tx.BlockHash[:16], tx.PreviousTipHeight)
 
+	if bc == nil {
+		logger.Warn("JournalManager.Rollback: no blockchain attached — clearing journal pointer only, " +
+			"state DB changes for this block were NOT reverted. This should not happen once " +
+			"AttachBlockchain has been called during startup.")
+	} else if err := bc.rebuildStateToHeight(tx.PreviousTipHeight); err != nil {
+		// Don't clear activeTx on failure — leave the journal file in place so
+		// a subsequent restart's recovery pass gets another chance at it,
+		// rather than silently dropping the only record of the divergence.
+		return fmt.Errorf("JournalManager.Rollback: failed to restore state to height %d: %w",
+			tx.PreviousTipHeight, err)
+	} else {
+		logger.Info("SUCCESS State restored to height %d after failed commit", tx.PreviousTipHeight)
+	}
+
+	jm.mu.Lock()
 	jm.inProgress = false
 	jm.activeTx = nil
+	jm.mu.Unlock()
+
+	// Remove the on-disk journal now that state has actually been repaired —
+	// keeping it around after a successful rollback would make a later
+	// restart try to "recover" an already-consistent state.
+	if tx.BlockHash != "" {
+		txPath := filepath.Join(jm.journalDir, fmt.Sprintf("tx_%s.json", tx.BlockHash[:16]))
+		if err := os.Remove(txPath); err != nil && !os.IsNotExist(err) {
+			logger.Warn("JournalManager.Rollback: failed to remove journal file: %v", err)
+		}
+	}
 
 	logger.Info("SUCCESS Completed rollback of atomic transaction")
 	return nil
@@ -257,8 +241,11 @@ func (jm *JournalManager) persistTx() error {
 	return os.Rename(tmpPath, txPath)
 }
 
-// recoverIncompleteOperations recovers from incomplete commits on startup
-// This is called during InitJournalManager
+// recoverIncompleteOperations scans for incomplete commit journals on
+// startup. It can only detect and queue them here — bc.chain hasn't been
+// loaded from storage yet at InitJournalManager time, so there's nothing to
+// replay state against. RepairIncompleteCommits() does the actual repair
+// once AttachBlockchain has run; FinishInit calls it in that order.
 func (jm *JournalManager) recoverIncompleteOperations() error {
 	// Find all transaction files
 	txPathPattern := filepath.Join(jm.journalDir, "tx_*.json")
@@ -279,15 +266,61 @@ func (jm *JournalManager) recoverIncompleteOperations() error {
 		}
 
 		if !tx.Committed {
-			logger.Warn("Detected incomplete commit for block %s in phase %s - state may need recovery",
-				tx.BlockHash[:16], tx.Phase)
-			// The block may have been written but state changes not applied
-			// Recovery strategy: if block file exists but state not consistent, rollback
+			logger.Warn("Detected incomplete commit for block %s in phase %s (height %d) — queued for repair once chain is loaded",
+				tx.BlockHash[:16], tx.Phase, tx.BlockHeight)
+			txCopy := tx
+			jm.pendingRepair = append(jm.pendingRepair, &txCopy)
 		}
 	}
 
 	// Check for incomplete reorg
 	return jm.RecoverIncompleteReorg()
+}
+
+// RepairIncompleteCommits processes every journal queued by
+// recoverIncompleteOperations, restoring state to each journal's
+// PreviousTipHeight via bc.rebuildStateToHeight and then removing the
+// journal file. Must be called after AttachBlockchain and after the chain
+// has been loaded from storage (i.e. after initializeChain in FinishInit).
+//
+// This replaces the old behavior, where an incomplete commit was either
+// only logged (recoverIncompleteOperations) or detected-and-discarded
+// (the old PerformCrashRecovery, which deleted the journal file without
+// touching state at all) — in both cases the node would boot with account
+// state silently ahead of what storage actually persisted.
+func (jm *JournalManager) RepairIncompleteCommits() error {
+	jm.mu.Lock()
+	bc := jm.bc
+	pending := jm.pendingRepair
+	jm.pendingRepair = nil
+	jm.mu.Unlock()
+
+	if bc == nil {
+		if len(pending) > 0 {
+			logger.Warn("RepairIncompleteCommits: %d incomplete commit journal(s) found but no blockchain attached — not repaired", len(pending))
+		}
+		return nil
+	}
+
+	for _, tx := range pending {
+		logger.Warn("Repairing incomplete commit for block %s: restoring state to height %d",
+			tx.BlockHash[:16], tx.PreviousTipHeight)
+
+		if err := bc.rebuildStateToHeight(tx.PreviousTipHeight); err != nil {
+			return fmt.Errorf("RepairIncompleteCommits: failed to restore state to height %d for block %s: %w",
+				tx.PreviousTipHeight, tx.BlockHash[:16], err)
+		}
+
+		txPath := filepath.Join(jm.journalDir, fmt.Sprintf("tx_%s.json", tx.BlockHash[:16]))
+		if err := os.Remove(txPath); err != nil && !os.IsNotExist(err) {
+			logger.Warn("RepairIncompleteCommits: failed to remove repaired journal file: %v", err)
+		}
+
+		logger.Info("SUCCESS Repaired incomplete commit for block %s — state restored to height %d",
+			tx.BlockHash[:16], tx.PreviousTipHeight)
+	}
+
+	return nil
 }
 
 // IsInProgress returns true if a commit is currently in progress
@@ -447,11 +480,15 @@ func (jm *JournalManager) ClearReorgJournal() {
 // CRASH RECOVERY - Global recovery coordinator
 // ============================================================================
 
-// PerformCrashRecovery is called on node startup to recover from crashes
-// Returns true if recovery was performed, false if clean state
+// PerformCrashRecovery is called on node startup to recover from crashes.
+// Requires AttachBlockchain to have been called first (and the chain to
+// already be loaded) — otherwise it can detect incomplete commits but can't
+// actually repair state, same limitation as RepairIncompleteCommits.
+// Returns true if recovery was performed, false if clean state.
 func (jm *JournalManager) PerformCrashRecovery() bool {
 	jm.mu.Lock()
-	defer jm.mu.Unlock()
+	bc := jm.bc
+	jm.mu.Unlock()
 
 	recoveryPerformed := false
 
@@ -471,9 +508,27 @@ func (jm *JournalManager) PerformCrashRecovery() bool {
 			}
 
 			if !tx.Committed {
-				logger.Warn("Crash recovery: found incomplete block commit for height %d", tx.BlockHeight)
+				logger.Warn("Crash recovery: found incomplete block commit for height %d (block %s)",
+					tx.BlockHeight, tx.BlockHash)
 				recoveryPerformed = true
-				// Remove the incomplete journal
+
+				if bc == nil {
+					// Nothing attached yet — leave the journal file in place
+					// so a later, properly-sequenced call (via
+					// RepairIncompleteCommits after AttachBlockchain) can
+					// still repair it. Previously this branch deleted the
+					// journal unconditionally, which discarded the only
+					// record that state needed rolling back.
+					logger.Warn("Crash recovery: no blockchain attached yet — leaving journal in place for later repair")
+					continue
+				}
+
+				if err := bc.rebuildStateToHeight(tx.PreviousTipHeight); err != nil {
+					logger.Error("Crash recovery: failed to restore state to height %d for block %s: %v",
+						tx.PreviousTipHeight, tx.BlockHash[:16], err)
+					continue
+				}
+				logger.Info("SUCCESS Crash recovery: state restored to height %d", tx.PreviousTipHeight)
 				os.Remove(file)
 			}
 		}
@@ -489,7 +544,9 @@ func (jm *JournalManager) PerformCrashRecovery() bool {
 				logger.Warn("Crash recovery: found incomplete reorg in phase %s", journal.Phase)
 				recoveryPerformed = true
 				// Store the journal for blockchain to process via GetReorgJournal
+				jm.mu.Lock()
 				jm.reorgTx = &journal
+				jm.mu.Unlock()
 			}
 		}
 	}

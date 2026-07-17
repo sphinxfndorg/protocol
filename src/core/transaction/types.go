@@ -28,6 +28,7 @@ type BlockHeader struct {
 	UnclesHash []byte   `json:"uncles_hash"` // Hash of the uncles (references side blocks)
 	ExtraData  []byte   `json:"extra_data"`  // Extra data field for additional information
 	Miner      []byte   `json:"miner"`       // Miner address (20 bytes)
+	LogsBloom  []byte   `json:"logs_bloom"`  // 256-byte Bloom filter over block addresses/tx IDs
 	// NEW: PoS signature fields
 	ProposerSignature []byte `json:"proposer_signature"` // Signature by the block proposer
 	ProposerID        string `json:"proposer_id"`        // Which validator proposed this block

@@ -805,3 +805,78 @@ type blockchainInitOptions struct {
 // synchronously inside NewBlockchain, before it returns. Existing callers
 // that pass no options (server.go, legacy.go) are unaffected.
 type BlockchainOption func(*blockchainInitOptions)
+
+// ============================================================================
+// ROLLBACK JOURNAL - Records state changes for crash-safe rollback
+// ============================================================================
+
+// StateChangeJournal records a single account state change for potential rollback
+type StateChangeJournal struct {
+	Address         string `json:"address"`
+	PreviousBalance string `json:"previous_balance"`
+	PreviousNonce   uint64 `json:"previous_nonce"`
+}
+
+// AtomicCommitJournal records all state changes for a single block commit
+// This enables exact rollback if the commit is interrupted
+type AtomicCommitJournal struct {
+	BlockHash         string               `json:"block_hash"`
+	BlockHeight       uint64               `json:"block_height"`
+	Phase             string               `json:"phase"` // "started", "state_applied", "block_stored", "committed"
+	StateChanged      []StateChangeJournal `json:"state_changes"`
+	Committed         bool                 `json:"committed"`
+	PreviousTipHash   string               `json:"previous_tip_hash,omitempty"`
+	PreviousTipHeight uint64               `json:"previous_tip_height,omitempty"`
+	PreviousWeight    *big.Int             `json:"previous_weight,omitempty"`
+	StartedAt         time.Time            `json:"started_at"`
+	CommittedAt       time.Time            `json:"committed_at,omitempty"`
+	StateRootBefore   string               `json:"state_root_before,omitempty"`
+	BlockFileWritten  bool                 `json:"block_file_written,omitempty"`
+	IndexUpdated      bool                 `json:"index_updated,omitempty"`
+}
+
+// ReorgJournal records chain reorganization state for crash recovery
+type ReorgJournal struct {
+	OldTipHash         string    `json:"old_tip_hash"`
+	OldTipHeight       uint64    `json:"old_tip_height"`
+	OldTipStateRoot    string    `json:"old_tip_state_root,omitempty"`
+	ForkHash           string    `json:"fork_hash"`
+	ForkHeight         uint64    `json:"fork_height"`
+	BlocksToDisconnect []string  `json:"blocks_to_disconnect"`
+	BlocksToConnect    []string  `json:"blocks_to_connect"`
+	Phase              string    `json:"phase"` // "started", "disconnecting", "connecting", "complete"
+	StartedAt          time.Time `json:"started_at"`
+	// For proper rollback, store the pre-reorg state
+	DisconnectedBlocks []string `json:"disconnected_blocks,omitempty"`
+}
+
+// ============================================================================
+// JOURNAL MANAGER - Manages crash-safe journals
+// ============================================================================
+
+// JournalManager manages rollback journals for atomic commits and reorganizations
+type JournalManager struct {
+	mu sync.Mutex
+
+	dataDir    string
+	journalDir string
+
+	activeTx   *AtomicCommitJournal
+	inProgress bool
+
+	// For reorg crash recovery
+	reorgTx         *ReorgJournal
+	reorgInProgress bool
+
+	// bc is the blockchain this journal guards. It's nil at InitJournalManager
+	// time (the chain hasn't been loaded from storage yet, so there's nothing
+	// to replay against) and gets set via AttachBlockchain once FinishInit has
+	// loaded bc.chain. Real state repair — actually calling
+	// bc.rebuildStateToHeight — can only happen once bc is set.
+	bc *Blockchain
+
+	// pendingRepair holds incomplete commit journals discovered during the
+	// InitJournalManager scan, before bc is available to repair them against.
+	// RepairIncompleteCommits() drains this once AttachBlockchain has run.
+	pendingRepair []*AtomicCommitJournal
+}

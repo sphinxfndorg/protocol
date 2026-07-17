@@ -1,0 +1,70 @@
+{
+  "chain_id": 73310,
+  "chain_name": "Sphinx Devnet",
+  "symbol": "SPX",
+  "timestamp": "2026-07-15T19:33:18Z",
+  "extra_data": "Sphinx: The personal ledger beyond it's economics participants. Privacy, sovereignty, and humanity.",
+  "initial_difficulty": "17179869184",
+  "initial_gas_limit": "5000",
+  "nonce": "0000000000000001",
+  "total_allocations": 9,
+  "total_allocated_nspx": "1240000000000000000000000000",
+  "total_allocated_spx": "1240000000",
+  "total_validators": 0,
+  "allocations": [
+    {
+      "address": "F6F666A0F07BB9F1B9C36C0BC497DEF789ACA6B4A7564F88A6277FCBBFD909F8",
+      "balance_nspx": "30000000000000000000000000",
+      "balance_spx": "30000000",
+      "label": "Founder"
+    },
+    {
+      "address": "42D1A44930C61EE48B858E88E393BAA172D95DFFDE0D5AE42B70E60B8C71C2DB",
+      "balance_nspx": "95000000000000000000000000",
+      "balance_spx": "95000000",
+      "label": "CoFounder"
+    },
+    {
+      "address": "929FC03E6D4DD81BF0825217A977EC0BEF78AAEDA28C4C5968201DEFE1A93D8D",
+      "balance_nspx": "200000000000000000000000000",
+      "balance_spx": "200000000",
+      "label": "Development"
+    },
+    {
+      "address": "CA359B93E914745900FC4EA87E44E4EB486294C940311940CEC53C370CBD0B7C",
+      "balance_nspx": "90000000000000000000000000",
+      "balance_spx": "90000000",
+      "label": "Contributors"
+    },
+    {
+      "address": "5000000000000000000000000000000000000001",
+      "balance_nspx": "300000000000000000000000000",
+      "balance_spx": "300000000",
+      "label": "Foundation"
+    },
+    {
+      "address": "6000000000000000000000000000000000000001",
+      "balance_nspx": "35000000000000000000000000",
+      "balance_spx": "35000000",
+      "label": "Campaigns"
+    },
+    {
+      "address": "7000000000000000000000000000000000000001",
+      "balance_nspx": "90000000000000000000000000",
+      "balance_spx": "90000000",
+      "label": "Airdrops"
+    },
+    {
+      "address": "8000000000000000000000000000000000000001",
+      "balance_nspx": "200000000000000000000000000",
+      "balance_spx": "200000000",
+      "label": "PublicICOPool"
+    },
+    {
+      "address": "9000000000000000000000000000000000000001",
+      "balance_nspx": "200000000000000000000000000",
+      "balance_spx": "200000000",
+      "label": "Reserve"
+    }
+  ]
+}

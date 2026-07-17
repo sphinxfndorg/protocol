@@ -1,0 +1,12 @@
+{
+  "chain_identification": null,
+  "nodes": null,
+  "storage_state": null,
+  "basic_chain_state": {
+    "best_block_hash": "38105a184e7d73ef9d51ab55779ba318a379cf92905b90fd144d01f232be372d",
+    "total_blocks": 4,
+    "last_updated": "2026-07-17T15:22:33+07:00"
+  },
+  "block_size_metrics": null,
+  "timestamp": ""
+}

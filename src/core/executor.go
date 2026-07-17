@@ -1169,6 +1169,12 @@ func (bc *Blockchain) CreateBlock() (block *types.Block, err error) {
 	newBlock := types.NewBlock(newHeader, newBody)
 	newBlock.Header.ProposerID = proposerID
 
+	// Build the Bloom filter once here, before nonce mining. FinalizeHash
+	// runs inside the loop below up to maxAttempts times per block; a
+	// filter build (hashing every address/tx-id with 3 hash functions)
+	// must never happen per nonce attempt.
+	newBlock.PopulateLogsBloom()
+
 	// CRITICAL: Increment nonce multiple times until consensus is achieved
 	logger.Info("Starting nonce iteration for consensus: initial nonce=%s", newBlock.Header.Nonce)
 	if bp != nil {

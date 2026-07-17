@@ -1,0 +1,128 @@
+{
+  "header": {
+    "hash": "GENESIS_9a0a5a65b87b32be4e8e6963b49102ca1ffd39155d47e9f322a0ad44c0f78e1f",
+    "txs_root": "d259b39731438c902e0e95f01defc46f1412f7aded7a54f04e9e05962aefd7a3",
+    "state_root": "10c03078357849e356fcb7ade8ed39fa733df1f265842fc8d7c6f6b14043d001",
+    "parent_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "uncles_hash": "3916d45c66e84c612c8a4a403702ec44cc575fc2383dbe4e861dd29ef892bee3",
+    "extra_data": "Sphinx: The personal ledger beyond it's economics participants. Privacy, sovereignty, and humanity.",
+    "miner": "0000000000000000000000000000000000000000",
+    "version": 1,
+    "nblock": 0,
+    "height": 0,
+    "timestamp": "2026-07-15T19:33:18Z",
+    "difficulty": "17179869184",
+    "nonce": "0000000000000001",
+    "gas_limit": "5000",
+    "gas_used": "0",
+    "proposer_signature": "",
+    "proposer_id": "0000000000000000000000000000000000000001",
+    "sig_data_hash": "9a0a5a65b87b32be4e8e6963b49102ca1ffd39155d47e9f322a0ad44c0f78e1f",
+    "commit_status": "committed",
+    "signature_valid": false
+  },
+  "body": {
+    "txs_list": [
+      {
+        "amount": "30000000000000000000000000",
+        "gas_limit": "0",
+        "gas_price": "0",
+        "id": "327c21b2b888ce811b1dba29b58b99b3e25814643a509f58983e9cf9e708ea6c",
+        "nonce": 0,
+        "receiver": "F6F666A0F07BB9F1B9C36C0BC497DEF789ACA6B4A7564F88A6277FCBBFD909F8",
+        "sender": "0000000000000000000000000000000000000001",
+        "signature": "",
+        "timestamp": "2026-07-15T19:33:18Z"
+      },
+      {
+        "amount": "95000000000000000000000000",
+        "gas_limit": "0",
+        "gas_price": "0",
+        "id": "280dc1b1eb867bfcb166d58c66609e9cfbd9c31d48dd23ad95b84d737785ddff",
+        "nonce": 1,
+        "receiver": "42D1A44930C61EE48B858E88E393BAA172D95DFFDE0D5AE42B70E60B8C71C2DB",
+        "sender": "0000000000000000000000000000000000000001",
+        "signature": "",
+        "timestamp": "2026-07-15T19:33:18Z"
+      },
+      {
+        "amount": "200000000000000000000000000",
+        "gas_limit": "0",
+        "gas_price": "0",
+        "id": "163fc469e334b7e4606ae27c822e7c6a72b92421cd5b83cf555283723a6d92cb",
+        "nonce": 2,
+        "receiver": "929FC03E6D4DD81BF0825217A977EC0BEF78AAEDA28C4C5968201DEFE1A93D8D",
+        "sender": "0000000000000000000000000000000000000001",
+        "signature": "",
+        "timestamp": "2026-07-15T19:33:18Z"
+      },
+      {
+        "amount": "90000000000000000000000000",
+        "gas_limit": "0",
+        "gas_price": "0",
+        "id": "a896483bd5757766fbbd772119da294274c69ed5ea986ba077f00652686a5278",
+        "nonce": 3,
+        "receiver": "CA359B93E914745900FC4EA87E44E4EB486294C940311940CEC53C370CBD0B7C",
+        "sender": "0000000000000000000000000000000000000001",
+        "signature": "",
+        "timestamp": "2026-07-15T19:33:18Z"
+      },
+      {
+        "amount": "300000000000000000000000000",
+        "gas_limit": "0",
+        "gas_price": "0",
+        "id": "7229510dd3d630657b7c12194794ad6b4e4a24ba5cda224a15cc7d0ba4b473fc",
+        "nonce": 4,
+        "receiver": "5000000000000000000000000000000000000001",
+        "sender": "0000000000000000000000000000000000000001",
+        "signature": "",
+        "timestamp": "2026-07-15T19:33:18Z"
+      },
+      {
+        "amount": "35000000000000000000000000",
+        "gas_limit": "0",
+        "gas_price": "0",
+        "id": "3d7baeda84f25c5fbc36f13ca2722f326d9bd315ce45722d04398e50533987b0",
+        "nonce": 5,
+        "receiver": "6000000000000000000000000000000000000001",
+        "sender": "0000000000000000000000000000000000000001",
+        "signature": "",
+        "timestamp": "2026-07-15T19:33:18Z"
+      },
+      {
+        "amount": "90000000000000000000000000",
+        "gas_limit": "0",
+        "gas_price": "0",
+        "id": "c50d2a98f86dc5351016f79f55caf21441051d0b05cb502e5c14f497ad8c9ac6",
+        "nonce": 6,
+        "receiver": "7000000000000000000000000000000000000001",
+        "sender": "0000000000000000000000000000000000000001",
+        "signature": "",
+        "timestamp": "2026-07-15T19:33:18Z"
+      },
+      {
+        "amount": "200000000000000000000000000",
+        "gas_limit": "0",
+        "gas_price": "0",
+        "id": "ae6be10b3220722583a2cecf030967046bf36dadfeb91355783116b79272ad1b",
+        "nonce": 7,
+        "receiver": "8000000000000000000000000000000000000001",
+        "sender": "0000000000000000000000000000000000000001",
+        "signature": "",
+        "timestamp": "2026-07-15T19:33:18Z"
+      },
+      {
+        "amount": "200000000000000000000000000",
+        "gas_limit": "0",
+        "gas_price": "0",
+        "id": "8eb4680fbb4b368a797757ee1224ef1331bcc0cd773178916bfd99ca70b04073",
+        "nonce": 8,
+        "receiver": "9000000000000000000000000000000000000001",
+        "sender": "0000000000000000000000000000000000000001",
+        "signature": "",
+        "timestamp": "2026-07-15T19:33:18Z"
+      }
+    ],
+    "uncles_hash": "3916d45c66e84c612c8a4a403702ec44cc575fc2383dbe4e861dd29ef892bee3"
+  }
+}

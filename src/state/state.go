@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"os"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/sphinxfndorg/protocol/src/common"
 	logger "github.com/sphinxfndorg/protocol/src/console"
+	"github.com/sphinxfndorg/protocol/src/core/rawdb"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
 )
 
@@ -56,17 +58,32 @@ func (s *Storage) GetIndexDir() string {
 	return s.indexDir
 }
 
-// GetTransaction returns a transaction by ID
+// GetTransaction returns a transaction by ID. It first tries the O(1)
+// rawdb tx-lookup index; if that misses (db not attached, or the tx
+// predates the rawdb rollout on this node), it falls back to the original
+// full-chain scan so nothing regresses for un-migrated data.
 func (s *Storage) GetTransaction(txID string) (*types.Transaction, error) {
-	// Search through all blocks for the transaction
+	if s.db != nil {
+		if entry, err := rawdb.ReadTxLookupEntry(s.db, txID); err == nil {
+			if block, err := rawdb.ReadBlock(s.db, entry.BlockHash); err == nil {
+				if entry.Index >= 0 && entry.Index < len(block.Body.TxsList) {
+					if tx := block.Body.TxsList[entry.Index]; tx != nil && tx.ID == txID {
+						return tx, nil
+					}
+				}
+			}
+			// Index pointed somewhere stale — fall through to the scan.
+		}
+	}
+
+	// Fallback: full-chain scan (unchanged from before rawdb).
 	blocks, err := s.GetAllBlocks()
 	if err != nil {
 		return nil, err
 	}
-
 	for _, block := range blocks {
 		for _, tx := range block.Body.TxsList {
-			if tx.ID == txID {
+			if tx != nil && tx.ID == txID {
 				return tx, nil
 			}
 		}
@@ -1261,8 +1278,85 @@ func (s *Storage) GetChainStatePath() string {
 	return filepath.Join(s.stateDir, "chain_state.json")
 }
 
+// sortAttestations returns a copy of the attestation slice ordered
+// deterministically by ValidatorID (ties broken by View then BlockHash).
+// A stable, node-independent order is what lets two nodes that hold the
+// same set of attestations produce byte-identical block files on disk.
+// nil entries are dropped.
+func sortAttestations(atts []*types.Attestation) []*types.Attestation {
+	out := make([]*types.Attestation, 0, len(atts))
+	for _, a := range atts {
+		if a != nil {
+			out = append(out, a)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].ValidatorID != out[j].ValidatorID {
+			return out[i].ValidatorID < out[j].ValidatorID
+		}
+		if out[i].View != out[j].View {
+			return out[i].View < out[j].View
+		}
+		return out[i].BlockHash < out[j].BlockHash
+	})
+	return out
+}
+
+// mergeAttestations computes the deterministic UNION of two attestation
+// sets, deduplicated by ValidatorID (each validator casts exactly one commit
+// vote per block, so ValidatorID is the natural identity key). The result is
+// sorted via sortAttestations for a stable on-disk representation.
+//
+// It returns the merged slice and a bool that is true only when the merge
+// added at least one attestation that `existing` did not already contain —
+// i.e. when re-persisting the block would actually record new quorum
+// signatures. Callers use that flag to skip redundant disk writes.
+//
+// When both an existing and incoming attestation share a ValidatorID, the
+// existing one is kept unless the incoming one carries a signature the
+// existing one lacks (defensive: prefer the more complete record).
+func mergeAttestations(existing, incoming []*types.Attestation) ([]*types.Attestation, bool) {
+	byValidator := make(map[string]*types.Attestation, len(existing)+len(incoming))
+	order := make([]string, 0, len(existing)+len(incoming))
+
+	add := func(a *types.Attestation) (added bool) {
+		if a == nil || a.ValidatorID == "" {
+			return false
+		}
+		if cur, ok := byValidator[a.ValidatorID]; ok {
+			// Already have a vote for this validator. Upgrade only if the
+			// existing record is missing a signature the incoming one has.
+			if len(cur.Signature) == 0 && len(a.Signature) > 0 {
+				byValidator[a.ValidatorID] = a
+			}
+			return false
+		}
+		byValidator[a.ValidatorID] = a
+		order = append(order, a.ValidatorID)
+		return true
+	}
+
+	for _, a := range existing {
+		add(a)
+	}
+
+	added := false
+	for _, a := range incoming {
+		if add(a) {
+			added = true
+		}
+	}
+
+	merged := make([]*types.Attestation, 0, len(order))
+	for _, id := range order {
+		merged = append(merged, byValidator[id])
+	}
+	return sortAttestations(merged), added
+}
+
 // StoreBlock stores a block and updates indices with TxsRoot validation
 func (s *Storage) StoreBlock(block *types.Block) error {
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -1300,18 +1394,77 @@ func (s *Storage) StoreBlock(block *types.Block) error {
 	// Check if block already exists
 	if existing, exists := s.blockIndex[blockHash]; exists {
 		if existing.GetHeight() == height {
-			// Only skip if the new block has no MORE data than existing
-			if len(block.Body.Attestations) <= len(existing.Body.Attestations) {
-				logger.Info("Block already exists with same/more attestations: height=%d, hash=%s", height, blockHash)
+			// ── Attestation convergence fix ──
+			//
+			// Each node reaches PBFT quorum as soon as it has collected
+			// ≥2/3 of the commit votes, so the attestation set it first
+			// attaches to a committed block is only the *subset* of votes
+			// that node happened to observe before quorum. Different nodes
+			// observe different subsets, which is why the on-disk block
+			// files diverge in their body.attestations (same block hash,
+			// same state — only which quorum signatures got persisted
+			// differed).
+			//
+			// The previous logic compared attestation *counts* and skipped
+			// unless the incoming block had strictly more. That could never
+			// converge two equal-sized-but-different sets ({A,B} vs {A,C}),
+			// and even when it did update it replaced the set wholesale
+			// rather than accumulating. We instead take the deterministic
+			// UNION of the existing and incoming attestations (deduped by
+			// ValidatorID, sorted for a stable on-disk order). This makes
+			// every node monotonically accumulate every attestation it ever
+			// observes and converge on the same full quorum certificate, so
+			// the persisted block files become byte-identical once all
+			// votes have propagated.
+			merged, added := mergeAttestations(existing.Body.Attestations, block.Body.Attestations)
+			if !added {
+				logger.Info("Block already exists with no new attestations to merge: height=%d, hash=%s", height, blockHash)
 				return nil
 			}
-			logger.Info("Block exists but new version has %d attestations (existing: %d), updating...",
-				len(block.Body.Attestations), len(existing.Body.Attestations))
-			// Fall through to re-store with attestations
+			logger.Info("Merging attestations for existing block height=%d, hash=%s: existing=%d incoming=%d merged=%d",
+				height, blockHash, len(existing.Body.Attestations), len(block.Body.Attestations), len(merged))
+			// Persist the union rather than the incoming subset.
+			block.Body.Attestations = merged
+			// Fall through to re-store with the merged attestation set.
 		}
+	} else {
+		// First time we store this block: still normalize the attestation
+		// ordering so the on-disk representation is deterministic across
+		// nodes regardless of the order votes arrived in.
+		block.Body.Attestations = sortAttestations(block.Body.Attestations)
 	}
 
-	// Store block to disk
+	// Write the rawdb entry (header, body, canonical height->hash, tx
+	// lookup entries) FIRST, as a single atomic LevelDB batch, and gate
+	// everything else on it. This used to run AFTER storeBlockToDisk as a
+	// best-effort mirror: if the process crashed between the two writes,
+	// the JSON file (and blockIndex/heightIndex reloaded from it) would
+	// claim the block was stored while rawdb — which GetTransaction and
+	// DeleteBlocksAbove both treat as the source of truth for lookups and
+	// purges — never learned about it. Doing the atomic write first and
+	// returning early on failure means a block only ever becomes visible
+	// to the JSON/index path once rawdb has durably committed it, so the
+	// two stores can't diverge from a crash inside this function.
+	if s.db != nil {
+		if err := rawdb.WriteBlock(s.db, block); err != nil {
+			return fmt.Errorf("failed to write block %d to rawdb index: %w", height, err)
+		}
+		if height == 0 {
+			// Best-effort: record the genesis pointer. Non-fatal — a
+			// missing genesis:hash key doesn't affect StoreBlock's own
+			// correctness, and WriteGenesisHash already refuses to
+			// silently overwrite a different existing value.
+			if err := rawdb.WriteGenesisHash(s.db, blockHash); err != nil {
+				logger.Warn("StoreBlock: failed to record genesis hash in rawdb: %v", err)
+			}
+		}
+	} else {
+		logger.Warn("StoreBlock: no db handle attached to storage (call SetDB first); skipping rawdb index write for block %d", height)
+	}
+
+	// Store block to disk (secondary, human-readable copy used by
+	// loadBlockIndex/loadBlockFromDisk; rawdb above is now the durable,
+	// atomic record of truth).
 	if err := s.storeBlockToDisk(block); err != nil {
 		return fmt.Errorf("failed to store block to disk: %w", err)
 	}
@@ -1408,6 +1561,21 @@ func (s *Storage) DeleteBlocksAbove(targetHeight uint64) error {
 			}
 		}
 
+		// Purge the rawdb mirror too. StoreBlock writes header/body/canonical
+		// index/tx-lookup entries into rawdb on every commit (see
+		// rawdb.WriteBlock above), but until this fix nothing ever cleaned
+		// those up on a purge. GetTransaction's primary lookup path reads
+		// straight through rawdb.ReadTxLookupEntry -> rawdb.ReadBlock, so a
+		// stale rawdb entry for a block this function just deleted from
+		// JSON/heightIndex would make GetTransaction keep resolving
+		// transactions from a chain that reorganizeChain/RollbackToHeight
+		// just disconnected — silently serving data from the losing fork.
+		if s.db != nil {
+			if err := rawdb.DeleteBlock(s.db, hash); err != nil && !errors.Is(err, rawdb.ErrNotFound) {
+				return fmt.Errorf("DeleteBlocksAbove: failed to purge rawdb entry for height %d: %w", height, err)
+			}
+		}
+
 		delete(s.blockIndex, hash)
 		delete(s.heightIndex, height)
 		removed++
@@ -1490,9 +1658,15 @@ func (s *Storage) ReplaceGenesis(block *types.Block) error {
 		return fmt.Errorf("ReplaceGenesis: block height %d is not genesis (height 0)", height)
 	}
 
-	// Remove old genesis from indices
+	// Remove old genesis from indices, keeping its hash so the rawdb
+	// mirror below can be purged too — without this, the old genesis's
+	// header/body/canonical-height-0 entries would linger in rawdb forever
+	// pointing at a block no longer reachable through blockIndex/JSON,
+	// and rawdb's ReadBlock(0) would silently disagree with GetBlockByHeight(0).
+	oldGenesisHash := ""
 	for hash, existing := range s.blockIndex {
 		if existing.GetHeight() == 0 {
+			oldGenesisHash = hash
 			delete(s.blockIndex, hash)
 			break
 		}
@@ -1501,6 +1675,23 @@ func (s *Storage) ReplaceGenesis(block *types.Block) error {
 		if h == 0 {
 			delete(s.heightIndex, h)
 			break
+		}
+	}
+
+	// Sync rawdb: same atomic-first ordering as StoreBlock — purge the old
+	// genesis, write the new one, and force the genesis pointer to match,
+	// before anything is written to disk or the in-memory indices.
+	if s.db != nil {
+		if oldGenesisHash != "" && oldGenesisHash != blockHash {
+			if err := rawdb.DeleteBlock(s.db, oldGenesisHash); err != nil && !errors.Is(err, rawdb.ErrNotFound) {
+				return fmt.Errorf("ReplaceGenesis: failed to purge old genesis from rawdb: %w", err)
+			}
+		}
+		if err := rawdb.WriteBlock(s.db, block); err != nil {
+			return fmt.Errorf("ReplaceGenesis: failed to write new genesis to rawdb: %w", err)
+		}
+		if err := rawdb.ForceWriteGenesisHash(s.db, blockHash); err != nil {
+			return fmt.Errorf("ReplaceGenesis: failed to update genesis hash pointer: %w", err)
 		}
 	}
 
@@ -2380,6 +2571,19 @@ func (s *Storage) loadBlockIndex() error {
 			logger.Warn("Warning: Could not load block %s at height %d: %v", hash, height, err)
 			// Don't fail completely, just skip this block
 			continue
+		}
+
+		// Self-heal: StoreBlock writes rawdb first and JSON second, but a
+		// block that reached JSON on a pre-reorder build, or one whose
+		// process died in the (now much narrower) window after the JSON
+		// rename but before this load, can still have a JSON file with no
+		// matching rawdb entry. Backfilling here means GetTransaction and
+		// DeleteBlocksAbove see a consistent rawdb index on every restart
+		// without needing a separate migration pass.
+		if s.db != nil && !rawdb.HasHeader(s.db, hash) {
+			if err := rawdb.WriteBlock(s.db, block); err != nil {
+				logger.Warn("Warning: could not backfill rawdb entry for block %s at height %d: %v", hash, height, err)
+			}
 		}
 
 		s.blockIndex[hash] = block

@@ -164,6 +164,21 @@ func (blockchain *Blockchain) FinishInit(nodeID string) error {
 		return fmt.Errorf("failed to initialize chain: %w", err)
 	}
 
+	// Wire the blockchain into the journal manager now that bc.chain is
+	// loaded, and repair any incomplete commit left by a crash on a
+	// previous run. Must happen in this order: AttachBlockchain needs a
+	// fully-constructed *Blockchain, and RepairIncompleteCommits needs
+	// bc.chain already populated so rebuildStateToHeight has blocks to
+	// replay against. Previously InitJournalManager's startup scan only
+	// logged incomplete commits and never repaired them — state could
+	// silently stay ahead of what storage actually persisted after a crash.
+	if jm := GetJournalManager(); jm != nil {
+		jm.AttachBlockchain(blockchain)
+		if err := jm.RepairIncompleteCommits(); err != nil {
+			logger.Warn("Warning: failed to repair incomplete commits from journal: %v", err)
+		}
+	}
+
 	// If this node is a late joiner and has a genesis block but missing genesis_state.json,
 	// write it from the downloaded block.
 	if blockchain.IsLateJoiner() {
@@ -1775,6 +1790,37 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 	}
 	// ════════════════════════════════════════════════════════════════════════
 
+	// ════════════════════════════════════════════════════════════════════════
+	// CRASH-SAFETY FIX: actually use the journal instead of just initializing it
+	// ════════════════════════════════════════════════════════════════════════
+	// JournalManager existed but nothing ever called StartAtomicCommit,
+	// UpdatePhase, or Commit — InitJournalManager only ran the startup
+	// recovery scan over journal files that were never written. That left a
+	// real crash window unguarded: between stateDB.Commit() (state flushed to
+	// LevelDB) and bc.storage.StoreBlock() (block persisted), a crash would
+	// advance account state on disk for a block that was never actually
+	// stored — silent, undetected divergence of exactly the kind this
+	// project has already hit once.
+	//
+	// Opening the journal here, before the state DB is touched, means a crash
+	// anywhere in this critical section leaves a journal file on disk that
+	// startup recovery (JournalManager.PerformCrashRecovery, also fixed
+	// below to do a real rollback instead of just deleting the file) can
+	// detect and repair by replaying rebuildStateToHeight back to the last
+	// block storage actually has.
+	var previousTipHash string
+	var previousTipHeight uint64
+	if latestBlock != nil {
+		previousTipHash = latestBlock.GetHash()
+		previousTipHeight = latestBlock.GetHeight()
+	}
+	jm := GetJournalManager()
+	if jm != nil {
+		jm.StartAtomicCommit(typeBlock.GetHash(), typeBlock.GetHeight(), previousTipHash, previousTipHeight)
+		jm.UpdatePhase("state_applied")
+	}
+	// ════════════════════════════════════════════════════════════════════════
+
 	txIDs := make([]string, len(typeBlock.Body.TxsList))
 	for i, tx := range typeBlock.Body.TxsList {
 		txIDs[i] = tx.ID
@@ -1802,9 +1848,15 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 	// Force commit to flush all changes to disk
 	if _, err := stateDB.Commit(); err != nil {
 		logger.Error("ERROR Failed to flush state DB: %v", err)
+		if jm != nil {
+			jm.Rollback()
+		}
 		return fmt.Errorf("CommitBlock: failed to flush state DB: %w", err)
 	}
 	logger.Info("SUCCESS State DB flushed successfully after block execution")
+	if jm != nil {
+		jm.MarkIndexUpdated() // account state is now the phase-tracked risk; block bytes come next
+	}
 
 	// Also verify the state DB flush worked by checking vault balance
 	if typeBlock.GetHeight() >= 1 {
@@ -1877,9 +1929,23 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 
 	if err := bc.storage.StoreBlock(typeBlock); err != nil {
 		logger.Error("ERROR Failed to store block: %v", err)
+		if jm != nil {
+			// State was already flushed above but the block itself never
+			// made it to storage — this is precisely the divergence window
+			// the journal exists to catch. Leave the journal's Committed
+			// flag false so PerformCrashRecovery finds it and repairs state
+			// even if the process dies right after this return.
+			jm.Rollback()
+		}
 		return fmt.Errorf("failed to store block: %w", err)
 	}
 	logger.Info("SUCCESS Block stored in storage successfully at %s", time.Now().Format("15:04:05.000"))
+	if jm != nil {
+		jm.MarkBlockWritten()
+		if err := jm.Commit(bc.chainWeight); err != nil {
+			logger.Warn("CommitBlock: journal commit failed (block is stored correctly, journal bookkeeping only): %v", err)
+		}
+	}
 
 	// Calculate actual block time and record TPS only after a successful commit.
 	blockTime := bc.calculateBlockTime(typeBlock)
@@ -2619,27 +2685,87 @@ func (bc *Blockchain) reorganizeChain(newForkBlock, oldTip *types.Block) error {
 		logger.Info("🔙 Rolled back block %s at height %d", ob.GetHash()[:16], ob.GetHeight())
 	}
 
+	// Step 4b: Purge the disconnected blocks from persistent storage.
+	//
+	// The old code only removed oldBlocks from the in-memory bc.chain slice
+	// above. That left every disconnected block's header/body/canonical-index
+	// data sitting in storage as an orphan: harmless on its own, but it meant
+	// GetBlockByHash(oldBlockHash) would keep returning a block that is no
+	// longer part of the canonical chain, and after a restart the canonical
+	// height->hash pointer written by the losing fork's earlier StoreBlock
+	// calls would be indistinguishable from the winning fork's — the exact
+	// class of "which chain is actually canonical on disk" bug this project
+	// has already hit once via CommitBlock's rehashing bug.
+	//
+	// DeleteBlocksAbove(forkHeight) removes every block's on-disk data and
+	// index entries for height > forkHeight and resets the storage layer's
+	// recorded tip back to the fork point — the same primitive
+	// RollbackToHeight already uses for a manual rollback. Doing it here too
+	// means a fork-choice-driven reorg leaves storage in the same clean state
+	// as an explicit admin rollback, instead of being the one path that
+	// doesn't purge.
+	if err := bc.storage.DeleteBlocksAbove(forkHeight); err != nil {
+		bc.emergencyReorgRollback(oldBlocks, nil)
+		return fmt.Errorf("reorganizeChain: failed to purge storage above fork height %d: %w", forkHeight, err)
+	}
+	logger.Info("🧹 Purged storage above fork height %d before applying new fork", forkHeight)
+
 	// Step 5: Apply new blocks in forward order
+	var appliedBlocks []*types.Block
 	for _, nb := range newBlocks {
 		// Validate the block (sparse check — full attestation verification happens in sync)
 		if err := nb.Validate(); err != nil {
-			// Emergency rollback: put old blocks back
-			bc.emergencyReorgRollback(oldBlocks, newBlocks)
+			// Emergency rollback: put old blocks back. Storage above forkHeight
+			// was already purged in Step 4b, so the old chain must also be
+			// re-persisted, not just restored in memory.
+			bc.emergencyReorgRollback(oldBlocks, appliedBlocks)
+			for _, ob := range oldBlocks {
+				if serr := bc.storage.StoreBlock(ob); serr != nil {
+					logger.Error("emergencyReorgRollback: failed to re-store old block %s: %v", ob.GetHash()[:16], serr)
+				}
+			}
 			return fmt.Errorf("new fork block %s at height %d failed validation: %w",
 				nb.GetHash()[:16], nb.GetHeight(), err)
 		}
+
+		// Store block to disk BEFORE it's reachable via the in-memory chain,
+		// so a crash mid-reorg can't leave an in-memory tip that storage
+		// doesn't actually have.
+		if err := bc.storage.StoreBlock(nb); err != nil {
+			bc.emergencyReorgRollback(oldBlocks, appliedBlocks)
+			for _, ob := range oldBlocks {
+				if serr := bc.storage.StoreBlock(ob); serr != nil {
+					logger.Error("emergencyReorgRollback: failed to re-store old block %s: %v", ob.GetHash()[:16], serr)
+				}
+			}
+			return fmt.Errorf("reorganizeChain: failed to store new fork block %s at height %d: %w",
+				nb.GetHash()[:16], nb.GetHeight(), err)
+		}
+
 		// Append to in-memory chain
 		bc.lock.Lock()
 		bc.chain = append(bc.chain, nb)
 		bc.lock.Unlock()
 
-		// Store block to disk
-		if err := bc.storage.StoreBlock(nb); err != nil {
-			logger.Error("Failed to store reorg block %s: %v", nb.GetHash()[:16], err)
-		}
-
+		appliedBlocks = append(appliedBlocks, nb)
 		logger.Info("🔀 Applied new block %s at height %d", nb.GetHash()[:16], nb.GetHeight())
 	}
+
+	// Step 5b: Rebuild account state to match the new fork exactly. Storage
+	// was truncated to forkHeight in Step 4b and rebuilt forward as each new
+	// block was stored above, but StateDB (balances/nonces/supply counters)
+	// still reflects the old fork's execution. Without this, the old fork's
+	// state changes silently survive a reorg even though its blocks don't.
+	if err := bc.rebuildStateToHeight(newForkBlock.GetHeight()); err != nil {
+		bc.emergencyReorgRollback(oldBlocks, appliedBlocks)
+		for _, ob := range oldBlocks {
+			if serr := bc.storage.StoreBlock(ob); serr != nil {
+				logger.Error("emergencyReorgRollback: failed to re-store old block %s: %v", ob.GetHash()[:16], serr)
+			}
+		}
+		return fmt.Errorf("reorganizeChain: state rebuild to height %d failed: %w", newForkBlock.GetHeight(), err)
+	}
+	logger.Info("SUCCESS State rebuilt to match new fork at height %d", newForkBlock.GetHeight())
 
 	// Step 6: Resurrect transactions into mempool
 	if bc.mempool != nil {

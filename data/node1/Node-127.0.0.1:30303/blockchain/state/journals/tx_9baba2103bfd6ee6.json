@@ -1,0 +1,13 @@
+{
+  "block_hash": "9baba2103bfd6ee6d21ffc6658785a1b4fdc01ef456cba9f303e803c482fd971",
+  "block_height": 19,
+  "phase": "committed",
+  "state_changes": [],
+  "committed": true,
+  "previous_tip_hash": "8de58c93bedfe089e8e52d4aff7118e7bd18f067f1fa2a7e2b8970a8437e5b82",
+  "previous_tip_height": 18,
+  "started_at": "2026-07-17T16:56:52.289439+07:00",
+  "committed_at": "2026-07-17T16:56:52.332985+07:00",
+  "block_file_written": true,
+  "index_updated": true
+}

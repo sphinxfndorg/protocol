@@ -113,11 +113,17 @@ func GetSphinxChainParams() *SphinxChainParameters {
 		BlockGasLimit:      big.NewInt(10000000),                              // 10 million gas - maximum gas per block
 		BaseBlockReward:    new(big.Int).Mul(big.NewInt(5), big.NewInt(1e18)), // 5 SPX = 5×10^18 nSPX
 
-		// Genesis-specific configuration - MUST MATCH genesis.go's DefaultGenesisState()
+		// Genesis-specific configuration.
+		// NOTE: The actual genesis block is always built from
+		// DefaultGenesisState() via getCachedGenesisBlock(), so the fields
+		// below MUST match DefaultGenesisState() or be left at their zero
+		// values.  GenesisNonce is intentionally omitted (zero) because the
+		// canonical genesis block always uses nonce=1
+		// (common.FormatNonce(1) → "0000000000000001") and any override
+		// here would be silently ignored by the cached-block path.
 		GenesisConfig: &GenesisConfig{
-			InitialDifficulty: big.NewInt(17179869184), // Initial mining difficulty
-			InitialGasLimit:   big.NewInt(5000),        // Initial gas limit per block
-			GenesisNonce:      66,                      // Genesis block nonce
+			InitialDifficulty: big.NewInt(17179869184), // MUST match DefaultGenesisState()
+			InitialGasLimit:   big.NewInt(5000),        // MUST match DefaultGenesisState()
 			GenesisExtraData:  canonicalExtraData,      // Use canonical extra data from genesis.go
 		},
 

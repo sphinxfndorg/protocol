@@ -97,6 +97,111 @@ func (bc *Blockchain) VerifyMessage(address, signature, message string) bool {
 	return true
 }
 
+// ExplorerValidatorInfo holds validator data formatted for the block explorer.
+type ExplorerValidatorInfo struct {
+	ID              string  `json:"id"`
+	StakeSPX        string  `json:"stake_spx"`
+	StakeNSPX       string  `json:"stake_nspx"`
+	RewardAddress   string  `json:"reward_address"`
+	ActivationEpoch uint64  `json:"activation_epoch"`
+	ExitEpoch       uint64  `json:"exit_epoch"`
+	IsSlashed       bool    `json:"is_slashed"`
+	LastAttested    uint64  `json:"last_attested"`
+	Status          string  `json:"status"`
+	StakePercent    float64 `json:"stake_percent"`
+}
+
+// ExplorerValidatorsResponse holds the full validator response for the explorer.
+type ExplorerValidatorsResponse struct {
+	TotalValidators   int                      `json:"total_validators"`
+	ActiveValidators  int                      `json:"active_validators"`
+	SlashedValidators int                      `json:"slashed_validators"`
+	TotalStakeSPX     string                   `json:"total_stake_spx"`
+	MinStakeSPX       uint64                   `json:"min_stake_spx"`
+	Validators        []*ExplorerValidatorInfo `json:"validators"`
+}
+
+// GetExplorerValidators returns validator data formatted for the block explorer.
+func (bc *Blockchain) GetExplorerValidators() *ExplorerValidatorsResponse {
+	vs := bc.GetValidatorSet()
+	if vs == nil {
+		return &ExplorerValidatorsResponse{
+			Validators: make([]*ExplorerValidatorInfo, 0),
+		}
+	}
+
+	response := &ExplorerValidatorsResponse{
+		Validators: make([]*ExplorerValidatorInfo, 0),
+	}
+
+	allVals := vs.GetValidators()
+	totalStake := vs.GetTotalStake()
+
+	if totalStake == nil || totalStake.Sign() == 0 {
+		totalStake = big.NewInt(1) // avoid division by zero
+	}
+
+	for _, v := range allVals {
+		if v == nil {
+			continue
+		}
+		response.TotalValidators++
+
+		if v.IsSlashed {
+			response.SlashedValidators++
+		}
+
+		// Calculate stake percentage
+		stakeFloat := new(big.Float).SetInt(v.StakeAmount)
+		totalFloat := new(big.Float).SetInt(totalStake)
+		stakePct, _ := new(big.Float).Quo(stakeFloat, totalFloat).Float64()
+		stakePct *= 100
+
+		// Convert to SPX
+		stakeSPX := new(big.Float).Quo(
+			new(big.Float).SetInt(v.StakeAmount),
+			new(big.Float).SetFloat64(1e18),
+		)
+
+		status := "active"
+		if v.IsSlashed {
+			status = "slashed"
+		} else if v.ExitEpoch > 0 {
+			status = "exited"
+		}
+
+		response.Validators = append(response.Validators, &ExplorerValidatorInfo{
+			ID:              v.ID,
+			StakeSPX:        stakeSPX.Text('f', 2),
+			StakeNSPX:       v.StakeAmount.String(),
+			RewardAddress:   v.RewardAddress,
+			ActivationEpoch: v.ActivationEpoch,
+			ExitEpoch:       v.ExitEpoch,
+			IsSlashed:       v.IsSlashed,
+			LastAttested:    v.LastAttested,
+			Status:          status,
+			StakePercent:    stakePct,
+		})
+
+		if !v.IsSlashed {
+			response.ActiveValidators++
+		}
+	}
+
+	// Total stake in SPX
+	if vs.totalStake != nil {
+		totalSPX := new(big.Float).Quo(
+			new(big.Float).SetInt(vs.totalStake),
+			new(big.Float).SetFloat64(1e18),
+		)
+		response.TotalStakeSPX = totalSPX.Text('f', 2)
+	}
+
+	response.MinStakeSPX = vs.GetMinStakeSPX()
+
+	return response
+}
+
 // HasPendingTx checks if a transaction is in the mempool
 func (bc *Blockchain) HasPendingTx(hash string) bool {
 	return bc.mempool.HasTransaction(hash)

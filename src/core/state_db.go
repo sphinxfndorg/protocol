@@ -360,6 +360,156 @@ func (s *StateDB) GetTransactionHistory(address string, limit int) ([]*types.Tra
 	return txs, nil
 }
 
+// ============================================================================
+// WALLET STATISTICS - For block explorer
+// ============================================================================
+
+// WalletStats holds comprehensive wallet statistics for the block explorer.
+type WalletStats struct {
+	TotalAccounts      uint64         `json:"total_accounts"`
+	SPIFAddresses      uint64         `json:"spif_addresses"`
+	LegacyAddresses    uint64         `json:"legacy_addresses"`
+	ActiveWallets      uint64         `json:"active_wallets"`
+	WalletsWithBalance uint64         `json:"wallets_with_balance"`
+	TotalSupplyNSPX    string         `json:"total_supply_nspx"`
+	TotalSupplySPX     string         `json:"total_supply_spx"`
+	RichList           []*WalletEntry `json:"rich_list,omitempty"`
+}
+
+// WalletEntry represents a single wallet in the rich list.
+type WalletEntry struct {
+	Rank        uint64 `json:"rank"`
+	Address     string `json:"address"`
+	AddressType string `json:"address_type"` // "SPIF" or "Legacy"
+	BalanceNSPX string `json:"balance_nspx"`
+	BalanceSPX  string `json:"balance_spx"`
+	Nonce       uint64 `json:"nonce"`
+	IsActive    bool   `json:"is_active"`
+}
+
+// GetWalletStats returns comprehensive wallet statistics including rich list.
+// It scans all accounts stored in LevelDB under the "acct:" prefix.
+func (s *StateDB) GetWalletStats(richListLimit int) (*WalletStats, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	stats := &WalletStats{
+		RichList: make([]*WalletEntry, 0),
+	}
+
+	// List all account keys from LevelDB
+	keys, err := s.db.ListKeysWithPrefix(accountPrefix)
+	if err != nil {
+		return nil, fmt.Errorf("GetWalletStats: listing accounts: %w", err)
+	}
+
+	// Include pending (uncommitted) accounts too
+	pendingSet := make(map[string]bool)
+	for addr := range s.pending {
+		pendingSet[addr] = true
+	}
+
+	// Collect all unique addresses
+	addrSet := make(map[string]bool)
+	for _, k := range keys {
+		addr := k[len(accountPrefix):]
+		if addr != "" {
+			addrSet[addr] = true
+		}
+	}
+	for addr := range pendingSet {
+		addrSet[addr] = true
+	}
+
+	// Process each account
+	type accountInfo struct {
+		address string
+		balance *big.Int
+		nonce   uint64
+	}
+
+	var accounts []accountInfo
+
+	for addr := range addrSet {
+		entry := s.load(addr)
+		if entry == nil {
+			continue
+		}
+
+		stats.TotalAccounts++
+
+		// Classify address type
+		if len(addr) == 64 {
+			stats.SPIFAddresses++
+		} else if len(addr) == 40 {
+			stats.LegacyAddresses++
+		}
+
+		// Check if active (has sent transactions)
+		if entry.nonce > 0 {
+			stats.ActiveWallets++
+		}
+
+		// Check if has balance
+		if entry.balance != nil && entry.balance.Sign() > 0 {
+			stats.WalletsWithBalance++
+			accounts = append(accounts, accountInfo{
+				address: addr,
+				balance: new(big.Int).Set(entry.balance),
+				nonce:   entry.nonce,
+			})
+		}
+	}
+
+	// Sort by balance descending for rich list
+	sort.Slice(accounts, func(i, j int) bool {
+		return accounts[i].balance.Cmp(accounts[j].balance) > 0
+	})
+
+	// Build rich list
+	if richListLimit <= 0 || richListLimit > 100 {
+		richListLimit = 100
+	}
+	for i, acc := range accounts {
+		if uint64(i) >= uint64(richListLimit) {
+			break
+		}
+		addrType := "Legacy"
+		if len(acc.address) == 64 {
+			addrType = "SPIF"
+		}
+		balanceSPX := new(big.Float).Quo(
+			new(big.Float).SetInt(acc.balance),
+			new(big.Float).SetFloat64(1e18),
+		)
+		stats.RichList = append(stats.RichList, &WalletEntry{
+			Rank:        uint64(i + 1),
+			Address:     acc.address,
+			AddressType: addrType,
+			BalanceNSPX: acc.balance.String(),
+			BalanceSPX:  balanceSPX.Text('f', 6),
+			Nonce:       acc.nonce,
+			IsActive:    acc.nonce > 0,
+		})
+	}
+
+	// Supply info
+	if s.totalSupply != nil {
+		stats.TotalSupplyNSPX = s.totalSupply.String()
+		supplySPX := new(big.Float).Quo(
+			new(big.Float).SetInt(s.totalSupply),
+			new(big.Float).SetFloat64(1e18),
+		)
+		stats.TotalSupplySPX = supplySPX.Text('f', 6)
+	}
+
+	logger.Info("GetWalletStats: total=%d, SPIF=%d, legacy=%d, active=%d, with_balance=%d",
+		stats.TotalAccounts, stats.SPIFAddresses, stats.LegacyAddresses,
+		stats.ActiveWallets, stats.WalletsWithBalance)
+
+	return stats, nil
+}
+
 // ----------------------------------------------------------------------------
 // Public write methods (buffered — flushed on Commit)
 // ----------------------------------------------------------------------------

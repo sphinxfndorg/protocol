@@ -509,6 +509,39 @@ func (vs *ValidatorSet) GetTotalStake() *big.Int {
 	return new(big.Int).Set(vs.totalStake)
 }
 
+// GetMinStakeSPX returns the minimum stake in SPX.
+func (vs *ValidatorSet) GetMinStakeSPX() uint64 {
+	vs.mu.RLock()
+	defer vs.mu.RUnlock()
+	if vs.minStakeAmount == nil {
+		return 0
+	}
+	minSPX := new(big.Int).Div(vs.minStakeAmount, big.NewInt(1e18))
+	return minSPX.Uint64()
+}
+
+// GetValidators returns all validators in the set.
+func (vs *ValidatorSet) GetValidators() []*StakedValidator {
+	vs.mu.RLock()
+	defer vs.mu.RUnlock()
+	vals := make([]*StakedValidator, 0, len(vs.validators))
+	for _, v := range vs.validators {
+		if v == nil {
+			continue
+		}
+		vals = append(vals, &StakedValidator{
+			ID:              v.ID,
+			StakeAmount:     new(big.Int).Set(v.StakeAmount),
+			ActivationEpoch: v.ActivationEpoch,
+			ExitEpoch:       v.ExitEpoch,
+			IsSlashed:       v.IsSlashed,
+			LastAttested:    v.LastAttested,
+			RewardAddress:   v.RewardAddress,
+		})
+	}
+	return vals
+}
+
 // GetValidator returns a validator by ID (implements validatorSetProvider)
 // Returns interface{} to avoid import cycles with consensus package
 func (vs *ValidatorSet) GetValidator(id string) interface{} {

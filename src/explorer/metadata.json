@@ -1,0 +1,6 @@
+{
+  "name": "Sphinx Post-Quantum Explorer",
+  "description": "An interactive, ultra-modern block explorer and cryptographic laboratory for Sphinx, the world's first post-quantum secure ledger utilizing SPHINCS+ signatures.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

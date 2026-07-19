@@ -210,13 +210,16 @@ func handleIncomingConn(
 
 		// Get our tip height so the requester knows how far ahead we are
 		tipHeight := uint64(0)
+		chainReady := false
 		if latest := bc.GetLatestBlock(); latest != nil {
 			tipHeight = latest.GetHeight()
+			chainReady = true
 		}
 
 		resp := GetBlocksResponse{
-			Blocks:    blocks,
-			TipHeight: tipHeight,
+			Blocks:     blocks,
+			TipHeight:  tipHeight,
+			ChainReady: chainReady,
 		}
 		respBytes, _ := json.Marshal(resp)
 		respMsg := security.Message{Type: "get_blocks", Data: respBytes}
@@ -226,7 +229,7 @@ func handleIncomingConn(
 		}
 		logger.Debug("[%s] Served %d blocks (heights %d-%d) to peer", selfID, len(blocks), req.FromHeight, req.ToHeight)
 
-	case "proposal", "prepare", "vote", "timeout", "randao_sync":
+	case "proposal", "prepare", "vote", "timeout", "randao_sync", "sync_request", "sync_response":
 		if p2pMgr == nil {
 			logger.Warn("[%s] P2P manager is nil, cannot handle consensus message", selfID)
 			return

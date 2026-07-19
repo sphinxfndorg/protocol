@@ -29,6 +29,12 @@ import (
 const maxMessageSize = 4 * 1024 * 1024 // 4 MB
 
 // Global server instance for connection management.
+// DEPRECATED: Prefer creating a *TCPServer via NewTCPServer and using its
+// method versions of ConnectTCP, SendMessage, etc. The global singleton is
+// kept for backward compatibility with call sites that do not have access to
+// a specific server instance (e.g. ip.go's ConnectNode). When multiple nodes
+// run in the same process, the global singleton will silently clobber
+// connections — use per-server methods instead.
 var globalServer = &TCPServer{
 	connections: make(map[string]net.Conn),
 	encKeys:     make(map[string]*security.EncryptionKey),
@@ -227,10 +233,16 @@ func (s *TCPServer) Stop() error {
 	return nil
 }
 
-// ConnectTCP establishes a TCP connection with handshake.
-func ConnectTCP(address string, messageCh chan *security.Message) (net.Conn, error) {
+// ============================================================================
+// Per-server method versions of connection management functions.
+// These should be preferred over the package-level functions when a specific
+// *TCPServer instance is available, as they isolate connection state per node.
+// ============================================================================
+
+// Connect establishes a TCP connection with handshake, storing state on this server.
+func (s *TCPServer) Connect(address string, messageCh chan *security.Message) (net.Conn, error) {
 	if address == "" {
-		log.Printf("ConnectTCP: Empty address provided")
+		log.Printf("Connect: Empty address provided")
 		return nil, fmt.Errorf("empty address provided")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -264,59 +276,14 @@ func ConnectTCP(address string, messageCh chan *security.Message) (net.Conn, err
 			}
 			log.Printf("Handshake successful for %s", address)
 
-			// Store the connection and encryption key
-			globalServer.mu.Lock()
-			globalServer.connections[address] = conn
-			globalServer.encKeys[address] = enc
-			globalServer.mu.Unlock()
+			// Store the connection and encryption key on this server instance
+			s.mu.Lock()
+			s.connections[address] = conn
+			s.encKeys[address] = enc
+			s.mu.Unlock()
 
 			// Start background goroutine to read responses
-			go func(conn net.Conn, address string) {
-				defer func() {
-					globalServer.mu.Lock()
-					delete(globalServer.connections, address)
-					delete(globalServer.encKeys, address)
-					globalServer.mu.Unlock()
-					if err := conn.Close(); err != nil && !strings.Contains(err.Error(), "use of closed network connection") {
-						log.Printf("Error closing connection to %s: %v", address, err)
-					}
-				}()
-
-				reader := bufio.NewReader(conn)
-				for {
-					lengthBuf := make([]byte, 4)
-					if _, err := io.ReadFull(reader, lengthBuf); err != nil {
-						if err != io.EOF && !strings.Contains(err.Error(), "closed") {
-							log.Printf("TCP read length error on %s: %v", address, err)
-						}
-						return
-					}
-					length := binary.BigEndian.Uint32(lengthBuf)
-
-					if length > maxMessageSize {
-						log.Printf("TCP response too large on %s: %d bytes (limit: %d bytes)", address, length, maxMessageSize)
-						return
-					}
-
-					respData := make([]byte, length)
-					if _, err := io.ReadFull(reader, respData); err != nil {
-						if err != io.EOF && !strings.Contains(err.Error(), "closed") {
-							log.Printf("TCP read data error on %s: %v", address, err)
-						}
-						return
-					}
-					respMsg, err := security.DecodeSecureMessage(respData, enc)
-					if err != nil {
-						log.Printf("TCP decode response error on %s: %v", address, err)
-						continue
-					}
-					select {
-					case messageCh <- respMsg:
-					default:
-						log.Printf("Failed to send response to messageCh for %s, channel full", address)
-					}
-				}
-			}(conn, address)
+			go s.readResponses(conn, address, enc, messageCh)
 
 			log.Printf("TCP connected to %s", address)
 			return conn, nil
@@ -327,31 +294,79 @@ func ConnectTCP(address string, messageCh chan *security.Message) (net.Conn, err
 	return nil, fmt.Errorf("failed to connect to %s after 10 attempts", address)
 }
 
-// GetConnection retrieves an active TCP connection.
-func GetConnection(address string) (net.Conn, error) {
-	globalServer.mu.Lock()
-	defer globalServer.mu.Unlock()
-	conn, exists := globalServer.connections[address]
+// readResponses reads incoming messages from a connection in a background goroutine.
+func (s *TCPServer) readResponses(conn net.Conn, address string, enc *security.EncryptionKey, messageCh chan *security.Message) {
+	defer func() {
+		s.mu.Lock()
+		delete(s.connections, address)
+		delete(s.encKeys, address)
+		s.mu.Unlock()
+		if err := conn.Close(); err != nil && !strings.Contains(err.Error(), "use of closed network connection") {
+			log.Printf("Error closing connection to %s: %v", address, err)
+		}
+	}()
+
+	reader := bufio.NewReader(conn)
+	for {
+		lengthBuf := make([]byte, 4)
+		if _, err := io.ReadFull(reader, lengthBuf); err != nil {
+			if err != io.EOF && !strings.Contains(err.Error(), "closed") {
+				log.Printf("TCP read length error on %s: %v", address, err)
+			}
+			return
+		}
+		length := binary.BigEndian.Uint32(lengthBuf)
+
+		if length > maxMessageSize {
+			log.Printf("TCP response too large on %s: %d bytes (limit: %d bytes)", address, length, maxMessageSize)
+			return
+		}
+
+		respData := make([]byte, length)
+		if _, err := io.ReadFull(reader, respData); err != nil {
+			if err != io.EOF && !strings.Contains(err.Error(), "closed") {
+				log.Printf("TCP read data error on %s: %v", address, err)
+			}
+			return
+		}
+		respMsg, err := security.DecodeSecureMessage(respData, enc)
+		if err != nil {
+			log.Printf("TCP decode response error on %s: %v", address, err)
+			continue
+		}
+		select {
+		case messageCh <- respMsg:
+		default:
+			log.Printf("Failed to send response to messageCh for %s, channel full", address)
+		}
+	}
+}
+
+// GetConn retrieves an active TCP connection from this server.
+func (s *TCPServer) GetConn(address string) (net.Conn, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	conn, exists := s.connections[address]
 	if !exists {
 		return nil, fmt.Errorf("no active connection to %s", address)
 	}
 	return conn, nil
 }
 
-// GetEncryptionKey retrieves the encryption key for a connection.
-func GetEncryptionKey(address string) (*security.EncryptionKey, error) {
-	globalServer.mu.Lock()
-	defer globalServer.mu.Unlock()
-	enc, exists := globalServer.encKeys[address]
+// GetEncKey retrieves the encryption key for a connection from this server.
+func (s *TCPServer) GetEncKey(address string) (*security.EncryptionKey, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	enc, exists := s.encKeys[address]
 	if !exists {
 		return nil, fmt.Errorf("no encryption key for %s", address)
 	}
 	return enc, nil
 }
 
-// SendMessage sends a message to a node.
-func SendMessage(address string, msg *security.Message) error {
-	conn, err := GetConnection(address)
+// Send sends a message to a node using this server's connection state.
+func (s *TCPServer) Send(address string, msg *security.Message) error {
+	conn, err := s.GetConn(address)
 	if err != nil {
 		// Fallback to establishing a new connection
 		log.Printf("No active connection to %s, establishing new connection", address)
@@ -370,11 +385,11 @@ func SendMessage(address string, msg *security.Message) error {
 			return fmt.Errorf("handshake returned nil encryption key for %s", address)
 		}
 
-		// Store the new connection and key
-		globalServer.mu.Lock()
-		globalServer.connections[address] = conn
-		globalServer.encKeys[address] = enc
-		globalServer.mu.Unlock()
+		// Store the new connection and key on this server
+		s.mu.Lock()
+		s.connections[address] = conn
+		s.encKeys[address] = enc
+		s.mu.Unlock()
 
 		data, err := security.SecureMessage(msg, enc)
 		if err != nil {
@@ -391,7 +406,7 @@ func SendMessage(address string, msg *security.Message) error {
 		}
 	} else {
 		// Use existing connection and encryption key
-		enc, err := GetEncryptionKey(address)
+		enc, err := s.GetEncKey(address)
 		if err != nil {
 			return fmt.Errorf("failed to get encryption key for %s: %v", address, err)
 		}
@@ -413,23 +428,58 @@ func SendMessage(address string, msg *security.Message) error {
 	return nil
 }
 
-// DisconnectNode closes the connection to a node.
-func DisconnectNode(node *network.Node) error {
+// Disconnect closes the connection to a node on this server.
+func (s *TCPServer) Disconnect(node *network.Node) error {
 	addr, err := NodeToAddress(node)
 	if err != nil {
 		return fmt.Errorf("invalid node address: %v", err)
 	}
-	globalServer.mu.Lock()
-	defer globalServer.mu.Unlock()
-	conn, exists := globalServer.connections[addr]
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	conn, exists := s.connections[addr]
 	if !exists {
 		return fmt.Errorf("no connection to %s", addr)
 	}
 	if err := conn.Close(); err != nil {
 		log.Printf("Failed to close connection to %s: %v", addr, err)
 	}
-	delete(globalServer.connections, addr)
-	delete(globalServer.encKeys, addr)
+	delete(s.connections, addr)
+	delete(s.encKeys, addr)
 	log.Printf("Disconnected from node %s at %s", node.ID, addr)
 	return nil
+}
+
+// ============================================================================
+// Package-level functions (backward-compatible wrappers around globalServer).
+// These are DEPRECATED — prefer using method versions on a specific *TCPServer.
+// ============================================================================
+
+// ConnectTCP establishes a TCP connection with handshake.
+// DEPRECATED: Use (*TCPServer).Connect instead.
+func ConnectTCP(address string, messageCh chan *security.Message) (net.Conn, error) {
+	return globalServer.Connect(address, messageCh)
+}
+
+// GetConnection retrieves an active TCP connection.
+// DEPRECATED: Use (*TCPServer).GetConn instead.
+func GetConnection(address string) (net.Conn, error) {
+	return globalServer.GetConn(address)
+}
+
+// GetEncryptionKey retrieves the encryption key for a connection.
+// DEPRECATED: Use (*TCPServer).GetEncKey instead.
+func GetEncryptionKey(address string) (*security.EncryptionKey, error) {
+	return globalServer.GetEncKey(address)
+}
+
+// SendMessage sends a message to a node.
+// DEPRECATED: Use (*TCPServer).Send instead.
+func SendMessage(address string, msg *security.Message) error {
+	return globalServer.Send(address, msg)
+}
+
+// DisconnectNode closes the connection to a node.
+// DEPRECATED: Use (*TCPServer).Disconnect instead.
+func DisconnectNode(node *network.Node) error {
+	return globalServer.Disconnect(node)
 }

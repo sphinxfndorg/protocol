@@ -315,7 +315,10 @@ func initializePhase2Stakes(
 	for _, vid := range validatorIDs {
 		address := validatorAddressMap[vid]
 		if address == "" {
-			logger.Warn("[%s] No genesis mapping for validator %s — using minimum stake", nodeID, vid)
+			// A peer ID is not an account address. Until this validator presents
+			// a verified reward-address claim, it deliberately receives only the
+			// configured bootstrap stake; do not attempt an acct:<node-id> lookup.
+			logger.Info("[%s] Validator %s has no verified reward address yet — using configured minimum stake", nodeID, vid)
 			if err := vs.AddValidator(vid, minStakeSPX); err == nil {
 				successCount++
 			} else {
@@ -539,8 +542,8 @@ func requestBlocksFromPeer(peerAddr string, fromHeight, toHeight uint64) (*GetBl
 		return nil, fmt.Errorf("unmarshal response failed: %w", err)
 	}
 
-	logger.Debug("requestBlocksFromPeer[%s]: RESPONSE: tip_height=%d, blocks_count=%d, error=%q",
-		peerAddr, resp.TipHeight, len(resp.Blocks), resp.Error)
+	logger.Debug("requestBlocksFromPeer[%s]: RESPONSE: tip_height=%d, chain_ready=%t, blocks_count=%d, error=%q",
+		peerAddr, resp.TipHeight, resp.ChainReady, len(resp.Blocks), resp.Error)
 
 	if resp.Error != "" {
 		return nil, fmt.Errorf("peer error: %s", resp.Error)
@@ -796,6 +799,26 @@ func runBlockSyncLoop(
 						tps.RecordTransaction()
 					}
 					tps.RecordBlock(txCount, 5*time.Second)
+				}
+				// Keep the persisted TPS tracker in lock-step with the live
+				// monitor. Late joiners bypass createGenesisBlock(), which is
+				// normally where storage records block 0; omitting it leaves
+				// transactions_per_block without genesis and a max of zero.
+				if store := bc.GetStorage(); store != nil {
+					metrics := store.GetTPSMetrics()
+					hasGenesis := false
+					for _, entry := range metrics.TransactionsPerBlock {
+						if entry.BlockHeight == 0 && entry.BlockHash == genesisBlock.GetHash() {
+							hasGenesis = true
+							break
+						}
+					}
+					if !hasGenesis {
+						for range genesisBlock.Body.TxsList {
+							store.RecordTransaction()
+						}
+						store.RecordBlock(genesisBlock, 5*time.Second)
+					}
 				}
 			}
 			// ════════════════════════════════════════════════════════════════════
@@ -1361,15 +1384,12 @@ startPBFT:
 
 	go watchAndUpdateStakes(ctx, bc, cons, nodeID, validatorIDs, validatorAddressMap, phase2State)
 
-	// Update validator count on dashboard
-	if vs := cons.GetValidatorSet(); vs != nil {
-		validators := vs.GetValidators()
-		active := len(validators)
-		total := active // we don't have a separate total; active is the total known
-		progress.UpdateValidatorStatus(active, total)
-	}
+	// The validator set includes configured peers before they are connected,
+	// so it cannot represent "active" in the terminal. Report the live
+	// discovery count instead, against the configured network size.
+	progress.UpdateValidatorStatus(effectiveValidatorCount(), totalNodes)
 
-	const roundStallTimeout = 15 * time.Second
+	const roundStallObservationInterval = 15 * time.Second
 	var (
 		stallHeight uint64
 		stallView   uint64
@@ -1413,12 +1433,7 @@ startPBFT:
 			// Estimate TPS: we don't have a real TPS counter, just pass 0 or compute from block times
 			progress.UpdateMempoolActivity(len(pending), 0)
 		}
-		if vs := cons.GetValidatorSet(); vs != nil {
-			validators := vs.GetValidators()
-			active := len(validators)
-			total := active
-			progress.UpdateValidatorStatus(active, total)
-		}
+		progress.UpdateValidatorStatus(effectiveValidatorCount(), totalNodes)
 
 		proposalView, electedLeader, isLeader := cons.RefreshLeaderStatus()
 		if electedLeader == "" {
@@ -1449,17 +1464,16 @@ startPBFT:
 		if stallHeight != currentHeight || stallView != proposalView || stallLeader != electedLeader {
 			stallHeight, stallView, stallLeader = currentHeight, proposalView, electedLeader
 			stallSince = time.Now()
-		} else if time.Since(stallSince) > roundStallTimeout {
-			logger.Warn("[%s] No progress for %v at height=%d view=%d (leader=%s) — forcing view change",
-				nodeID, roundStallTimeout, currentHeight, proposalView, electedLeader)
-			cons.StartViewChange()
-			stallHeight, stallView, stallLeader = 0, 0, ""
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(200 * time.Millisecond):
-			}
-			continue
+		} else if time.Since(stallSince) > roundStallObservationInterval {
+			// View changes are owned by Consensus.consensusLoop, which knows
+			// whether a proposal is being verified or votes are in flight. This
+			// loop used to force one after 15 seconds without that context,
+			// racing normal localhost storage/signature work and causing needless
+			// leader rotations. Record the observation and let the single,
+			// activity-aware PBFT watchdog decide whether recovery is required.
+			logger.Debug("[%s] No height change for %v at height=%d view=%d (leader=%s); waiting for consensus watchdog",
+				nodeID, roundStallObservationInterval, currentHeight, proposalView, electedLeader)
+			stallSince = time.Now()
 		}
 
 		if !isLeader {

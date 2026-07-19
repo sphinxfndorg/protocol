@@ -5,6 +5,7 @@
 package network
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -93,16 +94,88 @@ func NewNodeManager(bucketSize int, dht DHT, db *database.DB) *NodeManager {
 	}
 	// Return initialized NodeManager
 	return &NodeManager{
-		nodes:       make(map[string]*Node),  // Map of all known nodes by ID
-		peers:       make(map[string]*Peer),  // Map of connected peers by ID
-		seenMsgs:    make(map[string]bool),   // Set of seen message IDs to prevent duplicates
-		kBuckets:    [256][]*KBucket{},       // Kademlia routing table (256 buckets)
-		K:           bucketSize,              // Bucket size (k parameter in Kademlia)
-		PingTimeout: 10 * time.Second,        // Timeout for ping operations
-		ResponseCh:  make(chan []*Peer, 100), // Channel for async responses
-		DHT:         dht,                     // DHT implementation
-		db:          db,                      // Database reference for persistence
+		nodes:           make(map[string]*Node),  // Map of all known nodes by ID
+		peers:           make(map[string]*Peer),  // Map of connected peers by ID
+		seenMsgs:        make(map[string]bool),   // Set of seen message IDs to prevent duplicates
+		kBuckets:        [256][]*KBucket{},       // Kademlia routing table (256 buckets)
+		K:               bucketSize,              // Bucket size (k parameter in Kademlia)
+		PingTimeout:     10 * time.Second,        // Timeout for ping operations
+		ResponseCh:      make(chan []*Peer, 100), // Channel for async responses
+		DHT:             dht,                     // DHT implementation
+		db:              db,                      // Database reference for persistence
+		responseWaiters: make(map[string]chan []*Peer),
 	}
+}
+
+// DB exposes the NodeManager's database handle so other packages (e.g. p2p)
+// can pass a real database reference into network.NewNode instead of nil.
+func (nm *NodeManager) DB() *database.DB {
+	return nm.db
+}
+
+// RegisterResponseWaiter creates and registers a dedicated response channel
+// for a specific outgoing request, keyed by the nonce that was sent with it.
+// Callers must call RemoveResponseWaiter (directly or via defer) once they're
+// done waiting, whether or not a response arrived, to avoid leaking entries.
+func (nm *NodeManager) RegisterResponseWaiter(nonce []byte) chan []*Peer {
+	key := hex.EncodeToString(nonce)
+	ch := make(chan []*Peer, 1)
+
+	nm.waitersMu.Lock()
+	nm.responseWaiters[key] = ch
+	nm.waitersMu.Unlock()
+
+	return ch
+}
+
+// RemoveResponseWaiter unregisters and closes the response channel associated
+// with the given nonce, if one exists. Safe to call more than once.
+func (nm *NodeManager) RemoveResponseWaiter(nonce []byte) {
+	key := hex.EncodeToString(nonce)
+
+	nm.waitersMu.Lock()
+	ch, ok := nm.responseWaiters[key]
+	if ok {
+		delete(nm.responseWaiters, key)
+	}
+	nm.waitersMu.Unlock()
+
+	if ok {
+		close(ch)
+	}
+}
+
+// DeliverResponse routes a PONG/NEIGHBORS response to the specific caller
+// that is waiting on the matching nonce, if any. It returns true when a
+// waiter was found and the response was delivered directly to it. When no
+// waiter is registered (e.g. an unsolicited NEIGHBORS push), it falls back
+// to the legacy broadcast ResponseCh so existing passive listeners keep
+// working, without ever letting two independent requests race over the
+// same response.
+func (nm *NodeManager) DeliverResponse(nonce []byte, peers []*Peer) bool {
+	key := hex.EncodeToString(nonce)
+
+	nm.waitersMu.Lock()
+	ch, ok := nm.responseWaiters[key]
+	nm.waitersMu.Unlock()
+
+	if ok {
+		select {
+		case ch <- peers:
+		default:
+			// Waiter's buffer is already full (shouldn't happen, buffer is 1),
+			// drop rather than block the UDP receive loop.
+		}
+		return true
+	}
+
+	// No specific waiter registered - fall back to the broadcast channel so
+	// unsolicited responses aren't silently discarded.
+	select {
+	case nm.ResponseCh <- peers:
+	default:
+	}
+	return false
 }
 
 // Add method to create local node with database
@@ -1264,6 +1337,20 @@ func (m *P2PConsensusNodeManager) HandleIncomingMessage(msgType string, data []b
 		}
 		return m.consensusEngine.HandleTimeout(&timeout)
 
+	case "commit_certificate":
+		var cert consensus.CommitCertificate
+		if err := json.Unmarshal(data, &cert); err != nil {
+			return fmt.Errorf("failed to unmarshal commit certificate: %v", err)
+		}
+		return m.consensusEngine.HandleCommitCertificate(&cert)
+
+	case "prepare_certificate":
+		var cert consensus.PrepareCertificate
+		if err := json.Unmarshal(data, &cert); err != nil {
+			return fmt.Errorf("failed to unmarshal prepare certificate: %v", err)
+		}
+		return m.consensusEngine.HandlePrepareCertificate(&cert)
+
 	case "checkpoint":
 		return m.consensusEngine.HandleCheckpointMessage(data, fromNode)
 
@@ -1299,34 +1386,21 @@ func (m *P2PConsensusNodeManager) HandleIncomingMessage(msgType string, data []b
 		}
 		height := uint64(heightF)
 
-		// Fetch block from the consensus' underlying blockchain via its BlockChain interface.
-		// Consensus currently exposes pendingSyncRequests + HandleSyncResponse, but does not
-		// define a GetBlockByHeight method. We therefore call into the blockchain stored
-		// inside consensus.
-		//
-		// NOTE: This requires consensus engine to have a blockChain field accessible here.
-		// As a safe fallback, request a block by asking the node's blockchain directly
-		// is not possible from this layer, so we only support sync when consensus provides
-		// blocks via HandleSyncResponse path.
-		//
-		// For now, respond nil (avoid compile errors). This will be replaced once we add
-		// a public consensus method in src/consensus.
-		var blockBytes []byte
-		_ = blockBytes
+		block := m.consensusEngine.GetBlockByHeight(height)
+		if block == nil {
+			return fmt.Errorf("cannot serve sync_request: block %d is not available", height)
+		}
 
-		// Send back to origin node only.
-		// NOTE: fromNode is the peer that originated this message.
-		// We deliver on msgType "sync_response".
+		// The legacy bind transport does not supply an origin node ID, so send
+		// the response through the same broadcast transport as the request. Only
+		// the requester has a pending channel for this height; other nodes ignore
+		// the response in HandleSyncResponse.
 		resp := map[string]interface{}{
 			"height": height,
-			"block":  blockBytes,
+			"block":  block,
 		}
-		respBytes, err := json.Marshal(resp)
-		if err != nil {
-			return nil
-		}
-		if m.sendMessageFunc != nil {
-			_ = m.sendMessageFunc(m.nodeManager.GetNode(fromNode).Address, "sync_response", respBytes)
+		if err := m.BroadcastMessage("sync_response", resp); err != nil {
+			return fmt.Errorf("failed to broadcast sync_response for block %d: %w", height, err)
 		}
 		return nil
 

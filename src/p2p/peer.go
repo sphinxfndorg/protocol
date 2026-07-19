@@ -20,7 +20,6 @@ import (
 	logger "github.com/sphinxfndorg/protocol/src/console"
 	security "github.com/sphinxfndorg/protocol/src/handshake"
 	"github.com/sphinxfndorg/protocol/src/network"
-	"github.com/sphinxfndorg/protocol/src/transport"
 	"lukechampine.com/blake3"
 )
 
@@ -66,7 +65,7 @@ func (pm *PeerManager) ConnectPeer(node *network.Node) error {
 	logger.Info("Connecting to node %s via TCP: %s", node.ID, node.Address)
 
 	// Establish TCP connection to the peer
-	_, err := transport.ConnectTCP(node.Address, pm.server.messageCh)
+	_, err := pm.server.tcpConnect(node.Address, pm.server.messageCh)
 	if err != nil {
 		logger.Warn("Failed to connect to %s: %v", node.ID, err)
 		return fmt.Errorf("failed to connect to %s: %v", node.ID, err)
@@ -84,7 +83,7 @@ func (pm *PeerManager) ConnectPeer(node *network.Node) error {
 	// Add peer to node manager's peer list
 	if err := pm.server.nodeManager.AddPeer(node); err != nil {
 		logger.Warn("Failed to add peer %s: %v", node.ID, err)
-		transport.DisconnectNode(node) // Clean up connection
+		pm.server.tcpDisconnect(node) // Clean up connection
 		return fmt.Errorf("failed to add peer %s: %v", node.ID, err)
 	}
 
@@ -95,7 +94,7 @@ func (pm *PeerManager) ConnectPeer(node *network.Node) error {
 	// Perform handshake after adding peer
 	if err := pm.performHandshake(node); err != nil {
 		logger.Info("Handshake failed with %s: %v", node.ID, err)
-		transport.DisconnectNode(node) // Clean up connection
+		pm.server.tcpDisconnect(node) // Clean up connection
 		// Rollback peer addition
 		pm.server.nodeManager.RemovePeer(node.ID)
 		delete(pm.peers, node.ID)
@@ -187,7 +186,7 @@ func (pm *PeerManager) performHandshake(node *network.Node) error {
 	}
 
 	// Get existing TCP connection
-	conn, err := transport.GetConnection(node.Address)
+	conn, err := pm.server.tcpGetConn(node.Address)
 	if err != nil {
 		logger.Info("No active connection to %s: %v", node.Address, err)
 		return fmt.Errorf("no active connection to %s: %v", node.Address, err)
@@ -200,7 +199,7 @@ func (pm *PeerManager) performHandshake(node *network.Node) error {
 	}
 
 	// Send version message
-	if err := transport.SendMessage(node.Address, versionMsg); err != nil {
+	if err := pm.server.tcp(node.Address, versionMsg); err != nil {
 		logger.Warn("Failed to send version message to %s: %v", node.Address, err)
 		return err
 	}
@@ -274,7 +273,7 @@ func (pm *PeerManager) disconnectPeerLocked(peerID string) error {
 	}
 
 	// Close the underlying connection
-	if err := transport.DisconnectNode(peer.Node); err != nil {
+	if err := pm.server.tcpDisconnect(peer.Node); err != nil {
 		logger.Warn("Failed to disconnect peer %s: %v", peerID, err)
 	}
 
@@ -392,7 +391,7 @@ func (pm *PeerManager) PropagateMessage(msg *security.Message, originID string) 
 	// Send message to selected peers
 	for _, candidate := range candidates {
 		peer := candidate.peer
-		if err := transport.SendMessage(peer.Node.Address, msg); err != nil {
+		if err := pm.server.tcp(peer.Node.Address, msg); err != nil {
 			logger.Warn("Failed to propagate %s to %s: %v", msg.Type, peer.Node.ID, err)
 			// Penalize peer that failed to receive message
 			pm.UpdatePeerScore(peer.Node.ID, -10)
@@ -435,7 +434,7 @@ func (pm *PeerManager) SyncBlockchain(peerID string) error {
 	}
 
 	// Send request to peer
-	if err := transport.SendMessage(peer.Node.Address, headersMsg); err != nil {
+	if err := pm.server.tcp(peer.Node.Address, headersMsg); err != nil {
 		return fmt.Errorf("failed to request headers from %s: %v", peerID, err)
 	}
 

@@ -14,6 +14,7 @@ import (
 	sign "github.com/sphinxfndorg/protocol/src/core/sthincs/sign/backend"
 	security "github.com/sphinxfndorg/protocol/src/handshake"
 	"github.com/sphinxfndorg/protocol/src/network"
+	"github.com/sphinxfndorg/protocol/src/transport"
 	"github.com/syndtr/goleveldb/leveldb"
 )
 
@@ -25,6 +26,7 @@ type Server struct {
 	messageCh   chan *security.Message
 	blockchain  *core.Blockchain
 	peerManager *PeerManager
+	tcpServer   *transport.TCPServer
 	mu          sync.RWMutex
 	db          *leveldb.DB
 	sphincsMgr  *sign.STHINCSManager // Field uses STHINCSManager

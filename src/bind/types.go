@@ -97,9 +97,10 @@ type GetBlocksRequest struct {
 
 // GetBlocksResponse is the P2P reply containing the requested block data.
 type GetBlocksResponse struct {
-	Blocks    []*types.Block `json:"blocks"`
-	TipHeight uint64         `json:"tip_height"` // the peer's current chain tip
-	Error     string         `json:"error,omitempty"`
+	Blocks     []*types.Block `json:"blocks"`
+	TipHeight  uint64         `json:"tip_height"`  // the peer's current chain tip
+	ChainReady bool           `json:"chain_ready"` // false while genesis/tip is not installed
+	Error      string         `json:"error,omitempty"`
 }
 
 // knownPeerInfo describes a single peer entry as gossiped during a

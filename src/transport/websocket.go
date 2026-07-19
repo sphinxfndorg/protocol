@@ -156,17 +156,16 @@ func (wc *websocketConn) SetReadDeadline(t time.Time) error  { return nil }
 func (wc *websocketConn) SetWriteDeadline(t time.Time) error { return nil }
 
 // ConnectWebSocket tries to establish a WebSocket connection to the specified address.
+// address should already be the node's real WebSocket address (see
+// transport.resolveWebSocketAddress in ip.go) — this function no longer
+// guesses a port itself. It previously remapped a fixed set of three
+// hardcoded test addresses (127.0.0.1:30303/30304/30305) to hardcoded WS
+// ports that didn't correspond to how WS ports are actually assigned
+// (port.go's baseWSPort / NodePortConfig.WSPort), silently mis-dialing for
+// every other node.
 func ConnectWebSocket(address string, messageCh chan *security.Message) error {
 	dialer := websocket.Dialer{}
-	wsPortMap := map[string]string{
-		"127.0.0.1:30303": "127.0.0.1:8546",
-		"127.0.0.1:30304": "127.0.0.1:8548",
-		"127.0.0.1:30305": "127.0.0.1:8550",
-	}
-	wsAddress, ok := wsPortMap[address]
-	if !ok {
-		wsAddress = address
-	}
+	wsAddress := address
 	for attempt := 1; attempt <= 3; attempt++ {
 		conn, _, err := dialer.Dial("ws://"+wsAddress+"/ws", nil)
 		if err == nil {

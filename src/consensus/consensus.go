@@ -720,6 +720,55 @@ func (c *Consensus) RefreshLeaderStatus() (view uint64, electedLeaderID string, 
 	return c.currentView, c.electedLeaderID, c.isLeader
 }
 
+// VerifyBlockHeader verifies a block's own producer signature (not PBFT
+// quorum attestations) against the signing service's key material. This is
+// the read-only counterpart to SignBlockHeader, intended for the sync path
+// to check a solo-mined block's signature the same way processProposal
+// checks a PBFT leader's proposal — see VerifyBlockHeader's call site in
+// core.Blockchain.VerifyProducerSignature for why this matters: a late
+// joiner downloading a solo-mined chain has no PBFT quorum to lean on, so
+// the producer's own signature is the only thing standing between "this
+// really came from that node" and "anyone who can compute a competing hash."
+func (c *Consensus) VerifyBlockHeader(block Block) (bool, error) {
+	if c.signingService == nil {
+		return false, fmt.Errorf("VerifyBlockHeader: no signing service configured for node %s", c.nodeID)
+	}
+	return c.signingService.VerifyBlockSignature(block)
+}
+
+// SignBlockHeader signs a block's header with this node's own key, the same
+// way ProposeBlock signs a leader's proposal, and marks the block's own
+// signature as valid on success.
+//
+// FIX: solo-mined blocks (produced by CreateBlock before PBFT starts, or
+// before enough validators are known) were never signed at all —
+// ProposeBlock was the only call site for signingService.SignBlock, so
+// every block minted before the solo→PBFT handoff shipped with an empty
+// ProposerSignature and signature_valid=false permanently. That's a real
+// gap, not a cosmetic one: an unsigned block carries no proof of who
+// produced it, so nothing before quorum starts distinguishes a genuine
+// solo-miner's block from one forged by any peer that can compute a
+// competing hash — fork-choice between two unsigned blocks then has
+// nothing to go on but chain continuity and the deterministic hash
+// tie-break, not producer authenticity. Every block should be signed by
+// its own producer from genesis onward, even though a single signature is
+// not itself a BFT quorum; quorum attestations layer on top of this once
+// PBFT is active, they don't replace it.
+//
+// This does not require a peer/committee or a running consensus round —
+// it only touches this node's own signing key — so it is safe to call
+// from the solo-mining path in executor.go, not just from ProposeBlock.
+func (c *Consensus) SignBlockHeader(block Block) error {
+	if c.signingService == nil {
+		return fmt.Errorf("SignBlockHeader: no signing service configured for node %s", c.nodeID)
+	}
+	if err := c.signingService.SignBlock(block); err != nil {
+		return fmt.Errorf("SignBlockHeader: %w", err)
+	}
+	block.SetSigValid(true)
+	return nil
+}
+
 // ProposeBlock creates and broadcasts a new block proposal when this node is the leader
 func (c *Consensus) ProposeBlock(block interface{}) error {
 	c.mu.Lock()
@@ -1063,8 +1112,10 @@ func (c *Consensus) HandleSyncResponse(height uint64, blockData []byte) error {
 		return nil
 	}
 
-	// Deserialize the block
-	var block Block
+	// Deserialize into the concrete block type. Unmarshalling directly into the
+	// Block interface leaves encoding/json without a concrete destination and
+	// turns a valid sync response into an unusable map value.
+	var block types.Block
 	if err := json.Unmarshal(blockData, &block); err != nil {
 		logger.Warn("Failed to deserialize block response for height %d: %v", height, err)
 		return err
@@ -1072,13 +1123,29 @@ func (c *Consensus) HandleSyncResponse(height uint64, blockData []byte) error {
 
 	// Send the block to the waiting goroutine
 	select {
-	case request.response <- block:
+	case request.response <- &block:
 		logger.Info("Delivered block %d to sync handler", height)
 	default:
 		logger.Warn("Response channel full for height %d", height)
 	}
 
 	return nil
+}
+
+// GetBlockByHeight returns a locally stored block for the legacy PBFT
+// sync_request/sync_response transport.  Normal catch-up uses the dedicated
+// sync manager, but this fallback is still used when consensus detects a gap
+// while processing a proposal.  Keep the storage-specific lookup optional so
+// the consensus BlockChain interface remains usable by lightweight test and
+// embedding implementations.
+func (c *Consensus) GetBlockByHeight(height uint64) Block {
+	provider, ok := c.blockChain.(interface {
+		GetBlockByNumber(uint64) *types.Block
+	})
+	if !ok {
+		return nil
+	}
+	return provider.GetBlockByNumber(height)
 }
 
 // fetchBlockFromPeers requests a block from available peers and waits for response
@@ -1350,6 +1417,16 @@ func (c *Consensus) processProposal(proposal *Proposal) {
 		c.proposalMutex.Unlock()
 	}(proposal.Block.GetHash())
 	// ============================================================================
+
+	// A late joiner may receive PBFT traffic before it has installed genesis or
+	// completed its block catch-up.  Keep the proposal for FastForward replay,
+	// but do not enter validation yet: without a local tip it can only produce
+	// a misleading warning and cannot safely vote anyway.
+	if !c.IsSyncReady() {
+		logger.Debug("Deferring proposal for height %d from %s until sync gate opens",
+			proposal.Block.GetHeight(), proposal.ProposerID)
+		return
+	}
 
 	// Get block nonce for logging
 	nonce, err := proposal.Block.GetCurrentNonce()
@@ -1757,6 +1834,15 @@ func (c *Consensus) processProposal(proposal *Proposal) {
 	if c.phase != PhaseCommitted && c.hasQuorum(blockHash) {
 		blockToCommit := proposal.Block
 		logger.Info("Commit quorum was already reached for %s before proposal arrived — committing now", blockHash[:16])
+		// ========== FIX: Attach attestations BEFORE commit ==========
+		// The commit votes that reached quorum were parked in c.receivedVotes
+		// while waiting for this proposal to arrive. Without this call they
+		// are never attached, and the block commits with zero attestations.
+		// See attachAttestationsBeforeCommit's doc comment for the full
+		// explanation of this race. Must run here, while c.mu is still held,
+		// not inside the goroutine below.
+		c.attachAttestationsBeforeCommit(blockToCommit, blockHash)
+		// ============================================================
 		// Transition to committed phase and lock the block before releasing the mutex.
 		c.phase = PhaseCommitted
 		c.lockedBlock = blockToCommit
@@ -1918,12 +2004,35 @@ func (c *Consensus) tryEnterPreparedPhase(blockHash string, view uint64) {
 	}
 
 	// Record a consensus signature for every prepare vote collected for this
-	// block (previously only the single vote that happened to cross the
-	// quorum threshold got recorded; this captures the full set).
-	if votes := c.prepareVotes[blockHash]; votes != nil {
+	// block. Prepare-vote gossip can reach quorum with a genuinely different
+	// subset of voters on different nodes, the same way commit votes can
+	// (see PrepareCertificate's doc comment) — so prefer an already-broadcast
+	// canonical certificate over this node's own locally-gossiped subset,
+	// and if none exists yet, derive locally and publish ours for peers to
+	// adopt instead of each node persisting a different signer set.
+	blockHeight := c.preparedBlock.GetHeight()
+	prepareTimestamp := common.GetTimeService().GetCurrentTimeInfo().ISOLocal
+	if cached, ok := lookupPrepareCertificate(blockHash); ok && len(cached) > 0 {
+		for _, att := range cached {
+			c.addConsensusSig(&ConsensusSignature{
+				BlockHash:    blockHash,
+				BlockHeight:  blockHeight,
+				SignerNodeID: att.ValidatorID,
+				Signature:    hex.EncodeToString(att.Signature),
+				MessageType:  "prepare",
+				View:         att.View,
+				Timestamp:    prepareTimestamp,
+				Valid:        true,
+				MerkleRoot:   "pending_calculation",
+				Status:       "prepared",
+			})
+		}
+		evictPrepareCertificate(blockHash)
+	} else if votes := c.prepareVotes[blockHash]; votes != nil {
+		attestations := make([]*types.Attestation, 0, len(votes))
+		voteSignatures := make(map[string][]byte, len(votes))
 		for voterID, v := range votes {
 			c.addConsensusSig(&ConsensusSignature{
-				BlockHash: blockHash,
 				// FIX: c.currentHeight is only advanced at commit time (see
 				// SetCurrentHeight / the assignment after commit below), so
 				// during the Prepared phase — i.e. right here — it still
@@ -1933,17 +2042,46 @@ func (c *Consensus) tryEnterPreparedPhase(blockHash string, view uint64) {
 				// was recorded with block_height: 1. c.preparedBlock is the
 				// block actually reaching quorum right now (already used
 				// correctly in the log line below), so use its height.
-				BlockHeight:  c.preparedBlock.GetHeight(),
+				BlockHash:    blockHash,
+				BlockHeight:  blockHeight,
 				SignerNodeID: voterID,
 				Signature:    hex.EncodeToString(v.Signature),
 				MessageType:  "prepare",
 				View:         view,
-				Timestamp:    common.GetTimeService().GetCurrentTimeInfo().ISOLocal,
+				Timestamp:    prepareTimestamp,
 				Valid:        true,
 				MerkleRoot:   "pending_calculation",
 				Status:       "prepared",
 			})
+
+			if signedMsg, err := DeserializeSignedMessage(v.Signature); err == nil {
+				attestations = append(attestations, &types.Attestation{
+					ValidatorID: voterID,
+					BlockHash:   blockHash,
+					View:        v.View,
+					Signature:   signedMsg.Signature,
+				})
+				voteSignatures[voterID] = v.Signature
+			} else {
+				logger.Warn("tryEnterPreparedPhase: failed to deserialize prepare vote signature from %s for block %s: %v",
+					voterID, blockHash[:min(16, len(blockHash))], err)
+			}
 		}
+		if len(attestations) > 0 {
+			sort.Slice(attestations, func(i, j int) bool {
+				return attestations[i].ValidatorID < attestations[j].ValidatorID
+			})
+			cert := &PrepareCertificate{
+				BlockHash:      blockHash,
+				View:           view,
+				Attestations:   attestations,
+				VoteSignatures: voteSignatures,
+			}
+			if err := c.broadcastPrepareCertificate(cert); err != nil {
+				logger.Warn("tryEnterPreparedPhase: failed to broadcast prepare certificate for %s: %v", blockHash[:min(16, len(blockHash))], err)
+			}
+		}
+		evictPrepareCertificate(blockHash)
 	}
 
 	// Transition to prepared phase.
@@ -2264,49 +2402,10 @@ func (c *Consensus) processVoteLocked(vote *Vote) Block {
 		}
 
 		// ========== FIX: Attach attestations BEFORE commit ==========
-		// Extract underlying block
-		var tb *types.Block
-		if direct, ok := blockToCommit.(*types.Block); ok {
-			tb = direct
-		} else if getter, ok := blockToCommit.(interface{ GetUnderlyingBlock() interface{} }); ok {
-			if underlying, ok := getter.GetUnderlyingBlock().(*types.Block); ok {
-				tb = underlying
-			}
-		}
-
-		if tb != nil {
-			// Take snapshot of votes
-			votesSnapshot := make(map[string]*Vote)
-			if votes, exists := c.receivedVotes[vote.BlockHash]; exists {
-				for k, v := range votes {
-					votesSnapshot[k] = v
-				}
-				logger.Info("Captured %d votes for attestations", len(votesSnapshot))
-			}
-
-			// Attach attestations directly to the block
-			if len(votesSnapshot) > 0 {
-				tb.Body.Attestations = make([]*types.Attestation, 0, len(votesSnapshot))
-				for voterID, vote := range votesSnapshot {
-					// Extract the raw SPHINCS+ signature bytes from the serialized SignedMessage
-					// vote.Signature is a serialized SignedMessage (includes length prefixes, timestamp, nonce, etc.)
-					// We need to deserialize it and extract just the actual signature bytes
-					signedMsg, err := DeserializeSignedMessage(vote.Signature)
-					if err != nil {
-						logger.Warn("Failed to deserialize vote signature for attestation: %v", err)
-						continue
-					}
-
-					tb.Body.Attestations = append(tb.Body.Attestations, &types.Attestation{
-						ValidatorID: voterID,
-						BlockHash:   blockToCommit.GetHash(),
-						View:        vote.View,
-						Signature:   signedMsg.Signature, // Extract raw SPHINCS+ signature bytes only
-					})
-				}
-				logger.Info("Attached %d attestations to block BEFORE commit", len(tb.Body.Attestations))
-			}
-		}
+		// Shared with the "commit quorum arrived before proposal" fallback in
+		// processProposal — see attachAttestationsBeforeCommit for why this
+		// can no longer live inline here alone.
+		c.attachAttestationsBeforeCommit(blockToCommit, vote.BlockHash)
 		// ============================================================
 
 		// Commit the block after releasing c.mu. CommitBlock performs storage,
@@ -2316,6 +2415,186 @@ func (c *Consensus) processVoteLocked(vote *Vote) Block {
 	}
 
 	return nil
+}
+
+// attachAttestationsBeforeCommit builds a block's attestation list from the
+// commit votes currently recorded in c.receivedVotes[blockHash] and attaches
+// them to the block body. Must be called with c.mu already held, since it
+// reads c.receivedVotes directly.
+//
+// BUG FIX: this used to live only inline inside processVoteLocked's commit
+// branch. That covers the common case (quorum is reached when a vote
+// arrives), but there is a second, independent path that also commits a
+// block: processProposal's "commit quorum was already reached before the
+// proposal arrived" fallback (search for tryEnterPreparedPhase's sibling
+// check below). Commit votes can reach quorum and get parked in
+// c.receivedVotes *before* the proposal itself is processed and
+// preparedBlock is set; once the proposal arrives, that fallback committed
+// the block directly via commitBlock() without ever attaching the parked
+// votes as attestations. Because which path wins is a race (network
+// ordering of the proposal vs. the commit votes), the result was
+// nondeterministic: most blocks committed via the normal vote path and got
+// their attestations, but any block whose commit votes arrived first
+// committed via the fallback with zero attestations — exactly the scattered
+// "MISSING: no attestations field" blocks seen in the on-disk block JSON.
+// Extracting this into a shared helper and calling it from both commit
+// sites closes that gap. (A block with genuinely zero votes, such as
+// genesis, still legitimately ends up with no attestations — that case is
+// not a bug.)
+func (c *Consensus) attachAttestationsBeforeCommit(block Block, blockHash string) {
+	// Extract underlying block
+	var tb *types.Block
+	if direct, ok := block.(*types.Block); ok {
+		tb = direct
+	} else if getter, ok := block.(interface{ GetUnderlyingBlock() interface{} }); ok {
+		if underlying, ok := getter.GetUnderlyingBlock().(*types.Block); ok {
+			tb = underlying
+		}
+	}
+	if tb == nil {
+		return
+	}
+
+	// Skip re-attaching if this block already carries attestations (e.g. a
+	// block recovered from the proposal cache that was already processed
+	// once through this path).
+	if len(tb.Body.Attestations) > 0 {
+		return
+	}
+
+	// COMPOSITION FIX: if a peer already broadcast a CommitCertificate for
+	// this block hash (see commit_certificate.go), adopt it verbatim instead
+	// of deriving from this node's own local vote snapshot below. This is
+	// what actually closes the cross-node composition gap that sorting
+	// alone (further down) cannot: two nodes that reached quorum with
+	// different subsets of gossiped commit votes will, once either of them
+	// broadcasts its certificate, converge on the SAME attestation list
+	// rather than each committing with its own distinct subset.
+	if cached, ok := lookupCommitCertificate(blockHash); ok && len(cached) > 0 {
+		tb.Body.Attestations = cached
+		evictCommitCertificate(blockHash)
+		logger.Info("Attached %d attestations to block %s from peer commit certificate (skipped local derivation)",
+			len(tb.Body.Attestations), blockHash[:16])
+		return
+	}
+
+	// Take snapshot of votes
+	votesSnapshot := make(map[string]*Vote)
+	if votes, exists := c.receivedVotes[blockHash]; exists {
+		for k, v := range votes {
+			votesSnapshot[k] = v
+		}
+		logger.Info("Captured %d votes for attestations", len(votesSnapshot))
+	}
+
+	if len(votesSnapshot) == 0 {
+		logger.Warn("No commit votes recorded for block %s — committing with zero attestations", blockHash[:16])
+		return
+	}
+
+	// Attach attestations directly to the block
+	tb.Body.Attestations = make([]*types.Attestation, 0, len(votesSnapshot))
+	// voteSignatures captures the FULL original vote.Signature blob (not the
+	// extracted signedMsg.Signature stored on the Attestation itself) for
+	// every voter that makes it into the attestation list. This is what lets
+	// a peer receiving this node's CommitCertificate broadcast (further
+	// below) independently re-verify each attestation — see
+	// commit_certificate.go's TRUST MODEL note for exactly why the full blob
+	// is required and the extracted bytes alone are not enough.
+	voteSignatures := make(map[string][]byte, len(votesSnapshot))
+	var deserFailures int
+	for voterID, vote := range votesSnapshot {
+		// Extract the raw SPHINCS+ signature bytes from the serialized SignedMessage
+		// vote.Signature is a serialized SignedMessage (includes length prefixes, timestamp, nonce, etc.)
+		// We need to deserialize it and extract just the actual signature bytes
+		signedMsg, err := DeserializeSignedMessage(vote.Signature)
+		if err != nil {
+			// FIX: this used to be a bare logger.Warn + continue, which silently
+			// dropped the vote from the attestation list. If every parked vote for
+			// a block hit this branch, the block would commit with zero
+			// attestations while this function still logged "Attached N
+			// attestations" — i.e. quorum existed but the on-disk block looked
+			// exactly like the "MISSING: no attestations" symptom, with no trace
+			// of why. Log per-voter at Error with the raw signature length so
+			// this is diagnosable, and count failures so the all-failed case is
+			// flagged below instead of silently reporting an empty list as normal.
+			logger.Error("Attestation build: failed to deserialize vote signature from %s for block %s (raw len=%d): %v",
+				voterID, blockHash[:16], len(vote.Signature), err)
+			deserFailures++
+			continue
+		}
+
+		tb.Body.Attestations = append(tb.Body.Attestations, &types.Attestation{
+			ValidatorID: voterID,
+			BlockHash:   blockHash,
+			View:        vote.View,
+			Signature:   signedMsg.Signature, // Extract raw SPHINCS+ signature bytes only
+		})
+		voteSignatures[voterID] = vote.Signature // full blob, for certificate verification
+	}
+
+	if len(tb.Body.Attestations) == 0 && deserFailures > 0 {
+		logger.Error("Attestation build: block %s had %d recorded commit votes but ALL %d failed signature deserialization — committing with zero attestations despite quorum",
+			blockHash[:16], len(votesSnapshot), deserFailures)
+	} else if deserFailures > 0 {
+		logger.Warn("Attestation build: block %s attached %d/%d attestations — %d vote(s) dropped due to deserialization failure",
+			blockHash[:16], len(tb.Body.Attestations), len(votesSnapshot), deserFailures)
+	}
+
+	// FIX: votesSnapshot was copied from a map (c.receivedVotes[blockHash]),
+	// and the loop above ranges over that map — Go deliberately randomizes
+	// map iteration order on every run. Combined with the fact that this
+	// function runs independently on every node (each building its list from
+	// its OWN locally-received votes, not a canonical leader-broadcast
+	// certificate — see the doc comment above), the same underlying vote set
+	// could still serialize to a different-order Attestations array on two
+	// nodes even when both collected exactly the same voters. Sorting by
+	// ValidatorID here removes that source of divergence: whenever two nodes
+	// do end up with the same set of voters for a block (the common case in
+	// a small, low-latency devnet), their on-disk Attestations now compare
+	// byte-for-byte equal instead of differing only by append order.
+	//
+	// On its own this sort does NOT make attestation composition identical
+	// across nodes when nodes genuinely collected different subsets of
+	// gossiped commit votes before independently crossing their own
+	// 2/3-stake quorum threshold — that's an inherent property of
+	// asynchronous BFT quorum certificates (any valid 2/3-stake subset is a
+	// legitimate proof), not a bug on its own, and doesn't affect chain
+	// safety since the block hash never depends on Attestations. The
+	// composition gap itself is closed by the CommitCertificate broadcast
+	// below (see commit_certificate.go): this node reached quorum and built
+	// its list first, so it publishes that list as the canonical one for
+	// every peer that hasn't derived its own yet (checked at the top of this
+	// function) to adopt as-is.
+	sort.Slice(tb.Body.Attestations, func(i, j int) bool {
+		return tb.Body.Attestations[i].ValidatorID < tb.Body.Attestations[j].ValidatorID
+	})
+
+	// COMPOSITION FIX (continued): publish this node's freshly-derived list
+	// so peers that haven't independently derived their own yet will adopt
+	// it verbatim instead of racing ahead with a possibly-different subset.
+	// Fire-and-forget, consistent with broadcastVote/broadcastProposal — see
+	// broadcastCommitCertificate's doc comment for why this is safe to call
+	// with c.mu held. A failure here just means this node's peers fall back
+	// to local derivation as before; it does not affect this node's own
+	// commit.
+	cert := &CommitCertificate{
+		BlockHash:      blockHash,
+		View:           c.currentView,
+		Attestations:   tb.Body.Attestations,
+		VoteSignatures: voteSignatures,
+	}
+	if err := c.broadcastCommitCertificate(cert); err != nil {
+		logger.Warn("attachAttestationsBeforeCommit: failed to broadcast commit certificate for %s: %v", blockHash[:16], err)
+	}
+	// Defensive cleanup: drop any certificate a peer may have raced in for
+	// this hash after this node passed the lookup above but before it
+	// finished deriving its own list. Without this, a stale cache entry for
+	// an already-attached block hash could sit until commitBlock's own
+	// eviction runs.
+	evictCommitCertificate(blockHash)
+
+	logger.Info("Attached %d attestations to block %s BEFORE commit", len(tb.Body.Attestations), blockHash[:16])
 }
 
 // processTimeout handles incoming timeout messages for view changes
@@ -2496,6 +2775,23 @@ func (c *Consensus) hasQuorum(blockHash string) bool {
 		return false
 	}
 
+	// SAFETY FLOOR: quorum must never be satisfiable by fewer distinct
+	// voters than a real 2/3 majority of the network requires, regardless
+	// of what the stake tally below says. The stake check depends on this
+	// node's local c.validatorSet being fully populated with every other
+	// validator's stake; if that set is incomplete or stale on this node
+	// (e.g. a validator registration this node hasn't learned yet),
+	// totalStake computed below is smaller than the network's real total,
+	// and a single vote can wrongly clear 2/3 of that too-small total.
+	// getTotalNodes() is derived independently, from actual connected
+	// peers, so cross-checking against it catches exactly that case —
+	// this is what let a node commit (and record final_states) with only
+	// its own vote while peers required 2-of-3.
+	requiredVoters := c.calculateQuorumSize(c.getTotalNodes())
+	if len(votes) < requiredVoters {
+		return false
+	}
+
 	// Calculate total stake that has voted
 	totalStakeVoted := big.NewInt(0)
 	for voterID := range votes {
@@ -2541,6 +2837,12 @@ func (c *Consensus) hasPrepareQuorum(blockHash string) bool {
 	// Get prepare votes for this block
 	votes := c.prepareVotes[blockHash]
 	if votes == nil {
+		return false
+	}
+
+	// SAFETY FLOOR: same cross-check as hasQuorum — see its comment.
+	requiredVoters := c.calculateQuorumSize(c.getTotalNodes())
+	if len(votes) < requiredVoters {
 		return false
 	}
 
@@ -2765,6 +3067,12 @@ func (c *Consensus) commitBlock(block Block) {
 		c.sentPrepareVotes = make(map[string]bool)
 		c.weightedPrepareVotes = make(map[string]*big.Int)
 		c.weightedCommitVotes = make(map[string]*big.Int)
+		// Backstop cleanup: a peer's commit certificate for this now-stale
+		// block hash may still be cached (received but never consumed, e.g.
+		// this node lost the race to a synced block instead). See
+		// commit_certificate.go's commitCertCap note for why this matters.
+		evictCommitCertificate(block.GetHash())
+		evictPrepareCertificate(block.GetHash())
 		logger.Warn("commitBlock: dropped stale block %s at height %d (chain tip already advanced) — reset to PhaseIdle at height %d",
 			block.GetHash(), block.GetHeight(), c.currentHeight)
 		c.mu.Unlock()
@@ -2793,6 +3101,26 @@ func (c *Consensus) commitBlock(block Block) {
 	// of a commit and advancing their currentView ahead of the leader.
 	c.lastRoundActivity = common.GetTimeService().Now()
 
+	// Capture every commit vote this node collected for the block BEFORE
+	// receivedVotes is reset below. Without this, commitBlock only ever
+	// recorded a single self-authored "committed_by_<nodeID>" signature,
+	// so each node's chain_state.json final_states ended up with a
+	// different (and only its own) signer_node_id for the same block's
+	// commit phase — the same class of divergence the prepare phase
+	// already fixed by recording a signature per voter (see
+	// tryEnterPreparedPhase). Mirror that here for commit.
+	commitVotesForBlock := c.receivedVotes[committedHash]
+
+	// Capture the view this block actually committed AT, before it gets
+	// bumped for the next round below. Recording c.currentView after the
+	// increment (as this used to do) put next-round's view number on this
+	// round's signatures — and since a concurrent view-change can bump
+	// c.currentView independently on each node between the moment they
+	// each reach quorum, that made the recorded view for the SAME block
+	// diverge across nodes (e.g. view 14 on one node, 15 on another) even
+	// when the vote itself was cast at a single, consistent view.
+	committedView := c.currentView
+
 	// Reset ALL per-round state and advance view for next round.
 	c.currentView++ // Increment view for next round
 	c.phase = PhaseIdle
@@ -2806,6 +3134,14 @@ func (c *Consensus) commitBlock(block Block) {
 	c.sentPrepareVotes = make(map[string]bool)
 	c.weightedPrepareVotes = make(map[string]*big.Int)
 	c.weightedCommitVotes = make(map[string]*big.Int)
+	// Backstop cleanup: this node's own certificate for committedHash was
+	// already evicted at the point of use in attachAttestationsBeforeCommit,
+	// but a peer's certificate could have arrived and been cached AFTER this
+	// node had already attached its own attestations locally (so it was
+	// never consumed via the lookup at the top of that function). Clear it
+	// here so it doesn't sit in the cache until commitCertCap forces it out.
+	evictCommitCertificate(committedHash)
+	evictPrepareCertificate(committedHash)
 	// Evict only proposals at or below the committed height.
 	// Proposals for the NEXT height may already be cached (arrived early)
 	// and must survive this commit so FastForward can replay them.
@@ -2841,20 +3177,56 @@ func (c *Consensus) commitBlock(block Block) {
 	c.consensusSignatures = kept
 	c.signatureMutex.Unlock()
 
-	// Add self-commit signature while still under caller's c.mu.
-	commitSig := &ConsensusSignature{
-		BlockHash:    block.GetHash(),
-		BlockHeight:  newHeight,
-		SignerNodeID: c.nodeID,
-		Signature:    "committed_by_" + c.nodeID,
-		MessageType:  "commit",
-		View:         c.currentView,
-		Timestamp:    common.GetTimeService().GetCurrentTimeInfo().ISOLocal,
-		Valid:        true,
-		MerkleRoot:   c.extractMerkleRootFromBlock(block),
-		Status:       "committed",
+	// Record a commit signature for every voter this node collected for the
+	// block (mirrors tryEnterPreparedPhase's per-voter recording for the
+	// prepare phase), not just this node's own commit. Recording only the
+	// self signature here is what caused different nodes to persist
+	// different signer_node_id sets for the same block's commit phase in
+	// chain_state.json.
+	commitMerkleRoot := c.extractMerkleRootFromBlock(block)
+	commitTimestamp := common.GetTimeService().GetCurrentTimeInfo().ISOLocal
+	recordedCommitSigner := false
+	for voterID, v := range commitVotesForBlock {
+		sig := hex.EncodeToString(v.Signature)
+		if voterID == c.nodeID {
+			sig = "committed_by_" + c.nodeID
+			recordedCommitSigner = true
+		}
+		sigView := committedView
+		if v != nil && v.View != 0 {
+			sigView = v.View
+		}
+		c.addConsensusSig(&ConsensusSignature{
+			BlockHash:    block.GetHash(),
+			BlockHeight:  newHeight,
+			SignerNodeID: voterID,
+			Signature:    sig,
+			MessageType:  "commit",
+			View:         sigView,
+			Timestamp:    commitTimestamp,
+			Valid:        true,
+			MerkleRoot:   commitMerkleRoot,
+			Status:       "committed",
+		})
 	}
-	c.addConsensusSig(commitSig)
+
+	// Fallback: if this node's own commit vote wasn't in receivedVotes for
+	// some reason (e.g. leader fast-path), still record it so the block
+	// always has at least a self-commit signature.
+	if !recordedCommitSigner {
+		c.addConsensusSig(&ConsensusSignature{
+			BlockHash:    block.GetHash(),
+			BlockHeight:  newHeight,
+			SignerNodeID: c.nodeID,
+			Signature:    "committed_by_" + c.nodeID,
+			MessageType:  "commit",
+			View:         committedView,
+			Timestamp:    commitTimestamp,
+			Valid:        true,
+			MerkleRoot:   commitMerkleRoot,
+			Status:       "committed",
+		})
+	}
 
 	logger.Info("Node %s committed block %s at height %d (view now %d)",
 		c.nodeID, block.GetHash(), newHeight, c.currentView)
@@ -3263,6 +3635,23 @@ func (c *Consensus) FastForward(block Block) error {
 	if block.GetPrevHash() != tip.GetHash() {
 		return fmt.Errorf("FastForward: parent mismatch: expected %s, got %s",
 			tip.GetHash(), block.GetPrevHash())
+	}
+
+	// FIX: FastForward commits blocks fetched whole from a peer during catch-up,
+	// so it never goes through attachAttestationsBeforeCommit — there are no
+	// local votes to attach, the block either already carries attestations
+	// from the peer or it doesn't. If a peer's own copy of a block committed
+	// with zero attestations (e.g. via the deserialization-failure path above),
+	// FastForward previously propagated that silently: the gap-filled node
+	// would show the same "missing attestations" symptom with no indication it
+	// never actually went through this node's own PBFT pipeline for that
+	// block. Surface it instead of letting it look identical to a live-quorum
+	// miss.
+	if block.GetHeight() > 0 {
+		if tb, ok := block.(*types.Block); ok && len(tb.Body.Attestations) == 0 {
+			logger.Warn("FastForward: block height=%d hash=%s fetched from peer with zero attestations — propagating as-is (not a local quorum miss, check the source peer)",
+				block.GetHeight(), block.GetHash())
+		}
 	}
 
 	logger.Info("⏩ FastForward: committing synced block height=%d hash=%s",

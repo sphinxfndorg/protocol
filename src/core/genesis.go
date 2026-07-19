@@ -11,9 +11,11 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/sphinxfndorg/protocol/src/common"
+	"github.com/sphinxfndorg/protocol/src/consensus"
 	logger "github.com/sphinxfndorg/protocol/src/console"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
 )
@@ -33,6 +35,45 @@ func NewGenesisValidatorStake(spx int64) *big.Int {
 //
 // 2026-07-15 19:33:18 UTC — canonical genesis timestamp for ALL environments.
 const CanonicalGenesisTimestamp int64 = 1784143998
+
+// genesisSignerMu guards the two package-level values below.
+var genesisSignerMu sync.Mutex
+
+// genesisSigner and genesisSignerNodeID hold whichever node's SigningService
+// is bootstrapping a fresh chain, registered via SetGenesisSigner. This is a
+// package-level value — not a Blockchain struct field or a BuildBlock
+// parameter — for the same reason CanonicalGenesisTimestamp is a constant:
+// every existing call site (ApplyGenesis, ApplyGenesisWithCachedBlock,
+// getCachedGenesisBlock) already calls gs.BuildBlock() with no arguments, and
+// none of those need to change to pick this up.
+var (
+	genesisSigner       *consensus.SigningService
+	genesisSignerNodeID string
+)
+
+// SetGenesisSigner registers the SigningService and node identity that will
+// sign the genesis block when this node bootstraps a fresh chain (i.e. is
+// not a late joiner — see Blockchain.IsLateJoiner in initializeChain, which
+// skips createGenesisBlock/BuildBlock for late joiners entirely, so calling
+// this on a late joiner is harmless but unnecessary).
+//
+// Call this once, in bind.StartNode, right after this node's own
+// SigningService is constructed and BEFORE core.NewBlockchain(...) /
+// FinishInit() runs — initializeChain() calls createGenesisBlock() ->
+// BuildBlock() synchronously during blockchain construction, so the signer
+// must already be registered by then.
+func SetGenesisSigner(signer *consensus.SigningService, nodeID string) {
+	genesisSignerMu.Lock()
+	defer genesisSignerMu.Unlock()
+	genesisSigner = signer
+	genesisSignerNodeID = nodeID
+}
+
+func getGenesisSigner() (*consensus.SigningService, string) {
+	genesisSignerMu.Lock()
+	defer genesisSignerMu.Unlock()
+	return genesisSigner, genesisSignerNodeID
+}
 
 // DefaultGenesisState returns the canonical genesis configuration used by all
 // nodes on the Sphinx Mainnet. Every field is deterministic so that independent
@@ -270,7 +311,33 @@ func (gs *GenesisState) BuildBlock() *types.Block {
 
 	block := types.NewBlock(header, body)
 	block.PopulateLogsBloom()
-	block.FinalizeHash()
+	block.FinalizeHash() // hash finalized BEFORE any signature is attached
+
+	// FIX: genesis previously left here with an empty ProposerSignature and
+	// signature_valid=false permanently — BuildBlock never called SignBlock
+	// at all, unlike every other block (see Consensus.SignBlockHeader's
+	// signingService.SignBlock call, used from the solo-mining path in
+	// executor.go and from ProposeBlock). That meant late joiners had no
+	// producer signature to check on the one block that matters most.
+	//
+	// Sign here, using whichever node's SigningService called
+	// SetGenesisSigner (the node bootstrapping a fresh chain) — the exact
+	// same SignBlock call every other block goes through, no separate
+	// "authority" identity. Signing happens strictly AFTER FinalizeHash, so
+	// the signature bytes never affect the hash — genesis stays
+	// byte-for-byte identical across every node regardless of who signs it.
+	if signer, signerNodeID := getGenesisSigner(); signer != nil && signerNodeID != "" {
+		header.ProposerID = signerNodeID
+		wrapped := NewBlockHelper(block)
+		if err := signer.SignBlock(wrapped); err != nil {
+			logger.Warn("BuildBlock: failed to sign genesis block: %v", err)
+		} else {
+			wrapped.SetSigValid(true)
+			logger.Info("SUCCESS Genesis block signed by %s", signerNodeID)
+		}
+	} else {
+		logger.Warn("BuildBlock: no genesis signer registered — genesis block will be unsigned (call core.SetGenesisSigner before NewBlockchain)")
+	}
 
 	logger.Info("GenesisState.BuildBlock: hash=%s, height=0, vault=%s, txs=%d",
 		block.GetHash(), GenesisVaultAddress, len(txs))

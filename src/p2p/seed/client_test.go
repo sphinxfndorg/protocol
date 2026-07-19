@@ -632,7 +632,7 @@ func BenchmarkTreeBuilder_Build(b *testing.B) {
 	}
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		tb := NewTreeBuilder(24)
 		for _, rec := range records {
 			tb.AddRecord(rec)

@@ -316,6 +316,7 @@ func (sm *StateMachine) syncFinalStates() {
 	// produced the ~4.5s-cadence "stall" visible during every round where
 	// a dead signature was present.
 	newFinalStates := make([]*FinalStateInfo, 0, len(sigs))
+	seenKeys := make(map[string]bool, len(sigs))
 	for _, rawSig := range sigs {
 		var block *types.Block
 		var err error
@@ -330,6 +331,8 @@ func (sm *StateMachine) syncFinalStates() {
 				logger.Debug("Retry %d/10 for block %s", attempt+1, rawSig.BlockHash[:16])
 			}
 		}
+
+		key := rawSig.BlockHash + "|" + rawSig.SignerNodeID + "|" + rawSig.MessageType
 
 		if err != nil || block == nil {
 			logger.Debug("Block %s not in storage, creating placeholder (height=%d, type=%s)",
@@ -347,6 +350,7 @@ func (sm *StateMachine) syncFinalStates() {
 				SignatureStatus: sm.mapValidToSignatureStatus(rawSig.Valid),
 				Timestamp:       time.Now().Format(time.RFC3339),
 			})
+			seenKeys[key] = true
 			logger.Debug("SMR: Added placeholder final state for block %s", rawSig.BlockHash[:16])
 			continue
 		}
@@ -358,6 +362,7 @@ func (sm *StateMachine) syncFinalStates() {
 		finalState = sm.FinalStatePopulated(finalState)
 		finalState = sm.fixGenesisBlockHash(finalState)
 		newFinalStates = append(newFinalStates, finalState)
+		seenKeys[key] = true
 		logger.Debug("SMR: Final state - block=%s, height=%d, merkle=%s, status=%s",
 			finalState.BlockHash[:16], finalState.BlockHeight, finalState.MerkleRoot, finalState.Status)
 	}
@@ -365,17 +370,43 @@ func (sm *StateMachine) syncFinalStates() {
 	// Only the swap itself needs the lock, and only briefly.
 	sm.stateMutex.Lock()
 	previousCount := len(sm.finalStates)
-	sm.finalStates = newFinalStates
+
+	// MERGE rather than replace. GetConsensusSignatures() reflects this
+	// node's OWN accumulated view, and a single 2s tick can catch it
+	// mid-gossip — e.g. it has recorded its own "prepare" vote but hasn't
+	// yet received the other validators' PREPARE broadcasts. A wholesale
+	// replace here then permanently drops those other validators' entries
+	// for the block from finalStates until/unless this exact tick happens
+	// to observe them again — which is exactly why different nodes ended
+	// up persisting different signer_node_id sets for the same block in
+	// chain_state.json (each kept whichever signers were in its own latest
+	// snapshot, not the union of every signer it had ever observed). Keep
+	// any existing (block, signer, messageType) entry this tick's snapshot
+	// didn't reproduce, so a node only ever gains entries for a block, never
+	// silently loses ones it already recorded. CleanupStaleFinalStates
+	// still removes entries once their block ages out of storage.
+	merged := make([]*FinalStateInfo, 0, len(newFinalStates)+len(sm.finalStates))
+	merged = append(merged, newFinalStates...)
+	for _, old := range sm.finalStates {
+		if old == nil {
+			continue
+		}
+		key := old.BlockHash + "|" + old.SignerNodeID + "|" + old.MessageType
+		if !seenKeys[key] {
+			merged = append(merged, old)
+		}
+	}
+	sm.finalStates = merged
 	sm.stateMutex.Unlock()
 
 	// ★ FIX: only surface this at INFO when the set actually changed size —
 	// otherwise every idle 2s tick reprinted an identical "synced N final
 	// states" line forever. Debug still gets a line every tick for anyone
 	// actively tailing at that level.
-	if len(newFinalStates) != previousCount {
-		logger.Info("SMR: Synced %d final states (was %d)", len(newFinalStates), previousCount)
+	if len(merged) != previousCount {
+		logger.Info("SMR: Reconciled consensus records: retained %d final states (previous snapshot %d)", len(merged), previousCount)
 	} else {
-		logger.Debug("SMR: Synced %d final states (unchanged)", len(newFinalStates))
+		logger.Debug("SMR: Synced %d final states (unchanged)", len(merged))
 	}
 }
 
@@ -425,11 +456,17 @@ func (sm *StateMachine) convertToFinalStateInfo(sig *consensus.ConsensusSignatur
 	block, err := sm.storage.GetBlockByHash(sig.BlockHash)
 	var merkleRoot string
 	var blockTimestamp int64
+	var proposerID string
 
 	if err == nil && block != nil {
 		// Extract real merkle root from the block
 		merkleRoot = sm.extractMerkleRootFromBlock(block)
 		blockTimestamp = block.GetTimestamp()
+
+		// Extract the actual proposer ID from the block header
+		if block.Header != nil {
+			proposerID = block.Header.ProposerID
+		}
 	} else {
 		// Don't create final state for missing blocks
 		logger.Warn("Block not found for hash %s, cannot create final state", sig.BlockHash)
@@ -439,6 +476,12 @@ func (sm *StateMachine) convertToFinalStateInfo(sig *consensus.ConsensusSignatur
 	// Determine proper status
 	status := sm.determineFinalStateStatus(sig.MessageType, sig.Valid)
 
+	// Use the block's proposer ID if available, otherwise fall back to signer
+	nodeID := proposerID
+	if nodeID == "" {
+		nodeID = sig.SignerNodeID
+	}
+
 	return &FinalStateInfo{
 		// Block identification
 		BlockHash:      sig.BlockHash,
@@ -446,15 +489,15 @@ func (sm *StateMachine) convertToFinalStateInfo(sig *consensus.ConsensusSignatur
 		MerkleRoot:     merkleRoot,
 		BlockTimestamp: blockTimestamp,
 
-		// Node information
-		NodeID:      sig.SignerNodeID,
-		NodeName:    fmt.Sprintf("Node-%s", sig.SignerNodeID),
-		NodeAddress: fmt.Sprintf("127.0.0.1:%s", sig.SignerNodeID),
+		// Node information - use the actual block proposer, not the signer
+		NodeID:      nodeID,
+		NodeName:    fmt.Sprintf("Node-%s", nodeID),
+		NodeAddress: fmt.Sprintf("127.0.0.1:%s", nodeID),
 
 		// Chain state
 		TotalBlocks: sm.storage.GetTotalBlocks(),
 
-		// Signature information
+		// Signature information - keep the original signer for verification
 		SignerNodeID: sig.SignerNodeID,
 		Signature:    sig.Signature,
 		MessageType:  sig.MessageType,
@@ -462,8 +505,8 @@ func (sm *StateMachine) convertToFinalStateInfo(sig *consensus.ConsensusSignatur
 		Valid:        sig.Valid,
 		Status:       status,
 
-		// Additional context
-		ProposerID:       sig.SignerNodeID, // For proposals, signer is proposer
+		// Additional context - use the block's proposer ID
+		ProposerID:       nodeID,
 		SignatureStatus:  sm.mapValidToSignatureStatus(sig.Valid),
 		VerificationTime: time.Now().Format(time.RFC3339),
 

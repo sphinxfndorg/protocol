@@ -8,11 +8,18 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"time"
 
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
 	security "github.com/sphinxfndorg/protocol/src/handshake"
 )
+
+// httpClient is a reusable HTTP client with a 30-second timeout.
+var httpClient = &http.Client{
+	Timeout: 30 * time.Second,
+}
 
 // SubmitTransaction sends a transaction via HTTP.
 func SubmitTransaction(address string, tx types.Transaction) error {
@@ -32,11 +39,14 @@ func SubmitTransaction(address string, tx types.Transaction) error {
 		return err
 	}
 
-	resp, err := http.Post("http://"+address+"/transaction", "application/json", bytes.NewBuffer(data))
+	resp, err := httpClient.Post("http://"+address+"/transaction", "application/json", bytes.NewBuffer(data))
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
+
+	// Drain body to allow connection reuse
+	io.Copy(io.Discard, resp.Body)
 
 	// Check response status
 	if resp.StatusCode != http.StatusOK {

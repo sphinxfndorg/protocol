@@ -167,7 +167,7 @@ func runNodeCmd(args []string) error {
 
 	role := fs.String("role", "validator", "Node role: validator | sender | receiver | none")
 	tcpAddr := fs.String("tcp-addr", "127.0.0.1:30303", "TCP address for P2P (host:port)")
-	udpPort := fs.String("udp-port", "30304", "UDP port for peer discovery")
+	udpPort := fs.String("udp-port", "", "UDP port for peer discovery (defaults to this node's generated unique UDP port)")
 	httpPort := fs.String("http-port", "127.0.0.1:8545", "HTTP JSON-RPC listen address")
 	wsPort := fs.String("ws-port", "127.0.0.1:8600", "WebSocket listen address")
 	seeds := fs.String("seeds", "", "Comma-separated seed node UDP addresses or enrtree:// DNS discovery URLs")

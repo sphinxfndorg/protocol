@@ -54,31 +54,11 @@ func (s *Server) DiscoverPeers() error {
 		// Maximum retries per seed node
 		maxRetries := 3
 
-		// Start a goroutine to continuously drain ResponseCh
-		// This prevents blocking when responses arrive
-		peerCh := make(chan []*network.Peer, 100) // Buffered channel to hold incoming peers
-		go func() {
-			for {
-				select {
-				case peers := <-s.nodeManager.ResponseCh:
-					// Received peers from node manager
-					log.Printf("DiscoverPeers: Received %d peers from ResponseCh for %s", len(peers), s.localNode.Address)
-					select {
-					case peerCh <- peers:
-						// Successfully forwarded peers to processing channel
-						log.Printf("DiscoverPeers: Sent %d peers to peerCh for %s", len(peers), s.localNode.Address)
-					default:
-						// Channel is full - drop peers to avoid blocking
-						log.Printf("DiscoverPeers: peerCh full, dropping %d peers for %s", len(peers), s.localNode.Address)
-					}
-				case <-timeout:
-					// Global timeout reached, stop draining
-					log.Printf("DiscoverPeers: Global timeout reached, stopping ResponseCh drain for %s", s.localNode.Address)
-					close(peerCh)
-					return
-				}
-			}
-		}()
+		// NOTE: responses are no longer drained from a shared, unaddressed
+		// ResponseCh here. Each ping below registers its own nonce-keyed
+		// waiter via s.nodeManager.RegisterResponseWaiter, so a response can
+		// never be stolen by a concurrent iterativeFindNode query (or vice
+		// versa) racing on the same channel.
 
 		// Iterate through all seed nodes
 		for _, seed := range s.seedNodes {
@@ -105,6 +85,12 @@ func (s *Server) DiscoverPeers() error {
 					continue
 				}
 
+				// Register a dedicated, nonce-keyed channel for this exact ping
+				// before sending it, so the PONG that answers it can only be
+				// delivered here - never to a concurrently running
+				// iterativeFindNode query (or another seed's wait below).
+				waiter := s.nodeManager.RegisterResponseWaiter(nonce)
+
 				// Send UDP ping to seed node
 				s.sendUDPPing(addr, s.localNode.KademliaID, nonce)
 
@@ -113,10 +99,10 @@ func (s *Server) DiscoverPeers() error {
 
 				// Wait for response or timeout
 				select {
-				case peers, ok := <-peerCh:
+				case peers, ok := <-waiter:
 					// Received response from seed
 					if !ok {
-						log.Printf("DiscoverPeers: peerCh closed for %s", s.localNode.Address)
+						log.Printf("DiscoverPeers: response waiter closed for %s", s.localNode.Address)
 						break
 					}
 					log.Printf("DiscoverPeers: Received %d peers from seed %s for %s", len(peers), seed, s.localNode.Address)
@@ -186,6 +172,11 @@ func (s *Server) DiscoverPeers() error {
 				// Stop timer to prevent resource leak
 				seedTimer.Stop()
 
+				// Unregister this ping's waiter now that we're done with it,
+				// whether or not a response arrived, so the map doesn't leak
+				// entries across retries/seeds.
+				s.nodeManager.RemoveResponseWaiter(nonce)
+
 				// If we need to retry this seed, use exponential backoff
 				if retry < maxRetries {
 					// Exponential backoff: 5s, 10s, 20s
@@ -207,54 +198,10 @@ func (s *Server) DiscoverPeers() error {
 			}
 		}
 
-		// After processing all seeds, check for late-arriving peers
-		select {
-		case peers, ok := <-peerCh:
-			// Received late peers (after seed processing)
-			if !ok {
-				log.Printf("DiscoverPeers: peerCh closed for %s", s.localNode.Address)
-				break
-			}
-			log.Printf("DiscoverPeers: Received %d late-arriving peers for %s", len(peers), s.localNode.Address)
-
-			// Process late peers
-			for _, peer := range peers {
-				// Skip if already processed
-				if receivedPeers[peer.Node.ID] {
-					continue
-				}
-
-				// Skip invalid peers
-				if peer.Node.Address == "" || peer.Node.Address == s.localNode.Address {
-					continue
-				}
-
-				// Mark and connect to late peer
-				receivedPeers[peer.Node.ID] = true
-				log.Printf("DiscoverPeers: Processing late peer %s (KademliaID: %x) for %s",
-					peer.Node.Address, peer.Node.KademliaID[:8], s.localNode.Address)
-
-				if err := s.peerManager.ConnectPeer(peer.Node); err != nil {
-					log.Printf("DiscoverPeers: Failed to connect to late peer %s for %s: %v", peer.Node.Address, s.localNode.Address, err)
-					continue
-				}
-				log.Printf("DiscoverPeers: Successfully connected to late peer %s for %s", peer.Node.Address, s.localNode.Address)
-
-				// Start iterative find node for this peer
-				go s.iterativeFindNode(peer.Node.KademliaID)
-			}
-
-			// If we found any late peers, consider discovery successful
-			if len(receivedPeers) > 0 {
-				return nil // Success
-			}
-
-		case <-timeout:
-			// Global timeout reached, no late peers
-			log.Printf("DiscoverPeers: Global timeout reached, no late peers for %s", s.localNode.Address)
-		}
-
-		// Final check of nodeManager.peers after all processing
+		// Each ping above already waited on its own dedicated response
+		// channel and processed its result inline, so there's no separate
+		// "late-arriving" bucket to drain anymore. Go straight to the final
+		// check of nodeManager.peers after all processing.
 		s.nodeManager.Lock()
 		peers := s.nodeManager.GetPeers()
 		s.nodeManager.Unlock()
@@ -439,12 +386,25 @@ func (s *Server) iterativeFindNode(targetID network.NodeID) {
 					// Suppress unused variable warning for outer timestamp var
 					_ = timestamp
 
+					// Register a dedicated channel for this exact FINDNODE
+					// query, keyed by its own application-level nonce, before
+					// sending it. This guarantees the NEIGHBORS reply can only
+					// reach this goroutine - never a concurrently running
+					// DiscoverPeers seed ping or another peer's FINDNODE
+					// query racing on the old shared ResponseCh.
+					waiter := s.nodeManager.RegisterResponseWaiter(nonce)
+					defer s.nodeManager.RemoveResponseWaiter(nonce)
+
 					// Send UDP message to peer
 					s.sendUDPMessage(addr, msg)
 
 					// Wait for response or timeout
 					select {
-					case peers := <-s.nodeManager.ResponseCh:
+					case peers, ok := <-waiter:
+						if !ok {
+							errorCh <- nil
+							return
+						}
 						// Response received
 						responseCh <- peers
 					case <-time.After(queryTimeout):

@@ -27,6 +27,11 @@ var (
 	genesisCached         *types.Block
 )
 
+// genesisSignAttemptMu guards lazy re-signing of genesisCached in
+// getCachedGenesisBlock. This is separate from genesisSignerMu (genesis.go),
+// which only guards the registered signer pointer itself.
+var genesisSignAttemptMu sync.Mutex
+
 // GetGenesisTime returns the genesis block timestamp
 func (bc *Blockchain) GetGenesisTime() time.Time {
 	bc.lock.RLock()
@@ -139,6 +144,29 @@ func CreateStandardGenesisBlock() *types.Block {
 // do NOT affect the block hash, so the same block is valid for all environments.
 // The ChainName written to genesis_state.json is controlled by the gs passed
 // to ApplyGenesisWithCachedBlock, NOT by this function.
+//
+// FIX: genesisOnce fires on the FIRST call from ANYWHERE in the process —
+// and GetGenesisHash() (which triggers it) is called from many places that
+// run well before bind.StartNode gets a chance to call core.SetGenesisSigner
+// (chain-params construction in params.go, checkpoint continuity checks in
+// chain_maker.go, VDF-parameter derivation, key-exchange with peers, etc).
+// If any of those fire first, the ONE-TIME BuildBlock() call inside
+// genesisOnce.Do happens before a signer is registered, and the resulting
+// genesisCached block is permanently frozen unsigned — no later
+// SetGenesisSigner call can retroactively fix it, since BuildBlock only
+// signs at construction time.
+//
+// So signing can't safely live only inside genesisOnce.Do. Instead, every
+// call to getCachedGenesisBlock() checks whether genesisCached still lacks
+// a producer signature and a signer is now registered, and signs it in
+// place if so. This is safe because BuildBlock signs strictly AFTER
+// FinalizeHash — the signature never affects the hash, so mutating
+// genesisCached's signature after the fact doesn't change its identity.
+// This must happen before the caller persists the block (see
+// createGenesisBlock in blockchain.go, which calls this function and then
+// hands the result straight to ApplyGenesisWithCachedBlock/StoreBlock) —
+// SetGenesisSigner must be called before NewBlockchain/FinishInit for that
+// ordering to hold.
 func getCachedGenesisBlock() *types.Block {
 	genesisOnce.Do(func() {
 		// DefaultGenesisState() provides the canonical cryptographic inputs.
@@ -151,7 +179,41 @@ func getCachedGenesisBlock() *types.Block {
 		logger.Info("Genesis block computed once: %s at timestamp %d",
 			genesisHashValue, genesisTimestampValue)
 	})
+	signGenesisIfPossible(genesisCached)
 	return genesisCached
+}
+
+// signGenesisIfPossible attaches a producer signature to the cached genesis
+// block if it doesn't have one yet and a signer has since been registered
+// via SetGenesisSigner. See the FIX comment on getCachedGenesisBlock for why
+// this can't just happen once inside genesisOnce.Do.
+func signGenesisIfPossible(block *types.Block) {
+	if block == nil || block.Header == nil || len(block.Header.ProposerSignature) > 0 {
+		return
+	}
+	signer, signerNodeID := getGenesisSigner()
+	if signer == nil || signerNodeID == "" {
+		return
+	}
+
+	genesisSignAttemptMu.Lock()
+	defer genesisSignAttemptMu.Unlock()
+
+	// Re-check under the lock — another goroutine may have signed it while
+	// this one was waiting (e.g. concurrent key-exchange calls that both
+	// call GetGenesisHash()).
+	if len(block.Header.ProposerSignature) > 0 {
+		return
+	}
+
+	block.Header.ProposerID = signerNodeID
+	wrapped := NewBlockHelper(block)
+	if err := signer.SignBlock(wrapped); err != nil {
+		logger.Warn("getCachedGenesisBlock: failed to lazily sign genesis block: %v", err)
+		return
+	}
+	wrapped.SetSigValid(true)
+	logger.Info("SUCCESS Genesis block signed (lazily) by %s", signerNodeID)
 }
 
 // GetGenesisHash returns the computed genesis hash (computed once, cached forever).

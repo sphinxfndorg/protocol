@@ -5,6 +5,7 @@
 package state
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -783,6 +784,15 @@ func (s *Storage) SaveCompleteChainState(chainState *ChainState, chainParams *Ch
 			if node.ChainInfo == nil {
 				node.ChainInfo = fresh.ChainInfo
 			} else {
+				// ChainInfo is also consumed independently of the top-level node
+				// fields.  Updating only blocks_height left the two representations
+				// disagreeing after a commit: BlockHeight/BlockHash pointed at the
+				// new tip while current_height/latest_block still described an older
+				// snapshot.  That stale value is advertised to peers and can make a
+				// caught-up node look behind, which in turn needlessly triggers a
+				// view change.  Always update the canonical tip fields together.
+				node.ChainInfo["current_height"] = fresh.BlockHeight
+				node.ChainInfo["latest_block"] = fresh.BlockHash
 				node.ChainInfo["blocks_height"] = fresh.BlockHeight
 				node.ChainInfo["last_updated"] = fresh.Timestamp
 				node.ChainInfo["tps_current"] = fresh.ChainInfo["tps_current"]
@@ -900,8 +910,10 @@ func (s *Storage) SaveCompleteChainState(chainState *ChainState, chainParams *Ch
 			existingMetrics.TPSHistory = blockchainTPSMetrics.TPSHistory
 		}
 
-		// If existing metrics have no block data but blockchain has some, use blockchain's
-		if len(existingMetrics.TransactionsPerBlock) == 0 && len(blockchainTPSMetrics.TransactionsPerBlock) > 0 {
+		// The blockchain snapshot is built from canonical block storage and may
+		// repair incomplete legacy history (notably a late joiner missing block
+		// zero), so it is authoritative whenever it provides block data.
+		if len(blockchainTPSMetrics.TransactionsPerBlock) > 0 {
 			existingMetrics.TransactionsPerBlock = blockchainTPSMetrics.TransactionsPerBlock
 			existingMetrics.MaxTransactionsPerBlock = blockchainTPSMetrics.MaxTransactionsPerBlock
 			existingMetrics.MinTransactionsPerBlock = blockchainTPSMetrics.MinTransactionsPerBlock
@@ -930,6 +942,17 @@ func (s *Storage) SaveCompleteChainState(chainState *ChainState, chainParams *Ch
 	}
 
 	chainState.TPSMetrics = tpsMetrics
+	// chain_info is another view of this same snapshot. Populate it from the
+	// exact metrics object being persisted, rather than the older storage read
+	// used while nodes[] was initially normalized above.
+	for _, node := range chainState.Nodes {
+		if node == nil || node.ChainInfo == nil {
+			continue
+		}
+		node.ChainInfo["tps_current"] = tpsMetrics.CurrentTPS
+		node.ChainInfo["tps_average"] = tpsMetrics.AverageTPS
+		node.ChainInfo["total_txs"] = tpsMetrics.TotalTransactions
+	}
 
 	// VALIDATE AND FIX FINAL STATES BEFORE SAVING
 	if chainState.FinalStates != nil {
@@ -1178,13 +1201,15 @@ func (s *Storage) createNodeInfo(index int) *NodeInfo {
 		NodeName:    nodeID,
 		NodeAddress: nodeAddress,
 		ChainInfo: map[string]interface{}{
-			"status":        "active",
-			"last_updated":  time.Now().Format(time.RFC3339),
-			"tps_current":   tpsMetrics.CurrentTPS,
-			"tps_average":   tpsMetrics.AverageTPS,
-			"total_txs":     tpsMetrics.TotalTransactions,
-			"blocks_height": blockHeight,
-			"genesis_hash":  genesisHash,
+			"status":         "active",
+			"last_updated":   time.Now().Format(time.RFC3339),
+			"tps_current":    tpsMetrics.CurrentTPS,
+			"tps_average":    tpsMetrics.AverageTPS,
+			"total_txs":      tpsMetrics.TotalTransactions,
+			"current_height": blockHeight,
+			"latest_block":   blockHash,
+			"blocks_height":  blockHeight,
+			"genesis_hash":   genesisHash,
 		},
 		BlockHeight: blockHeight,
 		BlockHash:   blockHash,
@@ -1312,9 +1337,12 @@ func sortAttestations(atts []*types.Attestation) []*types.Attestation {
 // i.e. when re-persisting the block would actually record new quorum
 // signatures. Callers use that flag to skip redundant disk writes.
 //
-// When both an existing and incoming attestation share a ValidatorID, the
-// existing one is kept unless the incoming one carries a signature the
-// existing one lacks (defensive: prefer the more complete record).
+// When both an existing and incoming attestation share a ValidatorID but
+// disagree (missing signature, different view after a view-change, or a
+// same-view signature that differs due to SPHINCS+ signing randomness), the
+// conflict is resolved by a fixed rule (highest view, then lexicographically
+// smallest signature) so every node picks the same winner independent of
+// arrival order.
 func mergeAttestations(existing, incoming []*types.Attestation) ([]*types.Attestation, bool) {
 	byValidator := make(map[string]*types.Attestation, len(existing)+len(incoming))
 	order := make([]string, 0, len(existing)+len(incoming))
@@ -1323,17 +1351,39 @@ func mergeAttestations(existing, incoming []*types.Attestation) ([]*types.Attest
 		if a == nil || a.ValidatorID == "" {
 			return false
 		}
-		if cur, ok := byValidator[a.ValidatorID]; ok {
-			// Already have a vote for this validator. Upgrade only if the
-			// existing record is missing a signature the incoming one has.
-			if len(cur.Signature) == 0 && len(a.Signature) > 0 {
-				byValidator[a.ValidatorID] = a
-			}
+		cur, ok := byValidator[a.ValidatorID]
+		if !ok {
+			byValidator[a.ValidatorID] = a
+			order = append(order, a.ValidatorID)
+			return true
+		}
+
+		// Already have a vote for this validator. Resolve deterministically
+		// so every node converges on the same choice regardless of which
+		// copy it merged first:
+		//   1. missing signature always loses to a present one
+		//   2. a later view (post view-change re-vote) always wins
+		//   3. same view but different signature bytes (SPHINCS+ signing is
+		//      randomized, so two honest signatures over the same message
+		//      can differ) — pick the lexicographically smaller signature
+		//      as the canonical one
+		switch {
+		case len(cur.Signature) == 0 && len(a.Signature) > 0:
+			byValidator[a.ValidatorID] = a
+			return true
+		case len(a.Signature) == 0:
+			return false
+		case a.View > cur.View:
+			byValidator[a.ValidatorID] = a
+			return true
+		case a.View < cur.View:
+			return false
+		case !bytes.Equal(cur.Signature, a.Signature) && bytes.Compare(a.Signature, cur.Signature) < 0:
+			byValidator[a.ValidatorID] = a
+			return true
+		default:
 			return false
 		}
-		byValidator[a.ValidatorID] = a
-		order = append(order, a.ValidatorID)
-		return true
 	}
 
 	for _, a := range existing {

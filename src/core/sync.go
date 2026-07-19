@@ -2127,12 +2127,31 @@ func (sm *SyncManager) comprehensiveBlockVerification(block *types.Block) error 
 		return fmt.Errorf("Merkle root validation failed: %w", err)
 	}
 
-	// 6. Verify attestations (PBFT quorum)
+	// 6. Verify producer signature (single miner/proposer signature, distinct
+	// from PBFT quorum attestations below).
+	//
+	// FIX: this check didn't exist at all before solo-mined blocks were
+	// signed (see CreateBlock in executor.go and comprehensiveBlockVerification's
+	// old step 6 comment, which explicitly said solo-mined blocks were
+	// "trusted by parent-hash chain continuity alone, not by PBFT quorum").
+	// That was fine as long as solo-mined blocks genuinely had nothing to
+	// verify — but now every block from genesis onward carries a producer
+	// signature, so a late joiner downloading block N should verify it
+	// before accepting the block, the same way a PBFT node verifies a
+	// leader's proposal signature. Only skip for genesis (height 0), which
+	// has no producer.
+	if block.GetHeight() > 0 {
+		if err := sm.bc.VerifyProducerSignature(block); err != nil {
+			return fmt.Errorf("producer signature verification failed: %w", err)
+		}
+	}
+
+	// 7. Verify attestations (PBFT quorum)
 	// Blocks mined in solo mode (before PBFT was active, i.e. when there were
-	// fewer than 3 validators) have zero attestations. This is by design —
-	// solo-mined blocks are trusted by parent-hash chain continuity alone,
-	// not by PBFT quorum. Only blocks that actually went through PBFT carry
-	// attestations, and only those need quorum verification.
+	// fewer than 3 validators) have zero attestations. This is expected —
+	// once the producer signature above is verified, a solo-mined block is
+	// re-synced and accepted; only blocks that actually went through PBFT
+	// carry attestations, and only those need quorum verification on top.
 	if block.GetHeight() > 0 && len(block.Body.Attestations) > 0 {
 		// Get validator set for this block's epoch
 		epoch := block.GetHeight() / 100 // Assuming 100 blocks per epoch
@@ -2144,7 +2163,7 @@ func (sm *SyncManager) comprehensiveBlockVerification(block *types.Block) error 
 		}
 	}
 
-	// 7. Verify no duplicate transactions
+	// 8. Verify no duplicate transactions
 	txIDs := make(map[string]bool)
 	for _, tx := range block.Body.TxsList {
 		if txIDs[tx.ID] {

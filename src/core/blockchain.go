@@ -876,6 +876,27 @@ func (bc *Blockchain) StoreChainState(nodes []*storage.NodeInfo) error {
 
 		// Build transactions per block from storage (preserve existing)
 		txsPerBlock := existingMetrics.TransactionsPerBlock
+		// Older late joiners recorded genesis in the in-memory monitor but
+		// skipped storage.RecordBlock. Repair that persisted representation
+		// from canonical block storage whenever a state snapshot is written.
+		genesisRecorded := false
+		for _, entry := range txsPerBlock {
+			if entry.BlockHeight == 0 {
+				genesisRecorded = true
+				break
+			}
+		}
+		if !genesisRecorded {
+			if genesis, err := bc.storage.GetBlockByHeight(0); err == nil && genesis != nil {
+				txsPerBlock = append(txsPerBlock, storage.BlockTXCount{
+					BlockHeight: genesis.GetHeight(),
+					BlockHash:   genesis.GetHash(),
+					TxCount:     uint64(len(genesis.Body.TxsList)),
+					BlockTime:   time.Unix(genesis.Header.Timestamp, 0),
+					BlockSize:   bc.CalculateBlockSize(genesis),
+				})
+			}
+		}
 		if len(txsPerBlock) == 0 {
 			// Create from current block if available
 			latestBlock := bc.GetLatestBlock()
@@ -931,6 +952,18 @@ func (bc *Blockchain) StoreChainState(nodes []*storage.NodeInfo) error {
 		} else if blocksProc > 0 {
 			avgTxsPerBlock = float64(totalTx) / float64(blocksProc)
 		}
+		var maxTxsPerBlock, minTxsPerBlock uint64
+		if len(txsPerBlock) > 0 {
+			minTxsPerBlock = txsPerBlock[0].TxCount
+			for _, entry := range txsPerBlock {
+				if entry.TxCount > maxTxsPerBlock {
+					maxTxsPerBlock = entry.TxCount
+				}
+				if entry.TxCount < minTxsPerBlock {
+					minTxsPerBlock = entry.TxCount
+				}
+			}
+		}
 
 		blockchainTPSMetrics = &storage.TPSMetrics{
 			CurrentTPS:              currentTPS,
@@ -945,8 +978,8 @@ func (bc *Blockchain) StoreChainState(nodes []*storage.NodeInfo) error {
 			TPSHistory:              tpsHistory,  // Preserve history
 			TransactionsPerBlock:    txsPerBlock, // Preserve block data
 			AvgTransactionsPerBlock: avgTxsPerBlock,
-			MaxTransactionsPerBlock: existingMetrics.MaxTransactionsPerBlock,
-			MinTransactionsPerBlock: existingMetrics.MinTransactionsPerBlock,
+			MaxTransactionsPerBlock: maxTxsPerBlock,
+			MinTransactionsPerBlock: minTxsPerBlock,
 			LastUpdated:             time.Now(),
 		}
 
@@ -1985,7 +2018,7 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 
 	// ========== Add signature to consensus engine ==========
 	if bc.consensusEngine != nil {
-		signature := &ConsensusSignatureData{
+		signature := &consensus.ConsensusSignature{
 			BlockHash:    typeBlock.GetHash(),
 			BlockHeight:  typeBlock.GetHeight(),
 			SignerNodeID: bc.consensusEngine.GetNodeID(),
@@ -2161,6 +2194,13 @@ func (bc *Blockchain) createGenesisBlock() error {
 		logger.Info("📊 Recorded genesis block in TPS monitor with %d transactions", txCount)
 	}
 	if bc.storage != nil {
+		// Storage records transactions when they enter the mempool, but genesis
+		// transactions bypass that path.  Count them before recording block zero
+		// so total_transactions, transactions_per_block, and the block-size
+		// metrics are all derived from the same dataset on every node.
+		for i := 0; i < len(genesis.Body.TxsList); i++ {
+			bc.storage.RecordTransaction()
+		}
 		bc.storage.RecordBlock(genesis, 5*time.Second)
 		logger.Info("📊 Recorded genesis block in storage TPS metrics with %d transactions",
 			len(genesis.Body.TxsList))
@@ -2884,6 +2924,51 @@ func (bc *Blockchain) emergencyReorgRollback(oldBlocks, failedNewBlocks []*types
 //   - block: Block to validate (consensus.Block interface)
 //
 // Returns: Error if validation fails
+// VerifyProducerSignature checks a block's own producer signature (the
+// single ProposerSignature set by SignBlockHeader/ProposeBlock), independent
+// of PBFT quorum attestations. Genesis (height 0) has no producer to verify
+// against and is exempt.
+//
+// FIX: before solo-mined blocks were signed at all (see CreateBlock in
+// executor.go), the sync path had nothing to check here and trusted
+// solo-mined blocks by parent-hash continuity alone (see the comment at
+// comprehensiveBlockVerification step 6 in sync.go). Now that every block
+// is signed from genesis onward, a late joiner downloading block N from the
+// first node should verify that signature before accepting the block into
+// its local chain — exactly the flow: mint -> sign -> late joiner syncs ->
+// verifies signature -> accepts block -> continues normal PBFT attestation
+// flow for blocks after that point.
+func (bc *Blockchain) VerifyProducerSignature(block *types.Block) error {
+	if block == nil {
+		return fmt.Errorf("VerifyProducerSignature: nil block")
+	}
+	// FIX: genesis (height 0) used to be exempt here because it was never
+	// signed at all. Now that BuildBlock (genesis.go) gives genesis a real
+	// producer signature via SetGenesisSigner, verify it exactly like any
+	// other block — no more special case.
+	if len(block.Header.ProposerSignature) == 0 {
+		return fmt.Errorf("VerifyProducerSignature: block height=%d hash=%s has no producer signature",
+			block.GetHeight(), block.GetHash())
+	}
+	if bc.consensusEngine == nil {
+		return fmt.Errorf("VerifyProducerSignature: no consensus engine available to verify block height=%d", block.GetHeight())
+	}
+	cs, ok := bc.consensusEngine.(*consensus.Consensus)
+	if !ok {
+		return fmt.Errorf("VerifyProducerSignature: consensusEngine is not *consensus.Consensus (type=%T)", bc.consensusEngine)
+	}
+	wrapped := NewBlockHelper(block)
+	valid, err := cs.VerifyBlockHeader(wrapped)
+	if err != nil {
+		return fmt.Errorf("VerifyProducerSignature: block height=%d: %w", block.GetHeight(), err)
+	}
+	if !valid {
+		return fmt.Errorf("VerifyProducerSignature: invalid producer signature for block height=%d hash=%s",
+			block.GetHeight(), block.GetHash())
+	}
+	return nil
+}
+
 func (bc *Blockchain) ValidateBlock(block consensus.Block) error {
 	// Extract underlying types.Block
 	var b *types.Block

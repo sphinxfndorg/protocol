@@ -192,6 +192,46 @@ func (s *Server) SetServer() {
 	s.peerManager.server = s
 }
 
+// SetTCPServer sets the TCP server instance for this P2P server.
+// All connection management operations will use this server's isolated state,
+// preventing connection clobbering when multiple nodes run in the same process.
+func (s *Server) SetTCPServer(tcpServer *transport.TCPServer) {
+	s.tcpServer = tcpServer
+}
+
+// tcp sends a message using this server's TCP server if available,
+// falling back to the package-level transport.SendMessage.
+func (s *Server) tcp(address string, msg *security.Message) error {
+	if s.tcpServer != nil {
+		return s.tcpServer.Send(address, msg)
+	}
+	return transport.SendMessage(address, msg)
+}
+
+// tcpConnect establishes a connection using this server's TCP server if available.
+func (s *Server) tcpConnect(address string, messageCh chan *security.Message) (net.Conn, error) {
+	if s.tcpServer != nil {
+		return s.tcpServer.Connect(address, messageCh)
+	}
+	return transport.ConnectTCP(address, messageCh)
+}
+
+// tcpGetConn gets a connection using this server's TCP server if available.
+func (s *Server) tcpGetConn(address string) (net.Conn, error) {
+	if s.tcpServer != nil {
+		return s.tcpServer.GetConn(address)
+	}
+	return transport.GetConnection(address)
+}
+
+// tcpDisconnect disconnects a node using this server's TCP server if available.
+func (s *Server) tcpDisconnect(node *network.Node) error {
+	if s.tcpServer != nil {
+		return s.tcpServer.Disconnect(node)
+	}
+	return transport.DisconnectNode(node)
+}
+
 // Start starts the P2P server and initializes peer discovery.
 // Launches UDP discovery and message handling goroutines
 func (s *Server) Start() error {
@@ -432,6 +472,30 @@ func (s *Server) handleMessages() {
 				}
 			}
 
+		case "commit_certificate":
+			var cert consensus.CommitCertificate
+			if err := json.Unmarshal(msg.Data, &cert); err != nil {
+				log.Printf("Failed to unmarshal commit certificate: %v", err)
+				continue
+			}
+			if s.consensus != nil {
+				if err := s.consensus.HandleCommitCertificate(&cert); err != nil {
+					log.Printf("Failed to handle commit certificate: %v", err)
+				}
+			}
+
+		case "prepare_certificate":
+			var cert consensus.PrepareCertificate
+			if err := json.Unmarshal(msg.Data, &cert); err != nil {
+				log.Printf("Failed to unmarshal prepare certificate: %v", err)
+				continue
+			}
+			if s.consensus != nil {
+				if err := s.consensus.HandlePrepareCertificate(&cert); err != nil {
+					log.Printf("Failed to handle prepare certificate: %v", err)
+				}
+			}
+
 		case "ping":
 			var pingData network.PingData
 			if err := json.Unmarshal(msg.Data, &pingData); err != nil {
@@ -451,7 +515,7 @@ func (s *Server) handleMessages() {
 					}
 					pongBytes, _ := json.Marshal(pongData)
 
-					transport.SendMessage(peer.Address, &security.Message{
+					s.tcp(peer.Address, &security.Message{
 						Type: "pong",
 						Data: pongBytes,
 					})
@@ -551,7 +615,7 @@ func (s *Server) handleMessages() {
 			}
 
 			if sourceAddr != "" {
-				transport.SendMessage(sourceAddr, verackMsg)
+				s.tcp(sourceAddr, verackMsg)
 				s.peerManager.UpdatePeerScore(peerID, 5)
 			}
 
@@ -581,7 +645,7 @@ func (s *Server) handleMessages() {
 
 			headersBytes, _ := json.Marshal(headers)
 			if peer, ok := s.nodeManager.GetPeers()[originID]; ok && originID != "" {
-				transport.SendMessage(peer.Node.Address, &security.Message{
+				s.tcp(peer.Node.Address, &security.Message{
 					Type: "headers",
 					Data: headersBytes,
 				})
@@ -663,7 +727,7 @@ func (s *Server) handleMessages() {
 
 			// Send response back to requesting peer
 			if peer, ok := s.nodeManager.GetPeers()[originID]; ok && originID != "" {
-				transport.SendMessage(peer.Node.Address, &security.Message{
+				s.tcp(peer.Node.Address, &security.Message{
 					Type: "chaininfo",
 					Data: chainInfoData,
 				})
@@ -729,7 +793,7 @@ func (s *Server) handleMessages() {
 
 			// Send inv response back
 			if peer, ok := s.nodeManager.GetPeers()[originID]; ok && originID != "" {
-				transport.SendMessage(peer.Node.Address, &security.Message{
+				s.tcp(peer.Node.Address, &security.Message{
 					Type: "inv",
 					Data: invData,
 				})
@@ -784,7 +848,7 @@ func (s *Server) handleMessages() {
 
 				getdataData, _ := json.Marshal(getdataReq)
 				if peer, ok := s.nodeManager.GetPeers()[originID]; ok && originID != "" {
-					transport.SendMessage(peer.Node.Address, &security.Message{
+					s.tcp(peer.Node.Address, &security.Message{
 						Type: "getdata",
 						Data: getdataData,
 					})
@@ -840,7 +904,7 @@ func (s *Server) handleMessages() {
 					}
 
 					if peer, ok := s.nodeManager.GetPeers()[originID]; ok && originID != "" {
-						transport.SendMessage(peer.Node.Address, response)
+						s.tcp(peer.Node.Address, response)
 						s.peerManager.UpdatePeerScore(originID, 5)
 						log.Printf("📤 Sent block %d to peer %s (request_id=%s)",
 							uint64(height), originID, requestID)
@@ -882,7 +946,7 @@ func (s *Server) handleMessages() {
 				}
 				errData, _ := json.Marshal(errResp)
 				if peer, ok := s.nodeManager.GetPeers()[originID]; ok && originID != "" {
-					transport.SendMessage(peer.Node.Address, &security.Message{
+					s.tcp(peer.Node.Address, &security.Message{
 						Type: "snapshot_error",
 						Data: errData,
 					})
@@ -907,7 +971,7 @@ func (s *Server) handleMessages() {
 					"block_hash":    snapshotData.BlockHash,
 					"account_count": len(snapshotData.Accounts),
 				}
-				transport.SendMessage(peer.Node.Address, msg)
+				s.tcp(peer.Node.Address, msg)
 				s.peerManager.UpdatePeerScore(originID, 10)
 				log.Printf("📤 Sent snapshot at height %d to peer %s (%d accounts, %d validators)",
 					uint64(height), originID, len(snapshotData.Accounts), len(snapshotData.Validators))
@@ -1070,7 +1134,7 @@ func (s *Server) validateTransaction(tx *types.Transaction) error {
 	}
 
 	// Send transaction to validator
-	if err := transport.SendMessage(peer.Node.Address, &security.Message{
+	if err := s.tcp(peer.Node.Address, &security.Message{
 		Type: "transaction",
 		Data: txData, // Use marshaled bytes
 	}); err != nil {
@@ -1098,7 +1162,7 @@ func (s *Server) SendMessageToPeer(peerID string, messageType string, data []byt
 		Data: data,
 	}
 
-	return transport.SendMessage(peer.Node.Address, msg)
+	return s.tcp(peer.Node.Address, msg)
 }
 
 // Broadcast sends a message to all peers.

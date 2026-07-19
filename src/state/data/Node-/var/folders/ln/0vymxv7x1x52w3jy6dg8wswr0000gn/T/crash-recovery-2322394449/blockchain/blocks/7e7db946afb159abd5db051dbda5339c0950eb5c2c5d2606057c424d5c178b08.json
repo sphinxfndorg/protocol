@@ -1,0 +1,28 @@
+{
+  "header": {
+    "hash": "7e7db946afb159abd5db051dbda5339c0950eb5c2c5d2606057c424d5c178b08",
+    "txs_root": "5a6c2e9e730d5cb534e7f28c883ca7b604794c691f72398f3001be48cfef12bf",
+    "state_root": "5a6c2e9e730d5cb534e7f28c883ca7b604794c691f72398f3001be48cfef12bf",
+    "parent_hash": "",
+    "uncles_hash": "3d2367553e0b2068a9d0251226ecb42296a33a1aa76b6a0e3788fa5f38e3612f",
+    "extra_data": "crash-test",
+    "miner": "0000000000000000000000000000000000000000",
+    "version": 1,
+    "nblock": 1,
+    "height": 1,
+    "timestamp": "2001-09-09T01:46:41Z",
+    "difficulty": "1",
+    "nonce": "0000000000000002",
+    "gas_limit": "1000000",
+    "gas_used": "0",
+    "proposer_signature": "",
+    "proposer_id": "",
+    "sig_data_hash": "7e7db946afb159abd5db051dbda5339c0950eb5c2c5d2606057c424d5c178b08",
+    "commit_status": "committed",
+    "signature_valid": false
+  },
+  "body": {
+    "txs_list": [],
+    "uncles_hash": "3d2367553e0b2068a9d0251226ecb42296a33a1aa76b6a0e3788fa5f38e3612f"
+  }
+}

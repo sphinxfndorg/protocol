@@ -61,7 +61,20 @@ func ConnectNode(node *network.Node, messageCh chan *security.Message) error {
 		}
 		log.Printf("TCP connection to node %s (%s) attempt %d failed: %v", node.ID, addr, attempt, err) // Log TCP failure
 
-		wsAddr := fmt.Sprintf("%s:%d", node.IP, parsePort(node.Port)+553) // Construct WebSocket fallback address
+		// Resolve the node's *actual* WebSocket address from its registered
+		// port configuration instead of guessing via port arithmetic
+		// (node.Port+553) — that formula doesn't correspond to how
+		// WebSocket ports are actually assigned (see port.go's baseWSPort /
+		// NodePortConfig.WSPort) and only ever matched a few hardcoded
+		// addresses that ConnectWebSocket special-cased for testing.
+		wsAddr, ok := resolveWebSocketAddress(node)
+		if !ok {
+			log.Printf("No WebSocket address configured for node %s, skipping WebSocket fallback", node.ID)
+			if attempt < 3 {
+				time.Sleep(time.Second * time.Duration(attempt)) // Exponential backoff between retries
+			}
+			continue
+		}
 		if err := ConnectWebSocket(wsAddr, messageCh); err == nil {
 			node.UpdateStatus(network.NodeStatusActive)                           // Mark node as active on WebSocket success
 			log.Printf("Connected to node %s via WebSocket: %s", node.ID, wsAddr) // Log WebSocket connection success
@@ -76,13 +89,19 @@ func ConnectNode(node *network.Node, messageCh chan *security.Message) error {
 	return fmt.Errorf("failed to connect to node %s (%s) after 3 attempts", node.ID, addr) // Return error after 3 failed attempts
 }
 
-// parsePort resolves a port string to its integer value using TCP lookup.
-func parsePort(port string) int {
-	p, err := net.LookupPort("tcp", port) // Attempt to resolve TCP port number
-	if err != nil {
-		return 0 // Return 0 if port resolution fails
+// resolveWebSocketAddress looks up a node's real WebSocket address from the
+// global NodeConfigs registry (populated by port.go for locally-configured
+// nodes). Returns ok=false when the node has no registered config — e.g. a
+// peer discovered dynamically over UDP that never went through
+// GetNodePortConfigs — in which case there's no reliable way to guess its
+// WebSocket port and the caller should skip the WebSocket fallback rather
+// than dial a port that's almost certainly wrong.
+func resolveWebSocketAddress(node *network.Node) (string, bool) {
+	cfg, exists := network.GetNodeConfig(node.ID)
+	if !exists || cfg.WSPort == "" {
+		return "", false
 	}
-	return p // Return resolved port number
+	return cfg.WSPort, true
 }
 
 // SendPeerInfo sends a PeerInfo message to the given address over a secure TCP connection.

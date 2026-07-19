@@ -342,8 +342,12 @@ func (s *Server) handleDiscoveryMessage(msg *network.DiscoveryMessage, addr *net
 				addr.String(), s.localNode.Address, err)
 			return
 		}
-		// Send NEIGHBORS response with closest nodes
-		s.sendUDPNeighbors(addr, findNodeData.TargetID, msg.Nonce)
+		// Echo back the requester's own correlation nonce (findNodeData.Nonce),
+		// not the envelope's sigNonce (msg.Nonce) — the envelope nonce is a
+		// fresh, per-message anti-replay value generated independently on each
+		// side and never seen by the original caller, so echoing it back would
+		// leave the requester with no way to match this reply to its request.
+		s.sendUDPNeighbors(addr, findNodeData.TargetID, findNodeData.Nonce)
 
 	case "PING":
 		// Handle PING request - verify liveness
@@ -370,9 +374,9 @@ func (s *Server) handleDiscoveryMessage(msg *network.DiscoveryMessage, addr *net
 		// Find or create node
 		node := s.nodeManager.GetNodeByKademliaID(pingData.FromID)
 		if node == nil {
-			// Create new node
-			// FIX: Add database parameter (use nil since we don't have database access here)
-			node = network.NewNode(tcpAddr, addr.IP.String(), tcpPort, fmt.Sprintf("%d", addr.Port), false, network.RoleNone, nil)
+			// Create new node, sharing the NodeManager's real database handle
+			// instead of nil so later lookups against this node don't panic.
+			node = network.NewNode(tcpAddr, addr.IP.String(), tcpPort, fmt.Sprintf("%d", addr.Port), false, network.RoleNone, s.nodeManager.DB())
 			node.KademliaID = pingData.FromID
 			node.PublicKey = msg.PublicKey
 			s.nodeManager.AddNode(node)
@@ -388,8 +392,10 @@ func (s *Server) handleDiscoveryMessage(msg *network.DiscoveryMessage, addr *net
 			s.nodeManager.UpdateNode(node)
 		}
 
-		// Send PONG response
-		s.sendUDPPong(addr, pingData.FromID, msg.Nonce)
+		// Echo back the requester's own correlation nonce (pingData.Nonce),
+		// not the envelope's sigNonce (msg.Nonce) — see the equivalent
+		// FINDNODE comment above for why.
+		s.sendUDPPong(addr, pingData.FromID, pingData.Nonce)
 
 	case "PONG":
 		// Handle PONG response - update node information
@@ -416,9 +422,9 @@ func (s *Server) handleDiscoveryMessage(msg *network.DiscoveryMessage, addr *net
 		// Find or create node
 		node := s.nodeManager.GetNodeByKademliaID(pongData.FromID)
 		if node == nil {
-			// Create new node
-			// FIX: Add database parameter (use nil since we don't have database access here)
-			node = network.NewNode(tcpAddr, addr.IP.String(), tcpPort, fmt.Sprintf("%d", addr.Port), false, network.RoleNone, nil)
+			// Create new node, sharing the NodeManager's real database handle
+			// instead of nil so later lookups against this node don't panic.
+			node = network.NewNode(tcpAddr, addr.IP.String(), tcpPort, fmt.Sprintf("%d", addr.Port), false, network.RoleNone, s.nodeManager.DB())
 			node.KademliaID = pongData.FromID
 			node.PublicKey = msg.PublicKey
 			s.nodeManager.AddNode(node)
@@ -452,8 +458,14 @@ func (s *Server) handleDiscoveryMessage(msg *network.DiscoveryMessage, addr *net
 			}
 		}
 
-		// Send to response channel for discovery
-		s.nodeManager.ResponseCh <- []*network.Peer{peer}
+		// Route the PONG to whichever caller is waiting on this exact nonce
+		// (DiscoverPeers' seed ping or an iterativeFindNode probe), instead
+		// of broadcasting on the shared ResponseCh where any concurrent
+		// reader could consume a response meant for someone else. Use the
+		// echoed application-level nonce (pongData.Nonce), not the envelope's
+		// sigNonce (msg.Nonce), since that's the value the original caller
+		// generated and is waiting on.
+		s.nodeManager.DeliverResponse(pongData.Nonce, []*network.Peer{peer})
 
 	case "NEIGHBORS":
 		// Handle NEIGHBORS response - process list of nearby nodes
@@ -469,8 +481,8 @@ func (s *Server) handleDiscoveryMessage(msg *network.DiscoveryMessage, addr *net
 		// Process each node in the neighbors list
 		peers := make([]*network.Peer, 0, len(neighborsData.Nodes))
 		for _, nodeInfo := range neighborsData.Nodes {
-			// Create node from neighbor info
-			// FIX: Add database parameter (use nil since we don't have database access here)
+			// Create node from neighbor info, sharing the NodeManager's real
+			// database handle instead of nil so later lookups don't panic.
 			node := network.NewNode(
 				nodeInfo.Address,
 				nodeInfo.IP,
@@ -478,7 +490,7 @@ func (s *Server) handleDiscoveryMessage(msg *network.DiscoveryMessage, addr *net
 				nodeInfo.UDPPort,
 				false,
 				nodeInfo.Role,
-				nil,
+				s.nodeManager.DB(),
 			)
 			node.KademliaID = nodeInfo.KademliaID
 			node.PublicKey = nodeInfo.PublicKey
@@ -492,8 +504,11 @@ func (s *Server) handleDiscoveryMessage(msg *network.DiscoveryMessage, addr *net
 			peers = append(peers, network.NewPeer(node))
 		}
 
-		// Send discovered peers to response channel
-		s.nodeManager.ResponseCh <- peers
+		// Route the NEIGHBORS reply to whichever iterativeFindNode/DiscoverPeers
+		// call is waiting on this exact nonce, instead of broadcasting on the
+		// shared ResponseCh. Use the echoed application-level nonce
+		// (neighborsData.Nonce), not the envelope's sigNonce (msg.Nonce).
+		s.nodeManager.DeliverResponse(neighborsData.Nonce, peers)
 	}
 }
 

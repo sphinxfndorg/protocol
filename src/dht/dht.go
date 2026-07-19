@@ -15,6 +15,7 @@
 package dht
 
 import (
+	"encoding/json"
 	"math/rand"
 	"net"
 	"strconv"
@@ -602,8 +603,22 @@ func (d *DHT) sendMessage(m rpc.Message, addr net.UDPAddr) {
 		return
 	}
 
+	// encodedMsg is a raw binary buffer (magic number + length + payload +
+	// BLAKE3 hash), not JSON text. Data is json.RawMessage, so it must hold
+	// valid JSON — assigning the binary bytes directly made the outer
+	// json.Marshal below fail with "invalid character ... looking for
+	// beginning of value" as soon as a byte like 0xEF appeared.
+	// json.Marshal of a []byte auto-encodes it as a base64 JSON string
+	// (matching how bind.go's "rpc" case round-trips raw bytes through
+	// Message.Data), so marshal encodedMsg instead of assigning it directly.
+	b64Msg, err := json.Marshal(encodedMsg)
+	if err != nil {
+		d.log.Error("Failed to base64/JSON-encode message payload", zap.Error(err))
+		return
+	}
+
 	// Wrap in security message for encryption/integrity
-	secMsg := &security.Message{Type: "rpc", Data: encodedMsg}
+	secMsg := &security.Message{Type: "rpc", Data: b64Msg}
 	encodedData, err := secMsg.Encode()
 	if err != nil {
 		d.log.Error("Failed to encode security message", zap.Error(err))

@@ -15,6 +15,7 @@
 package dht
 
 import (
+	"encoding/json"
 	"errors"
 	"net"
 	"os"
@@ -137,8 +138,17 @@ func (c *conn) ReceiveMessageLoop(stopc chan struct{}) error {
 			continue // Not a valid RPC message, skip
 		}
 
-		// Use directly:
-		dataBytes := secMsg.Data // secMsg.Data is already json.RawMessage ([]byte)
+		// secMsg.Data now holds a JSON string containing the base64-encoded
+		// raw framed message (see dht.go sendMessage) rather than the raw
+		// bytes themselves — decode both layers back out.
+		// secMsg.Data now holds encodedMsg JSON-marshaled as a []byte (see
+		// dht.go sendMessage), which json.Marshal auto-base64-encodes —
+		// unmarshal back into []byte to auto-decode it, instead of treating
+		// secMsg.Data as the raw bytes directly.
+		var dataBytes []byte
+		if err := json.Unmarshal(secMsg.Data, &dataBytes); err != nil {
+			continue
+		}
 		if len(dataBytes) == 0 {
 			continue
 		}

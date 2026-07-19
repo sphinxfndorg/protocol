@@ -67,6 +67,13 @@ type NodeManager struct {
 	PingTimeout time.Duration
 	DHT         DHT // Add DHT interface field
 	db          *database.DB
+
+	// responseWaiters correlates in-flight UDP discovery requests (PING/FINDNODE)
+	// to their responses (PONG/NEIGHBORS) by nonce, so that concurrent callers
+	// (DiscoverPeers, iterativeFindNode) each receive only the response meant
+	// for them instead of racing on the shared, unaddressed ResponseCh.
+	waitersMu       sync.Mutex
+	responseWaiters map[string]chan []*Peer
 }
 
 // Node represents a participant in the blockchain or P2P network.

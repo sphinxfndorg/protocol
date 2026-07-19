@@ -91,11 +91,15 @@ func NewServer(tcpAddr, wsAddr, httpAddr, p2pAddr string, seeds []string, db *le
 		Role:      role,
 	}
 
+	tcpSrv := transport.NewTCPServer(tcpAddr, messageCh, rpcServer, readyCh)
+	p2pSrv := p2p.NewServer(config, blockchain, db)
+	p2pSrv.SetTCPServer(tcpSrv)
+
 	return &Server{
-		tcpServer:  transport.NewTCPServer(tcpAddr, messageCh, rpcServer, readyCh),
+		tcpServer:  tcpSrv,
 		wsServer:   transport.NewWebSocketServer(wsAddr, messageCh, rpcServer),
 		httpServer: http.NewServer(httpAddr, messageCh, blockchain, readyCh),
-		p2pServer:  p2p.NewServer(config, blockchain, db),
+		p2pServer:  p2pSrv,
 		readyCh:    readyCh,
 		nodeConfig: config,
 	}

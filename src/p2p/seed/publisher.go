@@ -193,7 +193,7 @@ func (p *Publisher) Publish(ctx context.Context) (*PublishResult, error) {
 		tb.AddRecord(rec)
 	}
 
-	txtRecords, branchMap, err := tb.Build()
+	_, branchMap, err := tb.Build()
 	if err != nil {
 		return nil, fmt.Errorf("build tree: %w", err)
 	}
@@ -208,7 +208,7 @@ func (p *Publisher) Publish(ctx context.Context) (*PublishResult, error) {
 	// Step 5: Sign the root hash
 	// The signed message is: version || eroot || lroot || seq
 	// where lroot is empty for a single tree (no links).
-	sigInput := []byte(fmt.Sprintf("v1|%s||%d", rootHashHex, p.config.Sequence))
+	sigInput := fmt.Appendf(nil, "v1|%s||%d", rootHashHex, p.config.Sequence)
 	sigBytes, err := p.signer.Sign(sigInput)
 	if err != nil {
 		return nil, fmt.Errorf("sign root: %w", err)
@@ -236,9 +236,6 @@ func (p *Publisher) Publish(ctx context.Context) (*PublishResult, error) {
 		subdomain := encodeSubdomain(hashBytes)
 		dnsRecords[subdomain+"."+DefaultENRTreeDomain] = txt
 	}
-
-	// Also include the raw TXT records for direct deployment
-	_ = txtRecords
 
 	log.Printf("dnsdiscovery: publisher: tree built with %d nodes, root=%s, sig=%s",
 		len(records), rootHashHex, sigHex[:16]+"...")

@@ -51,7 +51,51 @@ import (
 // ConnectionPool manages persistent TCP connections for consensus messages
 type ConnPool struct {
 	connections map[string]net.Conn
-	mu          *sync.Mutex
+	mu          sync.Mutex
+}
+
+// Get retrieves a live connection from the pool, or nil if none exists.
+func (p *ConnPool) Get(addr string) net.Conn {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	conn := p.connections[addr]
+	if conn == nil {
+		return nil
+	}
+	// If the pooled connection is already closed, discard it.
+	if isClosed(conn) {
+		delete(p.connections, addr)
+		return nil
+	}
+	return conn
+}
+
+// Put stores a connection in the pool. Any previously pooled connection for
+// the same address is closed and replaced. Passing nil removes the entry.
+func (p *ConnPool) Put(addr string, conn net.Conn) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if old, ok := p.connections[addr]; ok && old != nil {
+		// Ignore close error; we're just cleaning up
+		_ = old.Close()
+	}
+	if conn == nil {
+		delete(p.connections, addr)
+	} else {
+		p.connections[addr] = conn
+	}
+}
+
+// CloseAll closes every pooled connection and clears the map.
+func (p *ConnPool) CloseAll() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, conn := range p.connections {
+		if conn != nil {
+			_ = conn.Close()
+		}
+	}
+	p.connections = make(map[string]net.Conn)
 }
 
 // isClosed checks if a TCP connection is closed
@@ -315,6 +359,29 @@ func StartNode(
 		return fmt.Errorf("failed to create state database: %w", err)
 	}
 
+	// ★ FIX: signingService construction moved up from SECTION 6 (below) to
+	// here, BEFORE core.NewBlockchain()/bc.FinishInit(). Those calls build
+	// genesis synchronously (createGenesisBlock -> GenesisState.BuildBlock),
+	// and BuildBlock now signs the genesis block using whichever signer was
+	// registered via core.SetGenesisSigner — so the signer has to exist and
+	// be registered before genesis gets built, not after. Everything this
+	// needs (db, sharedKeyManager, sharedSphincsParams, currentNodeID) is
+	// already available at this point.
+	sphincsMgr := sign.NewSTHINCSManager(db, sharedKeyManager, sharedSphincsParams)
+	signingService := consensus.NewSigningService(sphincsMgr, sharedKeyManager, currentNodeID)
+
+	if selfPK := signingService.GetPublicKeyObject(); selfPK != nil {
+		signingService.RegisterPublicKey(currentNodeID, selfPK)
+		logger.Info("Self public key registered")
+	}
+
+	// Only the node that's actually bootstrapping a fresh chain should sign
+	// genesis — a late joiner downloads genesis (and its signature) from
+	// peers via the sync loop instead of minting its own.
+	if seeds == "" {
+		core.SetGenesisSigner(signingService, currentNodeID)
+	}
+
 	// SECTION 5 — blockchain + genesis
 	//
 	// ★ FIX: core.NewBlockchain() now defers chain loading / genesis creation
@@ -397,14 +464,9 @@ func StartNode(
 	}
 
 	// SECTION 6 — signing service
-	sphincsMgr := sign.NewSTHINCSManager(db, sharedKeyManager, sharedSphincsParams)
-	signingService := consensus.NewSigningService(sphincsMgr, sharedKeyManager, currentNodeID)
-
-	if selfPK := signingService.GetPublicKeyObject(); selfPK != nil {
-		signingService.RegisterPublicKey(currentNodeID, selfPK)
-		logger.Info("Self public key registered")
-	}
-
+	// (sphincsMgr/signingService were constructed earlier, in SECTION 4,
+	// before core.NewBlockchain — see the ★ FIX comment there. Only the
+	// public-key serialization/logging below still happens here.)
 	pkBytes, err := signingService.GetPublicKey()
 	if err != nil {
 		return fmt.Errorf("cannot serialize self public key: %w", err)
@@ -581,28 +643,12 @@ func StartNode(
 		logger.Info("Added peer %s at %s to P2P consensus manager", validatorIDs[i], addr)
 	}
 
-	// Connection pool for persistent TCP connections
-	connPool := &ConnPool{
-		connections: make(map[string]net.Conn),
-		mu:          &sync.Mutex{},
-	}
-
 	p2pMgr.SetSendMessageFunc(func(nodeAddress, msgType string, data []byte) error {
-		connPool.mu.Lock()
-		conn, exists := connPool.connections[nodeAddress]
-		connPool.mu.Unlock()
-
-		if !exists || isClosed(conn) {
-			newConn, err := net.DialTimeout("tcp", nodeAddress, 5*time.Second)
-			if err != nil {
-				return fmt.Errorf("failed to connect to %s: %v", nodeAddress, err)
-			}
-
-			connPool.mu.Lock()
-			connPool.connections[nodeAddress] = newConn
-			connPool.mu.Unlock()
-			conn = newConn
+		conn, err := net.DialTimeout("tcp", nodeAddress, 5*time.Second)
+		if err != nil {
+			return fmt.Errorf("failed to connect to %s: %v", nodeAddress, err)
 		}
+		defer conn.Close()
 
 		msg := &security.Message{
 			Type: msgType,
@@ -615,10 +661,6 @@ func StartNode(
 		}
 
 		if err := writeFramedMessage(conn, encodedMsg); err != nil {
-			connPool.mu.Lock()
-			delete(connPool.connections, nodeAddress)
-			connPool.mu.Unlock()
-			conn.Close()
 			return fmt.Errorf("failed to write message to %s: %v", nodeAddress, err)
 		}
 
@@ -1024,18 +1066,30 @@ func StartNode(
 		logger.Info("No --seeds configured; relying on statically-registered peers only")
 	}
 
-	effectivePeerCount := func() int {
+	knownPeerCount := func() int {
 		peerRegistryMu.Lock()
 		defer peerRegistryMu.Unlock()
 		return len(peerRegistry)
 	}
 
-	if effectivePeerCount() > 0 {
+	// effectivePeerCount is deliberately stricter than knownPeerCount: a
+	// configured seed is contactable, but not an active validator until it has
+	// completed discovery/key exchange.
+	effectivePeerCount := func() int {
+		// peerRegistry is an address book and intentionally includes static
+		// seed/config entries before their process is reachable. Only peers
+		// that completed discovery/key exchange are live participants.
+		registeredMu.Lock()
+		defer registeredMu.Unlock()
+		return len(registeredPeers)
+	}
+
+	if knownPeerCount() > 0 {
 		logger.Info("Waiting for other nodes to be ready (3 seconds)...")
 		time.Sleep(3 * time.Second)
 	}
 
-	if effectivePeerCount() > 0 {
+	if knownPeerCount() > 0 {
 		logger.Info("=== EXCHANGING PUBLIC KEYS (SYNC) BEFORE CONSENSUS ===")
 		for _, addr := range networkAddresses {
 			if addr == currentAddress {
@@ -1097,7 +1151,7 @@ func StartNode(
 
 	logger.Info("Self-stake and key exchange complete; remaining validator admission happens per-peer as reward addresses are verified")
 
-	if effectivePeerCount() > 0 && nodeIndex == 0 {
+	if knownPeerCount() > 0 && nodeIndex == 0 {
 		logger.Info("Waiting for genesis transactions to propagate (2 seconds)...")
 		time.Sleep(2 * time.Second)
 	}
@@ -1117,7 +1171,7 @@ func StartNode(
 
 	phase2State := &phase2InitState{}
 
-	if effectivePeerCount() > 0 || !usingRealAddress && synthCount > 1 {
+	if knownPeerCount() > 0 || !usingRealAddress && synthCount > 1 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -1229,7 +1283,7 @@ func StartNode(
 	// For nodes with peers (late joiners or multi-node networks), wait for
 	// the sync loop to fetch genesis. We wait indefinitely with periodic
 	// logging so the operator can see progress.
-	if !genesisVerified && effectivePeerCount() > 0 {
+	if !genesisVerified && knownPeerCount() > 0 {
 		logger.Info("Waiting for sync loop to fetch genesis from peers (will wait indefinitely)...")
 		checkTicker := time.NewTicker(1 * time.Second)
 		defer checkTicker.Stop()

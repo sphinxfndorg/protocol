@@ -1229,6 +1229,34 @@ func (bc *Blockchain) CreateBlock() (block *types.Block, err error) {
 	logger.Info("SUCCESS Created new PBFT block: height=%d, transactions=%d, hash=%s, final_nonce=%s",
 		newBlock.GetHeight(), len(selectedTxs), newBlock.GetHash(), newBlock.Header.Nonce)
 
+	// FIX: solo-mined blocks used to leave here with an empty
+	// ProposerSignature and SigValid=false forever — SignBlock was only ever
+	// called from Consensus.ProposeBlock (the PBFT-leader path), so nothing
+	// signed a block produced before PBFT started or before this node knew
+	// enough peers to run consensus. That's a real authenticity gap during
+	// solo mining and the solo→PBFT handoff, not just a cosmetic field: an
+	// unsigned block proves nothing about who produced it, so fork-choice
+	// between two competing solo-mined blocks (see the weight-tie fix in
+	// blockchain.go ImportBlock) had no producer signature to fall back on,
+	// only a hash tie-break. Sign every block from genesis onward with this
+	// node's own key, the same way a PBFT leader signs its proposal, so
+	// authenticity holds even before quorum attestations exist.
+	if bc.consensusEngine != nil {
+		if cs, ok := bc.consensusEngine.(*consensus.Consensus); ok {
+			wrapped := NewBlockHelper(newBlock)
+			if err := cs.SignBlockHeader(wrapped); err != nil {
+				logger.Warn("CreateBlock: failed to sign solo-mined block height=%d: %v", newBlock.GetHeight(), err)
+			} else {
+				logger.Info("SUCCESS Solo-mined block height=%d signed by proposer=%s", newBlock.GetHeight(), proposerID)
+			}
+		} else {
+			logger.Warn("CreateBlock: consensusEngine is not *consensus.Consensus (type=%T) — cannot sign solo-mined block height=%d",
+				bc.consensusEngine, newBlock.GetHeight())
+		}
+	} else {
+		logger.Warn("CreateBlock: no consensus engine available — solo-mined block height=%d will remain unsigned", newBlock.GetHeight())
+	}
+
 	return newBlock, nil
 }
 

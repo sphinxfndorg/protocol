@@ -179,7 +179,11 @@ func EnrichPeersFromDNS(seedList string, knownPeers map[string]bool) []network.P
 	}
 
 	// Try to resolve the peers into dialable UDP addresses so we can
-	// ping them for Kademlia integration.
+	// ping them for Kademlia integration. Peers that don't resolve are
+	// dropped here — previously this loop only logged "skipping" without
+	// actually removing them, so unresolvable peers were silently returned
+	// to the caller anyway.
+	resolvable := make([]network.PeerInfo, 0, len(newPeers))
 	for _, peer := range newPeers {
 		addrStr := peer.Address
 		if peer.UDPPort != "" {
@@ -190,10 +194,12 @@ func EnrichPeersFromDNS(seedList string, knownPeers map[string]bool) []network.P
 		}
 		if _, err := net.ResolveUDPAddr("udp", addrStr); err != nil {
 			log.Printf("dnsdiscovery: skipping unresolvable peer %s: %v", addrStr, err)
+			continue
 		}
+		resolvable = append(resolvable, peer)
 	}
 
-	return newPeers
+	return resolvable
 }
 
 // HasDNSTreeSeeds checks if a seed list contains any enrtree:// URLs.

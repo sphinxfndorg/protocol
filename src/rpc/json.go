@@ -992,17 +992,21 @@ func NewRPCCaller(nodeID NodeID) *RPCCallerImpl {
 
 // GetCheckpoint retrieves a checkpoint from a peer
 func (c *RPCCallerImpl) GetCheckpoint(peerAddress string) (*consensus.CheckpointMessage, error) {
-	msg, err := CallRPC(peerAddress, "getcheckpoint", nil, c.nodeID, 60)
+	// CallRPC(address, method, params, ttlSeconds) dials the peer's P2P TCP
+	// address and performs its own handshake/encryption internally — it no
+	// longer takes a NodeID argument, and it returns the JSON-RPC "result"
+	// field directly as json.RawMessage (no wrapping .Values slice).
+	resp, err := CallRPC(peerAddress, "getcheckpoint", nil, 60)
 	if err != nil {
 		return nil, fmt.Errorf("RPC call failed: %w", err)
 	}
 
-	if len(msg.Values) == 0 {
+	if len(resp) == 0 {
 		return nil, fmt.Errorf("empty response from peer")
 	}
 
 	var cp consensus.CheckpointMessage
-	if err := json.Unmarshal(msg.Values[0], &cp); err != nil {
+	if err := json.Unmarshal(resp, &cp); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal checkpoint: %w", err)
 	}
 
@@ -1011,17 +1015,17 @@ func (c *RPCCallerImpl) GetCheckpoint(peerAddress string) (*consensus.Checkpoint
 
 // GetSupplyStatus retrieves supply status from a peer
 func (c *RPCCallerImpl) GetSupplyStatus(peerAddress string) (map[string]interface{}, error) {
-	msg, err := CallRPC(peerAddress, "getsupplystatus", nil, c.nodeID, 60)
+	resp, err := CallRPC(peerAddress, "getsupplystatus", nil, 60)
 	if err != nil {
 		return nil, fmt.Errorf("RPC call failed: %w", err)
 	}
 
-	if len(msg.Values) == 0 {
+	if len(resp) == 0 {
 		return nil, fmt.Errorf("empty response from peer")
 	}
 
 	var result map[string]interface{}
-	if err := json.Unmarshal(msg.Values[0], &result); err != nil {
+	if err := json.Unmarshal(resp, &result); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal supply status: %w", err)
 	}
 

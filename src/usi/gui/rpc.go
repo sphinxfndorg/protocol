@@ -32,28 +32,42 @@ const (
 	GasPriceSPX = 1_000_000_000 // 1 gSPX in nSPX
 )
 
-// NewWalletClient creates a new wallet RPC client
+// NewWalletClient creates a new wallet RPC client.
+//
+// nodeAddr MUST be the node's dedicated wallet/JSON-RPC address — the
+// nodeConfig.WSPort slot (see port.go's baseWSPort, default
+// 127.0.0.1:8700), NOT the P2P gossip TCP address (baseTCPPort/32307) and
+// NOT the HTTP/Gin address.
+//
+//   - The P2P gossip port (bind.StartNode's SECTION 11 listener) is served
+//     by bind.handleIncomingConn, which speaks the unencrypted P2P wire
+//     protocol (key_exchange, peer_exchange, checkpoint, get_blocks,
+//     consensus messages) and has no "jsonrpc" case at all.
+//   - The HTTP server (go/src/http) is a plain REST API
+//     (/transaction, /blockcount, ...) with no JSON-RPC bridge.
+//   - bind.StartNode's SECTION 11a starts a transport.TCPServer bound to
+//     nodeConfig.WSPort specifically for this: transport.TCPServer.
+//     handleConnection (tcp.go) is the only listener that performs the
+//     handshake and forwards Type:"jsonrpc" requests into
+//     rpc.Server.HandleRequest, and rpc.CallRPC (client.go) is written to
+//     speak exactly its protocol (handshake + Type:"jsonrpc" + encrypted
+//     framing).
 func NewWalletClient(nodeAddr string) *WalletClient {
 	if nodeAddr == "" {
 		// Fallback to environment variable, then default
 		if envAddr := os.Getenv("SPHINX_RPC_ADDR"); envAddr != "" {
 			nodeAddr = envAddr
 		} else {
-			// Default to HTTP RPC port (8545), not TCP P2P port (30303)
-			nodeAddr = "127.0.0.1:8545"
-		}
-	}
-	// No scheme – just the raw host:port
-	var nodeID rpc.NodeID
-	if sessionRawFingerprint != "" {
-		rawBytes, err := hex.DecodeString(sessionRawFingerprint)
-		if err == nil {
-			copy(nodeID[:], rawBytes)
+			// Default to the dedicated wallet/JSON-RPC port (WSPort slot,
+			// baseWSPort=8700), not the P2P gossip port (32307) and not the
+			// HTTP port (8545/8645) — neither of those has a jsonrpc
+			// handler, so pointing here previously guaranteed every wallet
+			// RPC call would fail or be silently misrouted.
+			nodeAddr = "127.0.0.1:8700"
 		}
 	}
 	return &WalletClient{
 		nodeAddr: nodeAddr,
-		nodeID:   nodeID,
 	}
 }
 
@@ -87,13 +101,13 @@ func (c *WalletClient) GetBalance(address string) (*BalanceResponse, error) {
 	log.Printf("[WalletRPC] GetBalance: fetching for %s", rawAddress[:16]+"...")
 
 	params := []interface{}{rawAddress}
-	resp, err := rpc.CallRPC(c.nodeAddr, "getbalance", params, c.nodeID, 60)
+	resultData, err := rpc.CallRPC(c.nodeAddr, "getbalance", params, 60)
 	if err != nil {
 		log.Printf("[WalletRPC] RPC call failed: %v", err)
 		return nil, fmt.Errorf("RPC call failed: %w", err)
 	}
 
-	if len(resp.Values) == 0 {
+	if len(resultData) == 0 || string(resultData) == "null" {
 		return nil, errors.New("empty response from RPC")
 	}
 
@@ -103,7 +117,7 @@ func (c *WalletClient) GetBalance(address string) (*BalanceResponse, error) {
 		Pending  string `json:"pending"`
 		Unlocked string `json:"unlocked"`
 	}
-	if err := json.Unmarshal(resp.Values[0], &result); err != nil {
+	if err := json.Unmarshal(resultData, &result); err != nil {
 		return nil, fmt.Errorf("parse response: %w", err)
 	}
 
@@ -130,12 +144,12 @@ func (c *WalletClient) getCurrentNonce(address string) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	resp, err := rpc.CallRPC(c.nodeAddr, "getnonce", []interface{}{rawAddress}, c.nodeID, 60)
+	resultData, err := rpc.CallRPC(c.nodeAddr, "getnonce", []interface{}{rawAddress}, 60)
 	if err != nil {
 		return 0, err
 	}
 	var nonce uint64
-	if err := json.Unmarshal(resp.Values[0], &nonce); err != nil {
+	if err := json.Unmarshal(resultData, &nonce); err != nil {
 		return 0, err
 	}
 	return nonce + 1, nil // Increment for new transaction
@@ -221,12 +235,12 @@ func (c *WalletClient) SendTransaction(toAddress string, amount *big.Int, memo s
 	rawTx := hex.EncodeToString(txData)
 
 	// ─── 5. Send to RPC node ────────────────────────────────────
-	resp, err := rpc.CallRPC(c.nodeAddr, "sendrawtransaction", []interface{}{rawTx}, c.nodeID, 120)
+	resultData, err := rpc.CallRPC(c.nodeAddr, "sendrawtransaction", []interface{}{rawTx}, 120)
 	if err != nil {
 		return "", fmt.Errorf("RPC error: %w", err)
 	}
 
-	if len(resp.Values) == 0 {
+	if len(resultData) == 0 || string(resultData) == "null" {
 		return "", errors.New("empty response")
 	}
 
@@ -235,7 +249,7 @@ func (c *WalletClient) SendTransaction(toAddress string, amount *big.Int, memo s
 		Status string `json:"status"`
 		Error  string `json:"error"`
 	}
-	if err := json.Unmarshal(resp.Values[0], &result); err != nil {
+	if err := json.Unmarshal(resultData, &result); err != nil {
 		return "", fmt.Errorf("parse response: %w", err)
 	}
 
@@ -334,17 +348,17 @@ func (c *WalletClient) GetTransactionHistory(address string, limit int) ([]Trans
 	log.Printf("[WalletRPC] GetTransactionHistory: fetching for %s", rawAddress[:16]+"...")
 
 	params := []interface{}{rawAddress, limit}
-	resp, err := rpc.CallRPC(c.nodeAddr, "gettransactionhistory", params, c.nodeID, 60)
+	resultData, err := rpc.CallRPC(c.nodeAddr, "gettransactionhistory", params, 60)
 	if err != nil {
 		return nil, fmt.Errorf("RPC call failed: %w", err)
 	}
 
-	if len(resp.Values) == 0 {
+	if len(resultData) == 0 || string(resultData) == "null" {
 		return []TransactionResponse{}, nil
 	}
 
 	var txs []TransactionResponse
-	if err := json.Unmarshal(resp.Values[0], &txs); err != nil {
+	if err := json.Unmarshal(resultData, &txs); err != nil {
 		return nil, fmt.Errorf("parse response: %w", err)
 	}
 

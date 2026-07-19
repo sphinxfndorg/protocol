@@ -90,6 +90,15 @@ type Mempool struct {
 	invalidPool     map[string]*PooledTransaction
 	allTransactions map[string]*PooledTransaction
 
+	// accountNonceIndex maps "sender:nonce" -> the txID currently occupying
+	// that account-nonce slot across broadcast/validation/pending. Ethereum-
+	// style identity: an account can only have one live transaction per
+	// nonce at a time. A new transaction for an occupied slot is only
+	// admitted as a replace-by-fee (see isSufficientFeeBump in mempool.go);
+	// otherwise it is rejected outright rather than left to sit alongside
+	// the original and create an ambiguous choice at block-selection time.
+	accountNonceIndex map[string]string
+
 	// Configuration
 	config *MempoolConfig
 

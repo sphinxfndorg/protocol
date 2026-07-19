@@ -18,27 +18,57 @@ import (
 // This package is meant to support “off-chain storage + on-chain anchoring”
 // for mint receipts / NFTs.
 //
-// ASSUMPTION — CONFIRM AGAINST YOUR NODE:
+// CONFIRMED AGAINST THE NODE (go/src/rpc/json.go):
 // The previous version of this file guessed at five different RPC method
-// names and used whichever one didn't error. That's exactly backwards: a
-// wrong guess can silently "succeed" against an unrelated handler. This
-// version pins down ONE canonical method name for each operation below.
-// If your node's actual RPC dispatcher uses different names, change these
-// two constants — that's the only place the method name should live.
+// names and used whichever one didn't error — a wrong guess can silently
+// "succeed" against an unrelated handler. These two constants are now
+// verified against the node's actual dispatcher registration
+// (JSONRPCHandler.registerMethods, go/src/rpc/json.go):
+//
+//	h.methods["storeartifact"] = h.storeArtifact
+//	h.methods["getartifact"]   = h.getArtifact
+//
+// The node-side handlers (same file) also confirm the exact response shapes
+// documented below. If your node's dispatcher is ever renamed, update both
+// sides together — these constants are the only place the method name
+// should live on the client, and registerMethods is the only place it
+// should live on the server.
 const (
-	// RPCMethodStoreArtifact persists a StorageArtifact keyed by MintID.
+	// RPCMethodStoreArtifact persists a StorageArtifact keyed by MintID in
+	// the node's in-memory KV store (rpc.KVStore, 12-hour TTL — see
+	// JSONRPCHandler.storeArtifact). This is off-chain, best-effort caching,
+	// NOT an on-chain transaction: the node never broadcasts anything for
+	// this call, so nothing here is a txid. To actually anchor the artifact
+	// on-chain, build a ContractPayload (contract.go) and broadcast it
+	// yourself (see mint.broadcastAnchorTransaction) — StoreMintArtifact and
+	// on-chain anchoring are two independent steps.
+	//
 	// Expected request:  params[0] = JSON-encoded StorageArtifact (string)
-	// Expected response: JSON object with at least one of {txid, hash, status},
-	//                    and optionally {error} to signal a node-side rejection.
+	// Expected response: {"status":"stored","mint_id":"..."} on success.
+	//                     A node-side rejection (e.g. missing mint_id) comes
+	//                     back as a JSON-RPC error, not an embedded "error"
+	//                     field — rpc.CallRPC already surfaces that as a Go
+	//                     error, so the embedded-field check below is
+	//                     defensive only and not expected to trigger against
+	//                     this handler.
 	RPCMethodStoreArtifact = "storeartifact"
 
-	// RPCMethodGetArtifact reads back a previously stored StorageArtifact.
+	// RPCMethodGetArtifact reads back a previously stored StorageArtifact
+	// from the same KV store (JSONRPCHandler.getArtifact).
+	//
 	// Expected request:  params[0] = mint_id (string)
-	// Expected response: JSON object matching StorageArtifact, OR
-	//                    {"found": false} / a non-nil error if it doesn't exist.
+	// Expected response: {"found":false,"mint_id":"..."} if the entry has
+	//                     expired or was never stored, otherwise the raw
+	//                     StorageArtifact JSON that was originally passed to
+	//                     StoreMintArtifact.
 	RPCMethodGetArtifact = "getartifact"
 )
 
+// StorageClient talks to a node's P2P RPC endpoint to store/retrieve
+// off-chain artifacts. NodeID is currently unused by rpc.CallRPC (the P2P
+// TCP transport authenticates via its handshake instead of a NodeID), but
+// the field is kept for callers that still want to track which node they're
+// bound to.
 type StorageClient struct {
 	NodeAddr string
 	NodeID   rpc.NodeID
@@ -72,6 +102,15 @@ func DefaultStorageClient(nodeAddr string) *StorageClient {
 var ErrArtifactConflict = errors.New("mint id already anchored with different content")
 
 // StoreMintArtifact stores the artifact association on a node.
+//
+// This writes to the node's in-memory KV store only (12-hour TTL) — it is
+// NOT an on-chain write. The string returned on success is whichever of
+// {txid, hash, status} the node included in its response; against the
+// current node implementation that's always the literal string "stored"
+// (see RPCMethodStoreArtifact above), never a real transaction ID. If you
+// need an actual on-chain anchor, build a ContractPayload (contract.go) and
+// broadcast it separately (see mint.broadcastAnchorTransaction) — do not
+// mistake this method's return value for proof of on-chain inclusion.
 //
 // This is idempotent: if the MintID is already stored with the same
 // CIDHashHex, the existing status is returned instead of writing again
@@ -112,11 +151,14 @@ func (c *StorageClient) StoreMintArtifact(artifact *StorageArtifact) (string, er
 	}
 
 	params := []interface{}{string(b)}
-	resp, rpcErr := rpc.CallRPC(c.NodeAddr, RPCMethodStoreArtifact, params, c.NodeID, 120)
+	// rpc.CallRPC(address, method, params, ttlSeconds) — it no longer takes
+	// a NodeID, and it returns the JSON-RPC "result" payload directly as
+	// json.RawMessage (there's no wrapping .Values slice to index into).
+	resp, rpcErr := rpc.CallRPC(c.NodeAddr, RPCMethodStoreArtifact, params, 120)
 	if rpcErr != nil {
 		return "", fmt.Errorf("%s: %w", RPCMethodStoreArtifact, rpcErr)
 	}
-	if len(resp.Values) == 0 {
+	if len(resp) == 0 {
 		return "", fmt.Errorf("%s: empty response", RPCMethodStoreArtifact)
 	}
 
@@ -126,7 +168,7 @@ func (c *StorageClient) StoreMintArtifact(artifact *StorageArtifact) (string, er
 		Status string `json:"status"`
 		Error  string `json:"error"`
 	}
-	if err := json.Unmarshal(resp.Values[0], &r); err != nil {
+	if err := json.Unmarshal(resp, &r); err != nil {
 		return "", fmt.Errorf("%s: parse response: %w", RPCMethodStoreArtifact, err)
 	}
 	if r.Error != "" {
@@ -141,7 +183,7 @@ func (c *StorageClient) StoreMintArtifact(artifact *StorageArtifact) (string, er
 	if r.Status != "" {
 		return r.Status, nil
 	}
-	return "", fmt.Errorf("%s: response had none of txid/hash/status: %s", RPCMethodStoreArtifact, string(resp.Values[0]))
+	return "", fmt.Errorf("%s: response had none of txid/hash/status: %s", RPCMethodStoreArtifact, string(resp))
 }
 
 // GetMintArtifact reads back a stored artifact by MintID.
@@ -161,11 +203,11 @@ func (c *StorageClient) GetMintArtifact(mintID string) (*StorageArtifact, error)
 		return nil, errors.New("empty mint id")
 	}
 
-	resp, err := rpc.CallRPC(c.NodeAddr, RPCMethodGetArtifact, []interface{}{mintID}, c.NodeID, 60)
+	resp, err := rpc.CallRPC(c.NodeAddr, RPCMethodGetArtifact, []interface{}{mintID}, 60)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", RPCMethodGetArtifact, err)
 	}
-	if len(resp.Values) == 0 {
+	if len(resp) == 0 {
 		return nil, fmt.Errorf("%s: empty response", RPCMethodGetArtifact)
 	}
 
@@ -175,7 +217,7 @@ func (c *StorageClient) GetMintArtifact(mintID string) (*StorageArtifact, error)
 		Found *bool  `json:"found"`
 		Error string `json:"error"`
 	}
-	_ = json.Unmarshal(resp.Values[0], &probe)
+	_ = json.Unmarshal(resp, &probe)
 	if probe.Found != nil && !*probe.Found {
 		return nil, fmt.Errorf("%s: mint_id %s not found", RPCMethodGetArtifact, mintID)
 	}
@@ -184,11 +226,11 @@ func (c *StorageClient) GetMintArtifact(mintID string) (*StorageArtifact, error)
 	}
 
 	var artifact StorageArtifact
-	if err := json.Unmarshal(resp.Values[0], &artifact); err != nil {
+	if err := json.Unmarshal(resp, &artifact); err != nil {
 		return nil, fmt.Errorf("%s: parse response: %w", RPCMethodGetArtifact, err)
 	}
 	if artifact.MintID == "" {
-		return nil, fmt.Errorf("%s: response missing mint_id (got: %s)", RPCMethodGetArtifact, string(resp.Values[0]))
+		return nil, fmt.Errorf("%s: response missing mint_id (got: %s)", RPCMethodGetArtifact, string(resp))
 	}
 	return &artifact, nil
 }

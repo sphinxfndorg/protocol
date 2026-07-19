@@ -15,199 +15,129 @@ import (
 	security "github.com/sphinxfndorg/protocol/src/handshake"
 )
 
-// CallRPC sends an RPC request to a peer, supporting both JSON and binary formats.
-func CallRPC(address, method string, params interface{}, nodeID NodeID, ttl uint16) (*Message, error) {
-	conn, err := net.Dial("tcp", address)
+// CallRPC sends a JSON-RPC 2.0 request to a node and returns the raw
+// `result` field of the response as json.RawMessage.
+//
+// address MUST be the node's P2P TCP address — the tcpAddr passed to
+// server.NewServer / transport.NewTCPServer (see port.go's baseTCPPort,
+// default 32307) — NOT the HTTP/Gin address (go/src/http). The HTTP server
+// is a plain REST API (/transaction, /blockcount, ...) with no JSON-RPC
+// bridge at all; posting this protocol's bytes to it just confuses the
+// net/http parser.
+//
+// The P2P TCP listener (transport.TCPServer.handleConnection, tcp.go) is
+// the only listener in this codebase that forwards requests into
+// rpc.Server.HandleRequest, and it requires, in this exact order:
+//  1. A completed Kyber768/SPHINCS+ handshake (security.PerformHandshake,
+//     protocol label "p2p" — the same label transport/tcp.go's own Connect
+//     method uses to talk to this same listener).
+//  2. The request wrapped as security.Message{Type: "jsonrpc", Data: ...}
+//     — NOT "rpc". The listener only forwards "jsonrpc"-typed messages into
+//     HandleRequest; any other Type is just dropped into messageCh and
+//     never answered.
+//  3. Encrypted via security.SecureMessage, decrypted on the way back via
+//     security.DecodeSecureMessage, both keyed by the handshake result.
+//
+// An earlier version of this function built a "rpc"-typed, unencrypted,
+// handshake-less message and dialed the HTTP port by default. That protocol
+// has no listener anywhere in the codebase, so every call either blocked on
+// a handshake the server was waiting for and never received, or (against
+// the HTTP server) was parsed as garbage — which is why wallet RPC calls
+// (balance, nonce, send, history) always failed with "Error".
+func CallRPC(address, method string, params interface{}, ttlSeconds uint16) (json.RawMessage, error) {
+	conn, err := net.DialTimeout("tcp", address, 5*time.Second)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("dial %s: %w", address, err)
 	}
 	defer conn.Close()
 
-	// Convert method to RPCType.
-	// NOTE: this must stay in sync with JSONRPCHandler.registerMethods /
-	// mapRPCTypeToMethod in json.go — previously only 6 of the ~20 server
-	// methods were mapped here, so calls like "getbalance", "getnetworkinfo",
-	// "ping", or "gettransactionhistory" failed locally with
-	// ErrUnsupportedRPCType before ever reaching the network, silently
-	// forcing callers (e.g. WalletClient) onto their mock-data fallback.
-	var rpcType RPCType
-	switch method {
-	case "getblockcount":
-		rpcType = RPCGetBlockCount
-	case "getbestblockhash":
-		rpcType = RPCGetBestBlockHash
-	case "getblock":
-		rpcType = RPCGetBlock
-	case "getblocks":
-		rpcType = RPCGetBlocks
-	case "sendrawtransaction":
-		rpcType = RPCSendRawTransaction
-	case "gettransaction":
-		rpcType = RPCGetTransaction
-	case "ping":
-		rpcType = RPCPing
-	case "join":
-		rpcType = RPCJoin
-	case "findnode":
-		rpcType = RPCFindNode
-	case "get":
-		rpcType = RPCGet
-	case "store":
-		rpcType = RPCStore
-	case "getblockbynumber":
-		rpcType = RPCGetBlockByNumber
-	case "getblockhash":
-		rpcType = RPCGetBlockHash
-	case "getdifficulty":
-		rpcType = RPCGetDifficulty
-	case "getchaintip":
-		rpcType = RPCGetChainTip
-	case "getnetworkinfo":
-		rpcType = RPCGetNetworkInfo
-	case "getmininginfo":
-		rpcType = RPCGetMiningInfo
-	case "estimatefee":
-		rpcType = RPCEstimateFee
-	case "getmempoolinfo":
-		rpcType = RPCGetMemPoolInfo
-	case "validateaddress":
-		rpcType = RPCValidateAddress
-	case "verifymessage":
-		rpcType = RPCVerifyMessage
-	case "getrawtransaction":
-		rpcType = RPCGetRawTransaction
-	case "getbalance":
-		rpcType = RPCGetBalance
-	case "gettransactionhistory":
-		rpcType = RPCGetTransactionHistory
-	case "getsupplystatus":
-		rpcType = RPCGetSupplyStatus
-	case "getcheckpoint":
-		rpcType = RPCGetCheckpoint
-	case "storeartifact":
-		rpcType = RPCStoreArtifact
-	case "getartifact":
-		rpcType = RPCGetArtifact
-	case "getnonce":
-		rpcType = RPCGetNonce
-	default:
-		return nil, ErrUnsupportedRPCType
+	if ttlSeconds == 0 {
+		ttlSeconds = 30
+	}
+	deadline := time.Now().Add(time.Duration(ttlSeconds) * time.Second)
+	_ = conn.SetDeadline(deadline)
+
+	// Step 1: handshake. Must match the "p2p" label used by the server's
+	// own listener and by transport/tcp.go's Connect (client-role P2P
+	// dialer) — using a different label here is what would silently break
+	// this again if changed without checking tcp.go.
+	handshake := security.NewHandshake()
+	enc, err := handshake.PerformHandshake(conn, "p2p", true)
+	if err != nil {
+		return nil, fmt.Errorf("handshake with %s: %w", address, err)
+	}
+	if enc == nil {
+		return nil, fmt.Errorf("handshake with %s returned nil encryption key", address)
 	}
 
-	// Serialize params
-	paramsData, err := json.Marshal(params)
+	// Step 2 & 3: build + encrypt the JSON-RPC request.
+	req := JSONRPCRequest{
+		JSONRPC: "2.0",
+		Method:  method,
+		Params:  params,
+		ID:      time.Now().UnixNano(),
+	}
+	reqData, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
+
+	secMsg := &security.Message{Type: "jsonrpc", Data: reqData}
+	encryptedReq, err := security.SecureMessage(secMsg, enc)
+	if err != nil {
+		return nil, fmt.Errorf("encrypt request: %w", err)
+	}
+
+	if err := writeFramedMessage(conn, encryptedReq); err != nil {
+		return nil, err
+	}
+
+	respData, err := readFramedMessage(conn, deadline)
 	if err != nil {
 		return nil, err
 	}
 
-	// Create Message
-	msg := &Message{
-		RPCType: rpcType,
-		Query:   true,
-		TTL:     ttl,
-		Target:  NodeID{}, // Set to target node ID in production
-		RPCID:   GetRPCID(),
-		From: Remote{
-			NodeID:  nodeID,
-			Address: net.UDPAddr{IP: net.ParseIP("0.0.0.0"), Port: 0}, // Set actual address in production
-		},
-		Values:    [][]byte{paramsData},
-		Iteration: 0,
-		Secret:    uint16(time.Now().UnixNano() % 65536),
-	}
-
-	// Serialize Message
-	data, err := msg.Marshal(make([]byte, msg.MarshalSize()))
+	respMsg, err := security.DecodeSecureMessage(respData, enc)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("decrypt response: %w", err)
+	}
+	if respMsg.Type != "jsonrpc" {
+		return nil, fmt.Errorf("unexpected response type %q (expected \"jsonrpc\")", respMsg.Type)
 	}
 
-	// Wrap binary RPC data as a JSON byte string. json.RawMessage must contain
-	// valid JSON, not arbitrary binary bytes.
-	rpcPayload, err := json.Marshal(data)
+	var jsonResp JSONRPCResponse
+	if err := json.Unmarshal(respMsg.Data, &jsonResp); err != nil {
+		return nil, fmt.Errorf("parse JSON-RPC response: %w", err)
+	}
+	if jsonResp.Error != nil {
+		return nil, fmt.Errorf("RPC error (%d): %s", jsonResp.Error.Code, jsonResp.Error.Message)
+	}
+
+	resultBytes, err := json.Marshal(jsonResp.Result)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("re-marshal result: %w", err)
 	}
-	secMsg := &security.Message{Type: "rpc", Data: rpcPayload}
-	encodedData, err := secMsg.Encode()
-	if err != nil {
-		return nil, err
-	}
-
-	// Write length-prefixed message
-	if err := writeFramedMessage(conn, encodedData); err != nil {
-		return nil, err
-	}
-
-	// Read length-prefixed response
-	respData, err := readFramedMessage(conn)
-	if err != nil {
-		return nil, err
-	}
-	respMsg, err := security.DecodeMessage(respData)
-	if err != nil {
-		return nil, err
-	}
-
-	// Ensure the response is of type "rpc"
-	if respMsg.Type != "rpc" {
-		return nil, ErrInvalidMessageFormat
-	}
-
-	// Extract and deserialize the RPC Message. Binary RPC payloads are carried
-	// as JSON byte strings inside security.Message.Data.
-	var dataBytes []byte
-	if err := json.Unmarshal(respMsg.Data, &dataBytes); err != nil {
-		dataBytes = respMsg.Data
-	}
-	if len(dataBytes) == 0 {
-		return nil, ErrInvalidMessageFormat
-	}
-
-	// Check if the response is a JSON-RPC error response before trying to unmarshal as binary Message.
-	// The server may return JSON-RPC errors (e.g. method not found). Those payloads are valid
-	// JSON, not binary RPC Message bytes, so attempting resp.Unmarshal() would fail with
-	// buffer-size / format errors.
-	var rpcErrResp struct {
-		JSONRPC string    `json:"jsonrpc"`
-		Error   *RPCError `json:"error"`
-		Result  any       `json:"result"`
-	}
-	if err := json.Unmarshal(dataBytes, &rpcErrResp); err == nil && rpcErrResp.JSONRPC == "2.0" {
-		if rpcErrResp.Error != nil {
-			return nil, fmt.Errorf("RPC error (%d): %s", rpcErrResp.Error.Code, rpcErrResp.Error.Message)
-		}
-		// If it's a JSON-RPC response without an error, we still can't treat it as a binary Message.
-		return nil, fmt.Errorf("unexpected JSON-RPC response (expected binary Message): %s", string(dataBytes))
-	}
-
-	var resp Message
-	if err := resp.Unmarshal(dataBytes); err != nil {
-		return nil, err
-	}
-
-	return &resp, nil
+	return resultBytes, nil
 }
 
-// writeFramedMessage writes a length-prefixed message to the connection.
+// writeFramedMessage writes a 4-byte big-endian length prefix followed by
+// the payload — the exact framing transport/tcp.go's handleConnection reads.
 func writeFramedMessage(conn net.Conn, data []byte) error {
-	// Write 4-byte big-endian length prefix
 	lenBuf := make([]byte, 4)
 	binary.BigEndian.PutUint32(lenBuf, uint32(len(data)))
 	if _, err := conn.Write(lenBuf); err != nil {
 		return fmt.Errorf("writing length prefix: %w", err)
 	}
-	// Write payload
 	if _, err := conn.Write(data); err != nil {
 		return fmt.Errorf("writing payload: %w", err)
 	}
 	return nil
 }
 
-// readFramedMessage reads a length-prefixed message from the connection.
-func readFramedMessage(conn net.Conn) ([]byte, error) {
-	// Read 4-byte big-endian length prefix
-	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+// readFramedMessage reads a 4-byte big-endian length prefix followed by the
+// payload, matching the framing transport/tcp.go's handleConnection writes.
+func readFramedMessage(conn net.Conn, deadline time.Time) ([]byte, error) {
+	_ = conn.SetReadDeadline(deadline)
 	var lenBuf [4]byte
 	if _, err := io.ReadFull(conn, lenBuf[:]); err != nil {
 		return nil, fmt.Errorf("reading length prefix: %w", err)

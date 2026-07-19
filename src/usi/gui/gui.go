@@ -363,20 +363,44 @@ func Run() {
 				return
 			}
 
-			amount := new(big.Float)
+			// SetPrec(256) before SetString: the default big.Float precision
+			// (0, which SetString bumps to just 64 bits) is only good for
+			// integers up to ~1.8e19 with no fractional part. SPX amounts
+			// can be both large (millions of SPX) and carry up to 18
+			// decimal places at once, so we ask for headroom explicitly
+			// rather than silently losing low-order digits.
+			amount := new(big.Float).SetPrec(256)
 			_, ok := amount.SetString(amountEntry.Text)
 			if !ok || amount.Cmp(big.NewFloat(0)) <= 0 {
 				dialog.ShowError(errors.New("invalid amount"), window)
 				return
 			}
 
-			// Convert to nSPX (1 SPX = 10^18 nSPX)
-			amountNSPX := new(big.Int)
-			amountFloat, _ := amount.Float64()
-			amountNSPX.SetInt64(int64(amountFloat * 1e18))
+			// Convert to nSPX (1 SPX = 10^18 nSPX) using big.Float/big.Int
+			// arithmetic throughout.
+			//
+			// ★ FIX: the previous conversion routed through float64 and
+			// int64(...) — `amountNSPX.SetInt64(int64(amountFloat * 1e18))`
+			// — which silently overflows for any amount whose nSPX
+			// equivalent exceeds int64's ~9.223e18 ceiling, i.e. any send
+			// above ~9.22 SPX. Converting an out-of-range float to int64 in
+			// Go is implementation-defined (in practice it wraps/clamps to
+			// garbage), so a wallet with a typical multi-million-SPX
+			// balance could never send correctly: the signed transaction
+			// would carry a wildly wrong amount while the confirmation
+			// dialog above it (which formats `amount`, a big.Float,
+			// directly) kept showing the correct one — the two silently
+			// diverged only past the overflow threshold.
+			multiplier := new(big.Float).SetPrec(256).SetInt(big.NewInt(1e18))
+			scaledNSPX := new(big.Float).SetPrec(256).Mul(amount, multiplier)
+			amountNSPX, _ := scaledNSPX.Int(nil)
+			if amountNSPX == nil || amountNSPX.Sign() <= 0 {
+				dialog.ShowError(errors.New("invalid amount"), window)
+				return
+			}
 
-			validatePassphraseDialog(window, "Confirm Transaction", fmt.Sprintf("Send %.6f %s to:\n%s\n\nMemo: %s",
-				amount, chainHeader.Symbol, recipientEntry.Text, memoEntry.Text),
+			validatePassphraseDialog(window, "Confirm Transaction", fmt.Sprintf("Send %s %s to:\n%s\n\nMemo: %s",
+				formatSPXAmount(amount), chainHeader.Symbol, recipientEntry.Text, memoEntry.Text),
 				func(passphrase string) {
 					statusText.Text = "Processing transaction..."
 					statusText.Color = colMuted
@@ -395,15 +419,15 @@ func Run() {
 								return
 							}
 
-							addActivity(fmt.Sprintf("Sent %.6f %s to %s (tx: %s)",
-								amount, chainHeader.Symbol, recipientEntry.Text[:16], txID[:8]+"..."))
+							addActivity(fmt.Sprintf("Sent %s %s to %s (tx: %s)",
+								formatSPXAmount(amount), chainHeader.Symbol, recipientEntry.Text[:16], txID[:8]+"..."))
 							statusText.Text = "SUCCESS Transaction sent! TxID: " + txID[:16] + "..."
 							statusText.Color = colAccent
 							statusText.Refresh()
 
 							dialog.ShowInformation("Transaction Sent",
-								fmt.Sprintf("Successfully sent %.6f %s to %s\n\nTxID: %s",
-									amount, chainHeader.Symbol, recipientEntry.Text, txID), window)
+								fmt.Sprintf("Successfully sent %s %s to %s\n\nTxID: %s",
+									formatSPXAmount(amount), chainHeader.Symbol, recipientEntry.Text, txID), window)
 
 							recipientEntry.SetText("")
 							amountEntry.SetText("")
@@ -1794,15 +1818,10 @@ func Run() {
 		balValue.TextSize = 36
 		balValue.TextStyle = fyne.TextStyle{Bold: true}
 
-		balSubtext := fmt.Sprintf("%s identity · %s mainnet", orgDisplayName, chainHeader.ChainName)
-		balUnit := canvas.NewText(balSubtext, colMuted)
-		balUnit.TextSize = 12
-
 		balInner := container.NewVBox(
 			container.NewCenter(balLabel),
 			spacer(6),
 			container.NewCenter(balValue),
-			container.NewCenter(balUnit),
 		)
 		balCard := container.NewMax(balBg, container.NewPadded(balInner))
 
@@ -1822,7 +1841,7 @@ func Run() {
 						new(big.Float).SetInt(resp.Balance),
 						big.NewFloat(1e18),
 					)
-					balValue.Text = balanceSPX.Text('f', 6)
+					balValue.Text = formatSPXAmount(balanceSPX)
 					balValue.Color = colAccent
 					balValue.Refresh()
 					log.Printf("[Wallet] Balance updated: %s SPX", balValue.Text)
@@ -1893,13 +1912,13 @@ func Run() {
 						dirBadge := container.NewMax(dirBadgeBg, container.NewCenter(dirT))
 
 						// Format amount
-						amountSPX := "0.000000"
+						amountSPX := "0"
 						if tx.Amount != nil {
 							amountFloat := new(big.Float).Quo(
 								new(big.Float).SetInt(tx.Amount),
 								big.NewFloat(1e18),
 							)
-							amountSPX = amountFloat.Text('f', 6)
+							amountSPX = formatSPXAmount(amountFloat)
 						}
 
 						// Build message

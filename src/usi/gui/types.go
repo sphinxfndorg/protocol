@@ -7,14 +7,17 @@ package gui
 import (
 	"math/big"
 	"time"
-
-	"github.com/sphinxfndorg/protocol/src/rpc"
 )
 
-// WalletClient wraps the RPC client for wallet operations
+// WalletClient wraps the RPC client for wallet operations.
+//
+// nodeAddr must be the node's P2P TCP address (see rpc.CallRPC's doc
+// comment in client.go for why) — there is deliberately no NodeID field
+// here anymore: rpc.CallRPC now speaks standard JSON-RPC 2.0 over an
+// encrypted, handshake-authenticated TCP connection, which has no place
+// for a NodeID field the way the old custom binary Message protocol did.
 type WalletClient struct {
 	nodeAddr string
-	nodeID   rpc.NodeID
 }
 
 // BalanceResponse represents balance result

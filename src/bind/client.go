@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/sphinxfndorg/protocol/src/rpc"
-	"golang.org/x/crypto/sha3"
 )
 
 // ============================================================================
@@ -42,22 +41,21 @@ func CallNodeRPC(resources []NodeResources, nodeName, method string, params inte
 		return nil, fmt.Errorf("no UDP address configured for node %s", nodeName)
 	}
 
-	var nodeID rpc.NodeID
-	sh := sha3.NewShake256()
-	sh.Write(node.PublicKey)
-	sh.Read(nodeID[:])
-
-	resp, err := rpc.CallRPC(udpAddr, method, params, nodeID, ttl)
+	// rpc.CallRPC dials the node's P2P TCP address directly and performs its
+	// own handshake/encryption internally — it no longer takes a NodeID
+	// parameter, and it returns the JSON-RPC "result" field directly as
+	// json.RawMessage (there is no wrapping .Values slice anymore).
+	resp, err := rpc.CallRPC(udpAddr, method, params, ttl)
 	if err != nil {
 		return nil, fmt.Errorf("RPC call to %s failed: %w", nodeName, err)
 	}
 
-	if len(resp.Values) == 0 {
+	if len(resp) == 0 {
 		return nil, fmt.Errorf("no result data in RPC response from %s", nodeName)
 	}
 
 	var result interface{}
-	if err := json.Unmarshal(resp.Values[0], &result); err != nil {
+	if err := json.Unmarshal(resp, &result); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal RPC result from %s: %w", nodeName, err)
 	}
 

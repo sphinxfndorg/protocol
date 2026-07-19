@@ -44,6 +44,7 @@ import (
 	"github.com/sphinxfndorg/protocol/src/params/commit"
 	"github.com/sphinxfndorg/protocol/src/rpc"
 	"github.com/sphinxfndorg/protocol/src/state"
+	"github.com/sphinxfndorg/protocol/src/transport"
 	"github.com/syndtr/goleveldb/leveldb"
 	"go.uber.org/zap"
 )
@@ -999,6 +1000,64 @@ func StartNode(
 	}()
 	logger.Info("TCP inbound listener running")
 
+	// SECTION 11a — dedicated wallet/JSON-RPC listener
+	//
+	// currentAddress (above) is the P2P gossip port, served by
+	// handleIncomingConn, which only understands the plain, unencrypted
+	// P2P message types (key_exchange, peer_exchange, checkpoint,
+	// get_blocks, consensus messages, legacy "rpc"). It has no "jsonrpc"
+	// case, so wallets/CLI tooling built against rpc.CallRPC (which speaks
+	// handshake-authenticated, encrypted JSON-RPC 2.0 framing — see that
+	// function's doc comment) cannot talk to it.
+	//
+	// transport.TCPServer (go/src/transport/tcp.go) is the listener that
+	// actually implements that protocol: PerformHandshake, then a decode
+	// loop that dispatches msg.Type == "jsonrpc" to rpcServer.HandleRequest
+	// and writes back an encrypted, framed response. It already exists and
+	// is already correct — bind.BindTCPServers wires it up for the
+	// same-box devnet harness (legacy.go) — but production StartNode never
+	// instantiated one, so it sat unused while wallets dialed the P2P port
+	// instead and got silently misrouted or dropped.
+	//
+	// Rather than teach handleIncomingConn a second, incompatible wire
+	// format (the two protocols aren't reliably distinguishable by peeking
+	// bytes — this one starts with raw X25519 key material, the P2P one
+	// starts with a length-prefixed JSON envelope), we run
+	// transport.NewTCPServer as a second, dedicated listener on its own
+	// port. nodeConfig.WSPort already reserves a per-node port for exactly
+	// this kind of "operator/tooling-facing" traffic (see port.go's
+	// baseWSPort) and was otherwise unused in production startup — no
+	// separate WebSocket server is started here — so we reuse that slot
+	// rather than adding a new flag/config field.
+	//
+	// ★ FIX: cli.go's --ws-port flag is declared with a fixed literal
+	// default ("127.0.0.1:8600"). Go's flag package can't distinguish "the
+	// operator explicitly passed --ws-port=127.0.0.1:8600" from "the
+	// operator didn't touch the flag at all" — both look identical after
+	// parsing — so cli.go's flagOverrides always sets wsPort<N> to that
+	// same literal string for every node index, and GetNodePortConfigs
+	// dutifully assigns it to every same-box node's WSPort. Multiple
+	// same-box nodes therefore all report nodeConfig.WSPort ==
+	// "127.0.0.1:8600" and the second one to reach Start() panics with
+	// "address already in use" (exactly the failure mode
+	// StartTCPListener above works around for --tcp-addr via
+	// userProvidedTCP). We apply the same technique here: treat the
+	// well-known unmodified default as "not actually set for this node"
+	// and derive a per-nodeIndex address instead. An operator who
+	// deliberately passes a distinct --ws-port for each node (i.e. any
+	// value other than the bare default) is still honoured as-is.
+	const unsetWSPortDefault = "127.0.0.1:8600"
+	rpcListenAddr := nodeConfig.WSPort
+	if rpcListenAddr == "" || rpcListenAddr == unsetWSPortDefault {
+		rpcListenAddr = fmt.Sprintf("127.0.0.1:%d", 8700+nodeIndex)
+	}
+	rpcMsgCh := make(chan *security.Message, 100)
+	walletRPCServer := transport.NewTCPServer(rpcListenAddr, rpcMsgCh, rpcServer, nil)
+	if err := walletRPCServer.Start(); err != nil {
+		return fmt.Errorf("failed to bind wallet RPC listener on %s: %w", rpcListenAddr, err)
+	}
+	logger.Info("Wallet/JSON-RPC listener bound on %s", rpcListenAddr)
+
 	// SECTION 11b — dynamic peer discovery via --seeds with DNS support
 	//
 	// The hardcoded default enrtree:// URL only makes sense for real-device
@@ -1341,7 +1400,8 @@ func StartNode(
 
 	logger.Info("=== NODE RUNNING ===")
 	logger.Info("Node ID: %s", currentNodeID)
-	logger.Info("TCP: %s", currentAddress)
+	logger.Info("TCP (P2P gossip): %s", currentAddress)
+	logger.Info("TCP (wallet/JSON-RPC): %s", rpcListenAddr)
 	logger.Info("HTTP: http://127.0.0.1:%d", httpPort)
 
 	knownPeers := effectivePeerCount()

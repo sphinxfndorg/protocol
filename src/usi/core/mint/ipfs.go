@@ -55,11 +55,6 @@ func broadcastAnchorTransaction(nodeAddr, from, keyFile string, anchorData []byt
 		return "", fmt.Errorf("key file required")
 	}
 
-	// Build a minimal transaction with the anchor data in ReturnData
-	// We use the RPC client directly to broadcast
-	var nodeID rpc.NodeID
-	copy(nodeID[:], []byte(from)[:32])
-
 	// Create the transaction payload
 	txPayload := map[string]interface{}{
 		"sender":      from,
@@ -78,20 +73,23 @@ func broadcastAnchorTransaction(nodeAddr, from, keyFile string, anchorData []byt
 		return "", fmt.Errorf("marshal tx: %w", err)
 	}
 
-	// Broadcast via RPC
-	resp, err := rpc.CallRPC(nodeAddr, "sendrawtransaction", []interface{}{hex.EncodeToString(txJSON)}, nodeID, 120)
+	// Broadcast via RPC. rpc.CallRPC(address, method, params, ttlSeconds)
+	// dials the node's P2P TCP address and handles its own handshake — it
+	// no longer takes a NodeID argument, and it returns the JSON-RPC
+	// "result" field directly as json.RawMessage.
+	resp, err := rpc.CallRPC(nodeAddr, "sendrawtransaction", []interface{}{hex.EncodeToString(txJSON)}, 120)
 	if err != nil {
 		return "", fmt.Errorf("RPC broadcast: %w", err)
 	}
 
-	if len(resp.Values) == 0 {
+	if len(resp) == 0 {
 		return "", fmt.Errorf("empty RPC response")
 	}
 
 	var result struct {
 		TxID string `json:"txid"`
 	}
-	if err := json.Unmarshal(resp.Values[0], &result); err != nil {
+	if err := json.Unmarshal(resp, &result); err != nil {
 		return "", fmt.Errorf("parse RPC response: %w", err)
 	}
 

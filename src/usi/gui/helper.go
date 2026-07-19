@@ -481,10 +481,7 @@ func (c *WalletClient) AnchorMintReceipt(receipt *mint.MintReceipt) (txID string
 
 	// Store artifact association on node (best-effort).
 	// If node storage is unavailable, anchoring still proceeds.
-	if nodeID := c.nodeID; true {
-		_, _ = storage.DefaultStorageClient(c.nodeAddr).StoreMintArtifact(artifact)
-		_ = nodeID
-	}
+	_, _ = storage.DefaultStorageClient(c.nodeAddr).StoreMintArtifact(artifact)
 
 	anchorData, err := mint.BuildAnchorData(receipt)
 	if err != nil {
@@ -542,11 +539,11 @@ func (c *WalletClient) AnchorMintReceipt(receipt *mint.MintReceipt) (txID string
 
 	rawTx := hex.EncodeToString(txData)
 
-	resp, err := rpc.CallRPC(c.nodeAddr, "sendrawtransaction", []interface{}{rawTx}, c.nodeID, 120)
+	resultData, err := rpc.CallRPC(c.nodeAddr, "sendrawtransaction", []interface{}{rawTx}, 120)
 	if err != nil {
 		return "", "", fmt.Errorf("RPC error: %w", err)
 	}
-	if len(resp.Values) == 0 {
+	if len(resultData) == 0 || string(resultData) == "null" {
 		return "", "", errors.New("empty response")
 	}
 
@@ -555,7 +552,7 @@ func (c *WalletClient) AnchorMintReceipt(receipt *mint.MintReceipt) (txID string
 		Status string `json:"status"`
 		Error  string `json:"error"`
 	}
-	if err := json.Unmarshal(resp.Values[0], &result); err != nil {
+	if err := json.Unmarshal(resultData, &result); err != nil {
 		return "", "", fmt.Errorf("parse response: %w", err)
 	}
 	if result.Error != "" {
@@ -607,17 +604,17 @@ func BuildMintScreen(window fyne.Window, client *WalletClient) fyne.CanvasObject
 			dialog.ShowError(fmt.Errorf("no anchored txid available"), window)
 			return
 		}
-		resp, err := rpc.CallRPC(client.nodeAddr, "gettransaction", []interface{}{lastTxID}, client.nodeID, 60)
+		resultData, err := rpc.CallRPC(client.nodeAddr, "gettransaction", []interface{}{lastTxID}, 60)
 		if err != nil {
 			dialog.ShowError(fmt.Errorf("gettransaction rpc: %w", err), window)
 			return
 		}
-		if len(resp.Values) == 0 {
+		if len(resultData) == 0 || string(resultData) == "null" {
 			dialog.ShowError(fmt.Errorf("empty gettransaction response"), window)
 			return
 		}
 		var tx types.Transaction
-		if err := json.Unmarshal(resp.Values[0], &tx); err != nil {
+		if err := json.Unmarshal(resultData, &tx); err != nil {
 			dialog.ShowError(fmt.Errorf("parse gettransaction: %w", err), window)
 			return
 		}

@@ -35,29 +35,67 @@ import (
 //        ├─ re-derive electedLeaderID via selector.SelectProposer (RANDAO seed)
 //        ├─ phase = PhasePrePrepared
 //        ├─ sendPrepareVote()  → broadcasts own Vote (type: prepare)
-//        └─ tryEnterPreparedPhase()   ◄── side door #1
+//        ├─ tryEnterPreparedPhase()   ◄── side door #1 (prepare quorum arrived before this proposal did)
+//        └─ if hasQuorum(): attachAttestationsBeforeCommit + commitBlock()
+//                                     ◄── side door #2 (COMMIT quorum arrived before this proposal did —
+//                                         votes can outrace the proposal itself, not just prepare votes)
 //
 //   HandlePrepareVote → prepareCh → processPrepareVote
 //        ├─ store vote, accumulate stake in weightedPrepareVotes
-//        └─ tryEnterPreparedPhase()   ◄── side door #2 (same function, called again)
+//        └─ tryEnterPreparedPhase()   ◄── side door #3 (same function as #1, called again)
 //
-//        tryEnterPreparedPhase (idempotent, runs from either caller):
+//        tryEnterPreparedPhase (idempotent, runs from any of the 3 call sites):
 //            requires: hasPrepareQuorum() AND phase==PhasePrePrepared AND preparedBlock set
+//            hasPrepareQuorum/hasQuorum both require, in this order:
+//              (a) distinct voter count >= calculateQuorumSize(getTotalNodes()) — a floor derived
+//                  from actual connected peers, independent of this node's own stake bookkeeping
+//              (b) accumulated voter stake >= 2/3 of c.validatorSet.GetTotalStake()
+//            (a) exists so an incomplete/stale local validator-set registry — which shrinks this
+//            node's own view of "total stake" — can never let a single vote alone clear "2/3" of
+//            that too-small total.
+//            ├─ if a peer already broadcast a PrepareCertificate for this block hash, adopt its
+//            │    signer list verbatim (lookupPrepareCertificate) instead of this node's own
+//            │    locally-gossiped subset; otherwise derive locally AND broadcast a
+//            │    PrepareCertificate so peers converge on this node's list instead of each
+//            │    node persisting a different signer set for the same prepare phase
 //            ├─ phase = PhasePrepared
 //            ├─ lockedBlock = preparedBlock
 //            └─ voteForBlock()  → broadcasts own Vote (type: commit)
 //
-//   HandleVote → voteCh → processVote
+//   HandleVote → voteCh → processVote → processVoteLocked
 //        ├─ store vote, accumulate stake in weightedCommitVotes
-//        └─ if hasQuorum():
+//        └─ if hasQuorum():   (same two-part check as hasPrepareQuorum, see above)
 //              ├─ phase = PhaseCommitted
-//              ├─ attach Attestations to block body
+//              ├─ attachAttestationsBeforeCommit(block, blockHash):
+//              │     if a peer already broadcast a CommitCertificate for this hash, adopt its
+//              │     attestation list verbatim (lookupCommitCertificate) instead of deriving from
+//              │     this node's own c.receivedVotes; otherwise derive locally, sort by
+//              │     ValidatorID, attach to block.Body.Attestations, AND broadcast a
+//              │     CommitCertificate so peers converge on this node's list — same
+//              │     composition-convergence pattern as the prepare phase above
 //              └─ commitBlock(block)
+//
+//   HandleCommitCertificate / HandlePrepareCertificate (certificate.go)
+//        — invoked directly by the network layer (manager.go / p2p.go dispatch on
+//          "commit_certificate" / "prepare_certificate"), NOT queued through voteCh/prepareCh
+//        ├─ verify every attestation's signature binds to the EXACT (view, blockHash, voterID)
+//        │    it claims (rejects cross-block signature replay)
+//        ├─ require the certificate's own attestation set to independently clear the same
+//        │    2/3-stake threshold (attestationsMeetStakeQuorum, with the same distinct-attester
+//        │    floor as hasQuorum/hasPrepareQuorum)
+//        └─ cache the verified list for tryEnterPreparedPhase / attachAttestationsBeforeCommit
+//             to adopt (see above) — evicted once consumed, or at round-reset as a backstop
 //
 //   commitBlock
 //        ├─ blockChain.CommitBlock(block)   ← interface call, impl not in these files
 //        ├─ onCommit callback
-//        ├─ reset all round state, currentView++
+//        ├─ capture committedView := c.currentView BEFORE the increment below, and record each
+//        │    voter's ConsensusSignature at ITS OWN vote.View (falling back to committedView only
+//        │    for the self-commit fallback) — recording c.currentView AFTER incrementing it used
+//        │    to stamp next-round's view number onto this round's signatures, which diverged
+//        │    across nodes whenever a concurrent view-change bumped currentView independently
+//        ├─ reset all round state, currentView++, evict any cached prepare/commit certificate
+//        │    for this hash (consumed already, or never needed if this node derived locally)
 //        └─ goroutine: UpdateLeaderStatus() for next round
 
 // NewConsensus creates a new consensus instance with context

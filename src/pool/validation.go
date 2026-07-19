@@ -168,22 +168,30 @@ func (mp *Mempool) verifyTransactionSignature(tx *types.Transaction) error {
 
 	// OP_CHECK_SIGNATURE_HASH - Verifies the signature hash matches the transaction data
 	// This prevents replay attacks by ensuring each signature is unique per transaction
+	//
+	// executeCheckSignatureHash (opcode.go) pops in this order:
+	//   expectedHashLen, expectedHashPtr, sigLen, sigPtr
+	// Pop always returns the TOP of stack first, and the TOP is whatever was
+	// PUSHed LAST. So to have expectedHashLen come out of the first Pop(),
+	// it must be pushed LAST — the push order below is the pop order
+	// reversed, not repeated in the same order.
 
-	// Push 32 (hash length) onto the stack
+	// Push the signature offset (0, at the start of memory) — pushed first,
+	// ends up at the BOTTOM, popped LAST as sigPtr.
 	bc = append(bc, byte(svm.PUSH4))
-	bc = append(bc, uint32ToBytesPool(32)...)
+	bc = append(bc, uint32ToBytesPool(0)...)
 
-	// Push the memory offset where the signature hash is stored
-	bc = append(bc, byte(svm.PUSH4))
-	bc = append(bc, uint32ToBytesPool(uint32(hashOffset))...)
-
-	// Push the signature length onto the stack
+	// Push the signature length — popped as sigLen.
 	bc = append(bc, byte(svm.PUSH4))
 	bc = append(bc, uint32ToBytesPool(uint32(sigLen))...)
 
-	// Push the signature offset (0, at the start of memory)
+	// Push the memory offset where the signature hash is stored — popped as expectedHashPtr.
 	bc = append(bc, byte(svm.PUSH4))
-	bc = append(bc, uint32ToBytesPool(0)...)
+	bc = append(bc, uint32ToBytesPool(uint32(hashOffset))...)
+
+	// Push 32 (hash length) — pushed LAST, ends up on TOP, popped FIRST as expectedHashLen.
+	bc = append(bc, byte(svm.PUSH4))
+	bc = append(bc, uint32ToBytesPool(32)...)
 
 	// Execute OP_CHECK_SIGNATURE_HASH opcode
 	bc = append(bc, byte(svm.OP_CHECK_SIGNATURE_HASH))
@@ -191,30 +199,34 @@ func (mp *Mempool) verifyTransactionSignature(tx *types.Transaction) error {
 	bc = append(bc, byte(svm.OP_VERIFY))
 
 	// OP_CHECK_SPHINCS - Verifies the SPHINCS+ signature
+	//
+	// executeCheckSphincs (opcode.go) pops in this order:
+	//   msgLen, msgPtr, pubkeyLen, pubkeyPtr, sigLen, sigPtr
+	// Same reasoning as above: push the LAST-popped item FIRST.
 
-	// Push message length onto stack
+	// Push signature offset (0, at the start of memory) — popped LAST as sigPtr.
 	bc = append(bc, byte(svm.PUSH4))
-	bc = append(bc, uint32ToBytesPool(uint32(msgLen))...)
+	bc = append(bc, uint32ToBytesPool(0)...)
 
-	// Push message offset (where message is stored in memory)
-	bc = append(bc, byte(svm.PUSH4))
-	bc = append(bc, uint32ToBytesPool(uint32(msgOffset))...)
-
-	// Push public key length onto stack
-	bc = append(bc, byte(svm.PUSH4))
-	bc = append(bc, uint32ToBytesPool(uint32(pkLen))...)
-
-	// Push public key offset onto stack
-	bc = append(bc, byte(svm.PUSH4))
-	bc = append(bc, uint32ToBytesPool(uint32(pkOffset))...)
-
-	// Push signature length onto stack
+	// Push signature length — popped as sigLen.
 	bc = append(bc, byte(svm.PUSH4))
 	bc = append(bc, uint32ToBytesPool(uint32(sigLen))...)
 
-	// Push signature offset (0, at the start of memory) onto stack
+	// Push public key offset — popped as pubkeyPtr.
 	bc = append(bc, byte(svm.PUSH4))
-	bc = append(bc, uint32ToBytesPool(0)...)
+	bc = append(bc, uint32ToBytesPool(uint32(pkOffset))...)
+
+	// Push public key length — popped as pubkeyLen.
+	bc = append(bc, byte(svm.PUSH4))
+	bc = append(bc, uint32ToBytesPool(uint32(pkLen))...)
+
+	// Push message offset (where message is stored in memory) — popped as msgPtr.
+	bc = append(bc, byte(svm.PUSH4))
+	bc = append(bc, uint32ToBytesPool(uint32(msgOffset))...)
+
+	// Push message length — pushed LAST, popped FIRST as msgLen.
+	bc = append(bc, byte(svm.PUSH4))
+	bc = append(bc, uint32ToBytesPool(uint32(msgLen))...)
 
 	// Execute OP_CHECK_SPHINCS opcode to verify the signature
 	bc = append(bc, byte(svm.OP_CHECK_SPHINCS))
@@ -223,12 +235,17 @@ func (mp *Mempool) verifyTransactionSignature(tx *types.Transaction) error {
 
 	// Store the signature hash to prevent replay attacks
 	// This records that this signature hash has been used
-	bc = append(bc, byte(svm.PUSH4))
-	bc = append(bc, uint32ToBytesPool(32)...)
+	//
+	// executeStoreSignatureHash (opcode.go) pops in this order: hashLen, hashPtr.
+	// Push hashPtr first (bottom, popped last), hashLen last (top, popped first).
 
-	// Push the memory offset of the signature hash
+	// Push the memory offset of the signature hash — popped as hashPtr.
 	bc = append(bc, byte(svm.PUSH4))
 	bc = append(bc, uint32ToBytesPool(uint32(hashOffset))...)
+
+	// Push 32 (hash length) — pushed LAST, popped FIRST as hashLen.
+	bc = append(bc, byte(svm.PUSH4))
+	bc = append(bc, uint32ToBytesPool(32)...)
 
 	// Store the signature hash in the VM's state
 	bc = append(bc, byte(svm.OP_STORE_SIGNATURE_HASH))
@@ -513,6 +530,14 @@ func (mp *Mempool) validateTransaction(pooledTx *PooledTransaction) {
 		mp.lock.Lock()
 		defer mp.lock.Unlock()
 
+		// This tx may have been replaced, pruned, or removed after block
+		// inclusion while we were off checking ReturnData size. If so, it's
+		// no longer ours to write back — see stillOwnsSlot's doc comment.
+		if !mp.stillOwnsSlot(tx.ID, pooledTx) {
+			logger.Debug("validateTransaction: %s no longer tracked (evicted while validating), discarding OP_RETURN result", tx.ID)
+			return
+		}
+
 		// Mark transaction as invalid due to oversized return data
 		pooledTx.Status = StatusInvalid
 		pooledTx.Error = fmt.Sprintf("OP_RETURN data exceeds maximum size of %d bytes", maxReturnSize)
@@ -534,6 +559,21 @@ func (mp *Mempool) validateTransaction(pooledTx *PooledTransaction) {
 	// Lock to update mempool state with validation results
 	mp.lock.Lock()
 	defer mp.lock.Unlock()
+
+	// performValidation ran unlocked and can take real time (SPHINCS+/SVM
+	// checks). While it was running, this exact tx.ID may have been evicted
+	// by a fee-bump replacement, a stale-nonce prune, or a block-inclusion
+	// removal — all of which delete it from allTransactions and the
+	// account-nonce index. If that happened, this pooledTx is stale: writing
+	// it into pendingPool/invalidPool now would resurrect an already-
+	// superseded (or already-committed) transaction as freshly selectable,
+	// orphaned from allTransactions. Discard the result instead — including
+	// skipping the validationTime/stats accounting below, since this
+	// validation's outcome is being thrown away, not applied.
+	if !mp.stillOwnsSlot(tx.ID, pooledTx) {
+		logger.Debug("validateTransaction: %s no longer tracked (evicted while validating), discarding validation result", tx.ID)
+		return
+	}
 
 	// Calculate and record validation duration for performance monitoring
 	validationTime := time.Since(startTime)
@@ -668,8 +708,6 @@ func (mp *Mempool) performValidation(tx *types.Transaction) error {
 
 // getSenderNonce retrieves the current nonce for a given sender address
 // This is a stub method that would query the blockchain state in production
-// getSenderNonce retrieves the current nonce for a given sender address
-// getSenderNonce retrieves the current nonce for a given sender address
 func (mp *Mempool) getSenderNonce(sender string) uint64 {
 	if mp.stateProvider == nil {
 		logger.Warn("StateProvider not set, returning default nonce 0")

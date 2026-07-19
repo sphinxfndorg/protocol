@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"math/big"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/sphinxfndorg/protocol/src/common"
@@ -39,6 +40,7 @@ func NewMempool(config *MempoolConfig, stateProvider BlockchainStateProvider) *M
 		validationPool:    make(map[string]*PooledTransaction),
 		invalidPool:       make(map[string]*PooledTransaction),
 		allTransactions:   make(map[string]*PooledTransaction),
+		accountNonceIndex: make(map[string]string),
 		config:            config,
 		currentBytes:      0,
 		stateProvider:     stateProvider, // Store interface reference
@@ -103,6 +105,36 @@ func (mp *Mempool) Stop() {
 	}
 }
 
+// replacementBumpPercent is the minimum percentage by which a replacement
+// transaction's gas price must exceed the transaction it displaces for the
+// same (Sender, Nonce) slot — mirroring Ethereum's default 10% replace-by-fee
+// bump. Without a floor like this, an attacker (or a buggy client retrying
+// blindly) could replace-cycle a slot for free, repeatedly evicting and
+// re-occupying it at no real cost; requiring a real bump makes a replacement
+// a genuine priority signal instead of noise.
+const replacementBumpPercent = 10
+
+// isSufficientFeeBump reports whether newPrice exceeds oldPrice by at least
+// replacementBumpPercent%. A nil price is treated as zero.
+func isSufficientFeeBump(oldPrice, newPrice *big.Int) bool {
+	old := big.NewInt(0)
+	if oldPrice != nil {
+		old = oldPrice
+	}
+	if old.Sign() == 0 {
+		// Nothing to bump against — any positive price replaces a zero/unset one.
+		return newPrice != nil && newPrice.Sign() > 0
+	}
+	if newPrice == nil {
+		return false
+	}
+	// newPrice*100 >= old*(100+bump), done in integer math to avoid float
+	// rounding on potentially large nSPX gas prices.
+	lhs := new(big.Int).Mul(newPrice, big.NewInt(100))
+	rhs := new(big.Int).Mul(old, big.NewInt(100+replacementBumpPercent))
+	return lhs.Cmp(rhs) >= 0
+}
+
 // BroadcastTransaction adds a new transaction to the broadcast pool
 // Now with SVM signature verification
 func (mp *Mempool) BroadcastTransaction(tx *types.Transaction) error {
@@ -124,6 +156,36 @@ func (mp *Mempool) BroadcastTransaction(tx *types.Transaction) error {
 		return fmt.Errorf("transaction %s already exists with status %d", tx.ID, existing.Status)
 	}
 
+	// ========== ACCOUNT-NONCE IDENTITY CHECK ==========
+	// A transaction's real identity is (Sender, Nonce), not its content hash:
+	// two different payloads (e.g. a fee-bumped resubmission) can legitimately
+	// claim the same nonce, but the account can only ever settle one of them.
+	// Without this check both would sit in the pool at once with nothing to
+	// decide between them until block assembly — where they'd either race
+	// arbitrarily into the same block (getting the whole block rejected once
+	// the auth layer catches the duplicate nonce) or split across competing
+	// proposals unpredictably. Resolve the conflict here, deterministically,
+	// at admission time.
+	nonceKey := tx.Sender + ":" + strconv.FormatUint(tx.Nonce, 10)
+	var replacingID string
+	if occupantID, occupied := mp.accountNonceIndex[nonceKey]; occupied {
+		occupant := mp.allTransactions[occupantID]
+		if occupant == nil {
+			// Index entry outlived its transaction — every removal path is
+			// supposed to clear this too, so this shouldn't normally happen.
+			// Drop the stale entry and treat the slot as free.
+			delete(mp.accountNonceIndex, nonceKey)
+		} else if !isSufficientFeeBump(occupant.Transaction.GasPrice, tx.GasPrice) {
+			return fmt.Errorf(
+				"replacement transaction underpriced for sender=%s nonce=%d: existing gas price %s, need at least %d%% above it",
+				tx.Sender, tx.Nonce, occupant.Transaction.GasPrice.String(), replacementBumpPercent,
+			)
+		} else {
+			replacingID = occupantID
+		}
+	}
+	// ====================================================
+
 	// ========== SVM SIGNATURE VERIFICATION ==========
 	// Verify transaction signature using SVM before adding to mempool
 	// Skip genesis vault transactions (they are trusted)
@@ -140,11 +202,32 @@ func (mp *Mempool) BroadcastTransaction(tx *types.Transaction) error {
 		return errors.New("broadcast pool is full")
 	}
 
-	// Check memory limits
+	// Check memory limits. If this is a replacement, the occupant's bytes
+	// are about to be freed, so they shouldn't count against the newcomer.
 	txSize := mp.CalculateTransactionSize(tx)
-	if mp.currentBytes+txSize > mp.config.MaxBytes {
+	projectedBytes := mp.currentBytes
+	if replacingID != "" {
+		if occupant := mp.allTransactions[replacingID]; occupant != nil {
+			occupantSize := mp.CalculateTransactionSize(occupant.Transaction)
+			if projectedBytes >= occupantSize {
+				projectedBytes -= occupantSize
+			} else {
+				projectedBytes = 0
+			}
+		}
+	}
+	if projectedBytes+txSize > mp.config.MaxBytes {
 		return fmt.Errorf("mempool byte limit exceeded: current=%d, tx=%d, max=%d",
-			mp.currentBytes, txSize, mp.config.MaxBytes)
+			projectedBytes, txSize, mp.config.MaxBytes)
+	}
+
+	// Only now that the incoming transaction is fully validated do we evict
+	// whatever it's replacing — a malformed or unsigned "replacement" can
+	// never be used to knock out a legitimate pending transaction.
+	if replacingID != "" {
+		mp.removeTransactionFromAllPools(replacingID)
+		logger.Info("Transaction %s replaced pending nonce slot: sender=%s nonce=%d (was %s)",
+			tx.ID, tx.Sender, tx.Nonce, replacingID)
 	}
 
 	// Create pooled transaction
@@ -159,6 +242,7 @@ func (mp *Mempool) BroadcastTransaction(tx *types.Transaction) error {
 	// Add to pools and update byte count
 	mp.broadcastPool[tx.ID] = pooledTx
 	mp.allTransactions[tx.ID] = pooledTx
+	mp.accountNonceIndex[nonceKey] = tx.ID
 	mp.currentBytes += txSize
 	mp.stats.totalAdded++
 
@@ -404,6 +488,16 @@ func (mp *Mempool) removeTransactionFromAllPools(txID string) {
 		delete(mp.invalidPool, txID)
 	}
 
+	// Free the account-nonce slot this transaction held, but only if it's
+	// still the current occupant — a replacement may have already claimed
+	// the slot for a newer transaction, and that entry must be left alone.
+	if pooledTx.Transaction != nil {
+		nonceKey := pooledTx.Transaction.Sender + ":" + strconv.FormatUint(pooledTx.Transaction.Nonce, 10)
+		if mp.accountNonceIndex[nonceKey] == txID {
+			delete(mp.accountNonceIndex, nonceKey)
+		}
+	}
+
 	// Remove from main index
 	delete(mp.allTransactions, txID)
 
@@ -419,6 +513,37 @@ func (mp *Mempool) removeTransactionFromAllPools(txID string) {
 
 	logger.Debug("Transaction removed from all pools: ID=%s, size=%d bytes, remaining_bytes=%d",
 		txID, txSize, mp.currentBytes)
+}
+
+// stillOwnsSlot reports whether pooledTx is still the live, tracked instance
+// for txID in allTransactions. Callers must hold mp.lock.
+//
+// This guards against an in-flight-validation race: validateTransaction runs
+// performValidation() UNLOCKED (necessarily — SPHINCS+/SVM checks are slow
+// and shouldn't hold the mempool lock), then re-locks and writes the result
+// straight into pendingPool/invalidPool by tx.ID. Between those two points,
+// another goroutine can evict this exact tx.ID via
+// removeTransactionFromAllPools — a fee-bump replacement (BroadcastTransaction),
+// a stale-nonce prune (PruneStaleNonces), or a block-inclusion removal
+// (RemoveTransactions). removeTransactionFromAllPools deletes the entry from
+// allTransactions AND the account-nonce index, but the validating goroutine
+// has no way to know that happened; it still holds its own *PooledTransaction
+// pointer and will write it back into pendingPool/invalidPool regardless.
+//
+// The result: a transaction that was already superseded (or already
+// committed in a block) reappears in pendingPool — orphaned from
+// allTransactions and from accountNonceIndex — yet fully visible to
+// GetPendingTransactions/SelectTransactionsForBlock, which iterate
+// pendingPool directly and never consult allTransactions. That's how an
+// evicted tx could get selected into a later block.
+//
+// Pointer identity (not just presence) is the right check: if txID was
+// removed and then legitimately re-admitted via BroadcastTransaction before
+// this validation finished, allTransactions[txID] now points at a NEW
+// *PooledTransaction for that resubmission. The stale validation result
+// belongs to the OLD instance and must not be applied to the new one either.
+func (mp *Mempool) stillOwnsSlot(txID string, pooledTx *PooledTransaction) bool {
+	return mp.allTransactions[txID] == pooledTx
 }
 
 // GetTransaction returns a transaction by ID from any pool
@@ -632,6 +757,7 @@ func (mp *Mempool) Clear() {
 	mp.validationPool = make(map[string]*PooledTransaction)
 	mp.invalidPool = make(map[string]*PooledTransaction)
 	mp.allTransactions = make(map[string]*PooledTransaction)
+	mp.accountNonceIndex = make(map[string]string)
 	mp.currentBytes = 0
 
 	logger.Info("Mempool cleared")

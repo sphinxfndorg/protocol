@@ -6,6 +6,7 @@ package gui
 
 import (
 	"image/color"
+	"math/big"
 	"strings"
 
 	"fyne.io/fyne/v2"
@@ -32,6 +33,50 @@ var (
 	colBorder    = color.RGBA{255, 255, 255, 18}
 	colBorder2   = color.RGBA{255, 255, 255, 33}
 )
+
+// formatSPXAmount renders an SPX amount (already converted from nSPX) as a
+// comma-grouped, human-readable string.
+//
+// Amounts here can run into the millions (genesis allocations, large
+// balances) while retaining up to 18 decimal places of nSPX precision, so a
+// plain Text('f', 6) reads as an ungrouped wall of digits like
+// "30000000.000000" — technically correct but not what anyone actually
+// wants to see. This groups the integer part with commas every 3 digits
+// and drops the decimal part entirely when it's all zeros (the common
+// case for round genesis/reward amounts), trimming trailing zeros
+// otherwise so "1.500000" becomes "1.5" rather than carrying six digits of
+// padding.
+func formatSPXAmount(amount *big.Float) string {
+	raw := amount.Text('f', 6)
+
+	neg := strings.HasPrefix(raw, "-")
+	if neg {
+		raw = raw[1:]
+	}
+
+	intPart, decPart := raw, ""
+	if dot := strings.IndexByte(raw, '.'); dot != -1 {
+		intPart, decPart = raw[:dot], raw[dot+1:]
+	}
+	decPart = strings.TrimRight(decPart, "0")
+
+	var grouped strings.Builder
+	for i, d := range intPart {
+		if i > 0 && (len(intPart)-i)%3 == 0 {
+			grouped.WriteByte(',')
+		}
+		grouped.WriteRune(d)
+	}
+
+	result := grouped.String()
+	if decPart != "" {
+		result += "." + decPart
+	}
+	if neg {
+		result = "-" + result
+	}
+	return result
+}
 
 // =========================================================================
 // UI HELPER COMPONENTS

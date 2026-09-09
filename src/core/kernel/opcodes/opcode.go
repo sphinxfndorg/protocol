@@ -7,6 +7,7 @@ package svm
 import (
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"time"
 
@@ -342,7 +343,7 @@ func ExecuteOp(op OpCode, stack *Stack, memory []byte, code []byte, pc *uint64) 
 	// RETURNDATASIZE (0x3D), RETURNDATACOPY (0x3E), GASPRICE (0x3F) - no conflict, kept as-is
 	case ADDRESS, ORIGIN, CALLER, CALLVALUE, CALLDATALOAD, CALLDATASIZE, CALLDATACOPY,
 		CODESIZE, CODECOPY, EXTCODESIZE, EXTCODECOPY, RETURNDATASIZE, RETURNDATACOPY, GASPRICE:
-		return executeEthereumContextOp(op, stack, memory)
+		return executeEthereumContextOp(op, stack)
 
 	// ========== ETHEREUM BLOCK CONTEXT (0x40-0x47) ==========
 	case BLOCKHASH, COINBASE, TIMESTAMP, NUMBER, DIFFICULTY, GASLIMIT, CHAINID, SELFBALANCE:
@@ -1808,7 +1809,7 @@ func executeControlFlowOp(op OpCode, stack *Stack, code []byte, pc *uint64) erro
 }
 
 // executeEthereumContextOp - Handles Ethereum context operations
-func executeEthereumContextOp(op OpCode, stack *Stack, memory []byte) error {
+func executeEthereumContextOp(op OpCode, stack *Stack) error {
 	// These are placeholder implementations
 	switch op {
 	case ADDRESS, ORIGIN, CALLER, COINBASE:
@@ -2385,4 +2386,139 @@ func OpCodeFromString(name string) (OpCode, error) {
 		return op, nil
 	}
 	return 0, fmt.Errorf("unknown opcode: %s", name)
+}
+
+// ========== SVM1 (SMALL CONTRACT VM) ==========
+// SVM1Magic marks code for the deterministic, deliberately small contract VM.
+// It has no host time, randomness, networking, floating point, or recursion.
+var SVM1Magic = []byte{'S', 'V', 'M', '1'}
+
+const (
+	SVMStop  = byte(0x00)
+	SVMPush8 = byte(0x01)
+	SVMAdd   = byte(0x02)
+	SVMSub   = byte(0x03)
+	SVMMul   = byte(0x04)
+	SVMDiv   = byte(0x05)
+	SVMStore = byte(0x10)
+	SVMLoad  = byte(0x11)
+	// SVMCallDataWord pops a byte offset and pushes an eight-byte big-endian
+	// word from transaction call data (zero-padded past its end).
+	SVMCallDataWord = byte(0x12)
+	SVMReturn       = byte(0xff)
+)
+
+// AnalyzeSVM validates an SVM1 program without executing it and returns its
+// exact operation count. SVM1 has no branches, so this is deterministic and
+// lets mempool admission enforce the same policy gas floor as block execution.
+func AnalyzeSVM(code []byte) (uint64, error) {
+	if len(code) < len(SVM1Magic) || string(code[:len(SVM1Magic)]) != string(SVM1Magic) {
+		return 0, errors.New("invalid SVM1 code")
+	}
+	var operations uint64
+	for pc := len(SVM1Magic); pc < len(code); {
+		operations++
+		op := code[pc]
+		pc++
+		switch op {
+		case SVMStop, SVMReturn:
+			if pc != len(code) {
+				return 0, errors.New("SVM1 code after terminal instruction")
+			}
+			return operations, nil
+		case SVMPush8:
+			if pc+8 > len(code) {
+				return 0, errors.New("svm push out of bounds")
+			}
+			pc += 8
+		case SVMAdd, SVMSub, SVMMul, SVMDiv, SVMStore, SVMLoad, SVMCallDataWord:
+			// Valid single-byte operation.
+		default:
+			return 0, fmt.Errorf("unsupported SVM1 opcode 0x%02x", op)
+		}
+	}
+	return 0, errors.New("svm program terminated without stop")
+}
+
+// SVM1Store is the minimal contract storage surface the SVM1 opcodes need. Any
+// contract store offering storage get/set satisfies it; src/contracts.Store
+// and core's contractStore both do.
+type SVM1Store interface {
+	GetContractStorage(address, key string) ([]byte, error)
+	SetContractStorage(address, key string, value []byte)
+}
+
+// ExecuteSVM1Op implements a single SVM1 opcode on the shared stack machine.
+// It is the SVM1 counterpart of ExecuteOp: it uses the same Stack primitives
+// and the arithmetic helpers from arith.go. The terminal opcodes
+// (SVMStop/SVMReturn) are handled by the driving loop, not here. The op is a
+// raw byte because SVM1 opcode values live in the byte namespace of the
+// contract format, not in the OpCode enum.
+func ExecuteSVM1Op(op byte, stack *Stack, store SVM1Store, address string, code []byte, pc *uint64, callData []byte) error {
+	switch op {
+	case SVMPush8:
+		if *pc+8 > uint64(len(code)) {
+			return errors.New("svm push out of bounds")
+		}
+		stack.Push(binary.BigEndian.Uint64(code[*pc : *pc+8]))
+		*pc += 8
+	case SVMAdd, SVMSub, SVMMul, SVMDiv:
+		b, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		a, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		switch op {
+		case SVMAdd:
+			stack.Push(AddOp(a, b))
+		case SVMSub:
+			stack.Push(SubOp(a, b))
+		case SVMMul:
+			stack.Push(MulOp(a, b))
+		case SVMDiv:
+			if b == 0 {
+				return errors.New("svm division by zero")
+			}
+			result, _ := DivOp(a, b)
+			stack.Push(result)
+		}
+	case SVMStore:
+		value, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		key, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		buf := make([]byte, 8)
+		binary.BigEndian.PutUint64(buf, value)
+		store.SetContractStorage(address, fmt.Sprintf("svm:%016x", key), buf)
+	case SVMLoad:
+		key, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		value := uint64(0)
+		if data, err := store.GetContractStorage(address, fmt.Sprintf("svm:%016x", key)); err == nil && len(data) == 8 {
+			value = binary.BigEndian.Uint64(data)
+		}
+		stack.Push(value)
+	case SVMCallDataWord:
+		offset, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		word := make([]byte, 8)
+		if offset < uint64(len(callData)) {
+			copy(word, callData[offset:])
+		}
+		stack.Push(binary.BigEndian.Uint64(word))
+	default:
+		return fmt.Errorf("unsupported SVM1 opcode 0x%02x", op)
+	}
+	return nil
 }

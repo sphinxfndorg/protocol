@@ -5,9 +5,6 @@
 package gui
 
 import (
-	"crypto/rand"
-	"crypto/sha3"
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -18,9 +15,10 @@ import (
 	"time"
 
 	"github.com/sphinxfndorg/protocol/src/common"
+	"github.com/sphinxfndorg/protocol/src/core"
 	key "github.com/sphinxfndorg/protocol/src/core/sthincs/key/backend"
+	sign "github.com/sphinxfndorg/protocol/src/core/sthincs/sign/backend"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
-	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/sthincs"
 	"github.com/sphinxfndorg/protocol/src/policy"
 	"github.com/sphinxfndorg/protocol/src/rpc"
 	keys "github.com/sphinxfndorg/protocol/src/usi/core/key"
@@ -132,7 +130,80 @@ func (c *WalletClient) GetBalance(address string) (*BalanceResponse, error) {
 	}, nil
 }
 
-// getCurrentNonce uses raw hex address.
+// ────────────────────────────────────────────────────────────────────────
+// LIGHTWEIGHT (HEADER-ONLY) SYNC PATH
+//
+// ★ NODE-TYPE CONTRACT: USI is a LIGHTWEIGHT wallet, NOT a vault full node.
+// Full nodes download and commit entire blocks (that is what
+// src/core/sync.go's SyncManager does, running inside bind.StartNode).
+// Lightweight wallets must NOT download block bodies — they download block
+// headers only, and query all state (balance, history, nonce) from a full
+// node's JSON-RPC. The three methods below are the wallet's entire chain
+// footprint: they pull headers via the node's "getblockheader"/"getheaders"
+// RPC, which deliberately return types.BlockHeader and never the full
+// BlockBody (transactions, uncles, attestations).
+// ────────────────────────────────────────────────────────────────────────
+
+// GetChainTipHeader fetches ONLY the chain-tip block header from the node.
+// Lightweight path: the wallet learns height/hash/proposer of the tip
+// without ever requesting a full block.
+func (c *WalletClient) GetChainTipHeader() (*types.BlockHeader, error) {
+	resultData, err := rpc.CallRPC(c.nodeAddr, "getblockheader", []interface{}{"latest"}, 60)
+	if err != nil {
+		return nil, fmt.Errorf("RPC call failed: %w", err)
+	}
+	if len(resultData) == 0 || string(resultData) == "null" {
+		return nil, errors.New("empty response from RPC")
+	}
+	var hdr types.BlockHeader
+	if err := json.Unmarshal(resultData, &hdr); err != nil {
+		return nil, fmt.Errorf("parse response: %w", err)
+	}
+	return &hdr, nil
+}
+
+// GetBlockHeader fetches ONLY the header of the block at `height` (0 = genesis).
+// Lightweight path: no block body is ever transferred.
+func (c *WalletClient) GetBlockHeader(height uint64) (*types.BlockHeader, error) {
+	resultData, err := rpc.CallRPC(c.nodeAddr, "getblockheader", []interface{}{height}, 60)
+	if err != nil {
+		return nil, fmt.Errorf("RPC call failed: %w", err)
+	}
+	if len(resultData) == 0 || string(resultData) == "null" {
+		return nil, errors.New("empty response from RPC")
+	}
+	var hdr types.BlockHeader
+	if err := json.Unmarshal(resultData, &hdr); err != nil {
+		return nil, fmt.Errorf("parse response: %w", err)
+	}
+	return &hdr, nil
+}
+
+// GetHeaders downloads a batch of block headers — headers only, never block
+// bodies. A lightweight wallet can header-sync the whole chain (tip height,
+// per-height hashes, difficulty, proposers) this way without holding a
+// single full block.
+func (c *WalletClient) GetHeaders(start uint64, count int) ([]types.BlockHeader, error) {
+	resultData, err := rpc.CallRPC(c.nodeAddr, "getheaders", []interface{}{start, count}, 60)
+	if err != nil {
+		return nil, fmt.Errorf("RPC call failed: %w", err)
+	}
+	if len(resultData) == 0 || string(resultData) == "null" {
+		return []types.BlockHeader{}, nil
+	}
+	var hdrs []types.BlockHeader
+	if err := json.Unmarshal(resultData, &hdrs); err != nil {
+		return nil, fmt.Errorf("parse response: %w", err)
+	}
+	return hdrs, nil
+}
+
+// getCurrentNonce gets the next nonce to use for `address` from the node.
+//
+// IMPORTANT: the node's getnonce RPC returns the account's CURRENT nonce (the
+// next one that may be consumed). The mempool validates transactions with an
+// EXACT match check ("invalid nonce: %d must equal %d"), so this value must be
+// used verbatim — never incremented here, and never replaced with a timestamp.
 func (c *WalletClient) getCurrentNonce(address string) (uint64, error) {
 	rawAddress, err := normaliseAddress(address)
 	if err != nil {
@@ -146,7 +217,7 @@ func (c *WalletClient) getCurrentNonce(address string) (uint64, error) {
 	if err := json.Unmarshal(resultData, &nonce); err != nil {
 		return 0, err
 	}
-	return nonce + 1, nil // Increment for new transaction
+	return nonce, nil
 }
 
 // SendTransaction sends funds to a recipient
@@ -187,15 +258,25 @@ func (c *WalletClient) SendTransaction(toAddress string, amount *big.Int, memo s
 		}
 	}()
 
-	// ─── 2. Get nonce (try RPC first, fallback to timestamp) ────
+	// ─── 2. Get next nonce from the node ────────────────────
+	// The mempool enforces an EXACT nonce match ("invalid nonce: %d must
+	// equal %d"), so the nonce must come from the node as-is. A timestamp
+	// fallback can never pass that check — fail loudly instead of sending a
+	// transaction that is guaranteed to be rejected.
 	var nonce uint64
 	if cachedNonce, err := c.getCurrentNonce(sessionFingerprint); err == nil {
 		nonce = cachedNonce
 		log.Printf("[WalletRPC] Using RPC nonce: %d", nonce)
 	} else {
-		// Fallback: use UnixNano (works with GT validation)
-		nonce = uint64(time.Now().UnixNano())
-		log.Printf("[WalletRPC] RPC nonce failed, using timestamp: %d", nonce)
+		return "", fmt.Errorf("failed to get account nonce from node: %w", err)
+	}
+
+	// ChainID for EIP-155 replay protection — must match the node's network.
+	// Fall back to the Sphinx mainnet chain ID (7331) when the header is
+	// unavailable.
+	chainID := uint64(7331)
+	if chainHdr := core.GetSphinxChainHeader(); chainHdr != nil && chainHdr.ChainID != 0 {
+		chainID = chainHdr.ChainID
 	}
 
 	// ─── 3. Build and sign transaction locally ──────────────────
@@ -205,6 +286,7 @@ func (c *WalletClient) SendTransaction(toAddress string, amount *big.Int, memo s
 
 	tx := &types.Transaction{
 		ID:         "",
+		ChainID:    chainID,
 		Sender:     rawSender,
 		Receiver:   rawTo,
 		Amount:     amount,
@@ -255,7 +337,23 @@ func (c *WalletClient) SendTransaction(toAddress string, amount *big.Int, memo s
 	return result.TxID, nil
 }
 
-// signTransactionLocally signs a transaction using SPHINCS+
+// signTransactionLocally signs a transaction using the node's canonical
+// SPHINCS+ transaction authentication path.
+//
+// ★ WHY THIS IS THE CANONICAL PATH: the node's mempool / RPC / block
+// validators verify each transaction with STHINCSManager.VerifyTransactionAuth,
+// which requires:
+//   - signature over timestamp||nonce||txID  (NOT txID alone),
+//   - SignatureHash == SpxHash(sigBytes)     (NOT plain sha3-256),
+//   - a REAL SPHINCS receipt: MerkleRootHash built from the signature parts,
+//     a real commitment, and a regenerable proof.
+//
+// The old hand-rolled implementation here signed only the bare txID with
+// sha3-256 and left MerkleRootHash/Commitment/Proof as 32 zero bytes — the
+// node rejected every one of those fields, so every wallet transfer failed
+// with "signature verification failed" / "proof mismatch". Signing through
+// STHINCSManager.SignTransactionAuth (the same call cli/utils/client.go and
+// core.SignTransaction use) produces a bundle that passes all of them.
 func signTransactionLocally(tx *types.Transaction, skBytes, pkBytes []byte) error {
 	if tx == nil {
 		return fmt.Errorf("nil transaction")
@@ -268,57 +366,33 @@ func signTransactionLocally(tx *types.Transaction, skBytes, pkBytes []byte) erro
 	if err != nil {
 		return fmt.Errorf("failed to initialize key manager: %w", err)
 	}
-	privateKey, _, err := km.DeserializeKeyPair(skBytes, pkBytes)
+	privateKey, publicKey, err := km.DeserializeKeyPair(skBytes, pkBytes)
 	if err != nil {
 		return fmt.Errorf("failed to deserialize key pair: %w", err)
 	}
 
-	params := km.GetSPHINCSParameters()
-	if params == nil || params.Params == nil {
+	sphincsParams := km.GetSPHINCSParameters()
+	if sphincsParams == nil || sphincsParams.Params == nil {
 		return fmt.Errorf("SPHINCS+ parameters not initialized")
 	}
 
-	// Build message: timestamp || nonce || txID
-	tsBytes := make([]byte, 8)
-	binary.BigEndian.PutUint64(tsBytes, uint64(tx.Timestamp))
-
-	nonceBytes := make([]byte, 16)
-	if _, err := rand.Read(nonceBytes); err != nil {
-		return fmt.Errorf("failed to generate nonce: %w", err)
-	}
-
-	msg := make([]byte, 0, 8+16+len(tx.ID))
-	msg = append(msg, tsBytes...)
-	msg = append(msg, nonceBytes...)
-	msg = append(msg, []byte(tx.ID)...)
-
-	sigObj, err := sthincs.Spx_sign(params.Params, []byte(tx.ID), privateKey)
+	// Sign the canonical message (timestamp||nonce||txID) and build the full
+	// auth bundle exactly as core/CLI nodes do. An in-memory manager (nil
+	// LevelDB) is sufficient for signing — no replay evidence is consulted.
+	signingMgr := sign.NewSTHINCSManager(nil, km, sphincsParams)
+	bundle, err := signingMgr.SignTransactionAuth([]byte(tx.ID), privateKey, publicKey)
 	if err != nil {
-		return fmt.Errorf("failed to sign: %w", err)
-	}
-	if sigObj == nil {
-		return fmt.Errorf("signature object is nil")
+		return fmt.Errorf("failed to sign transaction auth bundle: %w", err)
 	}
 
-	sigBytes, err := sigObj.SerializeSignature()
-	if err != nil {
-		return fmt.Errorf("failed to serialize signature: %w", err)
-	}
-
-	sigHash := sha3.Sum256(sigBytes)
-
-	tx.Signature = sigBytes
-	tx.SignatureHash = sigHash[:]
-	tx.PublicKey = pkBytes
-	tx.AuthTimestamp = make([]byte, 8)
-	binary.BigEndian.PutUint64(tx.AuthTimestamp, uint64(time.Now().Unix()))
-	tx.AuthNonce = make([]byte, 16)
-	if _, err := rand.Read(tx.AuthNonce); err != nil {
-		return fmt.Errorf("failed to generate nonce: %w", err)
-	}
-	tx.MerkleRootHash = make([]byte, 32)
-	tx.Commitment = make([]byte, 32)
-	tx.Proof = make([]byte, 32)
+	tx.Signature = bundle.Signature
+	tx.SignatureHash = bundle.SignatureHash
+	tx.PublicKey = bundle.PublicKey
+	tx.AuthTimestamp = bundle.Timestamp
+	tx.AuthNonce = bundle.Nonce
+	tx.MerkleRootHash = bundle.MerkleRootHash
+	tx.Commitment = bundle.Commitment
+	tx.Proof = bundle.Proof
 
 	return nil
 }

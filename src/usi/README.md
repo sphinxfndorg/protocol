@@ -50,7 +50,15 @@ The application is built in Go with the Fyne GUI toolkit.
   - Displays a SPIF wallet balance and address.
   - Provides send and receive dialogs.
   - Shows transaction history and wallet statistics.
-  - Current wallet values are UI stubs and should be connected to real wallet backend calls.
+  - **Node type determination:** USI is a **LIGHTWEIGHT wallet**, not a vault
+    full node. It holds no blockchain and never downloads full block bodies —
+    entire-block sync (`src/core/sync.go`) belongs exclusively to full nodes
+    started via `bind.StartNode`. The wallet talks to a full node's JSON-RPC
+    (`getbalance`, `getnonce`, `sendtransaction`, ...) and when it needs any
+    chain data at all it downloads **block headers only** via the node's
+    `getblockheader` / `getheaders` RPC (see `gui/rpc.go`
+    `GetChainTipHeader` / `GetBlockHeader` / `GetHeaders`). The wallet screen
+    shows the header-synced chain tip (height, hash, proposer).
 
 ## Cryptography Overview
 
@@ -122,7 +130,7 @@ The keys screen displays the user's public fingerprint, key parameters, and loca
 
 ### Wallet
 
-The wallet screen shows a SPIF address, balance, send/receive actions, and transaction history. The current implementation contains placeholder wallet data and TODO markers for real wallet package integration.
+The wallet screen shows a SPIF address, balance, send/receive actions, and transaction history. Send signs transactions locally with the canonical STHINCS manager bundle (`SignTransactionAuth`) and broadcasts them to a full node via `sendrawtransaction`; balance, history, and nonce are queried from the node's JSON-RPC.
 
 ## Local Key Storage
 
@@ -165,7 +173,7 @@ Depending on the actual module layout, the entry command may differ. If the GUI 
 - Dark theme is enabled by default and can be toggled from the welcome/register screens.
 - Sensitive operations ask the user to confirm their passphrase.
 - Activity is tracked in-memory and displayed on the dashboard.
-- Wallet operations are currently placeholders and should be connected to a real wallet backend.
+- Wallet operations are connected to a real full-node backend: the wallet signs locally with the canonical SPHINCS auth bundle and broadcasts via `sendrawtransaction`, and reads balance/history/nonce over the node's JSON-RPC.
 - The sidebar navigation labels are Dashboard, Message, Inbox, Mint Data, Verify Data, Wallet, and My Keys; internally these map to the encrypt, decrypt, sign, and verify screens/functions respectively.
 
 ## Security Notes

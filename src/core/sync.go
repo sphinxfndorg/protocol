@@ -7,6 +7,20 @@
 // blocks received from peers carry valid commit attestations (≥2/3+ stake)
 // before they are committed during catch-up sync.
 //
+// ========== NODE-TYPE CONTRACT ==========
+// This file implements FULL-NODE sync: it downloads and commits ENTIRE blocks
+// (headers + bodies). It is instantiated only by full nodes via the
+// bind.StartNode stack (core.NewBlockchain + NewSyncManager).
+//
+// Lightweight clients — in particular the USI wallet (src/usi) — are NOT full
+// nodes and MUST NOT run this code. They hold no blockchain and download
+// block HEADERS only, via the node's "getblockheader"/"getheaders" JSON-RPC
+// (see src/rpc/json.go and src/usi/gui/rpc.go). All wallet state (balance,
+// history, nonce) is queried from a full node over RPC. The USI "vault"
+// feature (`.vault` encrypted folders) is folder encryption, unrelated to
+// chain sync.
+// =====================================================
+//
 // ========== PIPELINED BULK SYNC (Phase A) ==========
 // Late-joiners syncing millions of blocks use a pipelined download strategy:
 //

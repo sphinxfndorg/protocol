@@ -11,6 +11,14 @@ import (
 
 // WalletClient wraps the RPC client for wallet operations.
 //
+// ★ NODE-TYPE CONTRACT: the USI wallet is a LIGHTWEIGHT client, NOT a vault
+// full node. It holds no blockchain and downloads no block bodies. Full
+// chains are synced entirely by full nodes via src/core/sync.go
+// (SyncManager → handleSyncingBlocks/pipelined bulk download, started by
+// bind.StartNode). A lightweight wallet like USI instead talks to a full
+// node's JSON-RPC and — when it needs any chain data at all — pulls block
+// HEADERS only (see GetChainTipHeader / GetBlockHeader / GetHeaders).
+//
 // nodeAddr must be the node's P2P TCP address (see rpc.CallRPC's doc
 // comment in client.go for why) — there is deliberately no NodeID field
 // here anymore: rpc.CallRPC now speaks standard JSON-RPC 2.0 over an

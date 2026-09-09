@@ -5,6 +5,7 @@
 package vm
 
 import (
+	"errors"
 	"fmt"
 
 	svm "github.com/sphinxfndorg/protocol/src/core/kernel/opcodes"
@@ -98,4 +99,44 @@ func RunProgramWithMemory(code []byte, memory []byte) (uint64, error) {
 		return 0, err
 	}
 	return vm.GetResult()
+}
+
+// ExecuteSVM1 runs an SVM1 program against a storage. Storage keys and values
+// are uint64, encoded in deterministic big-endian form. It returns the
+// top-of-stack result (zero when the stack is empty at the terminal
+// instruction) and the consumed operation count.
+//
+// The per-opcode semantics live in the kernel opcode package (svm.SVM1Store,
+// svm.ExecuteSVM1Op) and the shared svm.Stack primitives are used. This
+// driver only counts operations, detects the terminal instructions, and
+// enforces the operation budget.
+func ExecuteSVM1(store svm.SVM1Store, address string, code, callData []byte, maxOperations uint64) (uint64, uint64, error) {
+	expectedOperations, err := svm.AnalyzeSVM(code)
+	if err != nil {
+		return 0, 0, err
+	}
+	if expectedOperations > maxOperations {
+		return 0, expectedOperations, errors.New("svm operation limit exceeded")
+	}
+	stack := svm.NewStack()
+	var ops uint64
+	var pc uint64
+	pc = uint64(len(svm.SVM1Magic))
+	for pc < uint64(len(code)) {
+		ops++
+		op := code[pc]
+		pc++
+		switch op {
+		case svm.SVMStop, svm.SVMReturn:
+			result := uint64(0)
+			if stack.Size() > 0 {
+				result, _ = stack.Peek()
+			}
+			return result, ops, nil
+		}
+		if err := svm.ExecuteSVM1Op(op, stack, store, address, code, &pc, callData); err != nil {
+			return 0, ops, err
+		}
+	}
+	return 0, ops, errors.New("svm program terminated without stop")
 }

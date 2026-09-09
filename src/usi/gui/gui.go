@@ -1882,6 +1882,56 @@ func Run() {
 		// Initial balance fetch
 		go fetchBalance()
 
+		// ── Chain tip header (LIGHTWEIGHT HEADER-ONLY SYNC) ──────────
+		// USI is a lightweight wallet, not a vault full node: it never
+		// downloads full block bodies (that is src/core/sync.go's job on
+		// full nodes). The only chain data this wallet pulls from the node
+		// is the block header, via the getblockheader RPC.
+		tipLabel := canvas.NewText("CHAIN TIP · HEADER SYNC", colFaint)
+		tipLabel.TextSize = 9
+		tipLabel.TextStyle = fyne.TextStyle{Monospace: true}
+
+		tipValue := widget.NewLabel("Header sync: —")
+		tipValue.TextStyle = fyne.TextStyle{Monospace: true}
+		tipValue.Wrapping = fyne.TextWrapBreak
+
+		fetchChainTip := func() {
+			hdr, err := walletClient.GetChainTipHeader()
+			fyne.Do(func() {
+				if err != nil {
+					tipValue.Text = fmt.Sprintf("Header sync offline (%v)", err)
+					tipValue.Refresh()
+					return
+				}
+				if hdr == nil {
+					tipValue.Text = "Header sync offline (no tip)"
+					tipValue.Refresh()
+					return
+				}
+				hash := ""
+				if len(hdr.Hash) > 0 {
+					hash = fmt.Sprintf("%x", hdr.Hash)
+					if len(hash) > 22 {
+						hash = hash[:10] + "…" + hash[len(hash)-10:]
+					}
+				}
+				proposer := hdr.ProposerID
+				if proposer == "" {
+					proposer = "—"
+				}
+				tipValue.Text = fmt.Sprintf("Height %d · hash 0x%s · proposer %s", hdr.Height, hash, proposer)
+				tipValue.Refresh()
+			})
+		}
+		go fetchChainTip()
+
+		tipBg := canvas.NewRectangle(colSurface2)
+		tipBg.CornerRadius = 8
+		tipBg.StrokeColor = colBorder
+		tipBg.StrokeWidth = 1
+		tipInner := container.NewVBox(tipLabel, spacer(4), tipValue)
+		tipCard := container.NewMax(tipBg, container.NewPadded(tipInner))
+
 		// ── Transaction history container ─────────────────────────
 		txBox := container.NewVBox()
 		txScroll := container.NewScroll(txBox)
@@ -2012,6 +2062,7 @@ func Run() {
 		refreshBtn := widget.NewButtonWithIcon("Refresh", theme.ViewRefreshIcon(), func() {
 			go fetchBalance()
 			go fetchTransactionHistory()
+			go fetchChainTip()
 		})
 		refreshBtn.Importance = widget.LowImportance
 
@@ -2084,6 +2135,8 @@ func Run() {
 			screenSubtitle(fmt.Sprintf("%s identity — %s network", orgDisplayName, chainHeader.ChainName)),
 			spacer(20),
 			balCard,
+			spacer(12),
+			tipCard,
 			spacer(16),
 			hRule(),
 			spacer(12),

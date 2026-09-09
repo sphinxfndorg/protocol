@@ -44,4 +44,11 @@ const (
 	RPCStoreArtifact
 	RPCGetArtifact
 	RPCGetNonce
+
+	// Lightweight (header-only) sync endpoints. Wallets such as src/usi are
+	// lightweight clients — NOT vault full nodes — so they download block
+	// headers only and never block bodies. These RPC types back the
+	// "getblockheader" / "getheaders" methods (see json.go).
+	RPCGetBlockHeader
+	RPCGetHeaders
 )

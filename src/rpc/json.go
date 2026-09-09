@@ -53,6 +53,131 @@ func (h *JSONRPCHandler) getBlockByNumber(params interface{}) (interface{}, erro
 	return block, nil
 }
 
+// getBlockHeader returns ONLY the header of a single block — never the body.
+//
+// ★ NODE-TYPE CONTRACT (lightweight path): wallets such as src/usi are
+// lightweight clients, NOT vault full nodes. Full nodes download entire
+// blocks (see src/core/sync.go); lightweight wallets download block headers
+// only. This is the lightweight counterpart of getblock/getblocks: it
+// deliberately serializes the types.BlockHeader and never the BlockBody, so
+// a wallet can track the chain tip / header chain without pulling
+// transactions, uncles, or attestations across the wire.
+//
+// Params (all optional):
+//   - none / ["latest"] / [""]   → chain tip header
+//   - [height uint] (0 = genesis) → header at that height
+//   - [hash string]              → header by block hash
+func (h *JSONRPCHandler) getBlockHeader(params interface{}) (interface{}, error) {
+	if h.server.blockchain == nil {
+		return nil, errors.New("blockchain not initialized")
+	}
+
+	// getConcrete unwraps a consensus.Block (usually *core.BlockHelper) into
+	// its underlying *types.Block so we can reach .Header directly.
+	getConcrete := func(b consensus.Block) (*types.Block, error) {
+		if b == nil {
+			return nil, errors.New("block not found")
+		}
+		underlying, ok := b.GetUnderlyingBlock().(*types.Block)
+		if !ok {
+			return nil, errors.New("block not found")
+		}
+		return underlying, nil
+	}
+	getTip := func() (*types.Block, error) {
+		return getConcrete(h.server.blockchain.GetLatestBlock())
+	}
+
+	var raw *types.Block
+	var blkError error
+
+	switch {
+	case params == nil:
+		raw, blkError = getTip()
+	default:
+		var paramsArray []interface{}
+		if err := h.parseParams(params, &paramsArray); err != nil {
+			return nil, err
+		}
+		switch {
+		case len(paramsArray) == 0:
+			raw, blkError = getTip()
+		default:
+			switch v := paramsArray[0].(type) {
+			case float64:
+				if v < 0 { // negative height → tip
+					raw, blkError = getTip()
+				} else {
+					raw = h.server.blockchain.GetBlockByNumber(uint64(v))
+					blkError = nil
+				}
+			case string:
+				if v == "" || v == "latest" {
+					raw, blkError = getTip()
+				} else {
+					raw, blkError = getConcrete(h.server.blockchain.GetBlockByHash(v))
+				}
+			default:
+				return nil, errors.New("invalid block header parameter")
+			}
+		}
+	}
+
+	if blkError != nil {
+		return nil, blkError
+	}
+	if raw == nil || raw.Header == nil {
+		return nil, errors.New("block header unavailable")
+	}
+
+	return raw.Header, nil
+}
+
+// getHeaders returns up to `count` block headers starting at `start_height`.
+// Lightweight bulk header sync: headers ONLY, never block bodies. This is the
+// RPC counterpart of the P2P getheaders/headers message pair (src/p2p) and is
+// what a lightweight wallet uses to header-sync the chain without holding a
+// single full block. Defaults: start_height=0, count=100.
+func (h *JSONRPCHandler) getHeaders(params interface{}) (interface{}, error) {
+	if h.server.blockchain == nil {
+		return nil, errors.New("blockchain not initialized")
+	}
+
+	start := uint64(0)
+	count := 100
+	if params != nil {
+		var paramsArray []interface{}
+		if err := h.parseParams(params, &paramsArray); err != nil {
+			return nil, err
+		}
+		if len(paramsArray) > 0 {
+			if v, ok := paramsArray[0].(float64); ok && v >= 0 {
+				start = uint64(v)
+			}
+		}
+		if len(paramsArray) > 1 {
+			if v, ok := paramsArray[1].(float64); ok && v > 0 {
+				count = int(v)
+			}
+		}
+	}
+
+	tipBlock := h.server.blockchain.GetLatestBlock()
+	if tipBlock == nil {
+		return []*types.BlockHeader{}, nil
+	}
+
+	headers := make([]*types.BlockHeader, 0, count)
+	for height := start; height <= tipBlock.GetHeight() && len(headers) < count; height++ {
+		blk := h.server.blockchain.GetBlockByNumber(height)
+		if blk == nil || blk.Header == nil {
+			continue
+		}
+		headers = append(headers, blk.Header)
+	}
+	return headers, nil
+}
+
 // getBlockHash returns the hash of a block at a given height
 func (h *JSONRPCHandler) getBlockHash(params interface{}) (interface{}, error) {
 	var paramsArray []interface{}
@@ -309,6 +434,11 @@ func (h *JSONRPCHandler) registerMethods() {
 	h.methods["getsupplystatus"] = h.getSupplyStatus
 	h.methods["getcheckpoint"] = h.getCheckpoint
 
+	// Lightweight header-only sync endpoints (wallets download headers, not
+	// entire block bodies — see getBlockHeader/getHeaders).
+	h.methods["getblockheader"] = h.getBlockHeader
+	h.methods["getheaders"] = h.getHeaders
+
 	// Mint/NFT storage methods
 	h.methods["storeartifact"] = h.storeArtifact
 	h.methods["getartifact"] = h.getArtifact
@@ -555,6 +685,10 @@ func (h *JSONRPCHandler) mapRPCTypeToMethod(rpcType RPCType) (string, error) {
 		return "store", nil
 	case RPCGetBlockByNumber:
 		return "getblockbynumber", nil
+	case RPCGetBlockHeader:
+		return "getblockheader", nil
+	case RPCGetHeaders:
+		return "getheaders", nil
 	case RPCGetBlockHash:
 		return "getblockhash", nil
 	case RPCGetDifficulty:
@@ -621,6 +755,10 @@ func (t RPCType) String() string {
 		return "store"
 	case RPCGetBlockByNumber:
 		return "getblockbynumber"
+	case RPCGetBlockHeader:
+		return "getblockheader"
+	case RPCGetHeaders:
+		return "getheaders"
 	case RPCGetBlockHash:
 		return "getblockhash"
 	case RPCGetDifficulty:

@@ -22,6 +22,7 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
+	"github.com/sphinxfndorg/protocol/src/core"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
 	"github.com/sphinxfndorg/protocol/src/policy"
 	"github.com/sphinxfndorg/protocol/src/rpc"
@@ -508,18 +509,31 @@ func (c *WalletClient) AnchorMintReceipt(receipt *mint.MintReceipt) (txID string
 		}
 	}()
 
+	// Mint anchors pay by their actual anchor size under the shared policy
+	// schedule. Core validates this independently when the transaction arrives.
+	gasQuote := policy.GetDefaultPolicyParams().QuoteTransactionGas(uint64(len(anchorData)))
+
+	// ChainID for EIP-155 replay protection — must match the node's network.
+	// Fall back to the Sphinx mainnet chain ID (7331) when the header is
+	// unavailable.
+	chainID := uint64(7331)
+	if chainHdr := core.GetSphinxChainHeader(); chainHdr != nil && chainHdr.ChainID != 0 {
+		chainID = chainHdr.ChainID
+	}
+
+	// Use the node's exact current nonce (mempool enforces an EXACT match —
+	// "invalid nonce: %d must equal %d"). A timestamp fallback can never pass
+	// that check, so fail loudly instead of broadcasting a guaranteed-reject.
 	var nonce uint64
 	if cachedNonce, err := c.getCurrentNonce(sessionFingerprint); err == nil {
 		nonce = cachedNonce
 	} else {
-		nonce = uint64(time.Now().UnixNano())
+		return "", "", fmt.Errorf("failed to get account nonce from node: %w", err)
 	}
 
-	// Mint anchors pay by their actual anchor size under the shared policy
-	// schedule. Core validates this independently when the transaction arrives.
-	gasQuote := policy.GetDefaultPolicyParams().QuoteTransactionGas(uint64(len(anchorData)))
 	tx := &types.Transaction{
 		ID:         "",
+		ChainID:    chainID,
 		Sender:     rawSender,
 		Receiver:   rawSender, // self-send: this tx exists only to carry data
 		Amount:     big.NewInt(1),

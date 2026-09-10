@@ -493,6 +493,16 @@ func (bc *Blockchain) rebuildStateToHeight(targetHeight uint64) error {
 	_ = db.Delete(genesisSupplyKey)
 	_ = db.Delete(rewardsMintedKey)
 
+	// Validator stake records live in contract state (contract:validator:*),
+	// which is re-hashed into the state root every block. Clear them so replay
+	// recomputes them from genesis + epoch boundaries and no stale pre-reorg
+	// stake survives to skew the first post-rollback epoch distribution.
+	if sdb, err := bc.newStateDB(); err == nil {
+		if err := sdb.ClearValidatorStakes(); err != nil {
+			logger.Warn("rebuildStateToHeight: could not clear validator stakes: %v", err)
+		}
+	}
+
 	for h := uint64(0); h <= targetHeight; h++ {
 		block := bc.getBlockByHeightLocked(h)
 		if block == nil {

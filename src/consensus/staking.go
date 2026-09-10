@@ -13,6 +13,7 @@ import (
 	logger "github.com/sphinxfndorg/protocol/src/console"
 
 	denom "github.com/sphinxfndorg/protocol/src/params/denom"
+	"github.com/sphinxfndorg/protocol/src/policy"
 )
 
 // sips0013 https://github.com/sphinxorg/SIPS/blob/main/.github/workflows/sips0013/sips0013.md
@@ -215,6 +216,11 @@ func (c *Consensus) GetValidatorSet() *ValidatorSet {
 // SlashValidator reduces a validator's stake by penaltyBps basis points
 // and marks them slashed if their remaining stake drops below the minimum.
 // penaltyBps: 100 = 1 %, 1000 = 10 %.
+//
+// The penalty amount is computed by the shared policy maths
+// (policy.CalculateSlashingPenaltyBPS) so consensus and policy always agree
+// on the economics; policy.SlashDowntimeBPS / SlashDoubleSignBPS /
+// SlashLivenessBPS are the canonical rates.
 func (vs *ValidatorSet) SlashValidator(id, reason string, penaltyBps uint64) {
 	vs.mu.Lock()
 	defer vs.mu.Unlock()
@@ -225,8 +231,11 @@ func (vs *ValidatorSet) SlashValidator(id, reason string, penaltyBps uint64) {
 		return
 	}
 
-	penalty := new(big.Int).Mul(v.StakeAmount, new(big.Int).SetUint64(penaltyBps))
-	penalty.Div(penalty, big.NewInt(10000))
+	// Exact integer penalty — single source of truth in policy.
+	penalty := policy.CalculateSlashingPenaltyBPS(v.StakeAmount, penaltyBps)
+	if penalty.Sign() <= 0 {
+		return
+	}
 
 	vs.totalStake.Sub(vs.totalStake, penalty)
 	v.StakeAmount.Sub(v.StakeAmount, penalty)
@@ -251,7 +260,7 @@ func (vs *ValidatorSet) SlashValidator(id, reason string, penaltyBps uint64) {
 //
 //	slashList := c.randao.FinaliseEpoch(epoch, c.validatorSet.ActiveValidatorIDs(epoch))
 //	for _, id := range slashList {
-//	    c.validatorSet.SlashValidator(id, "missed VDF submission", SlashBps)
+//	    c.validatorSet.SlashValidator(id, "missed VDF submission", policy.SlashDowntimeBPS)
 //	}
 //
 // The helper below wraps that pattern for convenience.
@@ -269,7 +278,9 @@ func (c *Consensus) FinaliseEpochAndSlash(epoch uint64) {
 	slashList := r.FinaliseEpoch(epoch, activeIDs)
 
 	for _, id := range slashList {
-		vs.SlashValidator(id, "missed VDF submission", SlashBps)
+		// Missing a VDF submission is a downtime offence — the policy-owned
+		// rate (1%) is used so consensus and policy share one slashing schedule.
+		vs.SlashValidator(id, "missed VDF submission", policy.SlashDowntimeBPS)
 	}
 }
 

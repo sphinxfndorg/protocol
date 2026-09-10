@@ -4,6 +4,8 @@
 // go/src/params/denom/denom.go
 package params
 
+import "math/big"
+
 // These are the multipliers for SPX denominations, which help to represent
 // different units of the SPX coins in the Sphinx blockchain, similar to how
 // currencies like Bitcoin and Ethereum use smaller units such as satoshis and wei.
@@ -22,7 +24,20 @@ const (
 	// Maximum supply of SPX set to 5 billion coins (5e9 SPX)
 	MaxSupplySPX  = 5e9                // The coin-count cap, in whole SPX. Fits in int64/uint64 — use this with big.NewInt() rather than MaximumSupply, which (5e9 * 1e18) overflows int64.
 	MaximumSupply = MaxSupplySPX * SPX // This is 5 billion SPX, equivalent to 5e9 * 1e18 nSPX. Too large for int64 — only safe as a compile-time constant or float64, not big.NewInt().
+
+	// MinValidatorStakeSPX is the minimum stake required to register as a
+	// validator. It is the single source of truth for the "32 SPX" default used
+	// by core (consensus gate + quorum fallback), policy (min self-delegation)
+	// and genesis validators. Keep the whole-SPX value here and derive nSPX via
+	// MinValidatorStakeNSPX() below — never hand-write "32 × 1e18" again.
+	MinValidatorStakeSPX = 32 // 32 SPX minimum stake / self-delegation
 )
+
+// MinValidatorStakeNSPX returns the minimum validator stake in nSPX
+// (32 × 1e18). A fresh *big.Int is returned so callers can safely mutate it.
+func MinValidatorStakeNSPX() *big.Int {
+	return new(big.Int).Mul(big.NewInt(MinValidatorStakeSPX), big.NewInt(SPX))
+}
 
 // In the same way that 1 Ether = 1e18 wei, here:
 // 1 SPX = 1e18 nSPX, and 1 gSPX = 1e9 nSPX.

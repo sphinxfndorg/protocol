@@ -320,3 +320,60 @@ func TestCalculateAPY(t *testing.T) {
 		t.Errorf("Expected APY %f, got %f", expectedAPY, apy)
 	}
 }
+
+func TestMintDataFeeIsComputedByPolicy(t *testing.T) {
+	p := NewPolicyParameters()
+
+	// Holding floor is still 100 SPX.
+	if p.GetMinMintBalanceSPX() != 100.0 {
+		t.Fatalf("min mint balance: want 100 SPX, got %v", p.GetMinMintBalanceSPX())
+	}
+	if err := p.Validate(); err != nil {
+		t.Fatalf("default policy should validate with mint sizing params: %v", err)
+	}
+
+	// The fee is computed — never a flat constant. A 1 MiB payload must cost
+	// strictly more than an empty payload, driven by the IPFS pinning term.
+	tiny := p.CalculateMintDataFee(0, 300, 5, 1)
+	big := p.CalculateMintDataFee(1024*1024, 300, 5, 1)
+	if tiny == nil || big == nil || tiny.TotalFee == nil || big.TotalFee == nil {
+		t.Fatal("mint fee quote must not be nil")
+	}
+	if tiny.TotalFee.Sign() <= 0 {
+		t.Fatalf("even an empty payload has on-chain/gas cost: %s", tiny.TotalFee)
+	}
+	if big.TotalFee.Cmp(tiny.TotalFee) <= 0 {
+		t.Fatalf("1 MiB payload must cost more than an empty payload")
+	}
+	if big.IPFSFee.Sign() <= 0 {
+		t.Fatal("IPFS pinning must be charged for a 1 MiB payload")
+	}
+
+	// The gas quote charges at least the computed fee, and larger payloads pay
+	// (weakly) more through the anchor transaction.
+	chargeSmall := p.QuoteMintDataGas(0, 300, 5, 1)
+	chargeLarge := p.QuoteMintDataGas(64*1024*1024, 300, 5, 1)
+	if chargeSmall == nil || chargeLarge == nil {
+		t.Fatal("mint gas quote must not be nil")
+	}
+	if chargeSmall.GasFee.Cmp(tiny.TotalFee) < 0 {
+		t.Fatalf("anchor gas fee %s must cover the computed fee %s", chargeSmall.GasFee, tiny.TotalFee)
+	}
+	if chargeLarge.GasFee.Cmp(chargeSmall.GasFee) < 0 {
+		t.Fatalf("64 MiB payload must charge at least as much as an empty payload")
+	}
+
+	// Same dimensions → same price (deterministic, consensus-safe).
+	a := p.CalculateMintDataFee(1024, 300, 5, 1)
+	b := p.CalculateMintDataFee(1024, 300, 5, 1)
+	if a.TotalFee.Cmp(b.TotalFee) != 0 {
+		t.Fatalf("mint fee must be deterministic, got %s vs %s", a.TotalFee, b.TotalFee)
+	}
+
+	// Larger on-chain anchor footprint must cost more too (storage + gas).
+	shortAnchor := p.CalculateMintDataFee(1024, 300, 5, 1)
+	longAnchor := p.CalculateMintDataFee(1024, 2048, 5, 1)
+	if longAnchor.TotalFee.Cmp(shortAnchor.TotalFee) <= 0 {
+		t.Fatalf("larger anchor payload must cost more")
+	}
+}

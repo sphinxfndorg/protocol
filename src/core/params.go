@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sphinxfndorg/protocol/src/accounts/key"
+	denom "github.com/sphinxfndorg/protocol/src/params/denom"
 	"github.com/sphinxfndorg/protocol/src/params/commit"
 	"github.com/sphinxfndorg/protocol/src/policy"
 	"github.com/sphinxfndorg/protocol/src/pool"
@@ -177,12 +178,10 @@ func GetDefaultMempoolConfig() *pool.MempoolConfig {
 // GetDefaultConsensusConfig returns the default consensus configuration
 // Defines how the PBFT consensus with RANDAO operates
 func GetDefaultConsensusConfig() *ConsensusConfig {
-	// Calculate 32 SPX in base units (nSPX)
-	// 32 * 1e18 = 32,000,000,000,000,000,000 nSPX
-	minStakeNSPX := new(big.Int).Mul(
-		big.NewInt(32),   // 32 SPX minimum stake requirement
-		big.NewInt(1e18), // 1e18 nSPX per SPX
-	)
+	// Minimum stake to become a validator. The "32 SPX" value is owned by the
+	// shared denom package (MinValidatorStakeSPX) — core, consensus and policy
+	// all derive from the same constant instead of re-declaring 32 × 1e18.
+	minStakeNSPX := denom.MinValidatorStakeNSPX()
 
 	return &ConsensusConfig{
 		BlockTime:        10 * time.Second,               // Target time between blocks

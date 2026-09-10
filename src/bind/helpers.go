@@ -16,6 +16,7 @@ import (
 	"io"
 	"math/big"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -94,6 +95,32 @@ func readFramedMessage(conn net.Conn) ([]byte, error) {
 // Checkpoint sync
 // ============================================================================
 
+// baseWalletRPCPort is the base port of a node's dedicated wallet/JSON-RPC
+// listener (the transport.TCPServer started in StartNode SECTION 11a). It
+// mirrors network.port.go's baseWSPort (8700) and nodes.go's "8700+nodeIndex"
+// fallback used when --ws-port is unset or left at the CLI default
+// ("127.0.0.1:8600").
+const baseWalletRPCPort = 8700
+
+// walletRPCAddressForNode returns the wallet/JSON-RPC listener address of the
+// same-box peer with the given node index.
+//
+// bc.SyncCheckpoints → rpc.CallRPC speaks handshake-authenticated, encrypted
+// JSON-RPC 2.0 framing and therefore MUST dial the peer's dedicated wallet
+// listener — NOT its P2P gossip port. The P2P gossip listener
+// (handleIncomingConn, nodes.go SECTION 11) uses a plain, length-prefixed
+// wire format and has no "jsonrpc" case: when CallRPC connects to it, the
+// server reads the client's raw Kyber768/X25519 handshake bytes as a message
+// length, rejects the frame and resets the connection ("RPC call failed:
+// handshake ... connection reset by peer").
+func walletRPCAddressForNode(peerP2PAddr string, peerNodeIndex int) string {
+	host := "127.0.0.1"
+	if h, _, err := net.SplitHostPort(peerP2PAddr); err == nil && h != "" {
+		host = h
+	}
+	return fmt.Sprintf("%s:%d", host, baseWalletRPCPort+peerNodeIndex)
+}
+
 // runCheckpointSyncLoop periodically syncs checkpoints.
 func runCheckpointSyncLoop(
 	ctx context.Context,
@@ -103,22 +130,34 @@ func runCheckpointSyncLoop(
 	networkAddresses []string,
 	nodeIndex int,
 ) {
-	time.Sleep(3 * time.Second)
-
-	if len(networkAddresses) > 1 {
+	// syncFromPeers pulls a checkpoint from the first responsive same-box
+	// peer. The addresses in networkAddresses are peers' P2P gossip ports, but
+	// SyncCheckpoints → rpc.CallRPC requires each peer's dedicated
+	// wallet/JSON-RPC listener (handshake-authenticated jsonrpc wire, nodes.go
+	// SECTION 11a), so we translate before dialing. Returns true once at least
+	// one peer answered.
+	syncFromPeers := func() bool {
+		if len(networkAddresses) <= 1 {
+			return false
+		}
 		logger.Info("[%s] Syncing checkpoint with peers...", nodeID)
-		for i, addr := range networkAddresses {
+		for i, p2pAddr := range networkAddresses {
 			if i == nodeIndex {
 				continue
 			}
-			if err := bc.SyncCheckpoints(addr); err != nil {
-				logger.Debug("[%s] Failed to sync checkpoint from %s: %v", nodeID, addr, err)
+			peerRPCAddr := walletRPCAddressForNode(p2pAddr, i)
+			if err := bc.SyncCheckpoints(peerRPCAddr); err != nil {
+				logger.Debug("[%s] Failed to sync checkpoint from %s: %v", nodeID, peerRPCAddr, err)
 				continue
 			}
-			logger.Info("[%s] Synced checkpoint from %s", nodeID, addr)
-			break
+			logger.Info("[%s] Synced checkpoint from %s", nodeID, peerRPCAddr)
+			return true
 		}
+		return false
 	}
+
+	time.Sleep(3 * time.Second)
+	syncedOnce := syncFromPeers()
 
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
@@ -128,6 +167,13 @@ func runCheckpointSyncLoop(
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			// The initial pull can race peer startup (connection refused).
+			// Keep retrying until at least one peer has answered so a late
+			// joiner is never stranded without a peer checkpoint.
+			if !syncedOnce {
+				syncedOnce = syncFromPeers()
+			}
+
 			if cons == nil || !cons.IsLeader() {
 				continue
 			}
@@ -603,6 +649,12 @@ func runBlockSyncLoop(
 	lastPeerRefresh := time.Now()
 	peerFailureCount := make(map[string]int)
 
+	// resyncOnDivergenceCount prevents infinite recovery loops: if we've
+	// already attempted recovery this many times in a single sync-loop
+	// lifetime, we stop trying and let the operator intervene.
+	const maxResyncAttempts = 3
+	resyncAttempts := 0
+
 	// Track sync progress for the dashboard
 	var syncStarted bool
 	var totalBlocksToSync int64 // blocks-behind delta, used only for the log line below
@@ -1054,8 +1106,50 @@ func runBlockSyncLoop(
 				}
 			}
 			wrapped := core.NewBlockHelper(blk)
-			if err := bc.CommitBlock(wrapped); err != nil {
-				logger.Error("[%s] Failed to commit synced block %d: %v", nodeID, blk.GetHeight(), err)
+			commitErr := bc.CommitBlock(wrapped)
+			if commitErr != nil {
+				// ── STATE DIVERGENCE RECOVERY ──
+				// CommitBlock refuses to commit when the locally executed state
+				// root differs from the block header's claimed state root. This
+				// means the local state has diverged from the network — the only
+				// safe remedy is to wipe everything and resync from genesis.
+				if strings.Contains(commitErr.Error(), "state root mismatch") {
+					if resyncAttempts >= maxResyncAttempts {
+						logger.Error("[%s] State divergence at block %d but max resync attempts (%d) exhausted — giving up",
+							nodeID, blk.GetHeight(), maxResyncAttempts)
+						break
+					}
+					resyncAttempts++
+					logger.Warn("[%s] STATE DIVERGENCE at block %d — wiping chain and resyncing from genesis (attempt %d/%d)",
+						nodeID, blk.GetHeight(), resyncAttempts, maxResyncAttempts)
+
+					// Wipe all blockchain state (account records, supply counters,
+					// validator stakes, stored blocks, in-memory chain).
+					if resetErr := bc.ResetForResync(); resetErr != nil {
+						logger.Error("[%s] ResetForResync failed: %v — giving up", nodeID, resetErr)
+						break
+					}
+
+					// Reset sync state so we re-download genesis and the full chain.
+					localHeight = 0
+					hasGenesis = false
+					syncStateMu.Lock()
+					*syncState = SyncStateSyncing
+					syncStateMu.Unlock()
+					applied = 0
+
+					// Clear the progress bar so it restarts cleanly.
+					if syncStarted {
+						syncStarted = false
+					}
+
+					logger.Info("[%s] State wiped — will re-download genesis from peers", nodeID)
+					// Break out of the block loop; the outer loop will re-fetch
+					// genesis and start over.
+					break
+				}
+
+				logger.Error("[%s] Failed to commit synced block %d: %v", nodeID, blk.GetHeight(), commitErr)
 				break
 			}
 			applied++

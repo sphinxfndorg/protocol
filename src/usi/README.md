@@ -35,6 +35,13 @@ The application is built in Go with the Fyne GUI toolkit.
   - Stores signature metadata in a `.usimeta` sidecar file.
   - Auto-mints an on-chain NFT anchor for the signed data.
   - Prevents re-signing already signed documents to preserve integrity.
+  - **Requires a minimum wallet balance of 100 SPX** — the node rejects the
+    mint when the signed-in wallet holds less than the policy minimum.
+  - **Costs SPX to perform** — every mint pays the policy-defined mint fee
+    (default 1 SPX) on-chain through the anchor transaction's gas fee, which
+    the executor deducts from the sender and distributes per the policy fee
+    schedule. The GUI shows the current balance, the floor, and the mint fee
+    before confirming.
 
 - **Signature verification (Verify Data)**
   - Verifies whether a file is authentic and untampered.
@@ -119,6 +126,27 @@ The Inbox screen allows the user to choose a `.vault` file, inspect vault inform
 ### Mint Data
 
 The Mint Data screen allows the user to select any regular file and attach a cryptographic signature. The signature is stored as a `.usimeta` sidecar file, and the signed data is automatically minted as an on-chain NFT anchor.
+
+Minting is a gated, paid operation governed by the consensus policy (`src/policy`): the wallet must hold at least the minimum mint balance (100 SPX) — enforced against the node's live `getbalance` — and each mint pays the policy mint fee (default 1 SPX) through the anchor transaction's gas fee. The screen shows the floor, the fee, and the user's current balance before confirming.
+
+### IPFS dependency for minted data
+
+Minting anchors the signed data to **IPFS** so a verifier can fetch the pinned payload by CID. IPFS is a **separate daemon** from the Sphinx node — running the chain nodes does not start IPFS. Start a Kubo daemon (or IPFS Desktop) and leave it listening on the default API port:
+
+```bash
+ipfs init        # once per machine
+ipfs daemon      # serve the HTTP API on 127.0.0.1:5001, gateway on 127.0.0.1:8080
+```
+
+If your daemon runs on another host/port, override it before launching the wallet:
+
+```bash
+export SPHINX_IPFS_ADDR="http://127.0.0.1:5001"
+export SPHINX_IPFS_GATEWAY="http://127.0.0.1:8080"
+export SPHINX_IPFS_DISABLE="true"   # optional: always use offline fallback CIDs
+```
+
+If the IPFS API is unreachable, **the mint still succeeds**: the wallet stores a deterministic local fallback CID (`sha256-<hex>`), signs, mints the receipt, and anchors it on-chain, and the UI shows a warning. The commitment remains locally verifiable; you can later pin the payload to IPFS by its CID once a daemon is running.
 
 ### Verify Data
 

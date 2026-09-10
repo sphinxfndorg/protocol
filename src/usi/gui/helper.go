@@ -433,6 +433,35 @@ func (os *OrgSelector) SetSelectedOrg(orgCode keys.OrgCode) {
 	log.Printf("[DEBUG] SetSelectedOrg called with %q, ignoring (only SPIF supported)", orgCode)
 }
 
+// requireMintBalance asserts the logged-in wallet holds at least the policy
+// minimum balance required to mint data through USI (default 100 SPX), and
+// returns the live balance on success. Minting is a paid, gated operation:
+// anyone below the floor is not allowed to anchor new data, and the balance is
+// read from the full node's JSON-RPC (getbalance), so an offline node rejects
+// the mint rather than silently bypassing the requirement.
+func requireMintBalance(client *WalletClient) (*BalanceResponse, error) {
+	if client == nil {
+		return nil, errors.New("wallet client not initialised")
+	}
+	resp, err := client.GetBalance("")
+	if err != nil {
+		return nil, fmt.Errorf("could not verify SPX balance (is the full node online?): %w", err)
+	}
+	if resp == nil || resp.Balance == nil {
+		return nil, errors.New("could not verify SPX balance")
+	}
+
+	mintPolicy := policy.GetDefaultPolicyParams()
+	minBalance := mintPolicy.GetMinMintBalance()
+	if resp.Balance.Cmp(minBalance) < 0 {
+		held := formatSPXAmount(new(big.Float).Quo(new(big.Float).SetInt(resp.Balance), big.NewFloat(1e18)))
+		required := formatSPXAmount(new(big.Float).SetFloat64(mintPolicy.GetMinMintBalanceSPX()))
+		return nil, fmt.Errorf("minting data requires holding at least %s SPX — your current balance is %s SPX",
+			required, held)
+	}
+	return resp, nil
+}
+
 // AnchorMintReceipt commits a signed MintReceipt to the chain.
 //
 // ASSUMPTION: I don't have your consensus/mempool tx-validation code, so
@@ -452,6 +481,13 @@ func (c *WalletClient) AnchorMintReceipt(receipt *mint.MintReceipt) (txID string
 		return "", "", errors.New("nil receipt")
 	}
 
+	// Minting data is a paid operation gated on holding the policy minimum
+	// balance. Enforce it here — in addition to the GUI screens — so every
+	// wallet path that anchors a receipt obeys the holding requirement.
+	if _, err := requireMintBalance(c); err != nil {
+		return "", "", fmt.Errorf("mint rejected: %w", err)
+	}
+
 	// Build NFT off-chain storage + on-chain anchor payload (Ethereum-style: anchor CID hash).
 	// 1) Upload mint receipt JSON bytes to IPFS and get CID.
 	// 2) Build deterministic CIDHash and create a storage artifact payload.
@@ -464,9 +500,11 @@ func (c *WalletClient) AnchorMintReceipt(receipt *mint.MintReceipt) (txID string
 	}
 
 	ipfsClient := storage.NewClient(storage.DefaultConfig())
-	cid, err := ipfsClient.AddBytesToIPFS(payloadJSON, fmt.Sprintf("mint_%s.json", receipt.MintID))
-	if err != nil {
-		return "", "", fmt.Errorf("ipfs upload: %w", err)
+	cid, cidErr := ipfsClient.AddBytesToIPFSWithFallback(payloadJSON, fmt.Sprintf("mint_%s.json", receipt.MintID))
+	if cidErr != nil {
+		// Not fatal: the on-chain anchor only needs the CID hash commitment.
+		// A missing IPFS daemon must not block anchoring the receipt.
+		log.Printf("[WARN] AnchorMintReceipt: receipt not uploaded to IPFS, continuing with fallback CID: %v", cidErr)
 	}
 	cidHashHex := storage.CIDHash(cid)
 
@@ -509,9 +547,23 @@ func (c *WalletClient) AnchorMintReceipt(receipt *mint.MintReceipt) (txID string
 		}
 	}()
 
-	// Mint anchors pay by their actual anchor size under the shared policy
-	// schedule. Core validates this independently when the transaction arrives.
-	gasQuote := policy.GetDefaultPolicyParams().QuoteTransactionGas(uint64(len(anchorData)))
+	// Mint anchors are a paid operation under the shared policy schedule: the
+	// ordinary gas quote only covers the data footprint, so QuoteMintDataGas
+	// raises the gas price until the gas fee reaches the policy mint fee
+	// (default 1 SPX). Core re-derives and enforces the minimum independently
+	// when the transaction arrives; an offered gas price above the floor is
+	// always accepted, and the executor deducts the full gas fee from the
+	// sender and distributes it per the fee schedule.
+	//
+	// QuoteMintDataGas sizes the price from four dimensions:
+	//   payloadBytes  — the bytes pinned to IPFS (the marshaled receipt uploaded
+	//                   above is what this wallet actually pins; its CID is what
+	//                   gets committed on-chain),
+	//   anchorBytes   — the on-chain anchor payload (ReturnData) footprint,
+	//   numHashes     — committed hashes / Merkle leaves (governance default),
+	//   pinningMonths — IPFS retention (governance default).
+	mintPolicy := policy.GetDefaultPolicyParams()
+	gasQuote := mintPolicy.QuoteMintDataGas(uint64(len(payloadJSON)), uint64(len(anchorData)), mintPolicy.MintBaseHashes, mintPolicy.MintPinningMonths)
 
 	// ChainID for EIP-155 replay protection — must match the node's network.
 	// Fall back to the Sphinx mainnet chain ID (7331) when the header is

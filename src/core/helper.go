@@ -284,6 +284,72 @@ func (bc *Blockchain) ClearChainAfter(keepAfter uint64) {
 	logger.Info("ClearChainAfter: cleared blocks after height %d (chain now has %d blocks)", keepAfter, len(bc.chain))
 }
 
+// ResetForResync wipes all blockchain state — account records, supply
+// counters, validator stakes, stored blocks, and the in-memory chain — so the
+// sync loop can re-download the entire chain from genesis. This is the recovery
+// path when CommitBlock detects a state-root mismatch: the local state has
+// diverged from the network and the only safe remedy is to throw everything
+// away and resync from a trusted peer.
+//
+// It is safe to call from the sync goroutine: CommitBlock holds bc.commitMu for
+// the duration of a commit, and the sync loop calls CommitBlock serially, so
+// this can only run when no commit is in progress.
+func (bc *Blockchain) ResetForResync() error {
+	bc.lock.Lock()
+	defer bc.lock.Unlock()
+
+	logger.Info("ResetForResync: wiping all blockchain state for resync from genesis")
+
+	// 1. Wipe account state and supply counters from LevelDB.
+	db, err := bc.storage.GetDB()
+	if err != nil {
+		return fmt.Errorf("ResetForResync: failed to get DB: %w", err)
+	}
+
+	keys, err := db.ListKeysWithPrefix(accountPrefix)
+	if err != nil {
+		return fmt.Errorf("ResetForResync: listing account keys: %w", err)
+	}
+	for _, k := range keys {
+		if err := db.Delete(k); err != nil {
+			return fmt.Errorf("ResetForResync: deleting %s: %w", k, err)
+		}
+	}
+
+	// 2. Wipe supply / reward counters.
+	_ = db.Delete(totalSupplyKey)
+	_ = db.Delete(genesisSupplyKey)
+	_ = db.Delete(rewardsMintedKey)
+
+	// 3. Wipe ALL contract state (code, storage, validator stakes) so the
+	//    replay starts from a clean slate.
+	if contractKeys, err := db.ListKeysWithPrefix(contractPrefix); err == nil {
+		for _, k := range contractKeys {
+			_ = db.Delete(k)
+		}
+	}
+	// Also use the StateDB helper to clear validator stakes (handles any
+	// in-memory pending writes that wouldn't show up in ListKeysWithPrefix).
+	if sdb, err := bc.newStateDB(); err == nil {
+		if err := sdb.ClearValidatorStakes(); err != nil {
+			logger.Warn("ResetForResync: could not clear validator stakes: %v", err)
+		}
+	}
+
+	// 4. Delete all stored blocks from disk and reset the storage tip.
+	//    ResetTip removes every block file (including genesis), clears the
+	//    in-memory indices, and resets totalBlocks / bestBlockHash.
+	if err := bc.storage.ResetTip(); err != nil {
+		return fmt.Errorf("ResetForResync: ResetTip failed: %w", err)
+	}
+
+	// 5. Clear the in-memory chain entirely.
+	bc.chain = nil
+
+	logger.Info("ResetForResync: state wiped — node ready to resync from genesis")
+	return nil
+}
+
 // GetStorage returns the storage instance for external access
 func (bc *Blockchain) GetStorage() *storage.Storage {
 	return bc.storage

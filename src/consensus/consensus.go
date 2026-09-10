@@ -2377,9 +2377,11 @@ func (c *Consensus) processVoteLocked(vote *Vote) Block {
 	// Handle zero stake case
 	if stake.Cmp(big.NewInt(0)) == 0 {
 		if vote.VoterID == c.nodeID {
-			// Self stake fallback
-			stake = new(big.Int).Mul(big.NewInt(32), big.NewInt(denom.SPX))
-			logger.Info("Self stake was zero, using default: 32 SPX")
+			// Self stake fallback: use the shared minimum-validator-stake
+			// constant (denom.MinValidatorStakeSPX) rather than a duplicated
+			// "32 SPX" literal.
+			stake = denom.MinValidatorStakeNSPX()
+			logger.Info("Self stake was zero, using default: %d SPX", denom.MinValidatorStakeSPX)
 		} else {
 			logger.Warn("Vote from %s has zero stake", vote.VoterID)
 		}

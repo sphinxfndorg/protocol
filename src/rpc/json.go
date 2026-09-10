@@ -1169,12 +1169,18 @@ func NewRPCCaller(nodeID NodeID) *RPCCallerImpl {
 	return &RPCCallerImpl{nodeID: nodeID}
 }
 
-// GetCheckpoint retrieves a checkpoint from a peer
+// GetCheckpoint retrieves a checkpoint from a peer.
+//
+// peerAddress MUST be the peer's dedicated wallet/JSON-RPC listener address —
+// the transport.TCPServer bound to nodeConfig.WSPort (or 127.0.0.1:8700+idx)
+// in StartNode SECTION 11a — NOT its P2P gossip address. rpc.CallRPC dials
+// the address and performs a Kyber768/X25519 handshake followed by encrypted
+// "jsonrpc" framing, a protocol only that wallet listener implements. Dialing
+// the P2P gossip port instead makes handleIncomingConn read the handshake
+// bytes as a message length and reset the connection.
 func (c *RPCCallerImpl) GetCheckpoint(peerAddress string) (*consensus.CheckpointMessage, error) {
-	// CallRPC(address, method, params, ttlSeconds) dials the peer's P2P TCP
-	// address and performs its own handshake/encryption internally — it no
-	// longer takes a NodeID argument, and it returns the JSON-RPC "result"
-	// field directly as json.RawMessage (no wrapping .Values slice).
+	// CallRPC(address, method, params, ttlSeconds) returns the JSON-RPC
+	// "result" field directly as json.RawMessage (no wrapping .Values slice).
 	resp, err := CallRPC(peerAddress, "getcheckpoint", nil, 60)
 	if err != nil {
 		return nil, fmt.Errorf("RPC call failed: %w", err)
@@ -1192,7 +1198,10 @@ func (c *RPCCallerImpl) GetCheckpoint(peerAddress string) (*consensus.Checkpoint
 	return &cp, nil
 }
 
-// GetSupplyStatus retrieves supply status from a peer
+// GetSupplyStatus retrieves supply status from a peer.
+//
+// peerAddress must be the peer's dedicated wallet/JSON-RPC listener address
+// (see GetCheckpoint) — rpc.CallRPC cannot talk to the peer's P2P gossip port.
 func (c *RPCCallerImpl) GetSupplyStatus(peerAddress string) (map[string]interface{}, error) {
 	resp, err := CallRPC(peerAddress, "getsupplystatus", nil, 60)
 	if err != nil {

@@ -151,6 +151,123 @@ func (s *StateDB) SetContractValue(key string, value []byte) {
 	s.contractPending[key] = append([]byte(nil), value...)
 }
 
+// ----------------------------------------------------------------------------
+// Validator stake state (deterministic, part of the state root)
+//
+// Validator stakes are stored in the same deterministic contract-state
+// namespace as contract code/storage (contract:validator:<id>), so they are
+// hashed into the state root and replayed identically from genesis. This is
+// what lets epoch inflation be computed from REAL stake instead of the policy
+// target ratio (the executor reads these records at epoch boundaries).
+// ----------------------------------------------------------------------------
+
+// validatorStakePrefix is the on-disk prefix for validator stake records.
+const validatorStakePrefix = contractPrefix + validatorPrefix
+
+// SetValidatorStake records a validator's stake in nSPX. The write is staged
+// until Commit like any other contract-state write. Non-positive stakes are
+// ignored (a validator with no stake simply has no record, which distribution
+// treats as "not eligible this epoch").
+func (s *StateDB) SetValidatorStake(id string, stakeNSPX *big.Int) {
+	if id == "" || stakeNSPX == nil || stakeNSPX.Sign() <= 0 {
+		return
+	}
+	s.SetContractValue(validatorPrefix+id, []byte(stakeNSPX.String()))
+}
+
+// GetValidatorStake returns the persisted stake for a validator in nSPX, or
+// nil when no record exists.
+func (s *StateDB) GetValidatorStake(id string) (*big.Int, error) {
+	if id == "" {
+		return nil, errors.New("validator id cannot be empty")
+	}
+	value, err := s.GetContractValue(validatorPrefix + id)
+	if err != nil {
+		return nil, err
+	}
+	if len(value) == 0 {
+		return nil, nil
+	}
+	stake, ok := new(big.Int).SetString(string(value), 10)
+	if !ok {
+		return nil, fmt.Errorf("corrupt validator stake record for %s: %q", id, string(value))
+	}
+	return stake, nil
+}
+
+// GetAllValidatorStakes returns a snapshot of every persisted validator stake
+// keyed by validator ID. Pending (not-yet-committed) writes take precedence
+// over the committed store, so an executor distributing epoch rewards uses
+// exactly the state it is about to commit.
+func (s *StateDB) GetAllValidatorStakes() (map[string]*big.Int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	stakes := make(map[string]*big.Int)
+
+	// Pending writes staged for the enclosing block.
+	for key, value := range s.contractPending {
+		if !strings.HasPrefix(key, validatorPrefix) {
+			continue
+		}
+		id := strings.TrimPrefix(key, validatorPrefix)
+		if id == "" {
+			continue
+		}
+		if stake, ok := new(big.Int).SetString(string(value), 10); ok {
+			stakes[id] = stake
+		}
+	}
+
+	// Committed store.
+	keys, err := s.db.ListKeysWithPrefix(validatorStakePrefix)
+	if err != nil {
+		return nil, fmt.Errorf("GetAllValidatorStakes: %w", err)
+	}
+	for _, k := range keys {
+		id := strings.TrimPrefix(k, validatorStakePrefix)
+		if id == "" {
+			continue
+		}
+		if _, seen := stakes[id]; seen {
+			continue // pending write wins for this block
+		}
+		data, err := s.db.Get(k)
+		if err != nil {
+			continue
+		}
+		if stake, ok := new(big.Int).SetString(string(data), 10); ok {
+			stakes[id] = stake
+		}
+	}
+
+	return stakes, nil
+}
+
+// ClearValidatorStakes removes all validator stake records from both the
+// pending map and the committed store. Used by state rebuilds so replay
+// recomputes validator stake records from scratch.
+func (s *StateDB) ClearValidatorStakes() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for key := range s.contractPending {
+		if strings.HasPrefix(key, validatorPrefix) {
+			delete(s.contractPending, key)
+		}
+	}
+	keys, err := s.db.ListKeysWithPrefix(validatorStakePrefix)
+	if err != nil {
+		return fmt.Errorf("ClearValidatorStakes: %w", err)
+	}
+	for _, k := range keys {
+		if err := s.db.Delete(k); err != nil {
+			return fmt.Errorf("ClearValidatorStakes: deleting %s: %w", k, err)
+		}
+	}
+	return nil
+}
+
 // NEW: SetGenesisSupply - Set the genesis allocation amount
 func (s *StateDB) SetGenesisSupply(amount *big.Int) {
 	s.mu.Lock()

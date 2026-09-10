@@ -722,23 +722,46 @@ func (s *Storage) calculateBlockSize(block *types.Block) uint64 {
 
 	size := uint64(0)
 
-	// Header size (approximate)
-	size += 80 // Fixed header components
+	// Header size (approximate) - fixed overhead
+	size += 80
 
-	// Transactions size - calculate based on actual transaction data
+	// Transactions size - must match bc.calculateTxsSize() in executor.go
+	// for consistent block size reporting across the codebase.
+	// This is the same manual estimation used when bc.mempool is nil.
 	for _, tx := range block.Body.TxsList {
-		txSize := uint64(0)
+		txSize := uint64(50) // Fixed overhead
+		txSize += uint64(len(tx.ID))
+		txSize += uint64(len(tx.Sender))
+		txSize += uint64(len(tx.Receiver))
 
-		// Add size of transaction fields
-		txSize += uint64(len(tx.ID))        // Transaction ID
-		txSize += uint64(len(tx.Sender))    // Sender address
-		txSize += uint64(len(tx.Receiver))  // Receiver address
-		txSize += 8                         // Nonce (uint64)
-		txSize += 32                        // Amount (big.Int - approximate)
-		txSize += 32                        // GasLimit (big.Int - approximate)
-		txSize += 32                        // GasPrice (big.Int - approximate)
-		txSize += 8                         // Timestamp (int64)
-		txSize += uint64(len(tx.Signature)) // Signature
+		if tx.Amount != nil {
+			txSize += uint64(len(tx.Amount.Bytes()))
+		}
+		if tx.GasLimit != nil {
+			txSize += uint64(len(tx.GasLimit.Bytes()))
+		}
+		if tx.GasPrice != nil {
+			txSize += uint64(len(tx.GasPrice.Bytes()))
+		}
+
+		txSize += 8 // nonce
+		txSize += 8 // timestamp
+
+		txSize += uint64(len(tx.Signature))
+		txSize += uint64(len(tx.SignatureHash))
+		txSize += uint64(len(tx.PublicKey))
+		txSize += uint64(len(tx.AuthTimestamp))
+		txSize += uint64(len(tx.AuthNonce))
+		txSize += uint64(len(tx.MerkleRootHash))
+		txSize += uint64(len(tx.Commitment))
+		txSize += uint64(len(tx.Proof))
+		txSize += uint64(len(tx.Code))
+		txSize += uint64(len(tx.CallData))
+		txSize += uint64(len(tx.ToContract))
+
+		if tx.HasReturnData() && len(tx.ReturnData) > 0 {
+			txSize += uint64(len(tx.ReturnData))
+		}
 
 		size += txSize
 	}
@@ -1433,13 +1456,16 @@ func (s *Storage) StoreBlock(block *types.Block) error {
 		}
 	}
 
-	// Calculate and log block size (simplified)
-	data, err := json.Marshal(block)
-	if err == nil {
-		blockSize := uint64(len(data))
-		logger.Info("Block %d size: %d bytes, transaction count: %d",
-			height, blockSize, len(block.Body.TxsList))
-	}
+	// Calculate and log block size using the same in-memory estimation
+	// used everywhere else (matches bc.CalculateBlockSize in blockchain.go).
+	// Previously this used json.Marshal(block) which measures the serialized
+	// JSON size (including field names, quotes, commas) — a completely
+	// different metric that was ~6x larger and inconsistent with the
+	// metrics path (s.calculateBlockSize in state.go and CalculateBlockSize
+	// in blockchain.go).
+	blockSize := s.calculateBlockSize(block)
+	logger.Info("Block %d size: %d bytes, transaction count: %d",
+		height, blockSize, len(block.Body.TxsList))
 
 	// Check if block already exists
 	if existing, exists := s.blockIndex[blockHash]; exists {
@@ -1665,6 +1691,63 @@ func (s *Storage) DeleteBlocksAbove(targetHeight uint64) error {
 
 	logger.Info("Purged %d stored blocks above height %d (tip now %d, hash=%s)",
 		removed, targetHeight, targetHeight, s.bestBlockHash)
+	return nil
+}
+
+// ResetTip wipes all stored blocks, indices, and chain tip bookkeeping so
+// the node can resync from genesis. This is the storage-layer primitive used
+// by Blockchain.ResetForResync when a state-root mismatch is detected during
+// sync. Unlike DeleteBlocksAbove (which preserves the block at targetHeight),
+// this removes everything — including genesis — and resets totalBlocks to 0.
+func (s *Storage) ResetTip() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	logger.Info("ResetTip: removing all stored blocks and resetting chain tip")
+
+	// Remove every block file from disk.
+	for hash := range s.blockIndex {
+		filename := filepath.Join(s.blocksDir, s.sanitizeFilename(hash)+".json")
+		if err := os.Remove(filename); err != nil && !os.IsNotExist(err) {
+			logger.Warn("ResetTip: failed to remove block file %s: %v", filename, err)
+		}
+	}
+
+	// Also scan the blocks directory for any files not in blockIndex
+	// (e.g., orphaned files from a crash) and remove them.
+	if entries, err := os.ReadDir(s.blocksDir); err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			// Keep non-block files (e.g., .gitkeep, README).
+			if filepath.Ext(entry.Name()) == ".json" {
+				fullPath := filepath.Join(s.blocksDir, entry.Name())
+				if err := os.Remove(fullPath); err != nil && !os.IsNotExist(err) {
+					logger.Warn("ResetTip: failed to remove orphan block file %s: %v", fullPath, err)
+				}
+			}
+		}
+	}
+
+	// Clear all in-memory indices.
+	s.blockIndex = make(map[string]*types.Block)
+	s.heightIndex = make(map[uint64]*types.Block)
+	s.txIndex = make(map[string]*types.Transaction)
+
+	// Reset chain tip bookkeeping.
+	s.totalBlocks = 0
+	s.bestBlockHash = ""
+
+	// Persist the empty index and chain state so the reset survives a restart.
+	if err := s.saveBlockIndex(); err != nil {
+		return fmt.Errorf("ResetTip: failed to save block index: %w", err)
+	}
+	if err := s.saveChainState(); err != nil {
+		return fmt.Errorf("ResetTip: failed to save chain state: %w", err)
+	}
+
+	logger.Info("ResetTip: all blocks removed, chain tip reset to genesis")
 	return nil
 }
 

@@ -19,6 +19,7 @@ import (
 	seed "github.com/sphinxfndorg/protocol/src/accounts/phrase"
 	"github.com/sphinxfndorg/protocol/src/core"
 	vault "github.com/sphinxfndorg/protocol/src/core/wallet/vault"
+	"github.com/sphinxfndorg/protocol/src/policy"
 	"github.com/sphinxfndorg/protocol/src/storage"
 	keys "github.com/sphinxfndorg/protocol/src/usi/core/key"
 	"github.com/sphinxfndorg/protocol/src/usi/core/mint"
@@ -1181,7 +1182,26 @@ func Run() {
 		log.Println("Displaying mint data screen")
 		updateLayout(true)
 
-		var selectedFile string
+		// Mint Data is a paid, gated operation: the wallet must hold the
+		// policy minimum balance (100 SPX) and each mint charges the policy
+		// mint fee on-chain. Pull the values once from the governance policy so
+		// the UI always reflects what the node will enforce.
+		mintPolicy := policy.GetDefaultPolicyParams()
+
+		var selectedFile     string
+		var selectedFileSize uint64
+
+		// mintFeeSPX projects the policy mint fee (in SPX) for the currently
+		// selected file. Mint data is priced deterministically from four
+		// dimensions — payload bytes (what gets pinned to IPFS), on-chain
+		// anchor bytes, committed hashes, and IPFS retention — and the node
+		// enforces the same dimensions through the anchor transaction's gas
+		// quote (see AnchorMintReceipt). The anchor/hash/pinning dimensions
+		// use the governance defaults; the payload dimension tracks the actual
+		// size of the file being minted (0 before any file is picked).
+		mintFeeSPX := func() float64 {
+			return mintPolicy.CalculateMintDataFeeInSPX(selectedFileSize, mintPolicy.MintAnchorBytes, mintPolicy.MintBaseHashes, mintPolicy.MintPinningMonths)
+		}
 
 		dropBg := canvas.NewRectangle(colSurface)
 		dropBg.CornerRadius = 12
@@ -1233,6 +1253,7 @@ func Run() {
 			fileNameVal.Refresh()
 
 			if info, err := os.Stat(path); err == nil {
+				selectedFileSize = uint64(info.Size())
 				fileSizeVal.Text = fmt.Sprintf("%.2f MB", float64(info.Size())/(1024*1024))
 				fileSizeVal.Color = colText
 				fileSizeVal.Refresh()
@@ -1251,6 +1272,7 @@ func Run() {
 		}
 
 		resetDropZone := func() {
+			selectedFileSize = 0
 			dropBg.FillColor = colSurface
 			dropBg.StrokeColor = colBorder2
 			dropIcon.Text = ""
@@ -1320,104 +1342,124 @@ func Run() {
 				return
 			}
 
-			validatePassphraseDialog(window, "Confirm Passphrase", "Enter your passphrase to sign this document:", func(passphrase string) {
-				prog := widget.NewProgressBar()
-				progLbl := widget.NewLabel("Preparing signature…")
-				progDlg := dialog.NewCustom("Signing", "Cancel", container.NewVBox(progLbl, prog), window)
-				progDlg.Show()
+			// Mint data is gated on holding the policy minimum balance (default
+			// 100 SPX in this wallet). Verify through the node before spending
+			// anything on the anchor transaction.
+			if _, balErr := requireMintBalance(walletClient); balErr != nil {
+				dialog.ShowError(balErr, window)
+				return
+			}
 
-				go func() {
-					data, err := os.ReadFile(selectedFile)
-					if err != nil {
-						fyne.Do(func() { progDlg.Hide(); dialog.ShowError(err, window) })
-						return
-					}
+			validatePassphraseDialog(window, "Confirm Passphrase",
+				fmt.Sprintf("Enter your passphrase to sign this document.\n\nMinting costs %.2f %s, charged on-chain. Your wallet must hold at least %.0f %s.",
+					mintFeeSPX(), chainHeader.Symbol, mintPolicy.GetMinMintBalanceSPX(), chainHeader.Symbol),
+				func(passphrase string) {
+					prog := widget.NewProgressBar()
+					progLbl := widget.NewLabel("Preparing signature…")
+					progDlg := dialog.NewCustom("Signing", "Cancel", container.NewVBox(progLbl, prog), window)
+					progDlg.Show()
 
-					fyne.Do(func() { prog.SetValue(0.3); progLbl.SetText("Hashing document…") })
-					hash := keys.SHAKE256Hash(data)
+					go func() {
+						data, err := os.ReadFile(selectedFile)
+						if err != nil {
+							fyne.Do(func() { progDlg.Hide(); dialog.ShowError(err, window) })
+							return
+						}
 
-					fyne.Do(func() { prog.SetValue(0.5); progLbl.SetText("Generating signature…") })
-					sig, err := sign.Sign(hash, passphrase)
-					if err != nil {
-						fyne.Do(func() { progDlg.Hide(); dialog.ShowError(err, window) })
-						return
-					}
+						fyne.Do(func() { prog.SetValue(0.3); progLbl.SetText("Hashing document…") })
+						hash := keys.SHAKE256Hash(data)
 
-					fyne.Do(func() { prog.SetValue(0.75); progLbl.SetText("Embedding signature…") })
-					meta, err := sign.NewMeta(sig, hash)
-					if err != nil {
-						fyne.Do(func() { progDlg.Hide(); dialog.ShowError(err, window) })
-						return
-					}
+						fyne.Do(func() { prog.SetValue(0.5); progLbl.SetText("Generating signature…") })
+						sig, err := sign.Sign(hash, passphrase)
+						if err != nil {
+							fyne.Do(func() { progDlg.Hide(); dialog.ShowError(err, window) })
+							return
+						}
 
-					meta.OrgCode = "SPIF"
-					meta.Signer = sessionFingerprint
-					meta.DocumentTitle = filepath.Base(selectedFile)
+						fyne.Do(func() { prog.SetValue(0.75); progLbl.SetText("Embedding signature…") })
+						meta, err := sign.NewMeta(sig, hash)
+						if err != nil {
+							fyne.Do(func() { progDlg.Hide(); dialog.ShowError(err, window) })
+							return
+						}
 
-					if err := sign.EmbedSignature(selectedFile, meta, publicFingerprint, passphrase); err != nil {
-						fyne.Do(func() { progDlg.Hide(); dialog.ShowError(err, window) })
-						return
-					}
+						meta.OrgCode = "SPIF"
+						meta.Signer = sessionFingerprint
+						meta.DocumentTitle = filepath.Base(selectedFile)
 
-					// After signing, auto-mint NFT on-chain
-					fyne.Do(func() { prog.SetValue(0.9); progLbl.SetText("Anchoring NFT on-chain…") })
+						if err := sign.EmbedSignature(selectedFile, meta, publicFingerprint, passphrase); err != nil {
+							fyne.Do(func() { progDlg.Hide(); dialog.ShowError(err, window) })
+							return
+						}
 
-					// Upload signed payload bytes to IPFS (so the on-chain mint can bind to a real CID)
+						// After signing, auto-mint NFT on-chain
+						fyne.Do(func() { prog.SetValue(0.9); progLbl.SetText("Anchoring NFT on-chain…") })
 
-					ipfsClient := storage.NewClient(storage.DefaultConfig())
-					cid, ipfsErr := ipfsClient.AddBytesToIPFS(data, filepath.Base(selectedFile))
-					if ipfsErr != nil {
-						fyne.Do(func() {
-							progDlg.Hide()
-							dialog.ShowError(fmt.Errorf("ipfs upload failed: %w", ipfsErr), window)
-						})
-						return
-					}
-					gatewayBase := storage.DefaultConfig().GatewayBaseURL
-					metadataURI := gatewayBase + "/ipfs/" + cid
+						// Upload signed payload bytes to IPFS (so the on-chain mint can bind to a
+						// real CID). A missing/unreachable IPFS daemon must NOT block
+						// the mint: AddBytesToIPFSWithFallback returns a
+						// deterministic local CID, and we surface the warning while
+						// continuing with the signature, receipt, and on-chain anchor.
+						ipfsClient := storage.NewClient(storage.DefaultConfig())
+						cid, ipfsWarn := ipfsClient.AddBytesToIPFSWithFallback(data, filepath.Base(selectedFile))
+						ipfsNote := ""
+						if ipfsWarn != nil {
+							ipfsNote = "\n\n⚠ IPFS unreachable — anchored with a local fallback CID. Start an IPFS daemon (or set SPHINX_IPFS_ADDR) to pin data after the fact."
+							log.Printf("[WARN] Mint Data: continuing without real IPFS upload: %v", ipfsWarn)
+						}
+						gatewayBase := storage.DefaultConfig().GatewayBaseURL
+						metadataURI := gatewayBase + "/ipfs/" + cid
 
-					mintRes, mintErr := mint.Mint(data, filepath.Base(selectedFile), sessionPassphrase, "SPIF", cid, metadataURI)
+						mintRes, mintErr := mint.Mint(data, filepath.Base(selectedFile), sessionPassphrase, "SPIF", cid, metadataURI)
 
-					if mintErr == nil {
-						txID, anchorPath, anchorErr := walletClient.AnchorMintReceipt(mintRes.Receipt)
-						fyne.Do(func() {
-							progDlg.Hide()
-							if anchorErr != nil {
-								addActivity(fmt.Sprintf("Signed document: %s (NFT anchor failed: %v)", filepath.Base(selectedFile), anchorErr))
-								statusText.Text = "✓  Document signed, but NFT anchor failed: " + anchorErr.Error()
-								statusText.Color = colWarn
-								statusText.Refresh()
-								dialog.ShowInformation("Signed",
-									fmt.Sprintf("Document signed successfully.\nSignature: %s.usimeta\n\nNFT anchor failed: %v",
-										filepath.Base(selectedFile), anchorErr), window)
-							} else {
-								addActivity(fmt.Sprintf("Signed & minted NFT: %s (tx=%s, anchor=%s)", filepath.Base(selectedFile), txID, anchorPath))
-								statusText.Text = fmt.Sprintf("✓  Signed & minted NFT. txid=%s\nAnchor: %s", txID, anchorPath)
+						if mintErr == nil {
+							txID, anchorPath, anchorErr := walletClient.AnchorMintReceipt(mintRes.Receipt)
+							fyne.Do(func() {
+								progDlg.Hide()
+								if anchorErr != nil {
+									addActivity(fmt.Sprintf("Signed document: %s (NFT anchor failed: %v)", filepath.Base(selectedFile), anchorErr))
+									statusText.Text = "✓  Document signed, but NFT anchor failed: " + anchorErr.Error()
+									statusText.Color = colWarn
+									statusText.Refresh()
+									dialog.ShowInformation("Signed",
+										fmt.Sprintf("Document signed successfully.\nSignature: %s.usimeta\n\nNFT anchor failed: %v",
+											filepath.Base(selectedFile), anchorErr), window)
+								} else {
+									anchorSuffix := ""
+									if ipfsWarn != nil {
+										anchorSuffix = " — IPFS fallback CID"
+									}
+									addActivity(fmt.Sprintf("Signed & minted NFT: %s (tx=%s, anchor=%s%s)", filepath.Base(selectedFile), txID, anchorPath, anchorSuffix))
+									if ipfsWarn != nil {
+										statusText.Text = "✓  Signed & minted NFT (IPFS fallback CID). txid=" + txID + "\nAnchor: " + anchorPath
+									} else {
+										statusText.Text = fmt.Sprintf("✓  Signed & minted NFT. txid=%s\nAnchor: %s", txID, anchorPath)
+									}
+									statusText.Color = colAccent
+									statusText.Refresh()
+									dialog.ShowInformation("Minted ✓",
+										fmt.Sprintf("Document signed and NFT minted on-chain!\n\nSignature: %s.usimeta\nTXID: %s\nAnchor: %s\n\nMint fee charged: %.2f %s%s",
+											filepath.Base(selectedFile), txID, anchorPath, mintFeeSPX(), chainHeader.Symbol, ipfsNote), window)
+								}
+								selectedFile = ""
+								resetDropZone()
+							})
+						} else {
+							fyne.Do(func() {
+								progDlg.Hide()
+								addActivity(fmt.Sprintf("Signed document (NFT mint skipped): %s", filepath.Base(selectedFile)))
+								statusText.Text = "✓  Document signed — signature embedded (NFT mint skipped)"
 								statusText.Color = colAccent
 								statusText.Refresh()
-								dialog.ShowInformation("Minted ✓",
-									fmt.Sprintf("Document signed and NFT minted on-chain!\n\nSignature: %s.usimeta\nTXID: %s\nAnchor: %s",
-										filepath.Base(selectedFile), txID, anchorPath), window)
-							}
-							selectedFile = ""
-							resetDropZone()
-						})
-					} else {
-						fyne.Do(func() {
-							progDlg.Hide()
-							addActivity(fmt.Sprintf("Signed document (NFT mint skipped): %s", filepath.Base(selectedFile)))
-							statusText.Text = "✓  Document signed — signature embedded (NFT mint skipped)"
-							statusText.Color = colAccent
-							statusText.Refresh()
-							dialog.ShowInformation("Signed",
-								fmt.Sprintf("Document signed successfully.\nSignature saved as: %s.usimeta\n\nNFT mint skipped: %v",
-									filepath.Base(selectedFile), mintErr), window)
-							selectedFile = ""
-							resetDropZone()
-						})
-					}
-				}()
-			})
+								dialog.ShowInformation("Signed",
+									fmt.Sprintf("Document signed successfully.\nSignature saved as: %s.usimeta\n\nNFT mint skipped: %v",
+										filepath.Base(selectedFile), mintErr), window)
+								selectedFile = ""
+								resetDropZone()
+							})
+						}
+					}()
+				})
 		})
 		signBtn.Importance = widget.HighImportance
 
@@ -1462,6 +1504,18 @@ func Run() {
 				infoRow("Sidecar", ".usimeta", colAccent),
 				infoRow("Network", chainHeader.ChainName, colAccent),
 			}),
+			spacer(12),
+			infoPanel("Mint Pricing (policy)", []fyne.CanvasObject{
+				infoRow("Min. balance", fmt.Sprintf("%.0f %s", mintPolicy.GetMinMintBalanceSPX(), chainHeader.Symbol), colAccent),
+				infoRow("Cost per mint", fmt.Sprintf("%.2f %s", mintFeeSPX(), chainHeader.Symbol), colWarn),
+				infoRow("Charged via", "anchor tx gas", colText),
+			}),
+			spacer(12),
+			alertBox(fmt.Sprintf("You must hold at least %.0f %s in your wallet to mint data. The node rejects the mint below this floor.",
+				mintPolicy.GetMinMintBalanceSPX(), chainHeader.Symbol), color.RGBA{96, 165, 250, 20}, colInfo),
+			spacer(12),
+			alertBox(fmt.Sprintf("Each mint costs %.2f %s, deducted on-chain through the anchor transaction.",
+				mintFeeSPX(), chainHeader.Symbol), color.RGBA{74, 222, 158, 15}, colAccent),
 			spacer(12),
 			alertBox("A document can only be signed once. Re-signing is blocked to preserve integrity.", color.RGBA{255, 179, 71, 20}, colWarn),
 		)

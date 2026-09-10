@@ -1633,8 +1633,8 @@ func (sm *SyncManager) shouldBecomeValidator() bool {
 		return false
 	}
 
-	minStake := new(big.Int).Mul(big.NewInt(32), big.NewInt(1e18)) // 32 SPX minimum
-	if stake.Cmp(minStake) < 0 {
+	// Compare against the shared minimum-validator-stake constant.
+	if stake.Cmp(denom.MinValidatorStakeNSPX()) < 0 {
 		return false
 	}
 

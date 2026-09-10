@@ -20,4 +20,6 @@ var (
 	ErrInvalidTargetStakeRatio   = errors.New("invalid target stake ratio")
 	ErrInvalidFeeDistribution    = errors.New("invalid fee distribution")
 	ErrInvalidBlockReward        = errors.New("invalid block reward")
+	ErrInvalidMinMintBalance     = errors.New("invalid minimum mint balance")
+	ErrInvalidMintParams         = errors.New("invalid mint sizing parameters")
 )

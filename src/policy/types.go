@@ -61,6 +61,20 @@ type PolicyParameters struct {
 	// Storage pricing
 	PinRatePerGBMonth *big.Int `json:"pin_rate_per_gb_month"` // PinRate = 0.01 SPX/GB/month
 
+	// Minting / data anchoring (USI Mint Data)
+	// MinMintBalance is the minimum nSPX balance an identity must hold to mint
+	// (anchor) data through src/usi/gui (default 100 SPX). The per-mint price is
+	// NOT a flat constant: CalculateMintDataFee sizes it from the payload size,
+	// anchor/metadata bytes, hash count, gas quote, IPFS pinning duration and
+	// the BlocksPerEpoch replication factor. The Mint* fields below are the
+	// deterministic sizing knobs of that calculation.
+	MinMintBalance     *big.Int `json:"min_mint_balance"`      // 100 SPX in nSPX
+	MintAnchorBaseSize uint64   `json:"mint_anchor_base_size"` // serialized anchor tx overhead, excl. return data (bytes)
+	MintAnchorBytes    uint64   `json:"mint_anchor_bytes"`     // estimated anchor payload (ReturnData) size in bytes
+	MintBaseOps        uint64   `json:"mint_base_ops"`         // base compute operations per mint
+	MintBaseHashes     uint64   `json:"mint_base_hashes"`      // hashes committed per mint (SPHINCS+ auth bundle)
+	MintPinningMonths  uint64   `json:"mint_pinning_months"`   // default IPFS retention per mint (months)
+
 	// Inflation parameters
 	// The BPS fields are the consensus representation. The float fields below
 	// remain for wallet/UI projections and backward-compatible APIs only.
@@ -103,6 +117,22 @@ type StoragePricing struct {
 	DurationDays uint64   `json:"duration_days"`
 	CostPerMonth *big.Int `json:"cost_per_month"`
 	TotalCost    *big.Int `json:"total_cost"`
+}
+
+// MintDataFeeQuote is the policy-computed price of one data mint. Every
+// component is deterministic and derived from the payload dimensions and the
+// governance fee schedule, so the wallet and the node compute the same number.
+type MintDataFeeQuote struct {
+	PayloadBytes  uint64 `json:"payload_bytes"`  // raw signed data size in bytes
+	AnchorBytes   uint64 `json:"anchor_bytes"`   // on-chain anchor payload bytes
+	NumHashes     uint64 `json:"num_hashes"`     // committed hashes / Merkle leaves
+	PinningMonths uint64 `json:"pinning_months"` // IPFS retention
+
+	TxFee      *big.Int `json:"tx_fee"`      // on-chain write+compute (× replication R)
+	StorageFee *big.Int `json:"storage_fee"` // metadata anchoring (storage schedule)
+	GasFee     *big.Int `json:"gas_fee"`     // anchor transaction gas
+	IPFSFee    *big.Int `json:"ipfs_fee"`    // IPFS pinning over the retention period
+	TotalFee   *big.Int `json:"total_fee"`   // TxFee + StorageFee + GasFee + IPFSFee
 }
 
 // FeeDistribution represents how collected fees are distributed

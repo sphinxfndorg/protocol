@@ -41,7 +41,6 @@ import (
 	"github.com/sphinxfndorg/protocol/src/http"
 	"github.com/sphinxfndorg/protocol/src/network"
 	dnsdiscovery "github.com/sphinxfndorg/protocol/src/p2p/seed"
-	"github.com/sphinxfndorg/protocol/src/params/commit"
 	"github.com/sphinxfndorg/protocol/src/rpc"
 	"github.com/sphinxfndorg/protocol/src/state"
 	"github.com/sphinxfndorg/protocol/src/transport"
@@ -217,8 +216,20 @@ func StartNode(
 	}
 
 	// SECTION 1 — chain identification
-	chainParams := commit.SphinxChainParams()
-	logger.Info("Chain: %s  ChainID=%d  Symbol=%s", chainParams.ChainName, chainParams.ChainID, chainParams.Symbol)
+	// Use the correct chain parameters for the running network type.
+	// Previously this used commit.SphinxChainParams() which always returns mainnet
+	// parameters (ChainID=7331), even when running in devnet mode (ChainID=73310).
+	// Now we resolve the correct params based on the networkType parameter.
+	var coreChainParams *core.SphinxChainParameters
+	switch networkType {
+	case "testnet":
+		coreChainParams = core.GetTestnetChainParams()
+	case "devnet":
+		coreChainParams = core.GetDevnetChainParams()
+	default:
+		coreChainParams = core.GetSphinxChainParams()
+	}
+	logger.Info("Chain: %s  ChainID=%d  Symbol=%s", coreChainParams.ChainName, coreChainParams.ChainID, coreChainParams.Symbol)
 
 	networkType = "devnet"
 	logger.Info("Network type: %s (%s)", networkType, core.GetNetworkDisplayName(networkType))
@@ -676,7 +687,7 @@ func StartNode(
 	}
 
 	// SECTION 9 — consensus engine
-	coreChainParams := core.GetSphinxChainParams()
+	coreChainParams = core.GetSphinxChainParams()
 	minStakeAmount := coreChainParams.ConsensusConfig.MinStakeAmount
 
 	cons := consensus.NewConsensus(

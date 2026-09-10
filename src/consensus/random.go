@@ -20,10 +20,13 @@ import (
 // sips0013 https://github.com/sphinxorg/SIPS/blob/main/.github/workflows/sips0013/sips0013.md
 
 // Constants for VDF submission windows and slashing
+//
+// Slashing rates are NOT declared here any more: they are policy-owned
+// economics (policy.SlashDowntimeBPS / SlashDoubleSignBPS / SlashLivenessBPS)
+// so that consensus and the policy module share a single slashing schedule.
 const (
 	CommitWindowEnd = uint64(20)  // slots 0-20: submit commitHash+nonce (first phase of commit-reveal)
 	RevealWindowEnd = uint64(31)  // slots 21-31: reveal beta+proof+nonce (second phase of commit-reveal)
-	SlashBps        = uint64(100) // 1% of stake slashed for a missing reveal (basis points: 100 = 1%)
 	SubmitWindowEnd = uint64(31)  // slots 0-31: submit VDF output + proof (entire window for submission)
 )
 

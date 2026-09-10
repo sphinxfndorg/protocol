@@ -70,6 +70,118 @@ func (p *PolicyParameters) QuoteWASMContractGas(deploy bool, codeBytes, callData
 	return quote
 }
 
+// CalculateMintDataFee determines the price of minting data from the payload
+// dimensions using the governance fee schedule. The price is computed, never
+// a flat constant:
+//
+//	MintFee_nSPX = TxFee(S_tx, Ops) + StorageFee(M, H) + GasFee + IPFSFee(F, d)
+//
+// where, with R = BlocksPerEpoch (replication factor):
+//
+//	S_tx = MintAnchorBaseSize + anchorBytes  (serialized on-chain tx footprint)
+//	Ops  = MintBaseOps + H                   (compute, including hash work)
+//	M    = anchorBytes                       (on-chain anchor/metadata bytes)
+//	H    = numHashes                         (committed hashes / Merkle leaves)
+//	F    = payloadBytes                      (raw data size)
+//	d    = pinningMonths                     (IPFS retention)
+//
+// GasFee uses the same policy gas schedule as every transaction
+// (QuoteTransactionGas); TxFee and StorageFee apply the R replication factor.
+// All components come from the deterministic policy schedule, so any wallet
+// and the node compute the identical number.
+func (p *PolicyParameters) CalculateMintDataFee(payloadBytes, anchorBytes, numHashes, pinningMonths uint64) *MintDataFeeQuote {
+	if p == nil {
+		return nil
+	}
+
+	// Gas for the anchor transaction (ReturnData footprint).
+	gasQuote := p.QuoteTransactionGas(anchorBytes)
+	gasFee := new(big.Int).Set(gasQuote.GasFee)
+
+	// On-chain transaction write + compute fee, replicated R times.
+	txSize := p.MintAnchorBaseSize + anchorBytes
+	ops := p.MintBaseOps + numHashes
+	txFee := p.CalculateTxFee(txSize, ops)
+
+	// Metadata anchoring via the storage schedule.
+	storageFee := p.CalculateSigFee(anchorBytes, numHashes)
+
+	// Off-chain IPFS pinning of the raw payload.
+	ipfsFee := p.CalculateIPFSFeeInNSPX(payloadBytes, pinningMonths)
+
+	total := new(big.Int).Add(txFee, storageFee)
+	total.Add(total, gasFee)
+	total.Add(total, ipfsFee)
+
+	return &MintDataFeeQuote{
+		PayloadBytes:  payloadBytes,
+		AnchorBytes:   anchorBytes,
+		NumHashes:     numHashes,
+		PinningMonths: pinningMonths,
+		TxFee:         txFee,
+		StorageFee:    storageFee,
+		GasFee:        gasFee,
+		IPFSFee:       ipfsFee,
+		TotalFee:      total,
+	}
+}
+
+// CalculateMintDataFeeInSPX returns the computed mint price in SPX.
+func (p *PolicyParameters) CalculateMintDataFeeInSPX(payloadBytes, anchorBytes, numHashes, pinningMonths uint64) float64 {
+	quote := p.CalculateMintDataFee(payloadBytes, anchorBytes, numHashes, pinningMonths)
+	if quote == nil || quote.TotalFee == nil {
+		return 0
+	}
+	return p.ConvertNSPXToSPX(quote.TotalFee)
+}
+
+// QuoteMintDataGas prices a mint-anchor transaction so its on-chain gas fee
+// covers the policy-computed mint data fee for the given dimensions. Core
+// validates gas price as a floor (see ValidateTransactionPolicy), so offering
+// a higher price is always accepted; the executor then deducts
+// GasLimit×GasPrice from the sender and distributes it per the policy fee
+// schedule — the mint genuinely costs the user the computed amount.
+func (p *PolicyParameters) QuoteMintDataGas(payloadBytes, anchorBytes, numHashes, pinningMonths uint64) *GasQuote {
+	if p == nil {
+		return nil
+	}
+	quote := p.QuoteTransactionGas(anchorBytes)
+	fee := p.CalculateMintDataFee(payloadBytes, anchorBytes, numHashes, pinningMonths)
+	if fee == nil || quote == nil || quote.GasLimit == nil || quote.GasLimit.Sign() <= 0 {
+		return quote
+	}
+	target := fee.TotalFee
+	if target == nil || target.Sign() <= 0 {
+		return quote
+	}
+
+	// gasPriceNeeded = ceil(target / GasLimit) so GasLimit×GasPrice >= target.
+	gasPriceNeeded := new(big.Int).Sub(quote.GasLimit, big.NewInt(1))
+	gasPriceNeeded.Add(gasPriceNeeded, target)
+	gasPriceNeeded.Div(gasPriceNeeded, quote.GasLimit)
+
+	if quote.GasPrice == nil || gasPriceNeeded.Cmp(quote.GasPrice) > 0 {
+		quote.GasPrice = gasPriceNeeded
+		quote.GasFee = new(big.Int).Mul(quote.GasLimit, quote.GasPrice)
+	}
+	return quote
+}
+
+// GetMinMintBalance returns the minimum nSPX balance an identity must hold to
+// mint (anchor) data via USI. A copy is returned so callers cannot mutate the
+// active policy.
+func (p *PolicyParameters) GetMinMintBalance() *big.Int {
+	if p == nil || p.MinMintBalance == nil {
+		return big.NewInt(0)
+	}
+	return new(big.Int).Set(p.MinMintBalance)
+}
+
+// GetMinMintBalanceSPX returns the minimum mint balance expressed in SPX.
+func (p *PolicyParameters) GetMinMintBalanceSPX() float64 {
+	return p.ConvertNSPXToSPX(p.GetMinMintBalance())
+}
+
 // CalculateTxFee calculates transaction fee in nSPX
 // Formula: TxFee_nSPX = B_w * (S_tx * R) + B_cmp * Ops_tx + K_tx
 // Where:

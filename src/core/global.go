@@ -74,11 +74,9 @@ func (bc *Blockchain) GetValidatorStake(validatorID string) *big.Int {
 		return bc.chainParams.ConsensusConfig.MinStakeAmount
 	}
 
-	// Default fallback: 32 SPX in nSPX
-	return new(big.Int).Mul(
-		big.NewInt(32),
-		big.NewInt(denom.SPX),
-	)
+	// Default fallback: minimum validator stake in nSPX (32 SPX) — shared
+	// constant from the denom package.
+	return denom.MinValidatorStakeNSPX()
 }
 
 // GetTotalStaked returns the total amount staked across all validators

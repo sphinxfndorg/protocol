@@ -23,6 +23,7 @@ import (
 	logger "github.com/sphinxfndorg/protocol/src/console"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
 	denom "github.com/sphinxfndorg/protocol/src/params/denom"
+	"github.com/sphinxfndorg/protocol/src/policy"
 	"github.com/sphinxfndorg/protocol/src/pool"
 )
 
@@ -711,8 +712,18 @@ func (bc *Blockchain) mintEpochInflation(block *types.Block, stateDB *StateDB) {
 		return
 	}
 	year := block.GetHeight()/blocksPerYear + 1
-	// Until validator stake is stored in StateDB, the policy target is the only
-	// consensus-stable ratio available to every replaying node.
+	// ★ FIX: Do NOT refresh validator stakes from the live consensus set here.
+	// The live consensus set is node-specific (different peer discovery timing,
+	// connection state), so calling refreshValidatorStakesFromConsensus() here
+	// makes every node compute a different stake distribution → different account
+	// states → different state roots. This was the root cause of the late joiner
+	// state divergence at the first epoch boundary (block 3).
+	//
+	// Instead, epoch inflation distributes according to the deterministic on-chain
+	// stakes already persisted in StateDB (seeded at genesis via
+	// seedValidatorStakesFromGenesis, updated via explicit stake transactions).
+	// This guarantees every replaying node derives the identical distribution and
+	// arrives at the same state root.
 	distribution := p.CalculateEpochInflationExact(stateDB.GetTotalSupply(), year)
 	if distribution.TotalMinted.Sign() <= 0 {
 		return
@@ -729,11 +740,128 @@ func (bc *Blockchain) mintEpochInflation(block *types.Block, stateDB *StateDB) {
 		distribution.StakingRewards.Div(distribution.StakingRewards, big.NewInt(10000))
 		distribution.CommunityFund.Sub(remaining, distribution.StakingRewards)
 	}
-	stateDB.AddBalance(StakingFeePoolAddress, distribution.StakingRewards)
+	// Stakers slice → per-validator commission (real stake) + fee pool for the
+	// delegator share. Community fund → treasury.
+	bc.distributeEpochStakingRewards(stateDB, distribution.StakingRewards)
 	stateDB.AddBalance(TreasuryFeePoolAddress, distribution.CommunityFund)
 	stateDB.IncrementTotalSupply(distribution.TotalMinted)
 	stateDB.IncrementRewardsMinted(distribution.TotalMinted)
 	logger.Info("policy inflation: epoch=%d year=%d minted=%s nSPX (staking=%s treasury=%s)", block.GetHeight()/p.BlocksPerEpoch, year, distribution.TotalMinted, distribution.StakingRewards, distribution.CommunityFund)
+}
+
+// seedValidatorStakesFromGenesis persists the genesis-defined validator stakes
+// (InitialValidators) into StateDB. It runs exactly once, during block-0
+// execution, so chains that boot with a known validator set get a
+// deterministic on-chain stake snapshot before the first epoch boundary.
+func (bc *Blockchain) seedValidatorStakesFromGenesis(stateDB *StateDB) {
+	if stateDB == nil || bc.chainParams == nil {
+		return
+	}
+	existing, err := stateDB.GetAllValidatorStakes()
+	if err == nil && len(existing) > 0 {
+		return // already seeded — never overwrite a committed set
+	}
+	gs := GenesisStateFromChainParams(bc.chainParams)
+	for _, v := range gs.InitialValidators {
+		if v == nil || v.NodeID == "" {
+			continue
+		}
+		if v.StakeNSPX != nil && v.StakeNSPX.Sign() > 0 {
+			stateDB.SetValidatorStake(v.NodeID, v.StakeNSPX)
+		}
+	}
+}
+
+// distributeEpochStakingRewards credits the epoch's staking-reward slice to
+// validators in proportion to their state-persisted stake, using policy's
+// exact integer commission math (CalculateValidatorRewardExact). The
+// commission portion goes to each validator's reward address (node ID when no
+// SPIF reward address is registered); the remaining delegator share and any
+// integer rounding dust stays in StakingFeePoolAddress for the staking
+// subsystem to claim. With no stake records at all, the full slice is parked
+// in the fee pool — identical to the pre-distribution behaviour.
+func (bc *Blockchain) distributeEpochStakingRewards(stateDB *StateDB, stakingRewards *big.Int) {
+	if stateDB == nil || stakingRewards == nil || stakingRewards.Sign() <= 0 {
+		return
+	}
+	stakes, err := stateDB.GetAllValidatorStakes()
+	if err != nil || len(stakes) == 0 {
+		stateDB.AddBalance(StakingFeePoolAddress, stakingRewards)
+		return
+	}
+
+	totalStaked := big.NewInt(0)
+	for _, s := range stakes {
+		if s != nil {
+			totalStaked.Add(totalStaked, s)
+		}
+	}
+	if totalStaked.Sign() <= 0 {
+		stateDB.AddBalance(StakingFeePoolAddress, stakingRewards)
+		return
+	}
+
+	// Deterministic iteration order (sorted IDs) so every replaying node
+	// credits addresses in the same order.
+	ids := make([]string, 0, len(stakes))
+	for id := range stakes {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	commissionBPS := policy.DefaultCommissionBPS
+	policyParams := bc.ActivePolicy()
+	distributed := big.NewInt(0)
+	for _, id := range ids {
+		stake := stakes[id]
+		if stake == nil || stake.Sign() <= 0 {
+			continue
+		}
+		commission := policyParams.CalculateValidatorRewardExact(stake, totalStaked, stakingRewards, commissionBPS)
+		if commission.Sign() <= 0 {
+			continue
+		}
+		addr := bc.ValidatorRewardAddress(id)
+		if addr == "" {
+			addr = id
+		}
+		stateDB.AddBalance(addr, commission)
+		distributed.Add(distributed, commission)
+	}
+
+	remainder := new(big.Int).Sub(stakingRewards, distributed)
+	if remainder.Sign() > 0 {
+		stateDB.AddBalance(StakingFeePoolAddress, remainder)
+	}
+}
+
+// applyBlockTransitions applies the block's transactions and mints rewards to
+// the given stateDB. This is the shared execution path used by both
+// ExecuteBlock (during commit) and previewStateRoot (during block creation).
+// Keeping these in sync is critical: if previewStateRoot applies operations in
+// a different order or with different logic than ExecuteBlock, the state root
+// computed during block creation won't match the state root computed during
+// block verification on other nodes, causing state divergence on late joiners.
+func (bc *Blockchain) applyBlockTransitions(block *types.Block, stateDB *StateDB) error {
+	// For genesis block, fund the vault BEFORE distributing to allocations.
+	if block.GetHeight() == 0 {
+		bc.mintBlockReward(block, stateDB)
+		// Persist the genesis validator stakes so the first epoch-boundary
+		// inflation distribution has a deterministic on-chain stake snapshot.
+		bc.seedValidatorStakesFromGenesis(stateDB)
+	}
+
+	if err := bc.applyTransactions(block, stateDB); err != nil {
+		return err
+	}
+
+	// For all other blocks, mint reward AFTER transactions.
+	if block.GetHeight() > 0 {
+		bc.mintBlockReward(block, stateDB)
+		bc.mintEpochInflation(block, stateDB)
+	}
+
+	return nil
 }
 
 // ExecuteBlock is called from CommitBlock.
@@ -743,19 +871,9 @@ func (bc *Blockchain) ExecuteBlock(block *types.Block) ([]byte, error) {
 		return nil, err
 	}
 
-	// For genesis block, fund the vault BEFORE distributing to allocations.
-	if block.GetHeight() == 0 {
-		bc.mintBlockReward(block, stateDB)
-	}
-
-	if err := bc.applyTransactions(block, stateDB); err != nil {
-		return nil, err
-	}
-
-	// For all other blocks, mint reward AFTER transactions.
-	if block.GetHeight() > 0 {
-		bc.mintBlockReward(block, stateDB)
-		bc.mintEpochInflation(block, stateDB)
+	if err := bc.applyBlockTransitions(block, stateDB); err != nil {
+		logger.Error("ExecuteBlock: applyBlockTransitions failed: %v", err)
+		return nil, fmt.Errorf("ExecuteBlock: execution failed: %w", err)
 	}
 
 	stateRoot, err := stateDB.Commit()
@@ -781,13 +899,20 @@ func (bc *Blockchain) previewStateRoot(height uint64, txs []*types.Transaction, 
 		Body: types.BlockBody{TxsList: txs},
 	}
 
-	if err := bc.applyTransactions(block, stateDB); err != nil {
-		logger.Warn("previewStateRoot: applyTransactions failed: %v", err)
+	// ★ FIX: Use the exact same execution path as ExecuteBlock so the state
+	// root computed during block creation (on the bootstrap node) matches the
+	// state root computed during block verification (on late joiners). The old
+	// code applied operations in a slightly different order and used
+	// computeStateRoot() instead of Commit(), producing divergent state roots
+	// that caused "state root mismatch" errors on late joiners.
+	if err := bc.applyBlockTransitions(block, stateDB); err != nil {
+		logger.Warn("previewStateRoot: applyBlockTransitions failed: %v", err)
 		return bc.calculateStateRootFallback()
 	}
-	bc.mintBlockReward(block, stateDB)
-	bc.mintEpochInflation(block, stateDB)
 
+	// computeStateRoot() operates on the same pending state that Commit()
+	// would flush to LevelDB before computing the root, so the result is
+	// identical to what ExecuteBlock returns.
 	root, err := stateDB.computeStateRoot()
 	if err != nil {
 		logger.Warn("previewStateRoot: computeStateRoot failed: %v", err)

@@ -14,7 +14,9 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -40,14 +42,33 @@ type Config struct {
 	Timeout        time.Duration
 }
 
-// DefaultConfig uses localhost defaults.
+// DefaultConfig uses localhost defaults, overridable through environment:
+//
+//	SPHINX_IPFS_ADDR     → IPFS HTTP API address (default "http://127.0.0.1:5001")
+//	SPHINX_IPFS_GATEWAY  → IPFS gateway base URL  (default "http://127.0.0.1:8080")
+//	SPHINX_IPFS_DISABLE  → "true" to use the offline fallback CID mode
+//
+// IPFS is a separate daemon from the Sphinx node. If you run the daemon on a
+// non-default host/port (or behind a tunnel), export SPHINX_IPFS_ADDR so the
+// wallet and CLI talk to the real API endpoint instead of attempting
+// 127.0.0.1:5001.
 func DefaultConfig() Config {
-	return Config{
+	cfg := Config{
 		IPFSAddr:       "http://127.0.0.1:5001",
 		GatewayBaseURL: "http://127.0.0.1:8080",
 		DisableIPFS:    false,
 		Timeout:        30 * time.Second,
 	}
+	if v := strings.TrimSpace(os.Getenv("SPHINX_IPFS_ADDR")); v != "" {
+		cfg.IPFSAddr = v
+	}
+	if v := strings.TrimSpace(os.Getenv("SPHINX_IPFS_GATEWAY")); v != "" {
+		cfg.GatewayBaseURL = v
+	}
+	if v := strings.TrimSpace(os.Getenv("SPHINX_IPFS_DISABLE")); v != "" && strings.EqualFold(v, "true") {
+		cfg.DisableIPFS = true
+	}
+	return cfg
 }
 
 // PublicGatewayConfig returns a config that uses public IPFS gateways for
@@ -113,7 +134,38 @@ func NewClient(cfg Config) *Client {
 	if strings.TrimSpace(cfg.GatewayBaseURL) == "" {
 		cfg.GatewayBaseURL = "http://127.0.0.1:8080"
 	}
+	// Heal a common misconfiguration before it hits the dialer: an IPv4
+	// address with the port written as one more dotted label
+	// ("http://127.0.0.1.5001") parses as a bare hostname and silently dials
+	// the wrong target. Rewrite the trailing numeric label as the port.
+	cfg.IPFSAddr = normalizeIPFSAddr(cfg.IPFSAddr)
 	return &Client{cfg: cfg, httpClient: cli}
+}
+
+// normalizeIPFSAddr corrects a dotted-IPv4-with-port typo. Given
+// "http://127.0.0.1.5001" it returns "http://127.0.0.1:5001"; any address
+// that already has a port or does not match the pattern is left unchanged.
+func normalizeIPFSAddr(addr string) string {
+	if strings.TrimSpace(addr) == "" {
+		return addr
+	}
+	u, err := url.Parse(addr)
+	if err != nil || u.Hostname() == "" || u.Port() != "" {
+		return addr
+	}
+	labels := strings.Split(u.Hostname(), ".")
+	if len(labels) < 3 {
+		return addr
+	}
+	last := labels[len(labels)-1]
+	if last == "" {
+		return addr
+	}
+	if _, err := strconv.ParseUint(last, 10, 32); err == nil {
+		u.Host = strings.Join(labels[:len(labels)-1], ".") + ":" + last
+		return u.String()
+	}
+	return addr
 }
 
 // AddBytesToIPFS uploads raw bytes and returns a CID.
@@ -207,6 +259,30 @@ func (c *Client) AddBytesToIPFS(data []byte, filename string) (cid string, err e
 		return out.Cid, nil
 	}
 	return "", errors.New("ipfs add: missing Hash/Cid")
+}
+
+// AddBytesToIPFSWithFallback uploads data to a real IPFS node and returns the
+// CID. When the IPFS API is unreachable or misconfigured — for example no
+// daemon listening on cfg.IPFSAddr, or a daemon that is not a kubo node — it
+// returns a deterministic content-addressed fallback identifier
+// ("sha256-" + hex(sha256(data))) instead of failing, mirroring the CLI
+// mint's "continuing without CID" behaviour.
+//
+// The returned error is non-nil exactly when the fallback was used, so
+// callers can log it as a warning and finish the operation (signing, mint
+// receipt, on-chain anchor) with a stable, locally verifiable commitment.
+// With DisableIPFS=true this simply returns the fallback with no error.
+func (c *Client) AddBytesToIPFSWithFallback(data []byte, filename string) (string, error) {
+	if len(data) == 0 {
+		return "", errors.New("empty payload")
+	}
+	seed, err := c.AddBytesToIPFS(data, filename)
+	if err == nil {
+		return seed, nil
+	}
+	sum := sha256.Sum256(data)
+	fallbackCID := "sha256-" + hex.EncodeToString(sum[:])
+	return fallbackCID, fmt.Errorf("ipfs upload failed (%v) — using deterministic fallback CID %s", err, fallbackCID)
 }
 
 // GetBytesFromIPFS retrieves raw bytes by CID from the gateway.

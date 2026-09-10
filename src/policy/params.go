@@ -15,6 +15,14 @@ func NewPolicyParameters() *PolicyParameters {
 	// PinRate: 0.01 SPX/GB/month = 0.01 * 1e18 nSPX = 1e16 nSPX per GB/month
 	pinRatePerGBMonth := new(big.Int).Mul(big.NewInt(1), new(big.Int).Exp(big.NewInt(10), big.NewInt(16), nil))
 
+	// USI minting: to mint data through src/usi/gui an identity must hold at
+	// least 100 SPX, and each mint is priced by CalculateMintDataFee from the
+	// payload dimensions (size, compute, storage, gas × replication, IPFS pin)
+	// rather than a flat constant. The values below are the deterministic
+	// sizing knobs of that calculation.
+	e18 := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+	minMintBalance := new(big.Int).Mul(big.NewInt(100), e18) // 100 SPX in nSPX
+
 	return &PolicyParameters{
 		// Fee parameters (all in nSPX)
 		BaseFeePerByte:    big.NewInt(20000),   // 20,000 nSPX/byte
@@ -56,6 +64,14 @@ func NewPolicyParameters() *PolicyParameters {
 
 		// Storage pricing
 		PinRatePerGBMonth: pinRatePerGBMonth, // 0.01 SPX/GB/month in nSPX
+
+		// Minting / data anchoring (USI Mint Data)
+		MinMintBalance:     minMintBalance, // 100 SPX in nSPX
+		MintAnchorBaseSize: 768,            // serialized anchor tx overhead, excl. return data (bytes)
+		MintAnchorBytes:    300,            // estimated anchor payload (ReturnData) size in bytes
+		MintBaseOps:        4,              // base compute ops: load key, hash payload, hash anchor, sign
+		MintBaseHashes:     5,              // payload hash + sig hash + merkle root + commitment + proof
+		MintPinningMonths:  1,              // 1 month default IPFS retention
 
 		// Inflation parameters
 		InitialInflationBPS:  500,  // 5.00% annual inflation
@@ -118,6 +134,15 @@ func (p *PolicyParameters) Validate() error {
 		p.StorageReadGas == 0 || p.StorageWriteGas == 0 || p.EventGasPerByte == 0 || p.ContractTransferGas == 0 || p.WASMMaxEvents == 0 {
 		return ErrInvalidTransactionFee
 	}
+
+	// Validate minting parameters
+	if p.MinMintBalance == nil || p.MinMintBalance.Sign() <= 0 {
+		return ErrInvalidMinMintBalance
+	}
+	if p.MintAnchorBaseSize == 0 || p.MintAnchorBytes == 0 || p.MintBaseOps == 0 || p.MintBaseHashes == 0 || p.MintPinningMonths == 0 {
+		return ErrInvalidMintParams
+	}
+
 	if p.ValidatorFeeBPS+p.StakerFeeBPS+p.TreasuryFeeBPS+p.BurnFeeBPS != 10000 {
 		return ErrInvalidFeeDistribution
 	}

@@ -699,6 +699,37 @@ func (s *StateDB) SetNonce(address string, nonce uint64) {
 	s.dirty(address).nonce = nonce
 }
 
+// Transfer moves amount nSPX from `from` to `to` atomically.
+// It validates sufficient balance, performs the debit/credit as a single
+// logical operation, and returns an error if `from` has insufficient funds.
+// The total supply is conserved: no value is created or destroyed.
+func (s *StateDB) Transfer(from, to string, amount *big.Int) error {
+	if from == "" || to == "" {
+		return fmt.Errorf("transfer: empty address (from=%q, to=%q)", from, to)
+	}
+	if from == to {
+		return fmt.Errorf("transfer: sender and receiver are the same (%s)", from)
+	}
+	if amount == nil || amount.Sign() <= 0 {
+		return fmt.Errorf("transfer: amount must be positive, got %v", amount)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	fromEntry := s.dirty(from)
+	if fromEntry.balance.Cmp(amount) < 0 {
+		return fmt.Errorf("transfer: insufficient balance: %s has %s nSPX, needs %s nSPX",
+			from, fromEntry.balance.String(), amount.String())
+	}
+	fromEntry.balance.Sub(fromEntry.balance, amount)
+
+	toEntry := s.dirty(to)
+	toEntry.balance.Add(toEntry.balance, amount)
+
+	return nil
+}
+
 // IncrementNonce adds 1 to the nonce of address.
 func (s *StateDB) IncrementNonce(address string) {
 	s.mu.Lock()

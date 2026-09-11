@@ -263,10 +263,6 @@ func (bc *Blockchain) contractTransfer(state *StateDB, from string) func(string,
 			return errors.New("empty transfer recipient")
 		}
 		value := new(big.Int).SetUint64(amount)
-		if err := state.SubBalance(from, value); err != nil {
-			return err
-		}
-		state.AddBalance(to, value)
-		return nil
+		return state.Transfer(from, to, value)
 	}
 }

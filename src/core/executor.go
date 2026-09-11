@@ -567,15 +567,23 @@ func (bc *Blockchain) applyTransactions(block *types.Block, stateDB *StateDB) er
 			return errors.New("insufficient balance")
 		}
 
-		if err := stateDB.SubBalance(tx.Sender, totalCost); err != nil {
-			logger.Error("applyTransactions: tx[%d] SubBalance: %v", i, err)
-			return errors.New("failed to subtract balance")
-		}
+		// Transfer the amount to recipient, then deduct gas fee from sender.
+		// Both operations are buffered in s.pending and only flushed on Commit,
+		// so an abort before Commit leaves no partial state.
 		recipient := tx.Receiver
 		if tx.ToContract != "" {
 			recipient = tx.ToContract
 		}
-		stateDB.AddBalance(recipient, tx.Amount)
+		if err := stateDB.Transfer(tx.Sender, recipient, tx.Amount); err != nil {
+			logger.Error("applyTransactions: tx[%d] Transfer: %v", i, err)
+			return errors.New("failed to transfer balance")
+		}
+		if gasFee.Sign() > 0 {
+			if err := stateDB.SubBalance(tx.Sender, gasFee); err != nil {
+				logger.Error("applyTransactions: tx[%d] SubBalance(gas): %v", i, err)
+				return errors.New("failed to deduct gas fee")
+			}
+		}
 
 		if err := bc.executeContractTransaction(tx, stateDB, block.GetHeight()); err != nil {
 			return fmt.Errorf("contract execution for tx[%d]: %w", i, err)

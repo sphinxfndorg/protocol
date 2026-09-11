@@ -28,7 +28,7 @@ func NewWASMDeployTx(options TxOptions, wasm []byte) (*types.Transaction, error)
 	p := policy.GetDefaultPolicyParams()
 	base := p.QuoteTransactionGas(0)
 	contract := p.QuoteContractGas(true, uint64(len(wasm)), 0, 0)
-	return &types.Transaction{ChainID: options.ChainID, Sender: options.Sender, Amount: big.NewInt(0), Nonce: options.Nonce, Timestamp: timestamp(options), Code: append([]byte(nil), wasm...), GasLimit: new(big.Int).Add(base.GasLimit, contract.GasLimit), GasPrice: new(big.Int).Set(base.GasPrice)}, nil
+	return assembleUnsignedTx(options, wasm, nil, "", new(big.Int).Add(base.GasLimit, contract.GasLimit), new(big.Int).Set(base.GasPrice)), nil
 }
 
 // NewWASMCallTx constructs an unsigned call to a deployed WASM contract.
@@ -40,7 +40,7 @@ func NewWASMCallTx(options TxOptions, contractAddress string, callData []byte) (
 	p := policy.GetDefaultPolicyParams()
 	base := p.QuoteTransactionGas(0)
 	contract := p.QuoteContractGas(false, 0, uint64(len(callData)), 0)
-	return &types.Transaction{ChainID: options.ChainID, Sender: options.Sender, Amount: big.NewInt(0), Nonce: options.Nonce, Timestamp: timestamp(options), ToContract: contractAddress, CallData: append([]byte(nil), callData...), GasLimit: new(big.Int).Add(base.GasLimit, contract.GasLimit), GasPrice: new(big.Int).Set(base.GasPrice)}, nil
+	return assembleUnsignedTx(options, nil, callData, contractAddress, new(big.Int).Add(base.GasLimit, contract.GasLimit), new(big.Int).Set(base.GasPrice)), nil
 }
 
 // NewWASMFunctionCallTx encodes a canonical function selector and u64

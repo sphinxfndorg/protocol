@@ -9,26 +9,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
+
+	"github.com/sphinxfndorg/protocol/src/core"
 )
 
-// AnchorTag is the small payload placed into a Sphinx transaction's
-// ReturnData field to anchor a MintReceipt on-chain. It carries no
-// signature or payload bytes — only a commitment hash — so anchoring
-// stays cheap regardless of what was signed.
-//
-// The CID and MinterPublicKey fields are included so that:
-//   - anyone can fetch the content from IPFS using the CID
-//   - verifiers can confirm the anchoring transaction sender matches minter
-type AnchorTag struct {
-	Type            string `json:"type"` // always "mint_anchor"
-	MintID          string `json:"mint_id"`
-	Subject         string `json:"subject"`
-	CID             string `json:"cid,omitempty"`               // IPFS content hash
-	MinterPublicKey string `json:"minter_public_key,omitempty"` // hex-encoded
-	ReceiptHash     string `json:"receipt_hash"`                // hex(SHA3-256(full signed receipt))
-}
+// AnchorTag is re-exported from core (where the node's transaction-policy
+// validator lives): the node's ValidateTransactionPolicy verifies anchors
+// through core.IsMintAnchor / core.ValidateAnchorData, so the wallet and
+// the node must share one struct definition.
+type AnchorTag = core.AnchorTag
 
-const AnchorTagType = "mint_anchor"
+const AnchorTagType = core.AnchorTagType
 
 // ReceiptCommitmentHash hashes the FULL signed receipt (SignatureHex
 // included), so the on-chain commitment binds to one specific signed
@@ -52,17 +44,59 @@ func ReceiptCommitmentHash(r *MintReceipt) ([]byte, error) {
 	return sum[:], nil
 }
 
+// validateSIP721AnchorFields enforces the all-or-nothing SIP-721 binding:
+// token_id / token_uri / contract must be set together or all be empty, and a
+// token_uri must use the ipfs:// scheme. Kept in sync with
+// core.ValidateAnchorData so the wallet never builds an anchor the node would
+// reject (partial bindings, tokenURI-less mint).
+func validateSIP721AnchorFields(tokenID uint64, tokenURI, contract string) error {
+	fields := 0
+	if tokenID != 0 {
+		fields++
+	}
+	if strings.TrimSpace(tokenURI) != "" {
+		fields++
+	}
+	if strings.TrimSpace(contract) != "" {
+		fields++
+	}
+	if fields != 0 && fields != 3 {
+		return errors.New("SIP-721 anchor fields must be set together: token_id, token_uri, contract")
+	}
+	if strings.TrimSpace(tokenURI) != "" && !strings.HasPrefix(strings.TrimSpace(tokenURI), "ipfs://") {
+		return fmt.Errorf("SIP-721 token_uri must be ipfs://<metadataCID>, got %q", tokenURI)
+	}
+	return nil
+}
+
 // BuildAnchorData produces the bytes to place in a transaction's ReturnData.
+// The tag includes the CID plus its sha256 commitment (cid_hash_hex) so the
+// node can verify the anchor actually commits to the pinned content — see
+// core.ValidateAnchorData, which every node runs on this ReturnData.
+//
+// The receipt's SIP-721 binding (TokenID/TokenURI/ContractAddress) travels in
+// the tag when set, so a contract mint is verifiable as one atomic unit:
+// the same ReturnData commits to both the media CID and the
+// tokenURI[tokenId] pointer stored in contract storage.
 func BuildAnchorData(r *MintReceipt) ([]byte, error) {
 	h, err := ReceiptCommitmentHash(r)
 	if err != nil {
 		return nil, err
 	}
+	if err := validateSIP721AnchorFields(r.TokenID, r.TokenURI, r.ContractAddress); err != nil {
+		return nil, err
+	}
 	tag := AnchorTag{
-		Type:        AnchorTagType,
-		MintID:      r.MintID,
-		Subject:     r.Subject,
-		ReceiptHash: hex.EncodeToString(h),
+		Type:            AnchorTagType,
+		MintID:          r.MintID,
+		Subject:         r.Subject,
+		CID:             r.CID,
+		MinterPublicKey: r.MinterPublicKey,
+		ReceiptHash:     hex.EncodeToString(h),
+		CIDHashHex:      core.CIDHashHexFor(r.CID),
+		TokenID:         r.TokenID,
+		TokenURI:        r.TokenURI,
+		Contract:        r.ContractAddress,
 	}
 	out, err := json.Marshal(tag)
 	if err != nil {
@@ -91,6 +125,21 @@ func VerifyAnchor(r *MintReceipt, anchorData []byte) (bool, error) {
 	if tag.MintID != r.MintID {
 		return false, errors.New("mint id mismatch")
 	}
+
+	// SIP-721 binding: when the receipt carries a contract mint, the anchor
+	// must carry the identical tokenURI[tokenId] pointer.
+	if r.TokenID != 0 || r.TokenURI != "" || r.ContractAddress != "" {
+		if tag.TokenID != r.TokenID {
+			return false, errors.New("token_id mismatch between anchor and receipt")
+		}
+		if tag.TokenURI != r.TokenURI {
+			return false, errors.New("token_uri mismatch between anchor and receipt")
+		}
+		if tag.Contract != r.ContractAddress {
+			return false, errors.New("contract mismatch between anchor and receipt")
+		}
+	}
+
 	return true, nil
 }
 
@@ -104,7 +153,9 @@ func VerifyAnchoredReceipt(r *MintReceipt, payload []byte, anchorData []byte) (b
 }
 
 // BuildAnchorTag returns the AnchorTag struct for a receipt without marshaling.
-// BuildAnchorTag returns the AnchorTag struct for a receipt without marshaling.
+// The disk sidecar (anchor_<mintid>.json) carries the same CID commitment as
+// the on-chain tag produced by BuildAnchorData, so verifiers can re-check it
+// with core.ValidateAnchorData.
 func BuildAnchorTag(r *MintReceipt) (*AnchorTag, error) {
 	if r == nil {
 		return nil, errors.New("nil receipt")
@@ -116,11 +167,20 @@ func BuildAnchorTag(r *MintReceipt) (*AnchorTag, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := validateSIP721AnchorFields(r.TokenID, r.TokenURI, r.ContractAddress); err != nil {
+		return nil, err
+	}
 	return &AnchorTag{
-		Type:        AnchorTagType,
-		MintID:      r.MintID,
-		Subject:     r.Subject,
-		ReceiptHash: hex.EncodeToString(h),
+		Type:            AnchorTagType,
+		MintID:          r.MintID,
+		Subject:         r.Subject,
+		CID:             r.CID,
+		MinterPublicKey: r.MinterPublicKey,
+		ReceiptHash:     hex.EncodeToString(h),
+		CIDHashHex:      core.CIDHashHexFor(r.CID),
+		TokenID:         r.TokenID,
+		TokenURI:        r.TokenURI,
+		Contract:        r.ContractAddress,
 	}, nil
 }
 
@@ -172,6 +232,19 @@ func VerifyAnchorWithTag(r *MintReceipt, tag *AnchorTag) (bool, error) {
 	// If the anchor includes a MinterPublicKey, verify it matches the receipt
 	if tag.MinterPublicKey != "" && tag.MinterPublicKey != r.MinterPublicKey {
 		return false, errors.New("minter public key mismatch between anchor and receipt")
+	}
+
+	// SIP-721 binding: same check as VerifyAnchor for already-deserialized tags.
+	if r.TokenID != 0 || r.TokenURI != "" || r.ContractAddress != "" {
+		if tag.TokenID != r.TokenID {
+			return false, errors.New("token_id mismatch between anchor and receipt")
+		}
+		if tag.TokenURI != r.TokenURI {
+			return false, errors.New("token_uri mismatch between anchor and receipt")
+		}
+		if tag.Contract != r.ContractAddress {
+			return false, errors.New("contract mismatch between anchor and receipt")
+		}
 	}
 
 	return true, nil

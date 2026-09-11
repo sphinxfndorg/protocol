@@ -1188,7 +1188,16 @@ func Run() {
 		// the UI always reflects what the node will enforce.
 		mintPolicy := policy.GetDefaultPolicyParams()
 
-		var selectedFile     string
+		var selectedFile string
+
+		// NFT metadata fields (ERC-721 compatible) - declared early for closure use
+		nftNameEntry := widget.NewEntry()
+		nftNameEntry.SetPlaceHolder("NFT name (e.g. \"My Digital Artwork\")")
+
+		nftDescriptionEntry := widget.NewMultiLineEntry()
+		nftDescriptionEntry.SetPlaceHolder("NFT description (optional)")
+		nftDescriptionEntry.Wrapping = fyne.TextWrapWord
+		nftDescriptionEntry.SetMinRowsVisible(2)
 		var selectedFileSize uint64
 
 		// mintFeeSPX projects the policy mint fee (in SPX) for the currently
@@ -1387,19 +1396,14 @@ func Run() {
 						meta.Signer = sessionFingerprint
 						meta.DocumentTitle = filepath.Base(selectedFile)
 
-						if err := sign.EmbedSignature(selectedFile, meta, publicFingerprint, passphrase); err != nil {
-							fyne.Do(func() { progDlg.Hide(); dialog.ShowError(err, window) })
-							return
-						}
-
-						// After signing, auto-mint NFT on-chain
-						fyne.Do(func() { prog.SetValue(0.9); progLbl.SetText("Anchoring NFT on-chain…") })
-
-						// Upload signed payload bytes to IPFS (so the on-chain mint can bind to a
-						// real CID). A missing/unreachable IPFS daemon must NOT block
-						// the mint: AddBytesToIPFSWithFallback returns a
-						// deterministic local CID, and we surface the warning while
-						// continuing with the signature, receipt, and on-chain anchor.
+						// Upload signed payload bytes to IPFS BEFORE the sidecar is
+						// written (so the on-chain mint can bind to a real CID and the
+						// .usimeta sidecar can record it). A missing/unreachable IPFS
+						// daemon must NOT block the mint:
+						// AddBytesToIPFSWithFallback returns a deterministic local CID,
+						// and we surface the warning while continuing with the
+						// signature, receipt, and on-chain anchor.
+						fyne.Do(func() { prog.SetValue(0.8); progLbl.SetText("Uploading to IPFS…") })
 						ipfsClient := storage.NewClient(storage.DefaultConfig())
 						cid, ipfsWarn := ipfsClient.AddBytesToIPFSWithFallback(data, filepath.Base(selectedFile))
 						ipfsNote := ""
@@ -1410,7 +1414,71 @@ func Run() {
 						gatewayBase := storage.DefaultConfig().GatewayBaseURL
 						metadataURI := gatewayBase + "/ipfs/" + cid
 
+						// Build and upload ERC-721 metadata JSON to IPFS
+						// This creates the tokenURI that points to the metadata JSON,
+						// just like Ethereum ERC-721 NFTs. The metadata JSON contains
+						// name, description, image (ipfs://<mediaCID>), and attributes.
+						var tokenURI string
+						var metadataCID string
+						if cid != "" && nftNameEntry.Text != "" {
+							fyne.Do(func() { progLbl.SetText("Uploading metadata JSON…") })
+							nftMeta := mint.BuildNFTMetadata(
+								nftNameEntry.Text,
+								nftDescriptionEntry.Text,
+								cid,
+								nil, // attributes (future enhancement)
+								publicFingerprint,
+								"SPIF",
+								filepath.Base(selectedFile),
+								"", // mintID not known yet
+								0,  // blockHeight not known yet
+							)
+							metadataCID, tokenURI, err = mint.UploadNFTMetadata(nftMeta, ipfsClient)
+							if err != nil {
+								log.Printf("[WARN] Mint Data: metadata JSON upload failed: %v", err)
+								// Not fatal — continue without tokenURI
+								tokenURI = ""
+								metadataCID = ""
+							} else {
+								log.Printf("[INFO] Mint Data: metadata JSON uploaded, tokenURI=%s", tokenURI)
+							}
+						}
+
+						// Fetch the chain-tip block header (lightweight, header-only
+						// path — see GetChainTipHeader) so the sidecar can record the
+						// block height the document was minted at. Best-effort: an
+						// offline node must not block signing, so on failure we log
+						// a warning and leave BlockHeight unset.
+						var blockHeight uint64
+						if tipHdr, tipErr := walletClient.GetChainTipHeader(); tipErr != nil || tipHdr == nil {
+							log.Printf("[WARN] Mint Data: could not fetch chain tip header for sidecar: %v", tipErr)
+						} else {
+							blockHeight = tipHdr.Height
+						}
+
+						// Record the CID, tokenURI, and block height inside the sidecar
+						// output: all fields travel into the .usimeta sidecar (embedded
+						// footer / PDF properties / RawData DB) via EmbedSignature.
+						meta.IPFSCID = cid
+						meta.BlockHeight = blockHeight
+						meta.TokenURI = tokenURI
+						meta.MetadataCID = metadataCID
+
+						fyne.Do(func() { prog.SetValue(0.85); progLbl.SetText("Embedding signature…") })
+						if err := sign.EmbedSignature(selectedFile, meta, publicFingerprint, passphrase); err != nil {
+							fyne.Do(func() { progDlg.Hide(); dialog.ShowError(err, window) })
+							return
+						}
+
+						// After signing, auto-mint NFT on-chain
+						fyne.Do(func() { prog.SetValue(0.9); progLbl.SetText("Anchoring NFT on-chain…") })
+
 						mintRes, mintErr := mint.Mint(data, filepath.Base(selectedFile), sessionPassphrase, "SPIF", cid, metadataURI)
+						// Set tokenURI on receipt if available
+						if mintErr == nil && tokenURI != "" {
+							mintRes.Receipt.TokenURI = tokenURI
+							mintRes.Receipt.MetadataCID = metadataCID
+						}
 
 						if mintErr == nil {
 							txID, anchorPath, anchorErr := walletClient.AnchorMintReceipt(mintRes.Receipt)
@@ -1429,17 +1497,22 @@ func Run() {
 									if ipfsWarn != nil {
 										anchorSuffix = " — IPFS fallback CID"
 									}
-									addActivity(fmt.Sprintf("Signed & minted NFT: %s (tx=%s, anchor=%s%s)", filepath.Base(selectedFile), txID, anchorPath, anchorSuffix))
+									addActivity(fmt.Sprintf("Signed & minted NFT: %s (tx=%s, cid=%s, height=%d, anchor=%s%s)", filepath.Base(selectedFile), txID, cid, blockHeight, anchorPath, anchorSuffix))
 									if ipfsWarn != nil {
-										statusText.Text = "✓  Signed & minted NFT (IPFS fallback CID). txid=" + txID + "\nAnchor: " + anchorPath
+										statusText.Text = fmt.Sprintf("✓  Signed & minted NFT (IPFS fallback CID). txid=%s\ncid=%s\nheight=%d\nAnchor: %s", txID, cid, blockHeight, anchorPath)
 									} else {
-										statusText.Text = fmt.Sprintf("✓  Signed & minted NFT. txid=%s\nAnchor: %s", txID, anchorPath)
+										statusText.Text = fmt.Sprintf("✓  Signed & minted NFT. txid=%s\ncid=%s\nheight=%d\nAnchor: %s", txID, cid, blockHeight, anchorPath)
 									}
 									statusText.Color = colAccent
 									statusText.Refresh()
+
+									tokenURINote := ""
+									if tokenURI != "" {
+										tokenURINote = fmt.Sprintf("\nTokenURI: %s", tokenURI)
+									}
 									dialog.ShowInformation("Minted ✓",
-										fmt.Sprintf("Document signed and NFT minted on-chain!\n\nSignature: %s.usimeta\nTXID: %s\nAnchor: %s\n\nMint fee charged: %.2f %s%s",
-											filepath.Base(selectedFile), txID, anchorPath, mintFeeSPX(), chainHeader.Symbol, ipfsNote), window)
+										fmt.Sprintf("Document signed and NFT minted on-chain!\n\nSignature: %s.usimeta\nTXID: %s\nCID: %s\nBlock height: %d\nAnchor: %s%s\n\nMint fee charged: %.2f %s%s",
+											filepath.Base(selectedFile), txID, cid, blockHeight, anchorPath, tokenURINote, mintFeeSPX(), chainHeader.Symbol, ipfsNote), window)
 								}
 								selectedFile = ""
 								resetDropZone()
@@ -1468,6 +1541,8 @@ func Run() {
 			resetDropZone()
 			statusText.Text = ""
 			statusText.Refresh()
+			nftNameEntry.SetText("")
+			nftDescriptionEntry.SetText("")
 		})
 
 		panelBg := canvas.NewRectangle(colSurface)
@@ -1528,6 +1603,14 @@ func Run() {
 			dropZone,
 			spacer(8),
 			browseBtn,
+			spacer(20),
+			hRule(),
+			spacer(12),
+			sectionLabel("NFT Metadata (ERC-721)"),
+			spacer(6),
+			nftNameEntry,
+			spacer(8),
+			nftDescriptionEntry,
 			spacer(20),
 			container.NewCenter(statusText),
 			spacer(20),

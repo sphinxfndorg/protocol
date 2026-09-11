@@ -106,5 +106,5 @@ func NewSVMDeployTx(options TxOptions, code []byte) (*types.Transaction, error) 
 	p := policy.GetDefaultPolicyParams()
 	base := p.QuoteTransactionGas(0)
 	contract := p.QuoteContractGas(true, uint64(len(code)), 0, operations)
-	return &types.Transaction{ChainID: options.ChainID, Sender: options.Sender, Amount: big.NewInt(0), Nonce: options.Nonce, Timestamp: timestamp(options), Code: append([]byte(nil), code...), GasLimit: new(big.Int).Add(base.GasLimit, contract.GasLimit), GasPrice: new(big.Int).Set(base.GasPrice)}, nil
+	return assembleUnsignedTx(options, code, nil, "", new(big.Int).Add(base.GasLimit, contract.GasLimit), new(big.Int).Set(base.GasPrice)), nil
 }

@@ -37,3 +37,9 @@ Thumbs.db
 /go/cache
 /go/bin
 /go/pkg
+# Local build outputs (never commit)
+/cli
+/cmd
+/wallet
+/src/core/data/
+*.bak

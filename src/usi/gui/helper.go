@@ -464,14 +464,16 @@ func requireMintBalance(client *WalletClient) (*BalanceResponse, error) {
 
 // AnchorMintReceipt commits a signed MintReceipt to the chain.
 //
-// ASSUMPTION: I don't have your consensus/mempool tx-validation code, so
-// there's no dedicated "data" tx type here — this uses a self-send
-// transaction whose ReturnData carries the anchor tag (same pattern
-// SendTransaction already uses for memos). Amount is 1 nSPX rather than 0,
-// in case mempool rules reject zero-value transfers as dust — cheap either
-// way. If Sphinx later gets a first-class MINT/DATA tx type validated by
-// consensus, swap the tx construction below for that; BuildAnchorData
-// itself doesn't need to change.
+// VERIFICATION CONTRACT: the anchor tag in the transaction's ReturnData is
+// now verified by EVERY node — src/core.ValidateTransactionPolicy runs
+// core.ValidateAnchorData both at admission (sendrawtransaction →
+// AddTransaction) and at consensus (CommitBlock re-checks every transaction
+// of every proposed and synced block). An anchor whose CID commitment,
+// receipt hash, or minter key does not verify is rejected before entering
+// the mempool and can never be committed. This transaction therefore uses a
+// self-send whose ReturnData carries the verifiable mint_anchor commitment
+// (same memo pattern as SendTransaction); if Sphinx later adds a
+// first-class MINT/DATA tx type, only the tag construction here changes.
 // AnchorMintReceipt commits a signed MintReceipt to the chain and saves the anchor tag.
 func (c *WalletClient) AnchorMintReceipt(receipt *mint.MintReceipt) (txID string, anchorPath string, err error) {
 	if sessionPassphrase == "" {

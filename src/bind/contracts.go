@@ -4,8 +4,6 @@
 package bind
 
 import (
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"os"
 
@@ -73,13 +71,9 @@ func BuildSVMDeploymentTx(options abi.TxOptions, code []byte) (*types.Transactio
 // EncodeRawTransaction produces the canonical hex(JSON(transaction)) wire
 // payload accepted by the node's sendrawtransaction RPC method. Code and call
 // data remain binary fields and use Go JSON's byte-slice encoding internally.
+//
+// Delegates to the canonical abi.EncodeRawTransaction — kept here for backward
+// compatibility with any external callers importing from src/bind.
 func EncodeRawTransaction(tx *types.Transaction) (string, error) {
-	if tx == nil {
-		return "", fmt.Errorf("nil transaction")
-	}
-	data, err := json.Marshal(tx)
-	if err != nil {
-		return "", fmt.Errorf("marshal raw transaction: %w", err)
-	}
-	return hex.EncodeToString(data), nil
+	return abi.EncodeRawTransaction(tx)
 }

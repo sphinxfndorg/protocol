@@ -261,6 +261,20 @@ func (c *Client) AddBytesToIPFS(data []byte, filename string) (cid string, err e
 	return "", errors.New("ipfs add: missing Hash/Cid")
 }
 
+// DecodeHexStorageValue decodes the hex-encoded getcontractstorage payload.
+// The node returns raw storage bytes as hex; SDKs must not hand-roll this.
+func DecodeHexStorageValue(hexStr string) ([]byte, error) {
+	hexStr = strings.TrimSpace(hexStr)
+	if hexStr == "" {
+		return nil, nil
+	}
+	b, err := hex.DecodeString(strings.TrimPrefix(hexStr, "0x"))
+	if err != nil {
+		return nil, fmt.Errorf("decode storage hex: %w", err)
+	}
+	return b, nil
+}
+
 // AddBytesToIPFSWithFallback uploads data to a real IPFS node and returns the
 // CID. When the IPFS API is unreachable or misconfigured — for example no
 // daemon listening on cfg.IPFSAddr, or a daemon that is not a kubo node — it

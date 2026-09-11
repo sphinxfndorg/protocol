@@ -18,6 +18,7 @@ import (
 const (
 	RuntimeNative = "native"
 	StandardSIP20 = "sip20"
+	StandardSIP721 = "sip721"
 )
 
 func BuildDeployCode(spec *DeploySpec) ([]byte, error) {
@@ -90,6 +91,10 @@ func Deploy(store Store, tx *types.Transaction) (*ExecutionResult, error) {
 		if err := initSIP20(store, address, tx.Sender, &spec); err != nil {
 			return nil, err
 		}
+	case StandardSIP721:
+		if err := initSIP721(store, address, tx.Sender, &spec); err != nil {
+			return nil, err
+		}
 	default:
 		return nil, fmt.Errorf("unsupported contract standard: %s", spec.Standard)
 	}
@@ -135,6 +140,8 @@ func Call(store Store, tx *types.Transaction) (*ExecutionResult, error) {
 	switch meta.Standard {
 	case StandardSIP20:
 		return callSIP20(store, address, tx.Sender, &call)
+	case StandardSIP721:
+		return callSIP721(store, address, tx.Sender, &call)
 	default:
 		return nil, fmt.Errorf("unsupported contract standard: %s", meta.Standard)
 	}
@@ -176,6 +183,15 @@ func validateDeploySpec(spec *DeploySpec) error {
 			if _, ok := new(big.Int).SetString(spec.InitialSupply, 10); !ok {
 				return errors.New("invalid initial_supply")
 			}
+		}
+		return nil
+	}
+	if spec.Standard == StandardSIP721 {
+		if spec.Name == "" {
+			return errors.New("missing collection name")
+		}
+		if spec.Symbol == "" {
+			return errors.New("missing collection symbol")
 		}
 		return nil
 	}

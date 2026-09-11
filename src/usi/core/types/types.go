@@ -33,6 +33,16 @@ type Meta struct {
 	// Descriptive
 	Signer        string `json:"signer,omitempty"`
 	DocumentTitle string `json:"document_title,omitempty"`
+
+	// On-chain / pinning context (set by the Mint Data flow). Both are
+	// optional so legacy .usimeta sidecars without them still decode.
+	IPFSCID     string `json:"ipfs_cid,omitempty"`     // IPFS CID the payload was pinned under
+	BlockHeight uint64 `json:"block_height,omitempty"` // chain-tip height at mint time
+
+	// ERC-721 NFT metadata context (set when minting NFTs with metadata JSON).
+	// TokenURI points to the metadata JSON on IPFS (like Ethereum ERC-721).
+	TokenURI    string `json:"token_uri,omitempty"`     // ipfs://<metadataCID>
+	MetadataCID string `json:"metadata_cid,omitempty"` // CID of the metadata JSON
 }
 
 // GetPublicKeyPreview returns a shortened preview of the public key
@@ -77,6 +87,10 @@ func (m *Meta) Clone() *Meta {
 		Nonce:              m.Nonce,
 		Signer:             m.Signer,
 		DocumentTitle:      m.DocumentTitle,
+		IPFSCID:            m.IPFSCID,
+		BlockHeight:        m.BlockHeight,
+		TokenURI:           m.TokenURI,
+		MetadataCID:        m.MetadataCID,
 	}
 }
 

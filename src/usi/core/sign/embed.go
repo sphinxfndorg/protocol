@@ -591,6 +591,11 @@ func createUSIMetaFile(filePath string, inputMeta *Meta, passphrase string, skip
 		Nonce:              generateSecureNonce(),
 		Signer:             inputMeta.Signer,
 		DocumentTitle:      inputMeta.DocumentTitle,
+		// On-chain / pinning context: the Mint Data flow sets these before
+		// embedding so the sidecar output carries the IPFS CID the payload
+		// was pinned under and the chain-tip block height at mint time.
+		IPFSCID:     inputMeta.IPFSCID,
+		BlockHeight: inputMeta.BlockHeight,
 	}
 	// Add this line to record the nonce
 	if err := recordSigningNonce(meta.Nonce); err != nil {

@@ -11,6 +11,7 @@ package abi
 import "fmt"
 
 const SIP20 = "sip20"
+const SIP721 = "sip721"
 
 type Argument struct {
 	Name     string `json:"name"`
@@ -36,6 +37,22 @@ var SIP20ABI = Contract{
 		{Name: "mint", Inputs: []Argument{{Name: "to", Type: "address", Required: true}, {Name: "amount", Type: "uint256", Required: true}}},
 		{Name: "transfer", Inputs: []Argument{{Name: "to", Type: "address", Required: true}, {Name: "amount", Type: "uint256", Required: true}}},
 		{Name: "balance_of", Inputs: []Argument{{Name: "owner", Type: "address", Required: false}}},
+		{Name: "info"},
+	},
+}
+
+// SIP721ABI is the stable client-facing schema for the native SIP-721 runtime.
+// Method names mirror contracts/callSIP721 so wallets encode once and every
+// node decodes identically: mint/transfer_from/approve/owner_of/token_uri.
+var SIP721ABI = Contract{
+	Name: SIP721, Version: 1,
+	Methods: []Method{
+		{Name: "mint", Inputs: []Argument{{Name: "to", Type: "address", Required: true}, {Name: "token_uri", Type: "string", Required: true}, {Name: "mint_id", Type: "string", Required: false}}},
+		{Name: "transfer_from", Inputs: []Argument{{Name: "from", Type: "address", Required: true}, {Name: "to", Type: "address", Required: true}, {Name: "token_id", Type: "uint64", Required: true}}},
+		{Name: "approve", Inputs: []Argument{{Name: "to", Type: "address", Required: true}, {Name: "token_id", Type: "uint64", Required: true}}},
+		{Name: "owner_of", Inputs: []Argument{{Name: "token_id", Type: "uint64", Required: true}}},
+		{Name: "token_uri", Inputs: []Argument{{Name: "token_id", Type: "uint64", Required: true}}},
+		{Name: "token_id_of_mint", Inputs: []Argument{{Name: "mint_id", Type: "string", Required: true}}},
 		{Name: "info"},
 	},
 }

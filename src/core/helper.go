@@ -586,6 +586,29 @@ func (bc *Blockchain) ValidateTransactionPolicy(tx *types.Transaction) error {
 	if offeredFee.Cmp(requiredFee) < 0 {
 		return fmt.Errorf("transaction fee below policy minimum: offered %s, required %s", offeredFee.String(), requiredFee.String())
 	}
+
+	// ── Node-side mint-anchor verification ────────────────────────────────
+	// A mint-anchor transaction (USI "Mint Data", CLI mint) carries its entire
+	// on-chain commitment in ReturnData as a mint_anchor AnchorTag. Every node
+	// verifies that commitment here, twice:
+	//
+	//   - admission: the JSON-RPC handler's sendrawtransaction →
+	//     AddTransaction path rejects un-verifiable anchors before they enter
+	//     the mempool,
+	//   - consensus: CommitBlock re-runs this policy per transaction for every
+	//     proposed AND synced block, so a node can never commit (nor re-play
+	//     from a peer) a block containing an anchor that does not verify.
+	//
+	// Verification enforces the commitment's internal consistency: CID present
+	// and committed via cid_hash_hex, 32-byte receipt hash, valid minter key.
+	// Full receipt binding (SPHINCS+ signature + payload hash vs ReceiptHash)
+	// requires the original signed receipt and stays off-chain — see
+	// usi/core/mint.VerifyAnchoredReceipt and the mint-anchor comment in mint_anchor.go.
+	if tx.HasReturnData() && IsMintAnchor(tx.ReturnData) {
+		if err := ValidateAnchorData(tx.ReturnData); err != nil {
+			return fmt.Errorf("mint anchor verification failed: %w", err)
+		}
+	}
 	return nil
 }
 

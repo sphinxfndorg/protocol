@@ -1198,6 +1198,12 @@ func Run() {
 		nftDescriptionEntry.SetPlaceHolder("NFT description (optional)")
 		nftDescriptionEntry.Wrapping = fyne.TextWrapWord
 		nftDescriptionEntry.SetMinRowsVisible(2)
+
+		nftCollectionEntry := widget.NewEntry()
+		nftCollectionEntry.SetPlaceHolder("Collection contract (sc…, optional) — mints an ERC-721-style token: tokenId counter + tokenURI[tokenId] in contract storage")
+
+		nftRecipientEntry := widget.NewEntry()
+		nftRecipientEntry.SetPlaceHolder("NFT recipient (blank = you)")
 		var selectedFileSize uint64
 
 		// mintFeeSPX projects the policy mint fee (in SPX) for the currently
@@ -1340,6 +1346,9 @@ func Run() {
 				return
 			}
 
+			collectionAddress := strings.TrimSpace(nftCollectionEntry.Text)
+			nftRecipient := strings.TrimSpace(nftRecipientEntry.Text)
+
 			signed, prevFP, err := sign.IsAlreadySigned(selectedFile)
 			if err != nil {
 				dialog.ShowError(fmt.Errorf("metadata error: %w", err), window)
@@ -1398,14 +1407,27 @@ func Run() {
 
 						// Upload signed payload bytes to IPFS BEFORE the sidecar is
 						// written (so the on-chain mint can bind to a real CID and the
-						// .usimeta sidecar can record it). A missing/unreachable IPFS
-						// daemon must NOT block the mint:
-						// AddBytesToIPFSWithFallback returns a deterministic local CID,
-						// and we surface the warning while continuing with the
-						// signature, receipt, and on-chain anchor.
+						// .usimeta sidecar can record it). For a collection mint IPFS
+						// is REQUIRED: a fallback CID would leave nothing pinned, so
+						// the mint aborts (Ethereum behaviour). Legacy anchors tolerate
+						// a deterministic local fallback CID and continue with a warning.
 						fyne.Do(func() { prog.SetValue(0.8); progLbl.SetText("Uploading to IPFS…") })
 						ipfsClient := storage.NewClient(storage.DefaultConfig())
-						cid, ipfsWarn := ipfsClient.AddBytesToIPFSWithFallback(data, filepath.Base(selectedFile))
+						var cid string
+						var ipfsWarn error
+						if collectionAddress != "" {
+							uploadCID, ipfsErr := ipfsClient.AddBytesToIPFS(data, filepath.Base(selectedFile))
+							if ipfsErr != nil {
+								fyne.Do(func() {
+									progDlg.Hide()
+									dialog.ShowError(fmt.Errorf("collection mint aborted: media upload to IPFS failed (an NFT must pin real content): %w", ipfsErr), window)
+								})
+								return
+							}
+							cid = uploadCID
+						} else {
+							cid, ipfsWarn = ipfsClient.AddBytesToIPFSWithFallback(data, filepath.Base(selectedFile))
+						}
 						ipfsNote := ""
 						if ipfsWarn != nil {
 							ipfsNote = "\n\n⚠ IPFS unreachable — anchored with a local fallback CID. Start an IPFS daemon (or set SPHINX_IPFS_ADDR) to pin data after the fact."
@@ -1435,13 +1457,31 @@ func Run() {
 							)
 							metadataCID, tokenURI, err = mint.UploadNFTMetadata(nftMeta, ipfsClient)
 							if err != nil {
+								if collectionAddress != "" {
+									// The tokenURI is the ERC-721 metadata pointer:
+									// without it there is nothing for tokenURI[tokenId]
+									// to resolve — mint aborts (Ethereum behaviour).
+									fyne.Do(func() {
+										progDlg.Hide()
+										dialog.ShowError(fmt.Errorf("collection mint aborted: metadata upload to IPFS failed: %w", err), window)
+									})
+									return
+								}
 								log.Printf("[WARN] Mint Data: metadata JSON upload failed: %v", err)
-								// Not fatal — continue without tokenURI
+								// Not fatal for a legacy anchor — continue without tokenURI
 								tokenURI = ""
 								metadataCID = ""
 							} else {
 								log.Printf("[INFO] Mint Data: metadata JSON uploaded, tokenURI=%s", tokenURI)
 							}
+						} else if collectionAddress != "" {
+							// A collection mint binds tokenURI[tokenId] on-chain: it
+							// needs an NFT name to build the metadata JSON (=> tokenURI).
+							fyne.Do(func() {
+								progDlg.Hide()
+								dialog.ShowError(errors.New("collection mint aborted: NFT name is required to build the tokenURI metadata"), window)
+							})
+							return
 						}
 
 						// Fetch the chain-tip block header (lightweight, header-only
@@ -1474,30 +1514,61 @@ func Run() {
 						fyne.Do(func() { prog.SetValue(0.9); progLbl.SetText("Anchoring NFT on-chain…") })
 
 						mintRes, mintErr := mint.Mint(data, filepath.Base(selectedFile), sessionPassphrase, "SPIF", cid, metadataURI)
-						// Set tokenURI on receipt if available
-						if mintErr == nil && tokenURI != "" {
+						// Only a collection mint binds the token on the receipt: the
+						// anchor's SIP-721 fields (token_id/token_uri/contract) must
+						// be set together and nodes reject partial bindings, so a
+						// legacy anchor must NOT carry a lone TokenURI.
+						if mintErr == nil && tokenURI != "" && collectionAddress != "" {
 							mintRes.Receipt.TokenURI = tokenURI
 							mintRes.Receipt.MetadataCID = metadataCID
 						}
 
+						var tokenID uint64
+						var collectionTxID string
+						if mintErr == nil && collectionAddress != "" {
+							fyne.Do(func() { prog.SetValue(0.92); progLbl.SetText("Minting NFT in collection…") })
+							tokenID, collectionTxID, err = walletClient.MintNFTInCollection(mintRes.Receipt, collectionAddress, nftRecipient)
+							if err != nil {
+								fyne.Do(func() {
+									progDlg.Hide()
+									addActivity(fmt.Sprintf("Collection mint FAILED for %s: %v", filepath.Base(selectedFile), err))
+									statusText.Text = "✗  Collection mint failed: " + err.Error()
+									statusText.Color = colDanger
+									statusText.Refresh()
+									dialog.ShowError(fmt.Errorf("collection mint failed: %w", err), window)
+									selectedFile = ""
+									resetDropZone()
+								})
+								return
+							}
+						}
+
 						if mintErr == nil {
+							fyne.Do(func() { progLbl.SetText("Anchoring receipt on-chain…") })
 							txID, anchorPath, anchorErr := walletClient.AnchorMintReceipt(mintRes.Receipt)
 							fyne.Do(func() {
 								progDlg.Hide()
 								if anchorErr != nil {
+									collectionNote := ""
+									if collectionTxID != "" {
+										collectionNote = fmt.Sprintf("\n\n⚠ Token #%d was already minted in collection %s (tx %s) — do not re-mint this document (the collection rejects duplicate mint_ids).",
+											tokenID, mintRes.Receipt.ContractAddress, collectionTxID)
+									}
 									addActivity(fmt.Sprintf("Signed document: %s (NFT anchor failed: %v)", filepath.Base(selectedFile), anchorErr))
 									statusText.Text = "✓  Document signed, but NFT anchor failed: " + anchorErr.Error()
 									statusText.Color = colWarn
 									statusText.Refresh()
 									dialog.ShowInformation("Signed",
-										fmt.Sprintf("Document signed successfully.\nSignature: %s.usimeta\n\nNFT anchor failed: %v",
-											filepath.Base(selectedFile), anchorErr), window)
+										fmt.Sprintf("Document signed successfully.\nSignature: %s.usimeta\n\nNFT anchor failed: %v%s",
+											filepath.Base(selectedFile), anchorErr, collectionNote), window)
 								} else {
 									anchorSuffix := ""
-									if ipfsWarn != nil {
+									if collectionTxID != "" {
+										anchorSuffix = fmt.Sprintf(" — collection mint tx %s (token #%d)", collectionTxID[:16]+"...", tokenID)
+									} else if ipfsWarn != nil {
 										anchorSuffix = " — IPFS fallback CID"
 									}
-									addActivity(fmt.Sprintf("Signed & minted NFT: %s (tx=%s, cid=%s, height=%d, anchor=%s%s)", filepath.Base(selectedFile), txID, cid, blockHeight, anchorPath, anchorSuffix))
+									addActivity(fmt.Sprintf("Signed & minted NFT: %s (tx=%s, token=%d, cid=%s, height=%d, anchor=%s%s)", filepath.Base(selectedFile), txID, tokenID, cid, blockHeight, anchorPath, anchorSuffix))
 									if ipfsWarn != nil {
 										statusText.Text = fmt.Sprintf("✓  Signed & minted NFT (IPFS fallback CID). txid=%s\ncid=%s\nheight=%d\nAnchor: %s", txID, cid, blockHeight, anchorPath)
 									} else {
@@ -1507,7 +1578,10 @@ func Run() {
 									statusText.Refresh()
 
 									tokenURINote := ""
-									if tokenURI != "" {
+									if collectionTxID != "" {
+										tokenURINote = fmt.Sprintf("\nToken #%d (collection %s)\nTokenURI: %s\nCollection tx: %s",
+											tokenID, mintRes.Receipt.ContractAddress, tokenURI, collectionTxID)
+									} else if tokenURI != "" {
 										tokenURINote = fmt.Sprintf("\nTokenURI: %s", tokenURI)
 									}
 									dialog.ShowInformation("Minted ✓",
@@ -1543,6 +1617,8 @@ func Run() {
 			statusText.Refresh()
 			nftNameEntry.SetText("")
 			nftDescriptionEntry.SetText("")
+			nftCollectionEntry.SetText("")
+			nftRecipientEntry.SetText("")
 		})
 
 		panelBg := canvas.NewRectangle(colSurface)
@@ -1611,6 +1687,12 @@ func Run() {
 			nftNameEntry,
 			spacer(8),
 			nftDescriptionEntry,
+			spacer(8),
+			sectionLabel("Collection (optional)"),
+			spacer(6),
+			nftCollectionEntry,
+			spacer(8),
+			nftRecipientEntry,
 			spacer(20),
 			container.NewCenter(statusText),
 			spacer(20),

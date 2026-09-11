@@ -280,7 +280,7 @@ func MintAndAnchor(opts *MintAndAnchorOptions) (*MintAndAnchorResult, error) {
 		// mint), allocates next_token_id from sip721:info, and stores
 		// tokenURI[tokenId] + owner and the sip721:mint reverse index. The tokenId
 		// is read back from contract storage and trusted as the single counter value.
-		tokenID, collectionMintTxID, err = broadcastSIP721CollectionMint(
+		tokenID, collectionMintTxID, err = BroadcastSIP721CollectionMint(
 			opts.NodeAddr, opts.Collection, opts.From, opts.KeyFile, recipientTo, tokenURI, receipt.MintID)
 		if err != nil {
 			return nil, fmt.Errorf("collection mint aborted: %w", err)

@@ -15,6 +15,7 @@ import (
 	"log"
 	"math/big"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -647,6 +648,55 @@ func (c *WalletClient) AnchorMintReceipt(receipt *mint.MintReceipt) (txID string
 	}
 	log.Printf("[WalletRPC] AnchorMintReceipt: anchored as txid=%s, anchor saved to %s", result.TxID, anchorPath)
 	return result.TxID, anchorPath, nil
+}
+
+// MintNFTInCollection executes the Ethereum-close SIP-721 collection mint for
+// a receipt whose TokenURI is already set via a real IPFS upload (a collection
+// mint aborts without a real tokenURI). The returned tokenId is the
+// per-collection counter value committed by the block — contract storage
+// tokenURI[tokenId] — read back with retries until the block lands. On success
+// the receipt's token binding is recorded so the subsequent receipt anchor
+// carries the same token_id/token_uri/contract triple (nodes enforce that the
+// three travel together). Requires the logged-in key to be the collection
+// owner — the node enforces ownerOf at consensus.
+func (c *WalletClient) MintNFTInCollection(receipt *mint.MintReceipt, collection, toAddress string) (tokenID uint64, txID string, err error) {
+	if sessionPassphrase == "" {
+		return 0, "", errors.New("not logged in")
+	}
+	if receipt == nil {
+		return 0, "", errors.New("nil receipt")
+	}
+	collection = strings.TrimSpace(collection)
+	if collection == "" {
+		return 0, "", errors.New("collection contract address required")
+	}
+	if strings.TrimSpace(receipt.TokenURI) == "" {
+		return 0, "", errors.New("tokenURI required: a collection mint aborts without a real IPFS tokenURI")
+	}
+
+	rawFrom, err := normaliseAddress(sessionFingerprint)
+	if err != nil {
+		return 0, "", fmt.Errorf("invalid sender address: %w", err)
+	}
+	rawTo := rawFrom
+	if strings.TrimSpace(toAddress) != "" {
+		rawTo, err = normaliseAddress(toAddress)
+		if err != nil {
+			return 0, "", fmt.Errorf("invalid recipient address: %w", err)
+		}
+	}
+
+	// mint.BroadcastSIP721CollectionMint builds/signs the collection.mint
+	// contract call and waits (bounded) for the tokenId to be committed. Its
+	// "keyFile" parameter is the local key passphrase here.
+	tokenID, txID, err = mint.BroadcastSIP721CollectionMint(c.nodeAddr, collection, rawFrom, sessionPassphrase, rawTo, receipt.TokenURI, receipt.MintID)
+	if err != nil {
+		return 0, "", err
+	}
+
+	receipt.TokenID = tokenID
+	receipt.ContractAddress = collection
+	return tokenID, txID, nil
 }
 
 // BuildMintScreen returns the "Mint & Verify" tab content.

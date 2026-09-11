@@ -8,7 +8,7 @@
 // This extends the automatic mint flow (MintAndAnchor) with an Ethereum-close
 // collection mint while keeping the receipt-anchor model intact:
 //
-//   1. broadcastSIP721CollectionMint executes the collection contract's mint
+//   1. BroadcastSIP721CollectionMint executes the collection contract's mint
 //      method on-chain (sendrawtransaction with ToContract/CallData). The
 //      contract (contracts/callSIP721) is executed by EVERY node during block
 //      commit, which is what makes ownerOf/approve/transfer_from and the
@@ -40,10 +40,13 @@ import (
 	keys "github.com/sphinxfndorg/protocol/src/usi/core/key"
 )
 
-// broadcastSIP721CollectionMint executes collection.mint(to, tokenURI, mintID)
+// BroadcastSIP721CollectionMint executes collection.mint(to, tokenURI, mintID)
 // on-chain. The returned tokenId is the counter value carved from consensus
 // storage by the executing block — exactly Ethereum's tokenId allocation.
-func broadcastSIP721CollectionMint(nodeAddr, collection, from, keyFile, to, tokenURI, mintID string) (tokenID uint64, txID string, err error) {
+//
+// It is exported so lightweight wallets (e.g. the USI GUI) can drive the
+// SIP-721 collection mint path directly without going through MintAndAnchor.
+func BroadcastSIP721CollectionMint(nodeAddr, collection, from, keyFile, to, tokenURI, mintID string) (tokenID uint64, txID string, err error) {
 	if strings.TrimSpace(nodeAddr) == "" {
 		return 0, "", errors.New("node address required")
 	}
@@ -120,7 +123,7 @@ func broadcastSIP721CollectionMint(nodeAddr, collection, from, keyFile, to, toke
 	return tokenID, txID, nil
 }
 
-// TokenIDConfirmTimeout is how long broadcastSIP721CollectionMint waits for the
+// TokenIDConfirmTimeout is how long BroadcastSIP721CollectionMint waits for the
 // collection-mint transaction to be included in a block and its tokenId to
 // become visible in contract storage.
 const TokenIDConfirmTimeout = 60 * time.Second

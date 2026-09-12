@@ -19,6 +19,31 @@ import (
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
 )
 
+// mintAnchorTagType mirrors core.AnchorTagType ("mint_anchor"). Duplicated
+// here rather than imported: core/helper.go already imports this package
+// (pool), so pool importing core back would be an import cycle. This is the
+// same cheap type-peek as core.IsMintAnchor — keep the two in sync if the
+// anchor tag type string ever changes.
+const mintAnchorTagType = "mint_anchor"
+
+// isMintAnchorReturnData reports whether data is a serialized mint-anchor
+// tag, i.e. genuinely verifiable on-chain data (see core.ValidateAnchorData,
+// which runs the real structural check on every proposed and synced block)
+// rather than an arbitrary OP_RETURN-style payload. Used to gate the
+// self-send exception below: a self-send is only safe to admit *because* it
+// is a real anchor, not merely because it happens to carry some bytes — an
+// empty-ish or malformed payload with no verifiable content is just a
+// disguised value self-transfer and should still be rejected as one.
+func isMintAnchorReturnData(data []byte) bool {
+	var peek struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(data, &peek); err != nil {
+		return false
+	}
+	return peek.Type == mintAnchorTagType
+}
+
 // uint32ToBytesPool converts uint32 to big-endian 4 bytes for VM PUSH4 operands.
 // This is used when pushing 32-bit values onto the SVM stack.
 func uint32ToBytesPool(n uint32) []byte {
@@ -884,15 +909,19 @@ func (mp *Mempool) performValidation(tx *types.Transaction) error {
 		// Rejecting here, at the same point that already checks for empty
 		// addresses, keeps it out of the pool entirely.
 		//
-		// EXCEPTION: a self-send that carries ReturnData is not a value
-		// transfer at all — it's a data/NFT anchor using the self-send
-		// pattern documented in wallet helper.go's AnchorMintReceipt (the
-		// same pattern SendTransaction's memo path uses). Sender==Receiver
-		// there is by design: the transaction exists only to carry the
-		// anchor payload, and StateDB.Transfer's matching exception (see
-		// state_db.go) makes the debit/credit a mathematical no-op, so it's
-		// safe to admit.
-		if tx.Sender == tx.Receiver && len(tx.ReturnData) == 0 {
+		// EXCEPTION: a self-send whose ReturnData is a verified mint-anchor
+		// tag is not a value transfer at all — it's a data/NFT anchor using
+		// the self-send pattern documented in wallet helper.go's
+		// AnchorMintReceipt (the same pattern SendTransaction's memo path
+		// uses). Sender==Receiver there is by design: the transaction
+		// exists only to carry the anchor payload, and StateDB.Transfer's
+		// matching exception (see state_db.go) makes the debit/credit a
+		// mathematical no-op, so it's safe to admit. Gated on the actual
+		// tag content (isMintAnchorReturnData), not merely on ReturnData
+		// being non-empty, so a self-send can't dodge this check by
+		// attaching arbitrary junk bytes — see core.IsMintAnchor for the
+		// canonical version of this check.
+		if tx.Sender == tx.Receiver && !isMintAnchorReturnData(tx.ReturnData) {
 			return fmt.Errorf("sender and receiver are the same (%s)", tx.Sender)
 		}
 
@@ -935,10 +964,10 @@ func (mp *Mempool) performValidation(tx *types.Transaction) error {
 	// system-transaction branch above for why this must happen at
 	// admission rather than being left to execution-time rejection.
 	//
-	// EXCEPTION: self-send + ReturnData is a data/NFT anchor, not a value
-	// transfer — see the matching comment in the system-transaction branch
-	// above.
-	if tx.Sender == tx.Receiver && len(tx.ReturnData) == 0 {
+	// EXCEPTION: self-send + a verified mint-anchor tag is a data/NFT
+	// anchor, not a value transfer — see the matching comment in the
+	// system-transaction branch above.
+	if tx.Sender == tx.Receiver && !isMintAnchorReturnData(tx.ReturnData) {
 		return fmt.Errorf("sender and receiver are the same (%s)", tx.Sender)
 	}
 
@@ -1054,11 +1083,12 @@ func (mp *Mempool) validateTransactionBasic(tx *types.Transaction) error {
 	// this file for why this must happen at admission rather than being
 	// left to execution-time rejection.
 	//
-	// EXCEPTION: self-send + ReturnData is a data/NFT anchor, not a value
-	// transfer (see the matching comment in performValidation above). This
-	// check runs before type classification, so it has to make the same
-	// call directly on the raw fields rather than via classifyTransaction.
-	if tx.Sender == tx.Receiver && len(tx.ReturnData) == 0 {
+	// EXCEPTION: self-send + a verified mint-anchor tag is a data/NFT
+	// anchor, not a value transfer (see the matching comment in
+	// performValidation above). This check runs before type
+	// classification, so it has to make the same call directly on the raw
+	// fields rather than via classifyTransaction.
+	if tx.Sender == tx.Receiver && !isMintAnchorReturnData(tx.ReturnData) {
 		return fmt.Errorf("sender and receiver are the same (%s)", tx.Sender)
 	}
 

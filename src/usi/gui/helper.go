@@ -23,6 +23,7 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
+	"github.com/sphinxfndorg/protocol/src/common"
 	"github.com/sphinxfndorg/protocol/src/core"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
 	"github.com/sphinxfndorg/protocol/src/policy"
@@ -84,12 +85,12 @@ func loadOrgCodeFromBundle(pubKey []byte) string {
 	bundle, err := store.LookupByPublicKey(pubKeyHex)
 	if err != nil {
 		log.Printf("[WARN] loadOrgCodeFromBundle: org lookup failed: %v", err)
-		return "SPIF" // Default to SPIF
+		return string(keys.OrgSPIF) // Default to SPIF
 	}
 
 	// Always return SPIF regardless of what's in the bundle
-	log.Printf("[SUCCESS] loadOrgCodeFromBundle: returning SPIF (bundle had: %q)", bundle.Organization)
-	return "SPIF"
+	log.Printf("[SUCCESS] loadOrgCodeFromBundle: returning %s (bundle had: %q)", keys.OrgSPIF, bundle.Organization)
+	return string(keys.OrgSPIF)
 }
 
 // In publishRegistrarPublicBundle — store under BOTH keys
@@ -307,10 +308,10 @@ func getVaultSenderInfo(vaultPath string) (senderFP string, senderOrg string, er
 		bundle, lookupErr := store.LookupByPublicKey(pubKeyHex)
 		if lookupErr == nil && bundle.Organization != "" {
 			// Always use SPIF
-			orgCode := keys.OrgCode("SPIF")
+			orgCode := keys.OrgSPIF
 			senderFP = keys.GetPublicKeyFingerprintFromBytes(pubKeyBytes, orgCode)
-			senderOrg = "SPIF - Sphinx Fingerprint"
-			log.Printf("[SUCCESS] getVaultSenderInfo: found via server lookup, using SPIF, fp: %.16s...", senderFP)
+			senderOrg = string(keys.OrgSPIF) + " - Sphinx Fingerprint"
+			log.Printf("[SUCCESS] getVaultSenderInfo: found via server lookup, using %s, fp: %.16s...", common.SPIFPrefix, senderFP)
 			return senderFP, senderOrg, nil
 		}
 		log.Printf("[DEBUG] getVaultSenderInfo: server lookup failed: %v", lookupErr)
@@ -320,16 +321,16 @@ func getVaultSenderInfo(vaultPath string) (senderFP string, senderOrg string, er
 
 	// Use session org code if available (always SPIF)
 	if sessionOrgCode != "" {
-		senderFP = keys.GetPublicKeyFingerprintFromBytes(pubKeyBytes, keys.OrgCode("SPIF"))
-		senderOrg = "SPIF - Sphinx Fingerprint"
-		log.Printf("[INFO] getVaultSenderInfo: using session org code: SPIF")
+		senderFP = keys.GetPublicKeyFingerprintFromBytes(pubKeyBytes, keys.OrgSPIF)
+		senderOrg = string(keys.OrgSPIF) + " - Sphinx Fingerprint"
+		log.Printf("[INFO] getVaultSenderInfo: using session org code: %s", common.SPIFPrefix)
 		return senderFP, senderOrg, nil
 	}
 
 	// Fallback - use SPIF
-	senderFP = keys.GetPublicKeyFingerprintFromBytes(pubKeyBytes, keys.OrgCode("SPIF"))
-	senderOrg = "SPIF - Sphinx Fingerprint"
-	log.Printf("[WARN] getVaultSenderInfo: using SPIF as fallback, fp: %.16s...", senderFP)
+	senderFP = keys.GetPublicKeyFingerprintFromBytes(pubKeyBytes, keys.OrgSPIF)
+	senderOrg = string(keys.OrgSPIF) + " - Sphinx Fingerprint"
+	log.Printf("[WARN] getVaultSenderInfo: using %s as fallback, fp: %.16s...", common.SPIFPrefix, senderFP)
 	return senderFP, senderOrg, nil
 }
 
@@ -393,10 +394,10 @@ type OrgSelector struct {
 // Since we only use SPIF now, this returns a fixed widget
 func BuildOrgSelector(window fyne.Window) *OrgSelector {
 	// Fixed label showing SPIF
-	fixedLabel := widget.NewLabelWithStyle("Organization: SPIF", fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
+	fixedLabel := widget.NewLabelWithStyle("Organization: "+string(keys.OrgSPIF), fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
 	fixedLabel.Importance = widget.HighImportance
 
-	infoLabel := widget.NewLabel("SPIF - Sphinx Fingerprint")
+	infoLabel := widget.NewLabel(string(keys.OrgSPIF) + " - Sphinx Fingerprint")
 	infoLabel.TextStyle = fyne.TextStyle{Italic: true}
 	infoLabel.Alignment = fyne.TextAlignCenter
 
@@ -411,8 +412,8 @@ func BuildOrgSelector(window fyne.Window) *OrgSelector {
 	)
 
 	// Create a dummy select box that's hidden (for compatibility)
-	selectBox := widget.NewSelect([]string{"SPIF"}, func(selected string) {})
-	selectBox.SetSelected("SPIF")
+	selectBox := widget.NewSelect([]string{string(keys.OrgSPIF)}, func(selected string) {})
+	selectBox.SetSelected(string(keys.OrgSPIF))
 	selectBox.Hide()
 
 	selector := &OrgSelector{
@@ -425,7 +426,7 @@ func BuildOrgSelector(window fyne.Window) *OrgSelector {
 
 // SelectedOrg returns SPIF always
 func (os *OrgSelector) SelectedOrg() keys.OrgCode {
-	return keys.OrgCode("SPIF")
+	return keys.OrgSPIF
 }
 
 // SetSelectedOrg does nothing (only SPIF is available)
@@ -522,9 +523,26 @@ func (c *WalletClient) AnchorMintReceipt(receipt *mint.MintReceipt) (txID string
 		AnchorTagType: "nft_anchor",
 	}
 
-	// Store artifact association on node (best-effort).
-	// If node storage is unavailable, anchoring still proceeds.
-	_, _ = storage.DefaultStorageClient(c.nodeAddr).StoreMintArtifact(artifact)
+	// Store artifact association on node (best-effort, bounded).
+	// This is a second full RPC round-trip (handshake + storeartifact); when
+	// the node is slow or unreachable it must not stall the anchor behind
+	// it — a timeout here only skips an off-chain cache, never the on-chain
+	// commitment. Skip it entirely when IPFS is disabled: without a real
+	// pinned CID there is nothing worth caching node-side.
+	if !storage.DefaultConfig().DisableIPFS {
+		storeDone := make(chan struct{})
+		go func() {
+			defer close(storeDone)
+			if _, storeErr := storage.DefaultStorageClient(c.nodeAddr).StoreMintArtifact(artifact); storeErr != nil {
+				log.Printf("[WARN] AnchorMintReceipt: artifact cache skipped: %v", storeErr)
+			}
+		}()
+		select {
+		case <-storeDone:
+		case <-time.After(15 * time.Second):
+			log.Printf("[WARN] AnchorMintReceipt: artifact cache timed out after 15s, continuing with anchor")
+		}
+	}
 
 	anchorData, err := mint.BuildAnchorData(receipt)
 	if err != nil {
@@ -794,7 +812,7 @@ func BuildMintScreen(window fyne.Window, client *WalletClient) fyne.CanvasObject
 			dialog.ShowError(fmt.Errorf("subject required"), window)
 			return
 		}
-		res, err := mint.Mint(payload, subject, sessionPassphrase, "SPIF", "", "")
+		res, err := mint.Mint(payload, subject, sessionPassphrase, string(keys.OrgSPIF), "", "")
 		if err != nil {
 			dialog.ShowError(fmt.Errorf("mint: %w", err), window)
 			return
@@ -826,6 +844,18 @@ func BuildMintScreen(window fyne.Window, client *WalletClient) fyne.CanvasObject
 		addActivity(fmt.Sprintf("Anchored mint %s in tx %s, anchor %s", lastReceipt.Receipt.MintID, txID, anchorPath))
 		lastTxID = txID
 		verifyOnChainBtn.Enable()
+
+		// Track block inclusion so the status shows the REAL confirming block
+		// instead of leaving the anchor in limbo. Non-blocking: runs in background.
+		go func() {
+			conf, _ := client.WaitForTxConfirmation(txID, 120*time.Second)
+			fyne.Do(func() {
+				if conf != nil {
+					statusLabel.SetText(fmt.Sprintf("Anchored & confirmed. txid=%s\nConfirmed in block %d (%s)\nAnchor saved to: %s", txID, conf.Height, conf.Hash, anchorPath))
+					addActivity(fmt.Sprintf("Anchor tx %s confirmed in block %d", txID, conf.Height))
+				}
+			})
+		}()
 	}
 
 	signForm := container.NewVBox(

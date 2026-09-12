@@ -55,8 +55,8 @@ func TestAddBytesToIPFSWithFallbackUnconfigured(t *testing.T) {
 		httpClient: &http.Client{},
 	}
 	cid, warn := c.AddBytesToIPFSWithFallback([]byte("hello world"), "test.txt")
-	if !strings.HasPrefix(cid, "sha256-") {
-		t.Fatalf("expected fallback sha256- CID, got %q", cid)
+	if !strings.HasPrefix(cid, "spxhash-") {
+		t.Fatalf("expected fallback spxhash- CID, got %q", cid)
 	}
 	if warn == nil {
 		t.Fatal("expected a fallback warning when IPFS is not configured")
@@ -74,7 +74,7 @@ func TestAddBytesToIPFSWithFallbackDisabledMode(t *testing.T) {
 		httpClient: &http.Client{},
 	}
 	cid, warn := c.AddBytesToIPFSWithFallback([]byte("payload"), "p.bin")
-	if !strings.HasPrefix(cid, "sha256-") {
+	if !strings.HasPrefix(cid, "spxhash-") {
 		t.Fatalf("expected fallback CID, got %q", cid)
 	}
 	if warn != nil {

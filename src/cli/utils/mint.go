@@ -15,7 +15,8 @@
 //
 // On Sphinx:
 //   1. Upload content to IPFS → get CID
-//   2. Compute sha256(CID) → CIDHashHex (the on-chain commitment)
+//   2. Compute CIDHashHex = storage.CIDHash(CID) (common.SpxHash — the
+//      canonical Sphinx hash) → the on-chain commitment
 //   3. Create a REAL signed TRANSACTION with CIDHashHex in ReturnData (OP_RETURN)
 //   4. Broadcast via sendrawtransaction RPC
 //   5. The transaction gets included in a CONFIRMED BLOCK (permanent)
@@ -37,6 +38,7 @@ import (
 	"os"
 	"time"
 
+	types "github.com/sphinxfndorg/protocol/src/core/transaction"
 	"github.com/sphinxfndorg/protocol/src/storage"
 )
 
@@ -472,14 +474,18 @@ func parseAnchorPayload(data []byte) (*anchorPayload, error) {
 // sendReturnDataTransaction creates, signs, and broadcasts a transaction
 // with the given ReturnData payload. This is the REAL on-chain anchor.
 func sendReturnDataTransaction(opts SendTxOptions, returnData []byte) (string, error) {
-	// Convert amount to nSPX
+	if opts.KeyFile == "" {
+		return "", fmt.Errorf("--key is required: NFT anchor transactions must be locally signed with a full SPHINCS auth bundle before broadcast")
+	}
+
+	// Convert amount to nSPX (zero-value anchors are allowed: 0 nSPX)
 	amountBig, ok := new(big.Int).SetString(opts.Amount, 10)
 	if !ok {
 		return "", fmt.Errorf("invalid amount: %s", opts.Amount)
 	}
 	weiAmount := new(big.Int).Mul(amountBig, big.NewInt(1e18))
 
-	// Get nonce if not provided
+	// Get nonce from the node — the mempool enforces an EXACT match
 	nonce := opts.Nonce
 	if nonce == 0 {
 		var err error
@@ -489,44 +495,42 @@ func sendReturnDataTransaction(opts SendTxOptions, returnData []byte) (string, e
 		}
 	}
 
-	// Build the transaction with ReturnData
+	// Build the canonical transaction with ReturnData
 	gasLimit := big.NewInt(parseIntOrDefault(opts.GasLimit, 50000))
 	gasPrice := big.NewInt(parseIntOrDefault(opts.GasPrice, 1))
 
-	tx := &transactionForSigning{
+	tx := &types.Transaction{
 		Sender:     opts.From,
 		Receiver:   opts.To,
-		Amount:     new(big.Int).Set(weiAmount),
+		Amount:     weiAmount,
 		GasLimit:   gasLimit,
 		GasPrice:   gasPrice,
 		Nonce:      nonce,
 		Timestamp:  time.Now().Unix(),
+		ChainID:    7331, // Sphinx Mainnet chain ID (EIP-155 replay protection)
 		ReturnData: returnData,
 	}
 
-	// Compute the transaction ID (hash)
-	txID := computeTxID(tx)
-	tx.ID = txID
+	// Sign canonically: tx.ID = tx.Hash() (common.SpxHash over the full
+	// struct JSON) + full SPHINCS auth bundle (also common.SpxHash).
+	if err := signTransactionCanonical(tx, opts.KeyFile); err != nil {
+		return "", fmt.Errorf("sign anchor transaction: %w", err)
+	}
+	txID := tx.ID
 
-	// Sign the transaction — compute tx ID (simplified, uses JSON hash)
-	tx.ID = computeTxID(tx)
-	signedTx := tx
-
-	// Broadcast via RPC
-	rawTx, err := json.Marshal(signedTx)
+	// Broadcast via RPC (hex-wrapped JSON, exactly like the USI wallet path)
+	rawTx, err := json.Marshal(tx)
 	if err != nil {
 		return "", fmt.Errorf("marshal transaction: %w", err)
 	}
 
 	var result map[string]string
-	err = callRPC(opts.RPCURL, "sendrawtransaction", []interface{}{hex.EncodeToString(rawTx)}, &result)
-	if err != nil {
+	if err := callRPC(opts.RPCURL, "sendrawtransaction", []interface{}{hex.EncodeToString(rawTx)}, &result); err != nil {
 		return "", fmt.Errorf("broadcast transaction: %w", err)
 	}
 
-	txID = result["txid"]
-	if txID == "" {
-		txID = tx.ID
+	if broadcastTxID := result["txid"]; broadcastTxID != "" {
+		txID = broadcastTxID
 	}
 
 	fmt.Printf("SUCCESS Transaction broadcast! TX ID: %s\n", txID)
@@ -547,7 +551,10 @@ func sendReturnDataTransaction(opts SendTxOptions, returnData []byte) (string, e
 	return txID, nil
 }
 
-// transactionForSigning is a minimal transaction struct for signing.
+// transactionForSigning is a read-model used by the verify path to load an
+// anchored transaction from the node. It is NOT used for signing — all
+// signing goes through signTransactionCanonical (types.Transaction +
+// common.SpxHash auth bundle).
 type transactionForSigning struct {
 	ID         string   `json:"id"`
 	Sender     string   `json:"sender"`
@@ -560,12 +567,11 @@ type transactionForSigning struct {
 	ReturnData []byte   `json:"return_data,omitempty"`
 }
 
-// computeTxID computes the transaction hash.
-func computeTxID(tx *transactionForSigning) string {
-	data, _ := json.Marshal(tx)
-	hash := sha256.Sum256(data)
-	return hex.EncodeToString(hash[:])
-}
+// computeTxID was removed: the canonical transaction ID is derived by
+// types.Transaction.Hash() (common.SpxHash over the full struct JSON) inside
+// signTransactionCanonical. A bare sha256 over a partial struct produced IDs
+// the node's SVM verifier would reject ("error executing op code 0x69 at
+// pc=21: VERIFY failed").
 
 // getTransactionByID retrieves a transaction from the node by its ID.
 func getTransactionByID(rpcURL, txID string) (*transactionForSigning, error) {
@@ -614,6 +620,10 @@ type verifyResult struct {
 }
 
 // sha256Hex computes sha256 of data and returns hex string.
+// NOTE: this is an OFF-CHAIN content-integrity digest only (like an IPFS-style
+// content hash for payloadHash). It is never re-derived by the node's SVM
+// verifier, so it does not participate in transaction signature verification —
+// all on-chain auth hashes use common.SpxHash.
 func sha256Hex(data []byte) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])

@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"sort"
@@ -3048,6 +3049,65 @@ func (c *Consensus) commitBlock(block Block) {
 	// Commit block to blockchain
 	if err := c.blockChain.CommitBlock(block); err != nil {
 		logger.Error("Error committing block: %v", err)
+
+		// ★ FIX: Distinguish deterministic validation failures from
+		// transient races. A CommitBlock error is one of two very
+		// different things:
+		//
+		//   (a) Deterministic failure — the block itself is invalid
+		//       (e.g. a transaction's SPHINCS auth bundle is malformed
+		//       or the SPHINCS manager is not configured). Retrying the
+		//       SAME block forever won't fix it. We must evict the
+		//       offending transactions from the mempool so the next round
+		//       builds a DIFFERENT block that excludes them.
+		//
+		//   (b) Transient race — another goroutine committed a competing
+		//       block at the same height first. The block we tried is
+		//       simply stale; the chain tip already advanced. Retry is
+		//       fine and correct.
+		//
+		// Previously every CommitBlock error routed into the generic
+		// "stale block" recovery block below, which only resets to
+		// PhaseIdle and lets the next round retry. For case (a) that
+		// meant: rebuild byte-for-byte identical block → same quorum →
+		// same CommitBlock failure → reset → repeat. Forever.
+		if errors.Is(err, ErrInvalidBlockTx) {
+			logger.Error("CommitBlock: deterministic validation failure — evicting offending transactions from mempool so the next round builds a different block")
+
+			// Extract txIDs from the underlying types.Block and remove
+			// them from the mempool. We use the MempoolAccessor
+			// interface so this works without importing core.
+			var txIDs []string
+			if extractor, ok := block.(interface {
+				// GetUnderlyingBlock is implemented by core.BlockHelper
+				// to return the wrapped *types.Block.
+				GetUnderlyingBlock() interface{}
+			}); ok {
+				if tb, ok := extractor.GetUnderlyingBlock().(*types.Block); ok && tb != nil {
+					for _, tx := range tb.Body.TxsList {
+						if tx != nil && tx.ID != "" {
+							txIDs = append(txIDs, tx.ID)
+						}
+					}
+				}
+			}
+
+			if len(txIDs) > 0 {
+				if ma, ok := c.blockChain.(MempoolAccessor); ok && ma.GetMempool() != nil {
+					ma.GetMempool().RemoveTransactions(txIDs)
+					logger.Info("CommitBlock: evicted %d transaction(s) from mempool after deterministic failure", len(txIDs))
+				} else {
+					logger.Warn("CommitBlock: blockChain does not implement MempoolAccessor — cannot evict bad transactions; the same invalid block may be rebuilt")
+				}
+			} else {
+				logger.Warn("CommitBlock: deterministic validation failure but could not extract any transactions from the block — nothing to evict")
+			}
+
+			// Fall through to the shared PhaseIdle reset below so the
+			// node recovers its consensus state; the difference is the
+			// offending transactions are gone so the next round won't
+			// rebuild the same invalid block.
+		}
 
 		// FIX: This round did NOT actually complete on this node — c.phase was
 		// already advanced to PhaseCommitted (by whichever path detected quorum:

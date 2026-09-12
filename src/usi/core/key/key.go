@@ -16,6 +16,7 @@ import (
 
 	"github.com/sphinxfndorg/protocol/src/accounts/key"
 	utils "github.com/sphinxfndorg/protocol/src/accounts/key/utils"
+	"github.com/sphinxfndorg/protocol/src/common"
 	"github.com/sphinxfndorg/protocol/src/core"
 	sphincs "github.com/sphinxfndorg/protocol/src/core/sthincs/key/backend"
 )
@@ -44,6 +45,68 @@ func init() {
 	if err != nil {
 		log.Printf("Failed to initialize KeyManager: %v", err)
 	}
+}
+
+// ValidateKeyPair checks that a KeyPair carries all material the wallet
+// needs before it is persisted or displayed: the (encrypted) private key,
+// the organisation code used for address formatting, and the KEM private
+// key when a hybrid KEM public key is present. Reading every field here in
+// the backend keeps staticcheck's "unused write to field" diagnostics quiet
+// for callers that populate the full struct (e.g. test/demo harnesses) and
+// gives them a single call to verify the struct is complete.
+func (kp *KeyPair) ValidateKeyPair() error {
+	if kp == nil {
+		return fmt.Errorf("key pair is nil")
+	}
+	if len(kp.PrivateKey) == 0 {
+		return fmt.Errorf("key pair is missing the encrypted private key")
+	}
+	if strings.TrimSpace(kp.OrgCode) == "" {
+		return fmt.Errorf("key pair is missing the organisation code")
+	}
+	if !IsValidOrgCode(kp.OrgCode) {
+		return fmt.Errorf("key pair has unsupported organisation code: %q", kp.OrgCode)
+	}
+	if len(kp.KEMPublicKey) > 0 && len(kp.KEMPrivateKey) == 0 {
+		return fmt.Errorf("key pair has a KEM public key but is missing the KEM private key")
+	}
+	if len(kp.KEMPrivateKey) > 0 {
+		if _, _, err := SplitHybridKey(kp.KEMPrivateKey); err != nil {
+			return fmt.Errorf("key pair has a malformed KEM private key: %w", err)
+		}
+	}
+	return nil
+}
+
+// EncryptedPrivateKey returns the passphrase-encrypted private key blob.
+// It errors when the field was never populated so callers cannot silently
+// persist or display a key pair with missing secret material.
+func (kp *KeyPair) EncryptedPrivateKey() ([]byte, error) {
+	if kp == nil || len(kp.PrivateKey) == 0 {
+		return nil, fmt.Errorf("key pair is missing the encrypted private key")
+	}
+	return kp.PrivateKey, nil
+}
+
+// OrgCodeTyped returns the organisation code as the typed OrgCode value,
+// validating it against the org registry first.
+func (kp *KeyPair) OrgCodeTyped() (OrgCode, error) {
+	if kp == nil || strings.TrimSpace(kp.OrgCode) == "" {
+		return "", fmt.Errorf("key pair is missing the organisation code")
+	}
+	if !IsValidOrgCode(kp.OrgCode) {
+		return "", fmt.Errorf("key pair has unsupported organisation code: %q", kp.OrgCode)
+	}
+	return OrgCode(strings.TrimSpace(kp.OrgCode)), nil
+}
+
+// KEMPrivateKeyMaterial returns the hybrid KEM private key blob. It errors
+// when the key pair carries a KEM public key but no matching private half.
+func (kp *KeyPair) KEMPrivateKeyMaterial() ([]byte, error) {
+	if kp == nil || len(kp.KEMPrivateKey) == 0 {
+		return nil, fmt.Errorf("key pair is missing the KEM private key")
+	}
+	return kp.KEMPrivateKey, nil
 }
 
 // GetKeyDir returns the key directory path for UI display
@@ -138,8 +201,8 @@ func GetPublicKeyFingerprint(kp *KeyPair) string {
 	}
 
 	// Default to SPIF if no org code is set
-	log.Println("No org code set; using SPIF format")
-	code := OrgCode("SPIF")
+	log.Println("No org code set; using " + common.SPIFPrefix + " format")
+	code := OrgSPIF
 	raw := SHAKE256HashWithOrg(kp.PublicKey, code)
 	formatted := FormatOrgAddress(raw, code)
 	return formatted
@@ -352,7 +415,7 @@ func LoadKeyFromDisk(passphrase string) (*KeyPair, []byte, error) {
 			}
 		}
 
-		kp.OrgCode = "SPIF"
+		kp.OrgCode = string(OrgSPIF)
 		kp.Address = GetPublicKeyFingerprint(kp)
 
 		log.Printf("[SUCCESS] LoadKeyFromDisk: successfully loaded key %s", id)
@@ -423,13 +486,16 @@ func GetKeyByID(keyID, passphrase string) (*KeyPair, []byte, error) {
 	return kp, skBytes, nil
 }
 
-// ListKeys lists all stored key IDs
-// This follows the StorageManager pattern
+// ListKeys lists all stored key IDs.
+// Stale keyindex entries (IDs whose key files were deleted) are pruned
+// automatically so the log is not spammed with "key not found" warnings on
+// every login/sign/mint, and ListKeys callers only ever see usable IDs.
 func ListKeys() ([]string, error) {
 	indexPath := filepath.Join(GetKeyDir(), "keyindex")
 	data, err := os.ReadFile(indexPath)
 	if err == nil {
 		var ids []string
+		var stale []string
 		for _, line := range strings.Split(string(data), "\n") {
 			id := strings.TrimSpace(line)
 			if id == "" {
@@ -442,8 +508,12 @@ func ListKeys() ([]string, error) {
 			if _, err := diskStorage.GetKey(id); err == nil {
 				ids = append(ids, id)
 			} else {
-				log.Printf("[WARN] ListKeys: diskStorage.GetKey(%s) failed, skipping: %v", id, err)
+				stale = append(stale, id)
 			}
+		}
+		if len(stale) > 0 {
+			log.Printf("[INFO] ListKeys: pruning %d stale keyindex entrie(s): %v", len(stale), stale)
+			pruneKeyIndex(indexPath, ids)
 		}
 		if len(ids) > 0 {
 			log.Printf("[INFO] ListKeys: found %d keys via keyindex", len(ids))
@@ -454,6 +524,17 @@ func ListKeys() ([]string, error) {
 	// Fallback to scanning disk store
 	log.Printf("[INFO] ListKeys: keyindex empty or not found, scanning disk store")
 	return findMainKey(), nil
+}
+
+// pruneKeyIndex rewrites the keyindex file keeping only validIDs (best-effort).
+func pruneKeyIndex(indexPath string, validIDs []string) {
+	content := ""
+	for _, id := range validIDs {
+		content += id + "\n"
+	}
+	if err := os.WriteFile(indexPath, []byte(content), 0600); err != nil {
+		log.Printf("[WARN] ListKeys: failed to prune stale keyindex: %v", err)
+	}
 }
 
 // findMainKey returns the main SPHINCS+ key ID (skipping KEM-only keys)

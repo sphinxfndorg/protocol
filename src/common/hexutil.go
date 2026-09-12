@@ -18,13 +18,18 @@ import (
 // SPIF Address Utilities (post-quantum SPHINCS+ addresses)
 // ─────────────────────────────────────────────────────────────────────────────
 
-// NormalizeSPIFAddress strips the "SPIF" prefix, all spaces, and hyphens,
+// SPIFPrefix is the canonical address prefix used by every SPIF address
+// on the protocol. All packages building, parsing, or displaying SPIF
+// addresses should reference this constant instead of hardcoding "SPIF".
+const SPIFPrefix = "SPIF"
+
+// NormalizeSPIFAddress strips the SPIF prefix, all spaces, and hyphens,
 // then validates that the remaining string is valid hex of length 40 or 64.
-// Returns the cleaned hex string (without "SPIF") or an error.
+// Returns the cleaned hex string (without SPIFPrefix) or an error.
 func NormalizeSPIFAddress(addr string) (string, error) {
 	raw := strings.TrimSpace(addr)
-	if strings.HasPrefix(raw, "SPIF") {
-		raw = strings.TrimPrefix(raw, "SPIF")
+	if strings.HasPrefix(raw, SPIFPrefix) {
+		raw = strings.TrimPrefix(raw, SPIFPrefix)
 		raw = strings.ReplaceAll(raw, " ", "")
 		raw = strings.ReplaceAll(raw, "-", "")
 	}
@@ -48,7 +53,7 @@ func ValidateSPIFAddress(addr string) bool {
 //
 //	"SPIF XXXX XXXX XXXX ..." (groups of 4 hex characters).
 //
-// If the input already has a "SPIF" prefix or spaces, it normalises first.
+// If the input already has a SPIF prefix or spaces, it normalises first.
 // Returns the formatted string or an error if invalid.
 func FormatSPIFAddress(addr string) (string, error) {
 	raw, err := NormalizeSPIFAddress(addr)
@@ -64,7 +69,7 @@ func FormatSPIFAddress(addr string) (string, error) {
 		}
 		groups = append(groups, raw[i:end])
 	}
-	return "SPIF " + strings.Join(groups, " "), nil
+	return SPIFPrefix + " " + strings.Join(groups, " "), nil
 }
 
 // MustFormatSPIFAddress is like FormatSPIFAddress but panics on error.

@@ -360,9 +360,6 @@ func (bc *Blockchain) GetMempool() *pool.Mempool {
 	return bc.mempool
 }
 
-// SetSTHINCSManager connects the chain mempool to the node's SPHINCS verifier.
-// Call this during node startup after the per-node STHINCSManager is created.
-// Add this method to Blockchain
 // SetMempool sets the mempool for the blockchain
 func (bc *Blockchain) SetMempool(mempool *pool.Mempool) {
 	bc.lock.Lock()
@@ -371,6 +368,19 @@ func (bc *Blockchain) SetMempool(mempool *pool.Mempool) {
 	// Also set on state machine if needed
 	if bc.stateMachine != nil {
 		bc.stateMachine.SetMempool(mempool)
+	}
+	// Keep admission-time (mempool) and commit-time (chain) auth consistent:
+	// the mempool must observe the same STHINCS manager the chain uses.
+	if mempool != nil {
+		mempool.SetSTHINCSManager(bc.sphincsManager)
+	}
+}
+
+// SyncSTHINCSManager re-applies bc.sphincsManager onto the mempool so both
+// auth paths observe the same manager. Call after SetSTHINCSManager.
+func (bc *Blockchain) SyncSTHINCSManager() {
+	if bc.mempool != nil {
+		bc.mempool.SetSTHINCSManager(bc.sphincsManager)
 	}
 }
 

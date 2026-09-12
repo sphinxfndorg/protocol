@@ -25,6 +25,9 @@ func Shutdown(resources []NodeResources) error {
 				errs = append(errs, err)
 			}
 		}
+		if res.RPCServer != nil {
+			res.RPCServer.Close()
+		}
 		if res.TCPServer != nil {
 			if err := res.TCPServer.Stop(); err != nil {
 				logger.Error("Failed to stop TCP server: %v", err)

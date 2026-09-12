@@ -49,7 +49,7 @@ type WalletInfo struct {
 // stores the encrypted private key in the vault, and exports the
 // public key for use with the node.
 func InitWallet(cfg WalletConfig) (*WalletInfo, error) {
-	logger.Info("Initializing SPIF wallet (network=%s, label=%s)", cfg.Network, cfg.Label)
+	logger.Info("Initializing %s wallet (network=%s, label=%s)", common.SPIFPrefix, cfg.Network, cfg.Label)
 
 	if cfg.Passphrase == "" {
 		return nil, fmt.Errorf("passphrase is required to encrypt the wallet")
@@ -223,7 +223,7 @@ func ListWallets(dataDir string) ([]WalletInfo, error) {
 
 		// Validate address using common utility
 		if !common.ValidateSPIFAddress(info.Address) {
-			logger.Warn("Skipping invalid SPIF address in %s: %s", entry.Name(), info.Address)
+			logger.Warn("Skipping invalid %s address in %s: %s", common.SPIFPrefix, entry.Name(), info.Address)
 			continue
 		}
 

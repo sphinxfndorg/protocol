@@ -12,6 +12,7 @@ import (
 	"log"
 	"math/big"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/sphinxfndorg/protocol/src/common"
@@ -128,6 +129,98 @@ func (c *WalletClient) GetBalance(address string) (*BalanceResponse, error) {
 		Pending:  pending,
 		Unlocked: unlocked,
 	}, nil
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// ANCHOR CONFIRMATION PROVENANCE
+//
+// The anchor flow (AnchorMintReceipt) only broadcasts a transaction
+// (sendrawtransaction → mempool). To stamp the REAL confirming block into a
+// signed file's on-chain provenance (instead of the "pending" sentinel), the
+// wallet polls the node's "gettransactionreceipt" JSON-RPC — implemented in
+// src/rpc/json.go — until the tx is committed, then records the committing
+// block's height and hash.
+// ────────────────────────────────────────────────────────────────────────
+
+// TxConfirmation records where a transaction was committed on-chain.
+type TxConfirmation struct {
+	Height uint64 // block height that included the transaction
+	Hash   string // hex hash of the confirming block
+}
+
+// confirmedBlockInfo adapts a TxConfirmation to the sign package's
+// RefreshOnChainProvenance confirmedBlock interface (GetHeight/GetHash).
+type confirmedBlockInfo struct {
+	height uint64
+	hash   string
+}
+
+func (c *confirmedBlockInfo) GetHeight() uint64 { return c.height }
+func (c *confirmedBlockInfo) GetHash() string   { return c.hash }
+
+// GetTxConfirmation asks the node where a transaction was committed. Returns
+// (nil, nil) while the tx is still pending/uncommitted so callers can simply
+// poll; an error means the RPC itself failed.
+func (c *WalletClient) GetTxConfirmation(txID string) (*TxConfirmation, error) {
+	if strings.TrimSpace(txID) == "" {
+		return nil, errors.New("empty txid")
+	}
+	resultData, err := rpc.CallRPC(c.nodeAddr, "gettransactionreceipt", []interface{}{txID}, 30)
+	if err != nil {
+		return nil, fmt.Errorf("gettransactionreceipt rpc: %w", err)
+	}
+	if len(resultData) == 0 || string(resultData) == "null" {
+		return nil, errors.New("empty gettransactionreceipt response")
+	}
+	var result struct {
+		Confirmed     bool           `json:"confirmed"`
+		Height        uint64         `json:"height"`
+		BlockHash     string         `json:"blockhash"`
+		Pool          map[string]int `json:"pool"`
+		InvalidReason string         `json:"invalid_reason"`
+	}
+	if err := json.Unmarshal(resultData, &result); err != nil {
+		return nil, fmt.Errorf("parse gettransactionreceipt: %w", err)
+	}
+	if len(result.Pool) > 0 {
+		log.Printf("[WalletRPC] GetTxConfirmation: txid=%s pool(broadcast=%d validating=%d pending=%d invalid=%d total=%d)",
+			txID,
+			result.Pool["broadcast"], result.Pool["validating"], result.Pool["pending"],
+			result.Pool["invalid"], result.Pool["total"])
+	}
+	if strings.TrimSpace(result.InvalidReason) != "" {
+		log.Printf("[WalletRPC] GetTxConfirmation: txid=%s INVALID — reason: %s", txID, result.InvalidReason)
+	}
+	if !result.Confirmed {
+		return nil, nil
+	}
+	return &TxConfirmation{Height: result.Height, Hash: result.BlockHash}, nil
+}
+
+// WaitForTxConfirmation polls the node until the transaction is committed to a
+// block or the timeout elapses. A timeout is NOT an error — the caller can
+// still anchor provenance as pending; it returns (nil, nil) in that case so
+// mint flows never hard-fail on a slow block.
+func (c *WalletClient) WaitForTxConfirmation(txID string, timeout time.Duration) (*TxConfirmation, error) {
+	deadline := time.Now().Add(timeout)
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		conf, err := c.GetTxConfirmation(txID)
+		if err == nil && conf != nil {
+			log.Printf("[WalletRPC] WaitForTxConfirmation: txid=%s confirmed at height=%d hash=%s", txID, conf.Height, conf.Hash)
+			return conf, nil
+		}
+		if err != nil {
+			log.Printf("[WalletRPC] WaitForTxConfirmation: poll txid=%s: %v", txID, err)
+		}
+		if time.Now().After(deadline) {
+			log.Printf("[WalletRPC] WaitForTxConfirmation: txid=%s still unconfirmed after %s", txID, timeout)
+			return nil, nil
+		}
+		<-ticker.C
+	}
 }
 
 // ────────────────────────────────────────────────────────────────────────

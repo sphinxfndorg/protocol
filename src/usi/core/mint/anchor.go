@@ -4,13 +4,13 @@
 package mint
 
 import (
-	"crypto/sha3"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 
+	"github.com/sphinxfndorg/protocol/src/common"
 	"github.com/sphinxfndorg/protocol/src/core"
 )
 
@@ -23,8 +23,9 @@ type AnchorTag = core.AnchorTag
 const AnchorTagType = core.AnchorTagType
 
 // ReceiptCommitmentHash hashes the FULL signed receipt (SignatureHex
-// included), so the on-chain commitment binds to one specific signed
-// artifact rather than just its pre-signature content.
+// included) with the protocol Sphinx hash — NOT SHA3-256 — so the on-chain
+// commitment binds to one specific signed artifact in the same hash family
+// the node verifies (core.ValidateAnchorData) and the SVM opcodes use.
 //
 // Deliberately independent of canonicalReceiptBytesV2 — if that
 // canonicalization ever changes/gets fixed, previously anchored hashes
@@ -40,8 +41,7 @@ func ReceiptCommitmentHash(r *MintReceipt) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("marshal receipt: %w", err)
 	}
-	sum := sha3.Sum256(data)
-	return sum[:], nil
+	return common.SpxHash(data), nil
 }
 
 // validateSIP721AnchorFields enforces the all-or-nothing SIP-721 binding:

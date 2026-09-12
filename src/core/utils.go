@@ -854,6 +854,42 @@ func (bc *Blockchain) GetTransactionByIDString(txIDStr string) (*types.Transacti
 	return bc.GetTransactionByID(txIDBytes)
 }
 
+// GetTxConfirmation returns the height and hash of the block that committed
+// the transaction with the given ID (hex string). This is the node-side
+// confirmation provenance wallets need to stamp real block references into
+// signed artifacts instead of a "pending" sentinel. An error is returned
+// while the transaction is still uncommitted (mempool) or unknown.
+func (bc *Blockchain) GetTxConfirmation(txID string) (string, uint64, error) {
+	if bc == nil || bc.storage == nil {
+		return "", 0, fmt.Errorf("blockchain not initialised")
+	}
+	if strings.TrimSpace(txID) == "" {
+		return "", 0, fmt.Errorf("empty transaction ID")
+	}
+	return bc.storage.GetTxBlockInfo(txID)
+}
+
+// MempoolSnapshot returns the mempool's pool-size breakdown (broadcast,
+// validating, pending, invalid, total) for diagnostics. Exposed as a named
+// Blockchain method because the rpc package cannot reference the mempool
+// field directly.
+func (bc *Blockchain) MempoolSnapshot() (broadcast, validating, pending, invalid, all int) {
+	if bc == nil || bc.mempool == nil {
+		return 0, 0, 0, 0, 0
+	}
+	return bc.mempool.MempoolSnapshot()
+}
+
+// GetTransactionError returns the rejection reason recorded for a transaction
+// that failed mempool validation (invalid pool), so RPC clients can surface
+// exactly why a tx can never confirm. Returns (reason, exists).
+func (bc *Blockchain) GetTransactionError(txID string) (string, bool) {
+	if bc == nil || bc.mempool == nil {
+		return "", false
+	}
+	return bc.mempool.GetTransactionError(txID)
+}
+
 // GetLatestBlock returns the head of the chain with adapter
 // Returns: Latest block as consensus.Block interface
 func (bc *Blockchain) GetLatestBlock() consensus.Block {

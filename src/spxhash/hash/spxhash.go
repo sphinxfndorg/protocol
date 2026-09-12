@@ -376,14 +376,36 @@ func (s *SphinxHash) hashData(data []byte) []byte {
 	// FIX D: include saltEntropy alongside the salt so the random entropy
 	// generated at construction time actively influences the hash output.
 	const maxHashInputSize = 1 << 20 // 1 MB maximum hash input size
-	totalSize := len(data) + len(s.salt) + len(s.saltEntropy)
+	effectiveData := data
+	totalSize := len(effectiveData) + len(s.salt) + len(s.saltEntropy)
 	if totalSize > maxHashInputSize {
-		panic(fmt.Sprintf("spxhash: hash input size %d exceeds maximum %d", totalSize, maxHashInputSize))
+		// Large-payload path (e.g. Mint-Data fallback CID over a >1 MB file):
+		// compress the payload with streaming SHAKE-256 first, then run the
+		// regular SphinxHash pipeline over the 64-byte digest. This keeps
+		// memory bounded, never panics, and stays deterministic. Small
+		// inputs never take this branch, so existing hashes are unchanged.
+		pre := sha3.NewShake256()
+		const writeChunk = 1 << 18 // 256 KiB per Write — keeps absorb streaming
+		for off := 0; off < len(effectiveData); off += writeChunk {
+			end := off + writeChunk
+			if end > len(effectiveData) {
+				end = len(effectiveData)
+			}
+			pre.Write(effectiveData[off:end])
+		}
+		pre.Write(s.salt)
+		pre.Write(s.saltEntropy)
+		digest := make([]byte, 64)
+		if _, err := pre.Read(digest); err != nil {
+			panic(fmt.Sprintf("spxhash: failed to read large-input prehash: %v", err))
+		}
+		effectiveData = digest
+		totalSize = len(effectiveData) + len(s.salt) + len(s.saltEntropy)
 	}
 	combined := make([]byte, totalSize)
-	copy(combined, data)
-	copy(combined[len(data):], s.salt)
-	copy(combined[len(data)+len(s.salt):], s.saltEntropy)
+	copy(combined, effectiveData)
+	copy(combined[len(effectiveData):], s.salt)
+	copy(combined[len(effectiveData)+len(s.salt):], s.saltEntropy)
 
 	// Key stretching using Argon2id, which is a memory-hard function to improve resistance against brute-force attacks.
 	stretchedKey := argon2.IDKey(combined, s.salt, iterations, memory, parallelism, 64) // Generate a 64-byte key.

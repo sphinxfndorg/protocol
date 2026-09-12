@@ -6,6 +6,7 @@ package consensus
 
 import (
 	"context"
+	"fmt"
 	"math/big"
 	"sync"
 	"time"
@@ -81,6 +82,33 @@ type Attestation struct {
 }
 
 // BlockChain interface for block storage and retrieval
+// ErrInvalidBlockTx is a sentinel error returned by Blockchain.CommitBlock
+// when a block fails validation for a deterministic, non-transient reason
+// (e.g. a transaction's SPHINCS auth bundle is invalid or the SPHINCS
+// manager is not configured). Consensus callers can use errors.Is to
+// distinguish this from a transient race / staleness error and react
+// accordingly: evict the offending transactions from the mempool so the
+// same invalid block is not rebuilt and retried forever.
+//
+// Wrapping convention: core.CommitBlock wraps the underlying validation
+// error with fmt.Errorf("...: %w", ErrInvalidBlockTx) so the chain of
+// %w wraps still reports the original message while remaining detectable
+// via errors.Is.
+var ErrInvalidBlockTx = fmt.Errorf("block failed deterministic transaction validation")
+
+// MempoolAccessor is an optional interface that a BlockChain can
+// implement to let consensus evict transactions from the mempool after a
+// deterministic commit failure. It is intentionally narrow — only the
+// two methods needed for cleanup — so lightweight and test
+// implementations of BlockChain are not forced to provide a full mempool.
+type MempoolAccessor interface {
+	// GetMempool returns the mempool used by this blockchain, or nil
+	// if no mempool is configured.
+	GetMempool() interface {
+		RemoveTransactions(txIDs []string)
+	}
+}
+
 // BlockChain interface for block storage and retrieval
 type BlockChain interface {
 	GetLatestBlock() Block

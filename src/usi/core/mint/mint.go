@@ -11,8 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"golang.org/x/crypto/sha3"
-
+	"github.com/sphinxfndorg/protocol/src/common"
 	"github.com/sphinxfndorg/protocol/src/core"
 	keys "github.com/sphinxfndorg/protocol/src/usi/core/key"
 	"github.com/sphinxfndorg/protocol/src/usi/core/sign"
@@ -45,16 +44,18 @@ func Mint(payload []byte, subject string, passphrase string, orgCode string, cid
 	minterPKHex := hex.EncodeToString(kp.PublicKey)
 
 	if orgCode == "" {
-		orgCode = "SPIF"
+		orgCode = string(keys.OrgSPIF)
 	}
 	payloadHashWithOrg := keys.SHAKE256HashWithOrg(payload, keys.OrgCode(orgCode))
 	payloadHashHex := hex.EncodeToString(payloadHashWithOrg)
 
-	// Deterministic mint id: SHA3-256(minterPKHex || subject || payloadHashHex)
+	// Deterministic mint id: SphinxHash(minterPKHex || subject || payloadHashHex).
+	// Uses common.SpxHash — NOT SHA3-256 — so the mint identifier lives in
+	// the same hash family as the anchor CID commitment, the receipt hash
+	// path, and the SVM signature verification (see sphincsSigHash).
 	// This ensures globally unique, deterministic mint IDs.
 	mintIDInput := []byte(minterPKHex + ":" + subject + ":" + payloadHashHex)
-	mintIDHash := sha3.Sum256(mintIDInput)
-	mintID := hex.EncodeToString(mintIDHash[:])
+	mintID := hex.EncodeToString(common.SpxHash(mintIDInput))
 
 	rec := &MintReceipt{
 		Version:                ReceiptVersion,
@@ -104,9 +105,9 @@ type MintAndAnchorOptions struct {
 	MetadataURI string // ERC-721 style metadata URI (optional)
 
 	// NFT metadata (ERC-721 compatible)
-	NFTName        string          // NFT name/title
-	NFTDescription string          // NFT description
-	NFTAttributes  []NFTAttribute  // ERC-721 trait attributes
+	NFTName        string         // NFT name/title
+	NFTDescription string         // NFT description
+	NFTAttributes  []NFTAttribute // ERC-721 trait attributes
 
 	// Ethereum-close SIP-721 collection mint. When Collection is set, the
 	// media+metadata IPFS uploads MUST succeed (the mint aborts otherwise)
@@ -144,15 +145,15 @@ type MintAndAnchorResult struct {
 }
 
 // MintAndAnchor performs the COMPLETE automatic flow:
-// 1. Create a signed MintReceipt (local)
-// 2. Upload the media/payload to IPFS → get media CID
-// 3. Build ERC-721 metadata JSON (name, description, image=mediaCID)
-// 4. Upload metadata JSON to IPFS → get metadata CID → tokenURI
-// 5. When opts.Collection is set, mint the token in the SIP-721 collection
-//    on-chain (tokenId counter + tokenURI[tokenId] contract storage) — this
-//    ABORTS if IPFS is unreachable because a tokenURI-less NFT pins nothing
-// 6. Create a REAL blockchain transaction with the anchor in ReturnData
-// 7. Save the receipt and anchor tag to disk
+//  1. Create a signed MintReceipt (local)
+//  2. Upload the media/payload to IPFS → get media CID
+//  3. Build ERC-721 metadata JSON (name, description, image=mediaCID)
+//  4. Upload metadata JSON to IPFS → get metadata CID → tokenURI
+//  5. When opts.Collection is set, mint the token in the SIP-721 collection
+//     on-chain (tokenId counter + tokenURI[tokenId] contract storage) — this
+//     ABORTS if IPFS is unreachable because a tokenURI-less NFT pins nothing
+//  6. Create a REAL blockchain transaction with the anchor in ReturnData
+//  7. Save the receipt and anchor tag to disk
 //
 // This is the equivalent of Ethereum ERC-721 minting:
 //   - IPFS stores the media (like tokenURI)

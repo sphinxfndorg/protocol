@@ -48,6 +48,50 @@ type orgBundleResolver interface {
 // METADATA BLOCK BUILDERS
 // ─────────────────────────────────────────────────────────────────────────────
 
+// provenanceLine renders a single on-chain field with an explicit sentinel
+// when the value is missing/unset, so verify screens never mistake "no data"
+// for a confirmed anchor.
+func provenanceLine(label, value, emptySentinel string) string {
+	if strings.TrimSpace(value) == "" {
+		return fmt.Sprintf("%s: %s", label, emptySentinel)
+	}
+	return fmt.Sprintf("%s: %s", label, value)
+}
+
+func provenanceHeightLine(label string, height uint64) string {
+	if height == 0 {
+		return fmt.Sprintf("%s: pending", label)
+	}
+	return fmt.Sprintf("%s: %d", label, height)
+}
+
+// onChainProvenanceBlock renders a compact multi-line provenance summary for
+// use in buildSecureMetadataBlock (all formats).
+func onChainProvenanceBlock(meta *Meta) string {
+	if meta == nil {
+		return ""
+	}
+	lines := []string{
+		"--- On-Chain / Storage ---",
+		provenanceLine("MintID", meta.MintID, "unanchored"),
+		provenanceLine("CID", meta.IPFSCID, "unpinned"),
+		provenanceHeightLine("MintHeight", meta.BlockHeight),
+		provenanceLine("AnchorTx", meta.AnchorTxID, "unanchored"),
+		provenanceHeightLine("Confirmed", meta.ConfirmedHeight),
+		provenanceLine("BlockHash", meta.BlockHash, "pending"),
+	}
+	if meta.TokenID != 0 {
+		lines = append(lines, fmt.Sprintf("TokenID: %d", meta.TokenID))
+	}
+	if meta.ContractAddress != "" {
+		lines = append(lines, provenanceLine("Contract", meta.ContractAddress, "n/a"))
+	}
+	if meta.TokenURI != "" {
+		lines = append(lines, provenanceLine("TokenURI", meta.TokenURI, "n/a"))
+	}
+	return strings.Join(lines, "\n")
+}
+
 func buildSecureMetadataBlock(meta *Meta, fingerprint string) string {
 	nonce := meta.Nonce
 	if nonce == "" {
@@ -76,6 +120,8 @@ func buildSecureMetadataBlock(meta *Meta, fingerprint string) string {
 		shortFinalHash = shortFileHash
 	}
 
+	provBlock := onChainProvenanceBlock(meta)
+
 	return fmt.Sprintf(
 		"USI-SUMMARY\n"+
 			"Fingerprint: %s\n"+
@@ -85,7 +131,8 @@ func buildSecureMetadataBlock(meta *Meta, fingerprint string) string {
 			"Nonce: %s (%d chars)\n"+
 			"File Hash: %s\n"+
 			"Final Hash: %s\n"+
-			"Algorithm: SHAKE-256 + PQ",
+			"Algorithm: SHAKE-256 + PQ\n"+
+			"%s",
 		formatFingerprintLegacy(fingerprint),
 		formattedSignature,
 		time.Unix(meta.Timestamp, 0).Format("2006-01-02 15:04:05"),
@@ -93,6 +140,7 @@ func buildSecureMetadataBlock(meta *Meta, fingerprint string) string {
 		len(nonce),
 		shortFileHash,
 		shortFinalHash,
+		provBlock,
 	)
 }
 
@@ -104,6 +152,46 @@ func buildCryptographicMetadataBlock(meta *Meta, fingerprint, finalHash string) 
 	}
 	defer secureZeroBytes(metaJSON)
 
+	// On-chain / storage provenance: every value rendered here comes from
+	// Meta fields populated by the Mint Data flow (gui.go) — IPFSCID and
+	// BlockHeight before signing; MintID/AnchorTxID/AnchorPath/ConfirmedHeight/
+	// BlockHash/TokenID/ContractAddress after the anchor via
+	// RefreshOnChainProvenance. Missing values render as explicit sentinels
+	// ("unanchored"/"pending") so a verify screen can never mistake "no
+	// data" for a confirmed anchor. See types.Meta for the field contract.
+	provenance := func(label, value, emptySentinel string) string {
+		if strings.TrimSpace(value) == "" {
+			return fmt.Sprintf("%s: %s", label, emptySentinel)
+		}
+		return fmt.Sprintf("%s: %s", label, value)
+	}
+	provenanceHeight := func(label string, height uint64) string {
+		if height == 0 {
+			return fmt.Sprintf("%s: pending", label)
+		}
+		return fmt.Sprintf("%s: %d", label, height)
+	}
+	provenanceTokenID := func() string {
+		if meta.TokenID == 0 {
+			return "Token ID: n/a (legacy receipt anchor — no collection)"
+		}
+		return fmt.Sprintf("Token ID: %d", meta.TokenID)
+	}
+	onChainLines := strings.Join([]string{
+		"--- On-Chain / Storage Provenance ---",
+		provenance("Mint ID", meta.MintID, "unanchored"),
+		provenance("IPFS CID", meta.IPFSCID, "unpinned"),
+		provenanceHeight("Mint Block Height", meta.BlockHeight),
+		provenance("Anchor TxID", meta.AnchorTxID, "unanchored"),
+		provenance("Anchor Path", meta.AnchorPath, "unanchored"),
+		provenanceHeight("Confirmed Height", meta.ConfirmedHeight),
+		provenance("Block Hash", meta.BlockHash, "pending"),
+		provenance("Token URI", meta.TokenURI, "n/a"),
+		provenance("Metadata CID", meta.MetadataCID, "n/a"),
+		provenanceTokenID(),
+		provenance("Contract", meta.ContractAddress, "n/a (no collection)"),
+	}, "\n")
+
 	cryptoDetails := fmt.Sprintf(
 		"USI CRYPTOGRAPHIC SIGNATURE VERIFICATION\n\n"+
 			"Fingerprint: %s\n"+
@@ -112,12 +200,14 @@ func buildCryptographicMetadataBlock(meta *Meta, fingerprint, finalHash string) 
 			"Nonce: %s\n"+
 			"Algorithm: SHAKE-256 + post-quantum signature\n"+
 			"File Hash: %s\n"+
-			"Final Document Hash: %s",
+			"Final Document Hash: %s\n\n"+
+			"%s",
 		formatFingerprintLegacy(fingerprint),
 		time.Unix(meta.Timestamp, 0).Format("2006-01-02 15:04:05"),
 		getNoncePrefix(meta.Nonce),
 		meta.FileHash,
 		finalHash,
+		onChainLines,
 	)
 
 	return map[string]string{
@@ -138,9 +228,26 @@ func buildCryptographicMetadataBlock(meta *Meta, fingerprint, finalHash string) 
 // ─────────────────────────────────────────────────────────────────────────────
 
 // EmbedSignature signs the file at filePath and embeds the signature using the
-// format-appropriate method (PDF properties, PNG iTXt, JPEG XMP, Office custom
-// properties, or a binary footer for everything else). On macOS, rich xattrs
-// are also written for Spotlight / Finder "Get Info" display.
+// best available channel for its format:
+//
+//   - .pdf                                  → native PDF properties + XMP
+//   - .png                                  → PNG iTXt chunk (XMP payload)
+//   - .jpg / .jpeg                          → JPEG APP1 XMP segment
+//   - .docx/.xlsx/.pptx/.odt/.ods/.odp      → Office custom.xml properties
+//   - .mov/.mp4/.m4v                        → QuickTime atom (cosmetic) + USIMETA footer (verifiable)
+//   - everything else (binary/text/unknown, incl. .avi) → trailing USIMETA footer
+//
+// Every path also stores the signed Meta in the local RawData DB cache (a
+// convenience for same-machine re-verification, never the only copy) and,
+// on macOS, mirrors the summary into Spotlight/Finder xattrs.
+//
+// Native-format channels are preferred over the footer wherever the format
+// supports one: they are what most viewers/editors are more likely to
+// preserve across simple re-saves, and — for PDF specifically — appending a
+// multi-KB footer after the real %%EOF risks landing outside the bounded
+// backward scan some PDF readers use to locate startxref, which can make the
+// file fail to open. The footer remains available as the universal fallback
+// for formats with no native metadata channel.
 func EmbedSignature(filePath string, meta *Meta, fingerprint, passphrase string) error {
 	log.Printf("EmbedSignature called for: %s", filePath)
 
@@ -161,39 +268,26 @@ func EmbedSignature(filePath string, meta *Meta, fingerprint, passphrase string)
 	}
 
 	ext := strings.ToLower(filepath.Ext(filePath))
-
-	var embedErr error
+	var err error
 	switch ext {
 	case ".pdf":
-		log.Printf("Processing as PDF")
-		embedErr = embedPDFMetadata(filePath, meta, fingerprint, passphrase)
+		err = embedPDFMetadata(filePath, meta, fingerprint, passphrase)
 	case ".png":
-		log.Printf("Processing as PNG")
-		embedErr = embedPNGMetadata(filePath, meta, fingerprint, passphrase)
+		err = embedPNGMetadata(filePath, meta, fingerprint, passphrase)
 	case ".jpg", ".jpeg":
-		log.Printf("Processing as JPEG")
-		embedErr = embedJPEGMetadata(filePath, meta, fingerprint, passphrase)
+		err = embedJPEGMetadata(filePath, meta, fingerprint, passphrase)
 	case ".docx", ".xlsx", ".pptx", ".odt", ".ods", ".odp":
-		log.Printf("Processing as Office/ODF ZIP-based format")
-		embedErr = embedOfficeMetadata(filePath, meta, fingerprint, passphrase)
+		err = embedOfficeMetadata(filePath, meta, fingerprint, passphrase)
+	case ".mov", ".mp4", ".m4v":
+		err = embedVideoMetadata(filePath, meta, fingerprint, passphrase)
 	default:
-		if runtime.GOOS == "darwin" &&
-			(ext == ".mov" || ext == ".mp4" || ext == ".m4v" || ext == ".avi") {
-			log.Printf("Media file on macOS - embedding QuickTime metadata + xattrs")
-			if err := embedMOVQuickTimeMetadata(filePath, meta, fingerprint); err != nil {
-				log.Printf("Warning: QuickTime metadata embedding failed: %v", err)
-			}
-			embedErr = createUSIMetaFile(filePath, meta, passphrase, true)
-		}
-		// For all other binary/text files embedErr stays nil here;
-		// createUSIMetaFile with skipFooter=false is called in the fallback below.
+		// No native metadata channel for this format — footer is the only
+		// option, and it's safe here because there's no format-level
+		// expectation about what sits at true end-of-file.
+		err = createUSIMetaFile(filePath, meta, passphrase, false)
 	}
-
-	if embedErr != nil {
-		log.Printf("Warning: format-specific embed failed: %v — falling back to footer", embedErr)
-		if err := createUSIMetaFile(filePath, meta, passphrase, false); err != nil {
-			return fmt.Errorf("embed fallback failed: %w", err)
-		}
+	if err != nil {
+		return fmt.Errorf("embed signature failed: %w", err)
 	}
 
 	if runtime.GOOS == "darwin" {
@@ -212,16 +306,40 @@ func EmbedSignature(filePath string, meta *Meta, fingerprint, passphrase string)
 // passphrase is accepted for API compatibility but is NOT required — anyone
 // with the file can verify the embedded SPHINCS+ signature using the public
 // key stored in the metadata.
-func VerifyUniversal(filePath, passphrase string) (bool, *Meta, error) {
+//
+// For every extension, the native-format extractor is tried first, but if it
+// finds nothing the universal USIMETA footer is checked next — EmbedSignature
+// always writes at least one channel appropriate to the format, and for
+// formats with a native channel it also leaves the RawData cache as a
+// same-machine convenience, but the footer (when present) is the one channel
+// guaranteed to travel with the file itself across machines.
+func VerifyUniversal(filePath, passphrase string) (VerificationResult, *Meta, error) {
 	log.Printf("VerifyUniversal started for: %s", filePath)
 
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
-		return false, nil, fmt.Errorf("file does not exist: %s", filePath)
+		return VerificationInvalid, nil, fmt.Errorf("file does not exist: %s", filePath)
 	}
 
 	ext := strings.ToLower(filepath.Ext(filePath))
 	var meta *Meta
 	var extractErr error
+
+	// bestResult tracks the highest assurance level found across all channels.
+	// We short-circuit on FullyVerified; otherwise we keep the best result
+	// (IntegrityOnly > Invalid) so a caller who can reach the directory on a
+	// later channel gets the strongest possible answer.
+	bestResult := VerificationInvalid
+	var bestMeta *Meta
+
+	// recordResult updates the best-result tracker and returns true if the
+	// caller should short-circuit (i.e. we hit FullyVerified).
+	recordResult := func(result VerificationResult, m *Meta) bool {
+		if result > bestResult {
+			bestResult = result
+			bestMeta = m
+		}
+		return result == VerificationFullyVerified
+	}
 
 	// ── 1. macOS media files: try xattrs first ──────────────────────────────
 	if runtime.GOOS == "darwin" &&
@@ -229,24 +347,38 @@ func VerifyUniversal(filePath, passphrase string) (bool, *Meta, error) {
 		meta, extractErr = extractXattrSignature(filePath)
 		if extractErr == nil && meta != nil {
 			log.Printf("Found signature in xattrs for media file")
-			if ok, err := verifyEmbeddedSignature(filePath, meta); err == nil && ok {
-				log.Printf("Xattr verification SUCCESS")
-				return true, meta, nil
+			if result, err := verifyEmbeddedSignature(filePath, meta); err == nil {
+				log.Printf("Xattr verification result: %s", result)
+				if recordResult(result, meta) {
+					return VerificationFullyVerified, meta, nil
+				}
 			} else {
 				log.Printf("Xattr verification failed: %v", err)
 			}
 		}
 	}
 
-	// ── 2. Format-specific extraction ───────────────────────────────────────
+	// ── 2. Format-specific extraction, falling back to the universal footer ─
 	switch ext {
 	case ".png":
 		meta, extractErr = extractPNGSignature(filePath)
 		if extractErr == nil && meta != nil {
 			log.Printf("Found signature in PNG iTXt chunk")
 		}
+		if meta == nil {
+			if m, err := extractEmbeddedSignature(filePath); err == nil && m != nil {
+				meta, extractErr = m, nil
+				log.Printf("Found signature in USIMETA footer (PNG had no iTXt)")
+			}
+		}
 	case ".jpg", ".jpeg":
 		meta, extractErr = extractJPEGSignature(filePath)
+		if meta == nil {
+			if m, err := extractEmbeddedSignature(filePath); err == nil && m != nil {
+				meta, extractErr = m, nil
+				log.Printf("Found signature in USIMETA footer (JPEG had no XMP)")
+			}
+		}
 	case ".pdf":
 		meta, extractErr = extractPDFSignature(filePath)
 		if meta == nil {
@@ -256,8 +388,20 @@ func VerifyUniversal(filePath, passphrase string) (bool, *Meta, error) {
 				log.Printf("Found signature via legacy PDF extraction")
 			}
 		}
+		if meta == nil {
+			if m, err := extractEmbeddedSignature(filePath); err == nil && m != nil {
+				meta, extractErr = m, nil
+				log.Printf("Found signature in USIMETA footer (PDF had no embedded properties)")
+			}
+		}
 	case ".docx", ".xlsx", ".pptx", ".odt", ".ods", ".odp":
 		meta, extractErr = extractOfficeSignature(filePath)
+		if meta == nil {
+			if m, err := extractEmbeddedSignature(filePath); err == nil && m != nil {
+				meta, extractErr = m, nil
+				log.Printf("Found signature in USIMETA footer (Office file had no custom.xml)")
+			}
+		}
 	default:
 		meta, extractErr = extractEmbeddedSignature(filePath)
 		if meta == nil && runtime.GOOS == "darwin" {
@@ -267,10 +411,12 @@ func VerifyUniversal(filePath, passphrase string) (bool, *Meta, error) {
 
 	if extractErr == nil && meta != nil {
 		log.Printf("Found embedded signature in file")
-		if ok, err := verifyEmbeddedSignature(filePath, meta); err == nil && ok {
-			log.Printf("File signature verification SUCCESS")
+		if result, err := verifyEmbeddedSignature(filePath, meta); err == nil {
+			log.Printf("File signature verification result: %s", result)
 			storeVerifiedMeta(filePath, meta)
-			return true, meta, nil
+			if recordResult(result, meta) {
+				return VerificationFullyVerified, meta, nil
+			}
 		} else {
 			log.Printf("Embedded signature verification failed: %v", err)
 		}
@@ -292,9 +438,11 @@ func VerifyUniversal(filePath, passphrase string) (bool, *Meta, error) {
 					truncate(currentHashHex, 16), truncate(cachedMeta.FileHash, 16))
 			}
 
-			if ok, err := verifyEmbeddedSignature(filePath, cachedMeta); err == nil && ok {
-				log.Printf("RawData verification SUCCESS")
-				return true, cachedMeta, nil
+			if result, err := verifyEmbeddedSignature(filePath, cachedMeta); err == nil {
+				log.Printf("RawData verification result: %s", result)
+				if recordResult(result, cachedMeta) {
+					return VerificationFullyVerified, cachedMeta, nil
+				}
 			} else {
 				log.Printf("RawData verification failed: %v", err)
 			}
@@ -305,20 +453,33 @@ func VerifyUniversal(filePath, passphrase string) (bool, *Meta, error) {
 	usiMetaPath := filePath + ".usimeta"
 	if _, statErr := os.Stat(usiMetaPath); statErr == nil {
 		log.Printf("Found .usimeta sidecar (legacy)")
-		ok, sidecarMeta, err := verifyUSIMetaWithDetails(filePath, usiMetaPath)
+		result, sidecarMeta, err := verifyUSIMetaWithDetails(filePath, usiMetaPath)
 		if err != nil {
 			log.Printf(".usimeta verification failed: %v", err)
-			return false, sidecarMeta, err
+			// If we already have a better result from an earlier channel,
+			// return that instead of failing on the legacy sidecar.
+			if bestResult > VerificationInvalid {
+				return bestResult, bestMeta, nil
+			}
+			return VerificationInvalid, sidecarMeta, err
 		}
-		if ok {
-			log.Printf(".usimeta verification SUCCESS")
-			return true, sidecarMeta, nil
+		log.Printf(".usimeta verification result: %s", result)
+		if recordResult(result, sidecarMeta) {
+			return VerificationFullyVerified, sidecarMeta, nil
 		}
-		return false, sidecarMeta, fmt.Errorf("signature invalid")
+		if result == VerificationIntegrityOnly {
+			return VerificationIntegrityOnly, sidecarMeta, nil
+		}
+		return VerificationInvalid, sidecarMeta, fmt.Errorf("signature invalid")
+	}
+
+	if bestResult == VerificationIntegrityOnly {
+		log.Printf("No fully-verified signature found; returning INTEGRITY_ONLY for: %s", filePath)
+		return VerificationIntegrityOnly, bestMeta, nil
 	}
 
 	log.Printf("No valid signature found for: %s", filePath)
-	return false, nil, errors.New("no valid USI signature found")
+	return VerificationInvalid, nil, errors.New("no valid USI signature found")
 }
 
 // storeVerifiedMeta caches a successfully verified Meta in the RawData DB.
@@ -364,10 +525,10 @@ func (w *resolverWrapper) Close() error {
 //  4. Validates the timestamp (future-only guard + max-age).
 //  5. Verifies the SPHINCS+ signature using the PUBLIC KEY embedded in meta —
 //     no passphrase required; anyone can verify.
-func verifyEmbeddedSignature(filePath string, meta *Meta) (bool, error) {
+func verifyEmbeddedSignature(filePath string, meta *Meta) (VerificationResult, error) {
 	fileData, err := os.ReadFile(filePath)
 	if err != nil {
-		return false, fmt.Errorf("cannot read file: %w", err)
+		return VerificationInvalid, fmt.Errorf("cannot read file: %w", err)
 	}
 	defer secureZeroBytes(fileData)
 
@@ -390,28 +551,38 @@ func verifyEmbeddedSignature(filePath string, meta *Meta) (bool, error) {
 	} else if verifyContentIntegrity(filePath, meta) {
 		log.Printf("Content integrity verified (structural/metadata changes only)")
 	} else {
-		return false, fmt.Errorf("file content has been modified: stored=%s computed=%s",
+		return VerificationInvalid, fmt.Errorf("file content has been modified: stored=%s computed=%s",
 			truncate(meta.FileHash, 16), truncate(hex.EncodeToString(currentHash), 16))
 	}
 
-	// Org binding check
-	resolver := defaultResolver()
-	if resolver != nil {
-		// Validate org binding
-		if err := validateOrgBinding(meta, resolver); err != nil {
-			log.Printf("Org binding validation failed: %v", err)
-			// Don't fail verification - just warn (offline compatibility)
-		}
-		// Close the resolver if it needs cleanup
-		if closer, ok := resolver.(interface{ Close() error }); ok {
-			defer closer.Close()
-		}
+	// No signature present — the file is integrity-consistent (hash matches)
+	// but there's no cryptographic proof of identity. Report as
+	// IntegrityOnly so callers never mistake this for a fully verified
+	// signature.
+	if meta.Signature == "" {
+		return VerificationIntegrityOnly, nil
 	}
 
-	if meta.Signature == "" {
-		return true, nil
+	// Crypto self-consistency: does the signature verify against the
+	// embedded public key? This proves "this content + this key + this
+	// signature" are internally consistent, but NOT that the key belongs to
+	// anyone trustworthy — an attacker can generate their own keypair and
+	// produce a perfectly self-consistent triple.
+	cryptoOK, err := verifyCryptoSignature(meta, currentHash)
+	if err != nil {
+		return VerificationInvalid, err
 	}
-	return verifyCryptoSignature(meta, currentHash)
+	if !cryptoOK {
+		return VerificationInvalid, errors.New("cryptographic signature invalid — document may be tampered or signed by a different key")
+	}
+
+	// Org binding: is the embedded key a known, registered, active key in the
+	// directory? This is the fail-closed gate that catches forged key
+	// substitutions. It MUST run after the crypto check — otherwise an
+	// attacker who controls the file could supply any keypair and we'd be
+	// checking their self-chosen key against the directory (which would
+	// correctly fail, but only because we enforce it here as a hard gate).
+	return checkOrgBinding(meta)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -465,52 +636,104 @@ func defaultResolver() orgBundleResolver {
 //  2. The bundle's Organisation field matches meta.OrgCode.
 //  3. The bundle is not revoked.
 //
-// If the directory is unreachable (offline field use), the check is skipped
-// with a warning — the SPHINCS+ signature alone still proves integrity.
-// Set requireOnline=true for high-assurance contexts (e.g. server-side).
-func validateOrgBinding(meta *Meta, resolver orgBundleResolver) error {
+// Return values:
+//   - (true, nil)  — binding confirmed: key is registered, active, and org matches.
+//   - (false, nil) — soft-skip: directory unavailable or unreachable (offline
+//     field use). The SPHINCS+ signature alone still proves integrity, but
+//     NOT authenticity.
+//   - (false, err) — hard failure: key not registered, revoked, or org
+//     mismatch. These indicate a likely forgery or a compromised key.
+//
+// Callers MUST treat (false, err) as a verification failure — it means the
+// one check that could catch a forged key (an attacker generating their own
+// keypair and overwriting meta) has detected exactly that condition.
+func validateOrgBinding(meta *Meta, resolver orgBundleResolver) (verified bool, err error) {
 	if meta.PublicKey == "" {
-		return errors.New("meta missing public key — cannot validate org binding")
+		return false, errors.New("meta missing public key — cannot validate org binding")
 	}
 	if resolver == nil {
 		log.Printf("Warning: org binding check skipped (directory unavailable) for org=%q", meta.OrgCode)
-		return nil // degrade gracefully for offline field use
+		return false, nil // soft-skip for offline field use
 	}
 
 	bundle, err := resolver.LookupByPublicKey(meta.PublicKey)
 	if err != nil {
 		if errors.Is(err, pubkeydir.ErrNotFound) {
-			return fmt.Errorf("public key not registered in directory (org=%q) — possible key substitution", meta.OrgCode)
+			// Hard failure: key not in directory — possible key substitution.
+			// Wrap ErrNotFound so callers can detect the key-substitution
+			// condition programmatically via errors.Is.
+			return false, fmt.Errorf("public key not registered in directory (org=%q) — possible key substitution: %w", meta.OrgCode, pubkeydir.ErrNotFound)
 		}
-		// Network / DB error: warn but don't block (same offline policy)
+		// Network / DB error: soft-skip (offline policy). We cannot confirm
+		// or deny the binding, so we degrade gracefully.
 		log.Printf("Warning: org directory lookup failed: %v — skipping org validation", err)
-		return nil
+		return false, nil
 	}
 
 	// Revocation is a hard failure even offline-policy-wise
 	if bundle.Status == pubkeydir.StatusRevoked {
-		return fmt.Errorf("signer key has been revoked (org=%q, reason=%q)", meta.OrgCode, bundle.RevocationReason)
+		return false, fmt.Errorf("signer key has been revoked (org=%q, reason=%q)", meta.OrgCode, bundle.RevocationReason)
 	}
 
 	// Org code consistency check — only when meta carries an OrgCode claim
 	if meta.OrgCode != "" && bundle.Organization != "" {
 		if !strings.EqualFold(bundle.Organization, meta.OrgCode) {
-			return fmt.Errorf("org mismatch: file claims %q, directory says %q", meta.OrgCode, bundle.Organization)
+			return false, fmt.Errorf("org mismatch: file claims %q, directory says %q", meta.OrgCode, bundle.Organization)
 		}
 	}
 
-	return nil
+	return true, nil
+}
+
+// checkOrgBinding is the fail-closed gate that verifies the embedded public key
+// against the directory. It returns a tri-state VerificationResult:
+//
+//   - VerificationFullyVerified — key is registered, active, org-bound.
+//   - VerificationIntegrityOnly — directory unreachable / resolver nil (offline
+//     field use); crypto is self-consistent but identity is unverified.
+//   - VerificationInvalid with error — key not registered, revoked, or org
+//     mismatch. These are hard failures that indicate a likely forgery.
+//
+// This function MUST be called only after the SPHINCS+ signature has been
+// confirmed self-consistent (signature matches embedded key, file hash
+// matches). Without that precondition, an attacker could supply their own
+// keypair and bypass the directory check entirely.
+func checkOrgBinding(meta *Meta) (VerificationResult, error) {
+	resolver := defaultResolver()
+	if resolver == nil {
+		log.Printf("Warning: org binding check skipped (directory unavailable) for org=%q — returning INTEGRITY_ONLY", meta.OrgCode)
+		return VerificationIntegrityOnly, nil
+	}
+	defer resolver.Close()
+
+	verified, err := validateOrgBinding(meta, resolver)
+	if err != nil {
+		// Hard failure: not found, revoked, or org mismatch.
+		return VerificationInvalid, err
+	}
+	if !verified {
+		// Soft-skip: directory reachable but lookup failed transiently.
+		return VerificationIntegrityOnly, nil
+	}
+	return VerificationFullyVerified, nil
 }
 
 // verifyCryptoSignature verifies the SPHINCS+ signature stored in meta against
 // msgBytes using the public key embedded in meta.  No passphrase is required;
 // the public key is self-contained in the signed metadata.
 //
-// Security note: the caller (verifyEmbeddedSignature) has already confirmed
-// that meta.FileHash matches the current file before reaching this function.
-// That hash check is what makes trusting the embedded public key safe — the
-// attacker cannot swap both the file content AND the stored hash/signature
-// without invalidating one of them.
+// Security note: this function establishes ONLY self-consistency — "this
+// signature verifies against this embedded key". It does NOT establish
+// authenticity, because meta.PublicKey comes from the same untrusted file
+// that carries the signature (the exact misuse Verify's doc comment warns
+// about). SPHINCS+ keypairs are free to generate: an attacker can replace
+// content, signature, and key together and pass this check. Authenticity is
+// established by the caller (verifyEmbeddedSignature / verifyUSIMetaWithDetails)
+// via the fail-closed checkOrgBinding directory gate, which MUST report
+// VerificationFullyVerified before any caller treats the signer identity as
+// confirmed. The file-hash check confirmed before reaching here only proves
+// tamper-evidence against accidental corruption — it does not make trusting
+// the embedded key safe.
 func verifyCryptoSignature(meta *Meta, msgBytes []byte) (bool, error) {
 	if meta.Signature == "" {
 		return false, errors.New("metadata missing signature")
@@ -594,8 +817,24 @@ func createUSIMetaFile(filePath string, inputMeta *Meta, passphrase string, skip
 		// On-chain / pinning context: the Mint Data flow sets these before
 		// embedding so the sidecar output carries the IPFS CID the payload
 		// was pinned under and the chain-tip block height at mint time.
+		// TokenURI/MetadataCID travel the same path (ERC-721 metadata JSON
+		// CID + ipfs:// pointer) so PDF/XMP/Office/sidecar outputs all agree.
 		IPFSCID:     inputMeta.IPFSCID,
 		BlockHeight: inputMeta.BlockHeight,
+		TokenURI:    inputMeta.TokenURI,
+		MetadataCID: inputMeta.MetadataCID,
+		// Pre-anchor provenance (if the Mint flow already knows them):
+		// MintID is deterministic and known before broadcast. AnchorTxID /
+		// AnchorPath / ConfirmedHeight / BlockHash / TokenID / Contract are
+		// normally stamped post-anchor via RefreshOnChainProvenance — but if
+		// a caller pre-fills them, preserve (never drop) them here.
+		MintID:          inputMeta.MintID,
+		AnchorTxID:      inputMeta.AnchorTxID,
+		AnchorPath:      inputMeta.AnchorPath,
+		ConfirmedHeight: inputMeta.ConfirmedHeight,
+		BlockHash:       inputMeta.BlockHash,
+		TokenID:         inputMeta.TokenID,
+		ContractAddress: inputMeta.ContractAddress,
 	}
 	// Add this line to record the nonce
 	if err := recordSigningNonce(meta.Nonce); err != nil {
@@ -1111,6 +1350,25 @@ func buildPDFStyleXMPPacket(meta *Meta, fingerprint string) string {
 		docTitle = "Cryptographically Signed Document"
 	}
 
+	// On-chain / storage provenance (same fields as buildCryptographicMetadataBlock).
+	onChain := onChainProvenanceBlock(meta)
+	tokenIDStr := "n/a"
+	if meta.TokenID != 0 {
+		tokenIDStr = fmt.Sprintf("%d", meta.TokenID)
+	}
+	contractStr := meta.ContractAddress
+	if contractStr == "" {
+		contractStr = "n/a"
+	}
+	tokenURIStr := meta.TokenURI
+	if tokenURIStr == "" {
+		tokenURIStr = "n/a"
+	}
+	metadataCIDStr := meta.MetadataCID
+	if metadataCIDStr == "" {
+		metadataCIDStr = "n/a"
+	}
+
 	return fmt.Sprintf(`<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
 <x:xmpmeta xmlns:x="adobe:ns:meta/">
   <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
@@ -1160,6 +1418,18 @@ func buildPDFStyleXMPPacket(meta *Meta, fingerprint string) string {
       <usi:PublicKey_B>%s</usi:PublicKey_B>
       <usi:Signature_A>%s</usi:Signature_A>
       <usi:Signature_B>%s</usi:Signature_B>
+      <usi:OnChainProvenance>%s</usi:OnChainProvenance>
+      <usi:MintID>%s</usi:MintID>
+      <usi:IPFSCID>%s</usi:IPFSCID>
+      <usi:MintBlockHeight>%s</usi:MintBlockHeight>
+      <usi:AnchorTxID>%s</usi:AnchorTxID>
+      <usi:AnchorPath>%s</usi:AnchorPath>
+      <usi:ConfirmedHeight>%s</usi:ConfirmedHeight>
+      <usi:BlockHash>%s</usi:BlockHash>
+      <usi:TokenURI>%s</usi:TokenURI>
+      <usi:MetadataCID>%s</usi:MetadataCID>
+      <usi:TokenID>%s</usi:TokenID>
+      <usi:ContractAddress>%s</usi:ContractAddress>
     </rdf:Description>
   </rdf:RDF>
 </x:xmpmeta>
@@ -1185,7 +1455,43 @@ func buildPDFStyleXMPPacket(meta *Meta, fingerprint string) string {
 		xmlEscape(pubKeyB),
 		xmlEscape(sigA),
 		xmlEscape(sigB),
+		xmlEscape(onChain),
+		xmlEscape(meta.MintID),
+		xmlEscape(meta.IPFSCID),
+		provenanceHeightStr(meta.BlockHeight),
+		xmlEscape(meta.AnchorTxID),
+		xmlEscape(meta.AnchorPath),
+		provenanceHeightStr(meta.ConfirmedHeight),
+		xmlEscape(meta.BlockHash),
+		xmlEscape(tokenURIStr),
+		xmlEscape(metadataCIDStr),
+		xmlEscape(tokenIDStr),
+		xmlEscape(contractStr),
 	)
+}
+
+// provenanceHeightStr renders a uint64 height with a "pending" sentinel for 0.
+func provenanceHeightStr(h uint64) string {
+	if h == 0 {
+		return "pending"
+	}
+	return fmt.Sprintf("%d", h)
+}
+
+// tokenIDStr renders the TokenID with an "n/a" sentinel for 0 (no collection).
+func tokenIDStr(meta *Meta) string {
+	if meta.TokenID == 0 {
+		return "n/a"
+	}
+	return fmt.Sprintf("%d", meta.TokenID)
+}
+
+// contractAddressStr renders the ContractAddress with an "n/a" sentinel when empty.
+func contractAddressStr(meta *Meta) string {
+	if strings.TrimSpace(meta.ContractAddress) == "" {
+		return "n/a (no collection)"
+	}
+	return meta.ContractAddress
 }
 
 func formatHashWithSpaces(hash string, groupSize int) string {
@@ -1259,6 +1565,19 @@ func buildOfficeCustomPropsPDFStyle(meta *Meta, fingerprint string) []byte {
 		{18, "USI_Signature_B", sigB},
 		{19, "USI_Signer", meta.Signer},
 		{20, "USI_DocumentTitle", meta.DocumentTitle},
+		// On-chain / storage provenance (same fields as XMP and PDF metadata).
+		{21, "USI_OnChainProvenance", onChainProvenanceBlock(meta)},
+		{22, "USI_MintID", provenanceLine("MintID", meta.MintID, "unanchored")},
+		{23, "USI_IPFSCID", provenanceLine("CID", meta.IPFSCID, "unpinned")},
+		{24, "USI_MintBlockHeight", provenanceHeightLine("MintHeight", meta.BlockHeight)},
+		{25, "USI_AnchorTxID", provenanceLine("AnchorTx", meta.AnchorTxID, "unanchored")},
+		{26, "USI_AnchorPath", provenanceLine("AnchorPath", meta.AnchorPath, "unanchored")},
+		{27, "USI_ConfirmedHeight", provenanceHeightLine("Confirmed", meta.ConfirmedHeight)},
+		{28, "USI_BlockHash", provenanceLine("BlockHash", meta.BlockHash, "pending")},
+		{29, "USI_TokenURI", provenanceLine("TokenURI", meta.TokenURI, "n/a")},
+		{30, "USI_MetadataCID", provenanceLine("MetadataCID", meta.MetadataCID, "n/a")},
+		{31, "USI_TokenID", tokenIDStr(meta)},
+		{32, "USI_ContractAddress", contractAddressStr(meta)},
 	}
 
 	var sb strings.Builder
@@ -1479,27 +1798,20 @@ func setRichXattrs(filePath string, meta *Meta, fingerprint string) error {
 		"io.usprotocol.signer":          meta.Signer,
 		"io.usprotocol.document_title":  meta.DocumentTitle,
 	}
+	var xattrErrors []error
 	for key, value := range plainAttrs {
 		safeKey := sanitizeXattrValue(key)
 		safeValue := sanitizeXattrValue(value)
 		if safeKey != key || safeValue != value {
 			log.Printf("Xattr had unsafe characters, sanitized: %s", key)
 		}
-		var xattrErrors []error
-		for key, value := range plainAttrs {
-			safeKey := sanitizeXattrValue(key)
-			safeValue := sanitizeXattrValue(value)
-			if safeKey != key || safeValue != value {
-				log.Printf("Xattr had unsafe characters, sanitized: %s", key)
-			}
-			if err := setXattrSyscall(absPath, safeKey, safeValue); err != nil {
-				xattrErrors = append(xattrErrors, fmt.Errorf("%s: %w", safeKey, err))
-				log.Printf("ERROR: xattr set failed for %s: %v", safeKey, err)
-			}
+		if err := setXattrSyscall(absPath, safeKey, safeValue); err != nil {
+			xattrErrors = append(xattrErrors, fmt.Errorf("%s: %w", safeKey, err))
+			log.Printf("ERROR: xattr set failed for %s: %v", safeKey, err)
 		}
-		if len(xattrErrors) > 0 {
-			log.Printf("WARNING: %d xattr operations failed", len(xattrErrors))
-		}
+	}
+	if len(xattrErrors) > 0 {
+		log.Printf("WARNING: %d xattr operations failed", len(xattrErrors))
 	}
 
 	// Finder comment via AppleScript
@@ -1559,43 +1871,15 @@ func extractXattrSignature(filePath string) (*Meta, error) {
 }
 
 func writeMDItemXattrsBplist(filePath string, attrs map[string]interface{}) error {
-	var sb strings.Builder
-	sb.WriteString("import plistlib, xattr, sys\n")
-	sb.WriteString("f = sys.argv[1]\n")
-
-	for key, value := range attrs {
-		fullKey := "com.apple.metadata:" + key
-		var pyValue string
-		switch v := value.(type) {
-		case string:
-			pyValue = fmt.Sprintf("%q", v)
-		case []string:
-			parts := make([]string, len(v))
-			for i, s := range v {
-				escaped := strings.ReplaceAll(s, `\`, `\\`)
-				escaped = strings.ReplaceAll(escaped, `"`, `\"`)
-				parts[i] = fmt.Sprintf(`"%s"`, escaped)
-			}
-			pyValue = fmt.Sprintf("[%s]", strings.Join(parts, ", "))
-		}
-		sb.WriteString(fmt.Sprintf(
-			"xattr.setxattr(f, %q, plistlib.dumps(%s, fmt=plistlib.FMT_BINARY))\n",
-			fullKey, pyValue,
-		))
+	// NOTE: the CoreFoundation/ctypes path below uses only the Python
+	// standard library (plistlib + ctypes), so it works with the stock
+	// macOS python3. The old primary path required the third-party `xattr`
+	// module (ModuleNotFoundError on stock python3) and is skipped — the CF
+	// path writes the exact same com.apple.metadata:* keys.
+	if err := writeMDItemXattrsViaCoreFoundation(filePath, attrs); err != nil {
+		return fmt.Errorf("CoreFoundation xattr write failed: %w", err)
 	}
-
-	cmd := exec.Command("python3", "-c", sb.String(), filePath)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		log.Printf("ERROR: Python xattr failed: %v, output: %s", err, output)
-		log.Printf("Attempting CoreFoundation fallback...")
-		if fallbackErr := writeMDItemXattrsViaCoreFoundation(filePath, attrs); fallbackErr != nil {
-			return fmt.Errorf("both Python and CoreFoundation xattr methods failed: primary=%v, fallback=%w", err, fallbackErr)
-		}
-	} else if len(output) > 0 {
-		log.Printf("Python xattr script output: %s", output)
-	}
-	// Always also run the CF path so both methods are written
-	return writeMDItemXattrsViaCoreFoundation(filePath, attrs)
+	return nil
 }
 
 func writeMDItemXattrsViaCoreFoundation(filePath string, attrs map[string]interface{}) error {
@@ -1636,9 +1920,12 @@ f = sys.argv[1]
 		}
 	}
 
-	// Use the venv python that has xattr installed, or fall back to system python
-	pythonPath := "/Users/kusuma/usi-venv/bin/python3"
-	if _, err := os.Stat(pythonPath); os.IsNotExist(err) {
+	// Use the system python3 (stdlib-only script: plistlib + ctypes), with an
+	// explicit PATH lookup. The old code hardcoded a personal venv path
+	// (/Users/kusuma/usi-venv/...) that does not exist on other machines —
+	// look up python3 via PATH first so this works anywhere.
+	pythonPath, err := exec.LookPath("python3")
+	if err != nil {
 		pythonPath = "python3"
 	}
 
@@ -1653,11 +1940,237 @@ f = sys.argv[1]
 // PUBLIC VERIFICATION ALIASES
 // ─────────────────────────────────────────────────────────────────────────────
 
-func VerifyDocumentSignature(filePath, passphrase string) (bool, *Meta, error) {
+// RefreshOnChainProvenance stamps post-anchor provenance onto an ALREADY
+// SIGNED Meta and refreshes every location WITHOUT invalidating the SPHINCS+
+// signature. See the per-location refresh* helpers below for the mechanism.
+// CALLER CONTRACT (gui.go Mint Data flow): call AFTER AnchorMintReceipt (and
+// MintNFTInCollection for collection mints) returns. confirmedBlock == nil
+// means anchored-but-pending (ConfirmedHeight 0, BlockHash "pending").
+func RefreshOnChainProvenance(filePath string, meta *Meta, fingerprint string, anchorTxID, anchorPath string, receiptMintID string, tokenID uint64, contractAddress string, confirmedBlock interface {
+	GetHeight() uint64
+	GetHash() string
+}) error {
+	if meta == nil {
+		return errors.New("nil meta")
+	}
+	if strings.TrimSpace(anchorTxID) == "" {
+		return errors.New("empty anchor txid — refusing to stamp unanchored provenance")
+	}
+	meta.MintID = receiptMintID
+	meta.AnchorTxID = anchorTxID
+	meta.AnchorPath = anchorPath
+	meta.TokenID = tokenID
+	meta.ContractAddress = contractAddress
+	if confirmedBlock != nil {
+		meta.ConfirmedHeight = confirmedBlock.GetHeight()
+		if h := strings.TrimSpace(confirmedBlock.GetHash()); h != "" {
+			meta.BlockHash = h
+		} else {
+			meta.BlockHash = "pending"
+		}
+	} else {
+		meta.ConfirmedHeight = 0
+		meta.BlockHash = "pending"
+	}
+
+	var refreshErrs []string
+	storeVerifiedMeta(filePath, meta)
+
+	// NOTE: No separate .usimeta sidecar is written. The signature and all
+	// on-chain provenance (mint_id, anchor txid, CID, block height, token
+	// binding, etc.) are embedded directly into the file's native metadata
+	// channel below (PNG iTXt, PDF properties, JPEG XMP, Office custom XML,
+	// or binary footer for other formats). A standalone .usimeta sidecar is
+	// redundant — verification reads the embedded signature first (see
+	// VerifyUniversal step 1-3) and only falls back to a sidecar when no
+	// embedded metadata exists (step 4, legacy). Keeping a single source of
+	// truth inside the file means the signature travels with the file and
+	// there is no second file to lose or get out of sync.
+	writeSidecar := false
+	if writeSidecar {
+		if err := writeProvenanceSidecar(filePath, meta); err != nil {
+			refreshErrs = append(refreshErrs, fmt.Sprintf("sidecar: %v", err))
+		}
+	}
+
+	ext := strings.ToLower(filepath.Ext(filePath))
+	var fmtErr error
+	switch ext {
+	case ".pdf":
+		fmtErr = refreshPDFProvenance(filePath, meta, fingerprint)
+	case ".png":
+		fmtErr = refreshPNGProvenance(filePath, meta, fingerprint)
+	case ".jpg", ".jpeg":
+		fmtErr = refreshJPEGProvenance(filePath, meta, fingerprint)
+	case ".docx", ".xlsx", ".pptx", ".odt", ".ods", ".odp":
+		fmtErr = refreshOfficeProvenance(filePath, meta, fingerprint)
+	default:
+		fmtErr = refreshFooterProvenance(filePath, meta)
+	}
+	if fmtErr != nil {
+		refreshErrs = append(refreshErrs, fmt.Sprintf("container(%s): %v", ext, fmtErr))
+	}
+
+	if runtime.GOOS == "darwin" {
+		if err := setRichXattrs(filePath, meta, fingerprint); err != nil {
+			refreshErrs = append(refreshErrs, fmt.Sprintf("xattrs: %v", err))
+		}
+	}
+
+	if len(refreshErrs) > 0 {
+		return fmt.Errorf("provenance stamped in memory; %d location(s) failed to refresh: %s",
+			len(refreshErrs), strings.Join(refreshErrs, "; "))
+	}
+	return nil
+}
+
+// writeProvenanceSidecar rewrites the <file>.usimeta sidecar with the enriched
+// meta. The sidecar is pure metadata (never part of the file hash), so this
+// cannot invalidate the signature.
+func writeProvenanceSidecar(filePath string, meta *Meta) error {
+	metaJSON, err := json.MarshalIndent(meta, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal meta: %w", err)
+	}
+	defer secureZeroBytes(metaJSON)
+	sidecarPath := filePath + ".usimeta"
+	if err := os.WriteFile(sidecarPath, metaJSON, 0600); err != nil {
+		return fmt.Errorf("write sidecar %s: %w", sidecarPath, err)
+	}
+	return nil
+}
+
+// refreshFooterProvenance rewrites the Meta footer on binary/text files.
+// Only the trailing (size + Meta JSON + magicMarker) segment is replaced;
+// every byte before it (the signed content) is preserved verbatim.
+func refreshFooterProvenance(filePath string, meta *Meta) error {
+	fileData, err := os.ReadFile(filePath)
+	if err != nil {
+		return fmt.Errorf("read file: %w", err)
+	}
+	defer secureZeroBytes(fileData)
+
+	if len(fileData) < len(magicMarker)+4 ||
+		!bytes.Equal(fileData[len(fileData)-len(magicMarker):], magicMarker) {
+		return errors.New("no USIMETA footer present — nothing to refresh")
+	}
+	sizeStart := len(fileData) - len(magicMarker) - 4
+	metaSize := binary.BigEndian.Uint32(fileData[sizeStart : sizeStart+4])
+	metaStart := sizeStart - int(metaSize)
+	if metaStart < 0 {
+		return errors.New("corrupt footer size — refusing to rewrite")
+	}
+	content := bytes.Clone(fileData[:metaStart])
+
+	metaJSON, err := json.Marshal(meta)
+	if err != nil {
+		return fmt.Errorf("marshal meta: %w", err)
+	}
+	defer secureZeroBytes(metaJSON)
+
+	sizeBuf := make([]byte, 4)
+	binary.BigEndian.PutUint32(sizeBuf, uint32(len(metaJSON)))
+	out := make([]byte, 0, len(content)+4+len(metaJSON)+len(magicMarker))
+	out = append(out, content...)
+	out = append(out, sizeBuf...)
+	out = append(out, metaJSON...)
+	out = append(out, magicMarker...)
+
+	if err := os.WriteFile(filePath, out, 0644); err != nil {
+		return fmt.Errorf("write refreshed footer: %w", err)
+	}
+	return nil
+}
+
+// refreshPDFProvenance rewrites the USISignature PDF property + XMP packet
+// with the enriched meta. No pages are added or re-rendered, so the file
+// content hash is preserved.
+func refreshPDFProvenance(filePath string, meta *Meta, fingerprint string) error {
+	info := buildCryptographicMetadataBlock(meta, fingerprint, meta.FinalDocumentHash)
+	cleanInfo := cleanPDFMetadata(info)
+	conf := model.NewDefaultConfiguration()
+	if err := api.AddPropertiesFile(filePath, "", cleanInfo, conf); err != nil {
+		return fmt.Errorf("pdf properties refresh: %w", err)
+	}
+	return nil
+}
+
+// refreshPNGProvenance rebuilds the PNG iTXt chunk carrying the XMP packet
+// (which embeds the provenance via buildPDFStyleXMPPacket) without touching
+// any image data chunks.
+func refreshPNGProvenance(filePath string, meta *Meta, fingerprint string) error {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return fmt.Errorf("read png: %w", err)
+	}
+	if len(data) < 8 || !bytes.Equal(data[:8], []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}) {
+		return errors.New("not a valid PNG file")
+	}
+	data = stripPNGChunk(data, "iTXt")
+	xmpPayload := []byte(buildPDFStyleXMPPacket(meta, fingerprint))
+	keyword := []byte("XML:com.adobe.xmp\x00\x00\x00\x00\x00")
+	chunkData := append(keyword, xmpPayload...)
+	iTXt := buildPNGChunk("iTXt", chunkData)
+	ihdrEnd := 33
+	out := make([]byte, 0, len(data)+len(iTXt))
+	out = append(out, data[:ihdrEnd]...)
+	out = append(out, iTXt...)
+	out = append(out, data[ihdrEnd:]...)
+	if err := os.WriteFile(filePath, out, 0644); err != nil {
+		return fmt.Errorf("write refreshed png: %w", err)
+	}
+	return nil
+}
+
+// refreshJPEGProvenance rebuilds the JPEG APP1 XMP segment (which embeds the
+// provenance) without touching any image scan data.
+func refreshJPEGProvenance(filePath string, meta *Meta, fingerprint string) error {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return fmt.Errorf("read jpeg: %w", err)
+	}
+	if len(data) < 2 || data[0] != 0xFF || data[1] != 0xD8 {
+		return errors.New("not a valid JPEG file")
+	}
+	data = stripJPEGXMPSegment(data)
+	xmpNS := "http://ns.adobe.com/xap/1.0/\x00"
+	xmpBody := buildPDFStyleXMPPacket(meta, fingerprint)
+	payload := []byte(xmpNS + xmpBody)
+	segLen := uint16(len(payload) + 2)
+	app1 := make([]byte, 4+len(payload))
+	app1[0] = 0xFF
+	app1[1] = 0xE1
+	binary.BigEndian.PutUint16(app1[2:], segLen)
+	copy(app1[4:], payload)
+	out := make([]byte, 0, len(data)+len(app1))
+	out = append(out, data[:2]...)
+	out = append(out, app1...)
+	out = append(out, data[2:]...)
+	if err := os.WriteFile(filePath, out, 0644); err != nil {
+		return fmt.Errorf("write refreshed jpeg: %w", err)
+	}
+	return nil
+}
+
+// refreshOfficeProvenance rebuilds docProps/custom.xml with the enriched meta
+// without touching document content parts.
+func refreshOfficeProvenance(filePath string, meta *Meta, fingerprint string) error {
+	tempPath := filePath + ".prov.tmp"
+	if err := copyAndModifyOffice(filePath, tempPath, meta, fingerprint); err != nil {
+		return fmt.Errorf("rebuild office custom props: %w", err)
+	}
+	defer secureRemove(tempPath)
+	if err := os.Rename(tempPath, filePath); err != nil {
+		return fmt.Errorf("replace office file: %w", err)
+	}
+	return nil
+}
+
+func VerifyDocumentSignature(filePath, passphrase string) (VerificationResult, *Meta, error) {
 	return VerifyUniversal(filePath, passphrase)
 }
 
-func VerifySidecarSignature(filePath, passphrase string) (bool, *Meta, error) {
+func VerifySidecarSignature(filePath, passphrase string) (VerificationResult, *Meta, error) {
 	return VerifyUniversal(filePath, passphrase)
 }
 
@@ -1857,26 +2370,26 @@ func extractMetadataByBinaryScan(filePath string) (*Meta, error) {
 }
 
 // verifyUSIMetaWithDetails verifies a .usimeta sidecar without requiring a passphrase.
-func verifyUSIMetaWithDetails(filePath, metaPath string) (bool, *Meta, error) {
+func verifyUSIMetaWithDetails(filePath, metaPath string) (VerificationResult, *Meta, error) {
 	fileData, err := os.ReadFile(filePath)
 	if err != nil {
-		return false, nil, fmt.Errorf("cannot read file: %w", err)
+		return VerificationInvalid, nil, fmt.Errorf("cannot read file: %w", err)
 	}
 	defer secureZeroBytes(fileData)
 
 	metaData, err := os.ReadFile(metaPath)
 	if err != nil {
-		return false, nil, fmt.Errorf("cannot read metadata: %w", err)
+		return VerificationInvalid, nil, fmt.Errorf("cannot read metadata: %w", err)
 	}
 	defer secureZeroBytes(metaData)
 
 	var meta Meta
 	if err := json.Unmarshal(metaData, &meta); err != nil {
-		return false, nil, fmt.Errorf("invalid metadata format: %w", err)
+		return VerificationInvalid, nil, fmt.Errorf("invalid metadata format: %w", err)
 	}
 
 	if err := validateSignatureTimestamp(&meta); err != nil {
-		return false, &meta, err
+		return VerificationInvalid, &meta, err
 	}
 
 	// Legacy field-name fallback
@@ -1892,25 +2405,27 @@ func verifyUSIMetaWithDetails(filePath, metaPath string) (bool, *Meta, error) {
 		}
 	}
 	if meta.FileHash == "" {
-		return false, &meta, fmt.Errorf("no file hash found in metadata")
+		return VerificationInvalid, &meta, fmt.Errorf("no file hash found in metadata")
 	}
 
 	currentHash := computeShake256(fileData)
 	if meta.FileHash != hex.EncodeToString(currentHash) {
-		return false, &meta, fmt.Errorf("file content has been modified")
+		return VerificationInvalid, &meta, fmt.Errorf("file content has been modified")
 	}
 	if meta.Signature == "" {
-		return true, &meta, nil
+		return VerificationIntegrityOnly, &meta, nil
 	}
 
 	ok, err := verifyCryptoSignature(&meta, currentHash)
 	if err != nil {
-		return false, &meta, fmt.Errorf("signature verification error: %w", err)
+		return VerificationInvalid, &meta, fmt.Errorf("signature verification error: %w", err)
 	}
 	if !ok {
-		return false, &meta, errors.New("cryptographic signature invalid")
+		return VerificationInvalid, &meta, errors.New("cryptographic signature invalid")
 	}
-	return true, &meta, nil
+
+	result, bindErr := checkOrgBinding(&meta)
+	return result, &meta, bindErr
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1928,7 +2443,7 @@ func embedMOVQuickTimeMetadata(filePath string, meta *Meta, fingerprint string) 
 	udtaData = append(udtaData, buildQuickTimeAtom("©ART", []byte(meta.Signer))...)
 	udtaData = append(udtaData, buildQuickTimeAtom("©cmt", []byte(comment))...)
 	udtaData = append(udtaData, buildQuickTimeAtom("©day", []byte(ts))...)
-	descText := fmt.Sprintf("USI Signed Document - Status: VALID - Fingerprint: %s", fingerprint[:20])
+	descText := fmt.Sprintf("USI Signed Document - Status: VALID - Fingerprint: %s", truncate(fingerprint, 20))
 	udtaData = append(udtaData, buildQuickTimeAtom("©des", []byte(descText))...)
 
 	f, err := os.OpenFile(filePath, os.O_APPEND|os.O_WRONLY, 0644)
@@ -1938,6 +2453,24 @@ func embedMOVQuickTimeMetadata(filePath string, meta *Meta, fingerprint string) 
 	defer f.Close()
 	_, err = f.Write(buildQuickTimeAtom("udta", udtaData))
 	return err
+}
+
+// embedVideoMetadata handles .mov/.mp4/.m4v. There is no reader for the
+// QuickTime "udta" atom embedMOVQuickTimeMetadata writes — it's display-only
+// metadata (visible in Finder/QuickTime Player's Get Info), not a
+// verification channel. The real, verifiable signature is still the USIMETA
+// footer, so it's embedded last here so it lands at the true end of the file
+// where extractEmbeddedSignature's backward scan expects it. A failure to
+// write the cosmetic atom is logged and does not block the real signature.
+//
+// .avi is deliberately NOT routed here: AVI is a RIFF container, not
+// QuickTime/ISO-BMFF, so a "udta" atom is meaningless in it. AVI files fall
+// through to the default footer-only path instead.
+func embedVideoMetadata(filePath string, meta *Meta, fingerprint, passphrase string) error {
+	if err := embedMOVQuickTimeMetadata(filePath, meta, fingerprint); err != nil {
+		log.Printf("Warning: QuickTime atom metadata failed for %s (footer signature is unaffected): %v", filePath, err)
+	}
+	return createUSIMetaFile(filePath, meta, passphrase, false)
 }
 
 func buildQuickTimeAtom(atomType string, data []byte) []byte {

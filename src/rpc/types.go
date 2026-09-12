@@ -13,7 +13,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sphinxfndorg/protocol/src/core"
 	sign "github.com/sphinxfndorg/protocol/src/core/sthincs/sign/backend"
+	types "github.com/sphinxfndorg/protocol/src/core/transaction"
 	security "github.com/sphinxfndorg/protocol/src/handshake"
+	"github.com/syndtr/goleveldb/leveldb"
 )
 
 // NodeID represents a unique 256-bit node identifier.
@@ -76,12 +78,22 @@ type Server struct {
 	queryManager   *QueryManager
 	store          *KVStore
 	sphincsManager *sign.STHINCSManager // Added
+	artifactDB     *leveldb.DB          // persistent storage for NFT artifacts (no TTL)
 
 	// RPC hardening: authentication and timeouts
 	authConfig     *AuthConfig
 	requestTimeout time.Duration
 	maxRequestSize int
 	pagination     *PaginationConfig
+
+	// Outbound transaction relay — wired by StartNode to the P2P consensus
+	// manager via SetTxRelay. sendrawtransaction gossips every accepted tx
+	// through it so ALL validators' mempools (crucially the rotating PBFT
+	// leaders') see wallet-submitted transactions. nil = no relay (legacy
+	// in-process paths); the legacy messageCh fallback applies instead.
+	// Set once during node startup, before the transport listener serves
+	// traffic, so plain field access is race-free.
+	txRelay func(*types.Transaction)
 }
 
 // AuthConfig holds authentication configuration

@@ -194,7 +194,7 @@ func main() {
 
 	// --- 8. Generate SPIF address (SHAKE-256 based) ---
 	address := keys.GetPublicKeyFingerprintFromBytes(pkBytes, orgCode)
-	fmt.Printf("SPIF Address (SHAKE-256): %s\n", address)
+	fmt.Printf("%s Address (SHAKE-256): %s\n", string(keys.OrgSPIF), address)
 
 	// --- 8.5. Validate fingerprints ---
 	fmt.Println("\n--- Fingerprint Validation ---")
@@ -208,9 +208,9 @@ func main() {
 
 	// Validate SPIF address fingerprint
 	if vault.ValidateAddressFingerprint(pkBytes, address, orgCode) {
-		fmt.Println("SUCCESS SPIF address validation passed")
+		fmt.Printf("SUCCESS %s address validation passed\n", string(keys.OrgSPIF))
 	} else {
-		fmt.Println("ERROR SPIF address validation failed")
+		fmt.Printf("ERROR %s address validation failed\n", string(keys.OrgSPIF))
 	}
 
 	// Normalize address for comparison
@@ -227,6 +227,24 @@ func main() {
 		Address:       address,
 		KEMPublicKey:  kemPub,
 		KEMPrivateKey: kemPriv,
+	}
+
+	// --- 9.1. Backend validation: consume every populated KeyPair field ---
+	// ValidateKeyPair reads PrivateKey, OrgCode, and KEMPrivateKey in the
+	// backend, and the typed getters below re-read each field so nothing is
+	// an unused write. Failing here means the demo would persist or display
+	// an incomplete key pair.
+	if err := kp.ValidateKeyPair(); err != nil {
+		log.Fatalf("Generated key pair is incomplete: %v", err)
+	}
+	if _, err := kp.EncryptedPrivateKey(); err != nil {
+		log.Fatalf("Generated key pair is missing encrypted secret material: %v", err)
+	}
+	if _, err := kp.OrgCodeTyped(); err != nil {
+		log.Fatalf("Generated key pair has an invalid organisation code: %v", err)
+	}
+	if _, err := kp.KEMPrivateKeyMaterial(); err != nil {
+		log.Fatalf("Generated key pair is missing KEM secret material: %v", err)
 	}
 
 	// --- 10. Get chain header from params.go (LIGHTWEIGHT - NO BLOCKCHAIN INIT) ---
@@ -369,8 +387,8 @@ func main() {
 	fmt.Println(headerExample)
 
 	// --- 18. Display the SPIF wallet address summary ---
-	fmt.Println("\n=== SPIF WALLET SUMMARY ===")
-	fmt.Printf("SPIF Address (SHAKE-256):   %s\n", address)
+	fmt.Println("\n=== " + string(keys.OrgSPIF) + " WALLET SUMMARY ===")
+	fmt.Printf("%s Address (SHAKE-256):   %s\n", string(keys.OrgSPIF), address)
 	fmt.Printf("SHA3-256 Fingerprint:       %s\n", sha3Fingerprint)
 	fmt.Printf("Public Key:                 %x\n", pkBytes)
 	fmt.Printf("Key ID:                     %s\n", storedKeyPair.ID)
@@ -379,8 +397,8 @@ func main() {
 	fmt.Printf("BIP44 Path:                 %s\n", bip44Path)
 	fmt.Printf("Chain:                      %s (ID: %d)\n", header.ChainName, header.ChainID)
 	fmt.Println("==========================")
-	fmt.Println("\nIMPORTANT: Save your recovery mnemonic and passphrase safely!")
-	fmt.Println("The SPIF address above is your identity address.")
+	fmt.Printf("\nIMPORTANT: Save your recovery mnemonic and passphrase safely!\n")
+	fmt.Printf("The %s address above is your identity address.\n", string(keys.OrgSPIF))
 	fmt.Println("The SHA3-256 fingerprint is stored in metadata for validation.")
 	fmt.Println("Ledger headers are stored in the key file metadata.")
 }

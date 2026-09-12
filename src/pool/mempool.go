@@ -364,6 +364,16 @@ func (mp *Mempool) GetPendingTransactions() []*types.Transaction {
 	return txs
 }
 
+// MempoolSnapshot returns the current size of every pool for diagnostics.
+// Used by block production logging to answer "why is my block empty?" —
+// if pendingPool is 0 but broadcastPool or validationPool is >0, the txs
+// are stuck mid-pipeline (not yet validated or validation failed), not absent.
+func (mp *Mempool) MempoolSnapshot() (broadcast, validating, pending, invalid, all int) {
+	mp.lock.RLock()
+	defer mp.lock.RUnlock()
+	return len(mp.broadcastPool), len(mp.validationPool), len(mp.pendingPool), len(mp.invalidPool), len(mp.allTransactions)
+}
+
 // SelectTransactionsForBlock selects transactions for block inclusion with priority
 func (mp *Mempool) SelectTransactionsForBlock(maxBlockSize, targetBlockSize uint64) ([]*types.Transaction, uint64) {
 	mp.lock.RLock()
@@ -557,6 +567,19 @@ func (mp *Mempool) GetTransaction(txID string) (*types.Transaction, TransactionS
 	}
 
 	return pooledTx.Transaction, pooledTx.Status
+}
+
+// GetTransactionError returns the rejection reason stored on a pooled
+// transaction (transactions that failed validation carry the error that sent
+// them to the invalid pool). Returns (reason, exists).
+func (mp *Mempool) GetTransactionError(txID string) (string, bool) {
+	mp.lock.RLock()
+	defer mp.lock.RUnlock()
+	pooledTx := mp.allTransactions[txID]
+	if pooledTx == nil || pooledTx.Error == "" {
+		return "", false
+	}
+	return pooledTx.Error, true
 }
 
 // HasTransaction checks if a transaction exists in any pool

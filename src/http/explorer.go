@@ -465,7 +465,7 @@ func (s *Server) handleExplorerAddress(c *gin.Context) {
 	// ambiguous explorer results and keeps the address representation canonical.
 	normalized, err := common.NormalizeSPIFAddress(address)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid SPIF address"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid " + common.SPIFPrefix + " address"})
 		return
 	}
 
@@ -514,7 +514,7 @@ func (s *Server) handleExplorerAddress(c *gin.Context) {
 	// Address type
 	addrType := "Legacy"
 	if len(normalized) == 64 {
-		addrType = "SPIF"
+		addrType = common.SPIFPrefix
 	}
 
 	// Format transactions

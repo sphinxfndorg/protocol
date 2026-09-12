@@ -67,7 +67,7 @@ SUBCOMMANDS
   get-balance   Query the balance of an address
   watch-tx      Poll until a transaction is confirmed
   ipfs          IPFS + on-chain NFT mint and verify
-  wallet        Manage SPIF wallets (init, list)
+  wallet        Manage ` + common.SPIFPrefix + ` wallets (init, list)
 
 TOKENOMICS OVERVIEW
   Genesis Supply: 1,240,000,000 SPX (24.8% of 5B max supply)
@@ -179,7 +179,7 @@ func runNodeCmd(args []string) error {
 	mode := fs.String("mode", "development", "Run mode: development, production")
 	maxPeers := fs.Int("max-peers", 50, "Maximum peer connections (production mode)")
 	networkFlag := fs.String("network", "devnet", "Network type: devnet, testnet, mainnet")
-	rewardAddress := fs.String("reward-address", "", "SPIF wallet address to stake and receive block rewards from (required for real validator participation; peers verify its on-chain balance before granting validator status — see help for details)")
+	rewardAddress := fs.String("reward-address", "", common.SPIFPrefix+" wallet address to stake and receive block rewards from (required for real validator participation; peers verify its on-chain balance before granting validator status — see help for details)")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -448,7 +448,7 @@ func legacyExecute() error {
 	flag.StringVar(&cfg.seedNodes, "seeds", "", "Comma-separated seed node UDP addresses or enrtree:// DNS discovery URLs")
 	flag.StringVar(&cfg.dataDir, "datadir", "data", "Directory for LevelDB storage")
 	flag.IntVar(&cfg.nodeIndex, "node-index", 0, "Index of the node to run")
-	flag.StringVar(&cfg.rewardAddress, "reward-address", "", "SPIF wallet address to stake and receive block rewards from")
+	flag.StringVar(&cfg.rewardAddress, "reward-address", "", common.SPIFPrefix+" wallet address to stake and receive block rewards from")
 	flag.IntVar(&testCfg.NumNodes, "test-nodes", 0,
 		"Run the PBFT integration test with N validator nodes (0 = disabled)")
 
@@ -607,8 +607,8 @@ func runWalletSendCmd(args []string) error {
 	fs := flag.NewFlagSet("wallet send", flag.ExitOnError)
 
 	rpcURL := fs.String("rpc", "http://127.0.0.1:8545", "JSON-RPC endpoint")
-	from := fs.String("from", "", "Sender SPIF address (required)")
-	to := fs.String("to", "", "Recipient SPIF address (required)")
+	from := fs.String("from", "", "Sender "+common.SPIFPrefix+" address (required)")
+	to := fs.String("to", "", "Recipient "+common.SPIFPrefix+" address (required)")
 	amount := fs.String("amount", "", "Amount in SPX (required)")
 	dataDir := fs.String("datadir", "", "Wallet data directory (default: ~/.sphinx/wallet)")
 	wait := fs.Bool("wait", true, "Wait for transaction confirmation")
@@ -622,10 +622,10 @@ func runWalletSendCmd(args []string) error {
 
 	// Validate addresses using common/hexutil.go
 	if !common.ValidateSPIFAddress(*from) {
-		return fmt.Errorf("invalid sender SPIF address: %s", *from)
+		return fmt.Errorf("invalid sender "+common.SPIFPrefix+" address: %s", *from)
 	}
 	if !common.ValidateSPIFAddress(*to) {
-		return fmt.Errorf("invalid recipient SPIF address: %s", *to)
+		return fmt.Errorf("invalid recipient "+common.SPIFPrefix+" address: %s", *to)
 	}
 
 	// Determine wallet directory

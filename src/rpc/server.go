@@ -10,17 +10,29 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/sphinxfndorg/protocol/src/core"
 	sign "github.com/sphinxfndorg/protocol/src/core/sthincs/sign/backend"
+	types "github.com/sphinxfndorg/protocol/src/core/transaction"
 	security "github.com/sphinxfndorg/protocol/src/handshake"
+	"github.com/syndtr/goleveldb/leveldb"
 )
 
 // NewServer creates a new RPC server instance.
 // NewServer creates a new RPC server instance with SPHINCS manager
 func NewServer(messageCh chan *security.Message, blockchain *core.Blockchain, sphincsManager *sign.STHINCSManager) *Server {
 	metrics := NewMetrics()
+
+	// Initialize persistent artifact storage (no TTL — artifacts are durable)
+	artifactDB, err := initArtifactDB()
+	if err != nil {
+		log.Printf("rpc.Server: Failed to open artifact DB: %v — artifacts will use ephemeral store", err)
+		artifactDB = nil
+	}
+
 	server := &Server{
 		messageCh:      messageCh,
 		metrics:        metrics,
@@ -28,6 +40,7 @@ func NewServer(messageCh chan *security.Message, blockchain *core.Blockchain, sp
 		queryManager:   NewQueryManager(),
 		store:          NewKVStore(),
 		sphincsManager: sphincsManager,
+		artifactDB:     artifactDB,
 		authConfig:     DefaultAuthConfig(),
 		requestTimeout: 30 * time.Second,
 		maxRequestSize: 1024 * 1024, // 1 MB
@@ -40,6 +53,41 @@ func NewServer(messageCh chan *security.Message, blockchain *core.Blockchain, sp
 		go server.handleMessages()
 	}
 	return server
+}
+
+// initArtifactDB opens (creating if needed) the LevelDB backing store for NFT
+// artifacts. The directory is created with 0755 if it doesn't exist. The DB
+// path is resolved under the node's data directory so it survives restarts.
+func initArtifactDB() (*leveldb.DB, error) {
+	dbPath := filepath.Join(".", "artifact-db")
+	if err := os.MkdirAll(dbPath, 0755); err != nil {
+		return nil, fmt.Errorf("create artifact db directory %s: %w", dbPath, err)
+	}
+	db, err := leveldb.OpenFile(dbPath, nil)
+	if err != nil {
+		return nil, fmt.Errorf("open artifact db at %s: %w", dbPath, err)
+	}
+	return db, nil
+}
+
+// Close releases resources held by the server, including the persistent
+// artifact database. It is safe to call Close multiple times.
+func (s *Server) Close() {
+	if s.artifactDB != nil {
+		if err := s.artifactDB.Close(); err != nil {
+			log.Printf("rpc.Server: Error closing artifact DB: %v", err)
+		}
+		s.artifactDB = nil
+	}
+}
+
+// SetTxRelay wires the outbound transaction gossip relay used by
+// sendrawtransaction. StartNode calls it with the P2P consensus manager's
+// BroadcastMessage so wallet-submitted transactions reach every validator's
+// mempool. Must be called during node startup, before the transport listener
+// begins serving RPC traffic.
+func (s *Server) SetTxRelay(relay func(tx *types.Transaction)) {
+	s.txRelay = relay
 }
 
 // handleMessages processes incoming messages from the message channel.

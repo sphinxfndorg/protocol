@@ -6,6 +6,7 @@ package abi
 import (
 	"testing"
 
+	"github.com/sphinxfndorg/protocol/src/common"
 	"github.com/sphinxfndorg/protocol/src/contracts"
 )
 
@@ -15,7 +16,7 @@ func TestSIP20BuildersUseCanonicalABI(t *testing.T) {
 	if err != nil || len(deploy.Code) == 0 || deploy.ToContract != "" {
 		t.Fatalf("deploy=%#v err=%v", deploy, err)
 	}
-	call, err := NewSIP20CallTx(opts, "sc123", "transfer", map[string]string{"to": "alice", "amount": "5"})
+	call, err := NewSIP20CallTx(opts, common.SPIFPrefix+"123", "transfer", map[string]string{"to": "alice", "amount": "5"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,8 +67,8 @@ func TestWASMBuildersCopyAndQuoteBytecode(t *testing.T) {
 	if err != nil || len(deploy.Code) != len(wasm) || deploy.GasLimit.Sign() <= 0 {
 		t.Fatalf("deploy=%#v err=%v", deploy, err)
 	}
-	call, err := NewWASMCallTx(opts, "sc123", []byte{1, 2})
-	if err != nil || call.ToContract != "sc123" || len(call.CallData) != 2 {
+	call, err := NewWASMCallTx(opts, common.SPIFPrefix+"123", []byte{1, 2})
+	if err != nil || call.ToContract != common.SPIFPrefix+"123" || len(call.CallData) != 2 {
 		t.Fatalf("call=%#v err=%v", call, err)
 	}
 }

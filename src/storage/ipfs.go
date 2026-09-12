@@ -5,7 +5,6 @@ package storage
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -19,6 +18,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/sphinxfndorg/protocol/src/common"
+	spxhash "github.com/sphinxfndorg/protocol/src/spxhash/hash"
 )
 
 // Config for an IPFS HTTP gateway / API.
@@ -174,9 +176,9 @@ func (c *Client) AddBytesToIPFS(data []byte, filename string) (cid string, err e
 		return "", errors.New("empty payload")
 	}
 	if c.cfg.DisableIPFS {
-		// fallback cid-like value
-		sum := sha256.Sum256(data)
-		return "sha256-" + hex.EncodeToString(sum[:]), nil
+		// fallback cid-like value, committed with the Sphinx hash so the
+		// offline CID feeds the same SpxHash-based CIDHash commitment below.
+		return "spxhash-" + hex.EncodeToString(common.SpxHash(data)), nil
 	}
 
 	// If no IPFS API address is configured, we can't upload
@@ -294,8 +296,7 @@ func (c *Client) AddBytesToIPFSWithFallback(data []byte, filename string) (strin
 	if err == nil {
 		return seed, nil
 	}
-	sum := sha256.Sum256(data)
-	fallbackCID := "sha256-" + hex.EncodeToString(sum[:])
+	fallbackCID := "spxhash-" + hex.EncodeToString(common.SpxHash(data))
 	return fallbackCID, fmt.Errorf("ipfs upload failed (%v) — using deterministic fallback CID %s", err, fallbackCID)
 }
 
@@ -381,10 +382,23 @@ func VerifyContentIntegrity(data []byte, expectedCID string, expectedCIDHashHex 
 }
 
 // CIDHash computes a deterministic on-chain friendly hash of the CID.
-// We use sha256(CID string bytes) and return hex.
+// Uses common.SpxHash(CID string bytes) — NOT sha256 — so the wallet-side
+// artifact commitment matches core.CIDHashHexFor byte-for-byte and the whole
+// NFT mint / SPX transfer anchor pipeline stays in one hash family (the same
+// family the SVM signature opcodes verify with).
 func CIDHash(cid string) string {
-	sum := sha256.Sum256([]byte(cid))
-	return hex.EncodeToString(sum[:])
+	return hex.EncodeToString(common.SpxHash([]byte(cid)))
+}
+
+// boundaryHash derives a multipart boundary tag with the same Sphinx hash so
+// no sha256 remains in this package's content-commitment paths. It is only a
+// transport framing value, never a consensus commitment.
+func boundaryHash(s string) []byte {
+	h, err := spxhash.NewSphinxHash(256, spxhash.ProtocolSalt)
+	if err != nil {
+		return common.SpxHash([]byte(s))
+	}
+	return h.GetHash([]byte(s))
 }
 
 // multipartBytes builds a multipart form request body with a single file part.
@@ -392,7 +406,7 @@ func multipartBytes(filename string, data []byte) (body io.Reader, contentType s
 	if filename == "" {
 		filename = "payload.bin"
 	}
-	boundarySum := sha256.Sum256([]byte(filename + "boundary"))
+	boundarySum := boundaryHash(filename + "boundary")
 	boundary := "----------------" + hex.EncodeToString(boundarySum[:])
 	contentType = "multipart/form-data; boundary=" + boundary
 

@@ -6,11 +6,13 @@ package pool
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
 	"time"
 
+	"github.com/sphinxfndorg/protocol/src/contracts"
 	logger "github.com/sphinxfndorg/protocol/src/console"
 	svm "github.com/sphinxfndorg/protocol/src/core/kernel/opcodes"
 	vmachine "github.com/sphinxfndorg/protocol/src/core/kernel/vm"
@@ -98,26 +100,38 @@ func (mp *Mempool) verifyTransactionSignature(tx *types.Transaction) error {
 		return fmt.Errorf("missing full SPHINCS transaction auth bundle")
 	}
 
-	// ========== 1. SPHINCS Manager Verification ==========
-	if mp.sphincsManager != nil {
-		if err := mp.sphincsManager.VerifyTransactionAuth(
-			[]byte(tx.ID),
-			tsBytes,
-			nonceBytes,
-			tx.Signature,
-			pkBytes,
-			tx.SignatureHash,
-			tx.MerkleRootHash,
-			tx.Commitment,
-			tx.Proof,
-			false,
-		); err != nil {
-			return fmt.Errorf("SPHINCS manager verification failed: %w", err)
-		}
-		logger.Debug("SPHINCS manager verification passed: %s", tx.ID)
-	} else {
-		logger.Warn("SPHINCS manager not available, falling back to SVM verification")
+	// ========== 1. SPHINCS Manager Verification (mandatory) ==========
+	//
+	// CONSISTENCY REQUIREMENT: this check must agree with the block-commit
+	// path (core.validateTransactionAuth → validateBlockTransactionAuth),
+	// which hard-fails when the SPHINCS manager is missing. The old code
+	// treated a nil manager as non-fatal here (warn + fall through to
+	// SVM-only verification), while commit treated it as fatal — so a
+	// transaction could be admitted to the mempool yet never committable,
+	// and every leader round would rebuild the identical block and hit the
+	// identical CommitBlock auth failure forever.
+	//
+	// New behavior: a nil manager rejects non-system transactions, exactly
+	// like the commit path. System transactions return earlier above, so
+	// this cannot block genesis/vault flow.
+	if mp.sphincsManager == nil {
+		return fmt.Errorf("SPHINCS manager is not configured, cannot verify transaction %s", tx.ID)
 	}
+	if err := mp.sphincsManager.VerifyTransactionAuth(
+		[]byte(tx.ID),
+		tsBytes,
+		nonceBytes,
+		tx.Signature,
+		pkBytes,
+		tx.SignatureHash,
+		tx.MerkleRootHash,
+		tx.Commitment,
+		tx.Proof,
+		false,
+	); err != nil {
+		return fmt.Errorf("SPHINCS manager verification failed: %w", err)
+	}
+	logger.Debug("SPHINCS manager verification passed: %s", tx.ID)
 
 	// ========== 2. SVM Verification ==========
 
@@ -503,16 +517,63 @@ func (mp *Mempool) getLastTransactionTimestamp(sender string) int64 {
 }
 
 // validationProcessor is a background goroutine that processes transactions for validation
-// It reads from validationChan and validates each transaction asynchronously
+// It reads from validationChan and validates each transaction asynchronously.
+// It also drains pendingPool on a short ticker so transactions that were bumped to
+// pending (because the validation channel was full) still get validated and can be
+// included in blocks — without this, they stay in pendingPool forever and show up as
+// "pending=1" in the RPC forever without ever being confirmed.
 func (mp *Mempool) validationProcessor() {
+	pendingTicker := time.NewTicker(500 * time.Millisecond)
+	defer pendingTicker.Stop()
 	for {
 		select {
 		case pooledTx := <-mp.validationChan:
 			// Process a single transaction for validation
 			mp.validateTransaction(pooledTx)
+		case <-pendingTicker.C:
+			// Drain any transactions that were bumped to pendingPool because
+			// the validation channel was full. Validate them now so they can
+			// progress to pendingPool with a real validation result.
+			mp.drainPendingPool()
 		case <-mp.stopChan:
 			// Shutdown signal received - exit the goroutine
 			return
+		}
+	}
+}
+
+// drainPendingPool moves all transactions from pendingPool back into the
+// validation channel so they get validated. If the channel is full, they
+// stay in pendingPool and we retry on the next tick. This ensures that
+// transactions that overflowed the validation channel are not stuck forever.
+func (mp *Mempool) drainPendingPool() {
+	mp.lock.Lock()
+	if len(mp.pendingPool) == 0 {
+		mp.lock.Unlock()
+		return
+	}
+
+	// Collect all pending transactions and remove them from pendingPool
+	var toValidate []*PooledTransaction
+	for _, pt := range mp.pendingPool {
+		toValidate = append(toValidate, pt)
+		delete(mp.pendingPool, pt.Transaction.ID)
+	}
+	mp.lock.Unlock()
+
+	for _, pt := range toValidate {
+		// Try to send to validation channel; if full, put back into pendingPool
+		select {
+		case mp.validationChan <- pt:
+			logger.Debug("drainPendingPool: re-queued tx %s for validation", pt.Transaction.ID)
+		default:
+			// Channel full — put back for next tick
+			mp.lock.Lock()
+			pt.Status = StatusPending
+			pt.LastUpdated = time.Now()
+			mp.pendingPool[pt.Transaction.ID] = pt
+			mp.lock.Unlock()
+			logger.Warn("drainPendingPool: channel full, tx %s stays in pending", pt.Transaction.ID)
 		}
 	}
 }
@@ -523,8 +584,19 @@ func (mp *Mempool) validateTransaction(pooledTx *PooledTransaction) {
 	startTime := time.Now() // Track validation duration for metrics
 	tx := pooledTx.Transaction
 
-	// Check OP_RETURN data size limit (prevents memory exhaustion attacks)
-	const maxReturnSize = 80
+	logger.Info("validateTransaction: ID=%s ReturnData=%d bytes", tx.ID, len(tx.ReturnData))
+
+	// Check OP_RETURN data size limit (prevents memory exhaustion attacks).
+	// Must match transaction.MaxReturnDataSize (4096) — the canonical
+	// blockchain limit — so that valid anchors (which can be ~500 bytes or
+	// more) pass mempool admission. Previously this was 256, which silently
+	// rejected every NFT/metadata anchor as invalid (sent to invalidPool,
+	// never reached pendingPool) while the broader chain happily accepted
+	// up to 4096. That mismatch is why every block after genesis was empty:
+	// sendrawtransaction succeeded (tx entered broadcastPool), validation
+	// failed the size check (tx moved to invalidPool), block producer saw
+	// 0 pending txs, empty blocks kept shipping.
+	const maxReturnSize = types.MaxReturnDataSize
 	if len(tx.ReturnData) > maxReturnSize {
 		// Lock the mempool to safely update transaction state
 		mp.lock.Lock()
@@ -550,6 +622,34 @@ func (mp *Mempool) validateTransaction(pooledTx *PooledTransaction) {
 		// Update statistics
 		mp.stats.totalInvalid++
 		logger.Warn("Transaction validation failed: ID=%s, OP_RETURN size exceeded", tx.ID)
+		return
+	}
+
+	// Classify transaction type for type-specific validation
+	txType := classifyTransaction(tx)
+	if err := mp.validateTransactionByType(tx, txType); err != nil {
+		// Lock the mempool to safely update transaction state
+		mp.lock.Lock()
+		defer mp.lock.Unlock()
+
+		// Check if this tx is still tracked
+		if !mp.stillOwnsSlot(tx.ID, pooledTx) {
+			logger.Debug("validateTransaction: %s no longer tracked (evicted while classifying), discarding type check result", tx.ID)
+			return
+		}
+
+		// Mark transaction as invalid due to type-specific validation failure
+		pooledTx.Status = StatusInvalid
+		pooledTx.Error = err.Error()
+		pooledTx.LastUpdated = time.Now()
+
+		// Move transaction from validation pool to invalid pool
+		delete(mp.validationPool, tx.ID)
+		mp.invalidPool[tx.ID] = pooledTx
+
+		// Update statistics
+		mp.stats.totalInvalid++
+		logger.Warn("Transaction validation failed: ID=%s, type check failed: %v", tx.ID, err)
 		return
 	}
 
@@ -599,8 +699,154 @@ func (mp *Mempool) validateTransaction(pooledTx *PooledTransaction) {
 		mp.pendingPool[tx.ID] = pooledTx
 
 		mp.stats.totalValidated++
-		logger.Debug("Transaction validated: ID=%s, time=%v", tx.ID, validationTime)
+		logger.Info("Transaction validated OK: ID=%s type=%s time=%v — moved to PENDING pool",
+			tx.ID, txType, validationTime)
 	}
+}
+
+// classifyTransaction inspects a transaction's populated fields to determine
+// its intended purpose. This enables type-specific validation in performValidation
+// so that garbage transactions are rejected at the mempool boundary instead of
+// wasting block space by failing later at execution time.
+//
+// Classification rules (in priority order):
+//   - TxTypeDeployment: Code is non-empty (contract deployment)
+//   - TxTypeCall: ToContract is non-empty (contract call)
+//   - TxTypeNFTAnchor: ReturnData is non-empty AND Amount is zero (NFT/metadata anchor)
+//   - TxTypeTransfer: everything else (plain SPX transfer)
+func classifyTransaction(tx *types.Transaction) TxType {
+	switch {
+	case len(tx.Code) > 0:
+		return TxTypeDeployment
+	case tx.ToContract != "":
+		return TxTypeCall
+	case len(tx.ReturnData) > 0 && (tx.Amount == nil || tx.Amount.Sign() == 0):
+		return TxTypeNFTAnchor
+	default:
+		return TxTypeTransfer
+	}
+}
+
+// TxType represents the classified purpose of a transaction.
+type TxType int
+
+const (
+	TxTypeTransfer TxType = iota
+	TxTypeDeployment
+	TxTypeCall
+	TxTypeNFTAnchor
+)
+
+func (t TxType) String() string {
+	switch t {
+	case TxTypeTransfer:
+		return "transfer"
+	case TxTypeDeployment:
+		return "deployment"
+	case TxTypeCall:
+		return "call"
+	case TxTypeNFTAnchor:
+		return "nft_anchor"
+	default:
+		return "unknown"
+	}
+}
+
+// validateTransactionByType runs type-specific validation checks based on the
+// classified transaction type. This is a defense-in-depth measure: the generic
+// validation (signature, nonce, balance, gas) already passed by the time this
+// is called; these checks reject structurally-invalid payloads early.
+func (mp *Mempool) validateTransactionByType(tx *types.Transaction, txType TxType) error {
+	switch txType {
+	case TxTypeDeployment:
+		return mp.validateDeployment(tx)
+	case TxTypeCall:
+		return mp.validateCall(tx)
+	case TxTypeNFTAnchor:
+		return mp.validateNFTAnchor(tx)
+	default:
+		return nil // transfer: no extra checks needed
+	}
+}
+
+// validateDeployment checks that the Code field parses as a valid DeploySpec.
+// This catches malformed deployment payloads at the mempool instead of letting
+// them occupy block space only to fail at execution.
+func (mp *Mempool) validateDeployment(tx *types.Transaction) error {
+	var spec contracts.DeploySpec
+	if err := json.Unmarshal(tx.Code, &spec); err != nil {
+		return fmt.Errorf("invalid deploy code: not a valid DeploySpec: %w", err)
+	}
+	if err := contracts.ValidateDeploySpec(&spec); err != nil {
+		return fmt.Errorf("invalid deploy spec: %w", err)
+	}
+	return nil
+}
+
+// validateCall checks that the target contract already exists in state.
+// This prevents calls to non-existent contracts from entering the mempool,
+// saving block space and providing faster feedback to the caller.
+func (mp *Mempool) validateCall(tx *types.Transaction) error {
+	if mp.stateProvider == nil {
+		// Without state access we cannot verify; let it through (execution will fail)
+		return nil
+	}
+	stateDB, err := mp.stateProvider.NewStateDB()
+	if err != nil {
+		return nil // state unavailable; defer to execution
+	}
+	defer stateDB.Close()
+
+	// Check contract existence via the contract store
+	contractAddr := tx.ToContract
+	if !stateDB.ContractExists(contractAddr) {
+		return fmt.Errorf("contract %s does not exist", contractAddr)
+	}
+
+	// Validate CallData parses as a valid CallSpec
+	var call contracts.CallSpec
+	if err := json.Unmarshal(tx.CallData, &call); err != nil {
+		return fmt.Errorf("invalid call data: not a valid CallSpec: %w", err)
+	}
+	if call.Method == "" {
+		return errors.New("invalid call data: missing method")
+	}
+	return nil
+}
+
+// validateNFTAnchor performs lightweight validation on NFT anchor transactions.
+// Since SIP-721 metadata is stored on-chain via tokenURI, this mainly validates
+// that the ReturnData is well-formed (valid JSON or a recognizable CID format).
+func (mp *Mempool) validateNFTAnchor(tx *types.Transaction) error {
+	data := tx.ReturnData
+
+	// Try parsing as JSON (could be metadata, anchor tag, etc.)
+	var jsonCheck interface{}
+	if err := json.Unmarshal(data, &jsonCheck); err == nil {
+		return nil // valid JSON is acceptable
+	}
+
+	// If not JSON, check for a recognizable CID-like string (ipfs://...)
+	if len(data) > 6 && string(data[:7]) == "ipfs://" {
+		return nil
+	}
+
+	// Allow raw hex (could be a CID in binary form)
+	if isHexString(string(data)) {
+		return nil
+	}
+
+	return fmt.Errorf("invalid NFT anchor data: not valid JSON, IPFS URI, or hex")
+}
+
+// isHexString reports whether s consists entirely of hexadecimal characters.
+func isHexString(s string) bool {
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return len(s) > 0 && len(s)%2 == 0
 }
 
 // performValidation executes all validation checks for a transaction

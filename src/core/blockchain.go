@@ -296,6 +296,12 @@ func (bc *Blockchain) SetSTHINCSManager(mgr *sign.STHINCSManager) {
 	bc.lock.Lock()
 	defer bc.lock.Unlock()
 	bc.sphincsManager = mgr
+	// Keep admission-time (mempool) and commit-time (chain) auth aligned:
+	// whichever manager the chain observes, the mempool must observe too,
+	// or a tx could be admitted yet never committable (the stuck-block loop).
+	if bc.mempool != nil {
+		bc.mempool.SetSTHINCSManager(mgr)
+	}
 }
 
 // SetSyncManager sets the sync manager for this blockchain
@@ -1772,7 +1778,11 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 	}
 
 	if err := bc.validateBlockTransactionAuth(typeBlock, false); err != nil {
-		return fmt.Errorf("CommitBlock: transaction authentication failed: %w", err)
+		// Wrap with the consensus sentinel so the commit path can
+		// distinguish a deterministic validation failure (evict the bad
+		// transactions from the mempool, don't retry) from a transient
+		// race / staleness error (retry). See consensus.ErrInvalidBlockTx.
+		return fmt.Errorf("CommitBlock: transaction authentication failed: %w: %w", consensus.ErrInvalidBlockTx, err)
 	}
 	for _, tx := range typeBlock.Body.TxsList {
 		if err := bc.ValidateTransactionPolicy(tx); err != nil {

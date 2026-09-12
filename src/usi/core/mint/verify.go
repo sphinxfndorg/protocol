@@ -17,6 +17,20 @@ import (
 // Returns (true,nil) when signature and payload hash are consistent.
 //
 // payload is optional: if receipt.RequireExternalPayload is true, payload MUST be provided.
+//
+// SECURITY SEMANTICS (same distinction as sign.VerificationResult): this
+// function establishes ONLY self-consistency — the signature verifies against
+// receipt.MinterPublicKey, which is carried inside the receipt itself. Anyone
+// can generate a SPHINCS+ keypair and produce a perfectly self-consistent
+// receipt, so (true, nil) here does NOT prove who the minter is.
+//
+// Authenticity comes from the ON-CHAIN ANCHOR: ReceiptCommitmentHash hashes
+// the full signed receipt and is committed in a transaction ReturnData that
+// every node validates (core.ValidateAnchorData). VerifyAnchorWithTag /
+// VerifyAnchoredReceiptWithTag re-check the receipt against that commitment,
+// including the anchored MinterPublicKey — a receipt whose key/signature were
+// substituted cannot match a previously anchored commitment. Callers that
+// need proof of the minter's identity MUST anchor-verify, not just Verify.
 func Verify(receipt *MintReceipt, payload []byte) (bool, error) {
 	if receipt == nil {
 		return false, errors.New("nil receipt")
@@ -82,7 +96,7 @@ func Verify(receipt *MintReceipt, payload []byte) (bool, error) {
 
 func canonicalPayloadHashHex(payload []byte, orgCode string) string {
 	if orgCode == "" {
-		orgCode = "SPIF"
+		orgCode = string(keys.OrgSPIF)
 	}
 	// IMPORTANT: keep in sync with mint.Mint().
 	// mint.Mint() currently uses keys.SHAKE256HashWithOrg which is org-prefixed+checksum.
@@ -93,7 +107,7 @@ func canonicalPayloadHashHex(payload []byte, orgCode string) string {
 	// Therefore, we currently call the same canonical hash as Mint(): hex of SHAKE256HashWithOrg.
 	// Recompute payload hash in the same way Mint() does.
 	if orgCode == "" {
-		orgCode = "SPIF"
+		orgCode = string(keys.OrgSPIF)
 	}
 	h := keys.SHAKE256HashWithOrg(payload, keys.OrgCode(orgCode))
 	return hex.EncodeToString(h)

@@ -93,6 +93,38 @@ func (s *Storage) GetTransaction(txID string) (*types.Transaction, error) {
 	return nil, fmt.Errorf("transaction %s not found", txID)
 }
 
+// GetTxBlockInfo returns the hash and height of the block that committed the
+// transaction with the given ID. It first resolves via the O(1) rawdb
+// tx-lookup index and falls back to the same full-chain scan GetTransaction
+// uses, so un-migrated chains keep working. An error is returned while the tx
+// is still uncommitted (e.g. sitting in the mempool) or unknown — callers use
+// that to poll for confirmation.
+func (s *Storage) GetTxBlockInfo(txID string) (string, uint64, error) {
+	if s.db != nil {
+		if entry, err := rawdb.ReadTxLookupEntry(s.db, txID); err == nil {
+			if entry.BlockHash != "" {
+				return entry.BlockHash, entry.BlockHeight, nil
+			}
+			// Stale/partial entry — fall through to the scan.
+		}
+	}
+
+	// Fallback: full-chain scan (same contract as GetTransaction).
+	blocks, err := s.GetAllBlocks()
+	if err != nil {
+		return "", 0, err
+	}
+	for _, block := range blocks {
+		for _, tx := range block.Body.TxsList {
+			if tx != nil && tx.ID == txID {
+				return block.GetHash(), block.GetHeight(), nil
+			}
+		}
+	}
+
+	return "", 0, fmt.Errorf("transaction %s not found", txID)
+}
+
 // FIXED GetAllBlocks - completely rewritten to avoid hangs
 func (s *Storage) GetAllBlocks() ([]*types.Block, error) {
 	s.mu.RLock()

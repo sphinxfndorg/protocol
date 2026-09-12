@@ -409,11 +409,33 @@ func StartNode(
 	if err != nil {
 		return fmt.Errorf("failed to create blockchain: %w", err)
 	}
+	// ★ FIX: wire the STHINCS manager built in SECTION 4 onto the blockchain.
+	// Without this, bc.sphincsManager stays nil for the life of the process:
+	// rpc.NewServer (below) receives sphincsMgr directly and works fine, but
+	// nothing was ever propagating it onto bc itself. That silent gap meant
+	// the mempool's admission-time check (which tolerates a nil manager by
+	// falling back to SVM-only verification) accepted transactions that
+	// commit-time auth (core/tx_auth.go's validateTransactionAuth, which
+	// treats a nil manager as fatal: "STHINCS manager is not configured")
+	// could never actually commit — a transaction gets validated into the
+	// pending pool, a leader builds and gets full PBFT quorum on a block
+	// containing it, and CommitBlock rejects it every single time. PBFT
+	// then treats that as a lost race, resets to PhaseIdle, and retries the
+	// identical block forever: height stops advancing and the mempool shows
+	// the same transaction "pending" indefinitely.
+	//
+	// Set it before FinishInit (which builds/attaches the mempool
+	// internally) so that path's own SetMempool call already sees a
+	// non-nil manager. SyncSTHINCSManager afterward is a belt-and-suspenders
+	// re-propagation in case FinishInit or something later replaces the
+	// mempool instance.
+	bc.SetSTHINCSManager(sphincsMgr)
 	bc.SetStorageDB(mainDatabase)
 	bc.SetStateDB(stateDatabase)
 	if err := bc.FinishInit(currentNodeID); err != nil {
 		return fmt.Errorf("failed to create blockchain: %w", err)
 	}
+	bc.SyncSTHINCSManager()
 
 	var nodeID rpc.NodeID
 	nodeIDBytes := []byte(currentNodeID)
@@ -654,6 +676,18 @@ func StartNode(
 		p2pMgr.AddPeer(validatorIDs[i], addr)
 		logger.Info("Added peer %s at %s to P2P consensus manager", validatorIDs[i], addr)
 	}
+
+	// Wire the RPC server's outbound transaction relay to the P2P manager so
+	// wallet-submitted transactions (sendrawtransaction — e.g. USI mint
+	// anchors) are gossiped to every peer. Without this the tx exists ONLY
+	// in this node's mempool: whichever PBFT leader doesn't hold it builds
+	// blocks without it, and since leadership rotates the anchor can sit
+	// uncommitted forever (the USI "Confirmed: pending" bug).
+	rpcServer.SetTxRelay(func(tx *types.Transaction) {
+		if err := p2pMgr.BroadcastMessage("transaction", tx); err != nil {
+			logger.Warn("RPC tx relay: broadcast of tx %s failed: %v", tx.ID, err)
+		}
+	})
 
 	p2pMgr.SetSendMessageFunc(func(nodeAddress, msgType string, data []byte) error {
 		conn, err := net.DialTimeout("tcp", nodeAddress, 5*time.Second)

@@ -76,6 +76,7 @@ type StateDB interface {
 	GetLastTransactionTimestamp(address string) (int64, error)
 	GetBalanceResult(address string) (*BalanceResult, error)
 	GetTransactionHistory(address string, limit int) ([]*types.Transaction, error)
+	ContractExists(address string) bool
 	Close() error
 }
 

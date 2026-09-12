@@ -12,12 +12,13 @@ import (
 	"math/big"
 	"strings"
 
+	"github.com/sphinxfndorg/protocol/src/common"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
 )
 
 const (
-	RuntimeNative = "native"
-	StandardSIP20 = "sip20"
+	RuntimeNative  = "native"
+	StandardSIP20  = "sip20"
 	StandardSIP721 = "sip721"
 )
 
@@ -26,7 +27,7 @@ func BuildDeployCode(spec *DeploySpec) ([]byte, error) {
 		return nil, errors.New("nil deploy spec")
 	}
 	normalizeDeploySpec(spec)
-	if err := validateDeploySpec(spec); err != nil {
+	if err := ValidateDeploySpec(spec); err != nil {
 		return nil, err
 	}
 	return json.Marshal(spec)
@@ -58,7 +59,7 @@ func Deploy(store Store, tx *types.Transaction) (*ExecutionResult, error) {
 		return nil, fmt.Errorf("decode deploy code: %w", err)
 	}
 	normalizeDeploySpec(&spec)
-	if err := validateDeploySpec(&spec); err != nil {
+	if err := ValidateDeploySpec(&spec); err != nil {
 		return nil, err
 	}
 
@@ -150,7 +151,10 @@ func Call(store Store, tx *types.Transaction) (*ExecutionResult, error) {
 func ContractAddress(sender string, nonce uint64, code []byte) string {
 	input := fmt.Sprintf("%s:%d:%x", sender, nonce, sha256.Sum256(code))
 	sum := sha256.Sum256([]byte(input))
-	return "sc" + hex.EncodeToString(sum[:20])
+	// Contract addresses use the same SPIF format as identity addresses:
+	// common.SPIFPrefix + 40 hex characters (20-byte hash), matching the
+	// protocol-wide address scheme (see common.NormalizeSPIFAddress).
+	return common.SPIFPrefix + hex.EncodeToString(sum[:20])
 }
 
 func normalizeDeploySpec(spec *DeploySpec) {
@@ -165,7 +169,9 @@ func normalizeDeploySpec(spec *DeploySpec) {
 	}
 }
 
-func validateDeploySpec(spec *DeploySpec) error {
+// ValidateDeploySpec checks that a DeploySpec is structurally valid.
+// Exported for use by mempool validation (defense-in-depth) and external callers.
+func ValidateDeploySpec(spec *DeploySpec) error {
 	if spec.Runtime != RuntimeNative {
 		return fmt.Errorf("unsupported runtime: %s", spec.Runtime)
 	}

@@ -10,11 +10,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
+	"strings"
 	"time"
 
-	"golang.org/x/crypto/sha3"
-
+	"github.com/sphinxfndorg/protocol/src/common"
 	"github.com/sphinxfndorg/protocol/src/consensus"
+	"github.com/sphinxfndorg/protocol/src/contracts"
 	"github.com/sphinxfndorg/protocol/src/core"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
 	security "github.com/sphinxfndorg/protocol/src/handshake"
@@ -411,6 +413,12 @@ func (h *JSONRPCHandler) registerMethods() {
 	h.methods["getblocks"] = h.getBlocks
 	h.methods["sendrawtransaction"] = h.sendRawTransaction
 	h.methods["gettransaction"] = h.getTransaction
+	h.methods["gettransactionreceipt"] = h.getTransactionReceipt
+	// spx_/sphinx_ aliases: the CLI's WatchTransaction and the bind client
+	// already call these names; they previously had NO node-side handler, so
+	// every confirmation poll failed and nothing could ever confirm on-chain.
+	h.methods["spx_getTransactionReceipt"] = h.getTransactionReceipt
+	h.methods["sphinx_getTransactionReceipt"] = h.getTransactionReceipt
 	h.methods["ping"] = h.ping
 	h.methods["join"] = h.join
 	h.methods["findnode"] = h.findNode
@@ -445,6 +453,10 @@ func (h *JSONRPCHandler) registerMethods() {
 	h.methods["getnonce"] = h.getNonce
 	h.methods["getcontract"] = h.getContract
 	h.methods["getcontractstorage"] = h.getContractStorage
+
+	// Contract deployment/call convenience methods (Gap 5/6 fix)
+	h.methods["deploycontract"] = h.deployContract
+	h.methods["callcontract"] = h.callContract
 }
 
 func (h *JSONRPCHandler) getContract(params interface{}) (interface{}, error) {
@@ -484,6 +496,226 @@ func (h *JSONRPCHandler) getContractStorage(params interface{}) (interface{}, er
 		return nil, err
 	}
 	return hex.EncodeToString(value), nil
+}
+
+// deployContract builds an unsigned contract deployment transaction and returns
+// it as hex-encoded JSON for the client to sign and submit via sendrawtransaction.
+//
+// FIX (Gap 5/6): thin wrapper around sendRawTransaction that pre-populates Code.
+//
+// Params (single object):
+//   - from:        sender SPIF address (required)
+//   - code:        hex-encoded deploy code JSON (required)
+//   - gasLimit:    optional gas limit
+//   - gasPrice:    optional gas price in nSPX
+//   - nonce:       optional nonce (default: queried from node)
+//
+// Returns: { "tx": "<hex>", "contractAddress": "<predicted>" }
+func (h *JSONRPCHandler) deployContract(params interface{}) (interface{}, error) {
+	if h.server.blockchain == nil {
+		return nil, errors.New("blockchain not initialized")
+	}
+
+	var paramsStruct struct {
+		From     string `json:"from"`
+		Code     string `json:"code"`
+		GasLimit uint64 `json:"gasLimit"`
+		GasPrice string `json:"gasPrice"`
+		Nonce    uint64 `json:"nonce"`
+	}
+	paramsJSON, err := json.Marshal(params)
+	if err != nil {
+		return nil, fmt.Errorf("invalid parameters: %w", err)
+	}
+	if err := json.Unmarshal(paramsJSON, &paramsStruct); err != nil {
+		return nil, fmt.Errorf("invalid parameters: %w", err)
+	}
+	if paramsStruct.From == "" {
+		return nil, errors.New("missing 'from' parameter")
+	}
+	if paramsStruct.Code == "" {
+		return nil, errors.New("missing 'code' parameter")
+	}
+
+	codeHex := strings.TrimPrefix(paramsStruct.Code, "0x")
+	codeBytes, err := hex.DecodeString(codeHex)
+	if err != nil {
+		return nil, fmt.Errorf("invalid code hex: %w", err)
+	}
+
+	// Normalize sender address
+	rawFrom, err := common.NormalizeSPIFAddress(paramsStruct.From)
+	if err != nil {
+		return nil, fmt.Errorf("invalid sender address: %w", err)
+	}
+
+	nonce := paramsStruct.Nonce
+	if nonce == 0 {
+		stateDB, dbErr := h.server.blockchain.NewStateDB()
+		if dbErr != nil {
+			return nil, fmt.Errorf("failed to query nonce: %w", dbErr)
+		}
+		defer stateDB.Close()
+		nonce, err = stateDB.GetNonce(rawFrom)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get nonce: %w", err)
+		}
+	}
+
+	gasLimit := paramsStruct.GasLimit
+	gasPrice := new(big.Int)
+	if paramsStruct.GasPrice != "" {
+		if _, ok := gasPrice.SetString(paramsStruct.GasPrice, 10); !ok {
+			return nil, errors.New("invalid gasPrice")
+		}
+	}
+
+	chainID := uint64(7331)
+	if chainHdr := core.GetSphinxChainHeader(); chainHdr != nil && chainHdr.ChainID != 0 {
+		chainID = chainHdr.ChainID
+	}
+
+	tx := &types.Transaction{
+		ChainID:   chainID,
+		Sender:    rawFrom,
+		Receiver:  "",
+		Amount:    big.NewInt(0),
+		GasLimit:  new(big.Int).SetUint64(gasLimit),
+		GasPrice:  gasPrice,
+		Nonce:     nonce,
+		Timestamp: 0,
+		Signature: []byte{},
+		Code:      codeBytes,
+	}
+
+	predictedAddress := contracts.ContractAddress(rawFrom, nonce, codeBytes)
+
+	txJSON, err := json.Marshal(tx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal transaction: %w", err)
+	}
+	txHex := hex.EncodeToString(txJSON)
+
+	return map[string]interface{}{
+		"tx":              txHex,
+		"contractAddress": predictedAddress,
+	}, nil
+}
+
+// callContract builds an unsigned contract call transaction and returns it as
+// hex-encoded JSON for the client to sign and submit via sendrawtransaction.
+//
+// FIX (Gap 5/6): thin wrapper around sendRawTransaction that pre-populates ToContract + CallData.
+//
+// Params (single object):
+//   - from:        sender SPIF address (required)
+//   - to:          target contract address (required)
+//   - callData:    hex-encoded call data (required)
+//   - value:       optional nSPX to send (default: 0)
+//   - gasLimit:    optional gas limit
+//   - gasPrice:    optional gas price in nSPX
+//   - nonce:       optional nonce (default: queried from node)
+//
+// Returns: { "tx": "<hex>" }
+func (h *JSONRPCHandler) callContract(params interface{}) (interface{}, error) {
+	if h.server.blockchain == nil {
+		return nil, errors.New("blockchain not initialized")
+	}
+
+	var paramsStruct struct {
+		From     string `json:"from"`
+		To       string `json:"to"`
+		CallData string `json:"callData"`
+		Value    string `json:"value"`
+		GasLimit uint64 `json:"gasLimit"`
+		GasPrice string `json:"gasPrice"`
+		Nonce    uint64 `json:"nonce"`
+	}
+	paramsJSON, err := json.Marshal(params)
+	if err != nil {
+		return nil, fmt.Errorf("invalid parameters: %w", err)
+	}
+	if err := json.Unmarshal(paramsJSON, &paramsStruct); err != nil {
+		return nil, fmt.Errorf("invalid parameters: %w", err)
+	}
+	if paramsStruct.From == "" {
+		return nil, errors.New("missing 'from' parameter")
+	}
+	if paramsStruct.To == "" {
+		return nil, errors.New("missing 'to' (contract address) parameter")
+	}
+	if paramsStruct.CallData == "" {
+		return nil, errors.New("missing 'callData' parameter")
+	}
+
+	callDataHex := strings.TrimPrefix(paramsStruct.CallData, "0x")
+	callDataBytes, err := hex.DecodeString(callDataHex)
+	if err != nil {
+		return nil, fmt.Errorf("invalid callData hex: %w", err)
+	}
+
+	// Normalize sender address
+	rawFrom, err := common.NormalizeSPIFAddress(paramsStruct.From)
+	if err != nil {
+		return nil, fmt.Errorf("invalid sender address: %w", err)
+	}
+
+	nonce := paramsStruct.Nonce
+	if nonce == 0 {
+		stateDB, dbErr := h.server.blockchain.NewStateDB()
+		if dbErr != nil {
+			return nil, fmt.Errorf("failed to query nonce: %w", dbErr)
+		}
+		defer stateDB.Close()
+		nonce, err = stateDB.GetNonce(rawFrom)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get nonce: %w", err)
+		}
+	}
+
+	amount := big.NewInt(0)
+	if paramsStruct.Value != "" {
+		if _, ok := amount.SetString(paramsStruct.Value, 10); !ok {
+			return nil, errors.New("invalid value")
+		}
+	}
+
+	gasLimit := paramsStruct.GasLimit
+	gasPrice := new(big.Int)
+	if paramsStruct.GasPrice != "" {
+		if _, ok := gasPrice.SetString(paramsStruct.GasPrice, 10); !ok {
+			return nil, errors.New("invalid gasPrice")
+		}
+	}
+
+	chainID := uint64(7331)
+	if chainHdr := core.GetSphinxChainHeader(); chainHdr != nil && chainHdr.ChainID != 0 {
+		chainID = chainHdr.ChainID
+	}
+
+	tx := &types.Transaction{
+		ChainID:    chainID,
+		Sender:     rawFrom,
+		Receiver:   paramsStruct.To,
+		Amount:     amount,
+		GasLimit:   new(big.Int).SetUint64(gasLimit),
+		GasPrice:   gasPrice,
+		Nonce:      nonce,
+		Timestamp:  0,
+		Signature:  []byte{},
+		ToContract: paramsStruct.To,
+		CallData:   callDataBytes,
+	}
+
+	txJSON, err := json.Marshal(tx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal transaction: %w", err)
+	}
+	txHex := hex.EncodeToString(txJSON)
+
+	return map[string]interface{}{
+		"tx": txHex,
+	}, nil
 }
 
 // ProcessRequest processes a JSON-RPC request or batch of requests.
@@ -888,14 +1120,34 @@ func (h *JSONRPCHandler) sendRawTransaction(params interface{}) (interface{}, er
 		return nil, err
 	}
 
-	// Broadcast via network
+	// Broadcast via network (non-blocking: the wallet RPC listener runs with a
+	// nil messageCh in production StartNode — nodes.go SECTION 6 passes nil
+	// to rpc.NewServer — so a plain channel send here either blocks forever
+	// on a nil channel (dropping the response, client sees "reading length
+	// prefix" until its 120s deadline, GUI reports "NFT anchor failed") or
+	// stalls the TCP handler behind a full queue. The tx is already in the
+	// mempool via AddTransaction above; gossip is best-effort.
 	txData, err := json.Marshal(&tx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal transaction: %v", err)
 	}
-	h.server.messageCh <- &security.Message{
-		Type: "transaction",
-		Data: txData,
+	// Relay to peers FIRST: every validator (above all the rotating PBFT
+	// leaders) must see this tx or it can sit uncommitted forever. The
+	// SetTxRelay hook is wired to the P2P consensus manager by StartNode —
+	// production runs the wallet RPC listener with a nil messageCh, so this
+	// hook is the only gossip path for wallet-submitted transactions.
+	if relay := h.server.txRelay; relay != nil {
+		relay(&tx)
+	}
+	// Legacy fallback for in-process paths where a messageCh was provided.
+	if ch := h.server.messageCh; ch != nil {
+		select {
+		case ch <- &security.Message{
+			Type: "transaction",
+			Data: txData,
+		}:
+		default:
+		}
 	}
 
 	return map[string]string{"txid": tx.ID}, nil
@@ -953,6 +1205,61 @@ func (h *JSONRPCHandler) getTransaction(params interface{}) (interface{}, error)
 		return nil, err
 	}
 	return tx, nil
+}
+
+// getTransactionReceipt returns the confirmation provenance of a transaction:
+// whether it has been committed to a block, and the height/hash of that block.
+// Wallets poll this after broadcasting (e.g. an anchored mint receipt) to
+// stamp real block references into signed artifacts instead of a "pending"
+// sentinel. An uncommitted (mempool) or unknown tx returns confirmed=false
+// rather than an error, so polling stays simple.
+func (h *JSONRPCHandler) getTransactionReceipt(params interface{}) (interface{}, error) {
+	var paramsArray []string
+	if err := h.parseParams(params, &paramsArray); err != nil {
+		return nil, err
+	}
+	if len(paramsArray) < 1 {
+		return nil, errors.New("missing transaction ID parameter")
+	}
+	txID := paramsArray[0]
+
+	if h.server.blockchain == nil {
+		return nil, errors.New("blockchain not initialized")
+	}
+
+	response := map[string]interface{}{
+		"txid":      txID,
+		"confirmed": false,
+		"height":    0,
+		"blockhash": "",
+	}
+	if blockHash, height, err := h.server.blockchain.GetTxConfirmation(txID); err == nil {
+		response["confirmed"] = true
+		response["height"] = height
+		response["blockhash"] = blockHash
+	}
+
+	// Attach the local mempool breakdown so wallets/operators can see exactly
+	// WHY a tx is not confirming: stuck "validating" means the background
+	// validation worker is stalled; "invalid" > 0 means admission-class
+	// validation rejected it (the per-tx reason is in the node console:
+	// "Transaction validation failed: ID=... error=..."); "total" == 0 means
+	// the tx never arrived on THIS node at all.
+	broadcast, validating, pending, invalid, all := h.server.blockchain.MempoolSnapshot()
+	response["pool"] = map[string]interface{}{
+		"broadcast":  broadcast,
+		"validating": validating,
+		"pending":    pending,
+		"invalid":    invalid,
+		"total":      all,
+	}
+	// If the tx has already been rejected by validation, surface the exact
+	// reason — the wallet then prints it and the operator knows immediately
+	// that the anchor can NEVER confirm (vs. still-in-flight).
+	if reason, exists := h.server.blockchain.GetTransactionError(txID); exists {
+		response["invalid_reason"] = reason
+	}
+	return response, nil
 }
 
 // ping responds to health checks
@@ -1052,7 +1359,15 @@ func (h *JSONRPCHandler) parseParams(params interface{}, target interface{}) err
 	return json.Unmarshal(data, target)
 }
 
-// storeArtifact persists a StorageArtifact keyed by MintID in the node's KV store.
+// storeArtifact persists a StorageArtifact keyed by MintID.
+//
+// FIX (Gap 4): artifacts are now stored in a persistent LevelDB database
+// instead of the ephemeral KV store with a 12-hour TTL. This prevents NFT
+// metadata from silently disappearing after 12 hours, which was a data-loss
+// bug. The persistent store has no TTL — artifacts are durable and survive
+// restarts. If the persistent DB is unavailable (e.g., failed to open at
+// startup), the handler falls back to the ephemeral store for backward
+// compatibility.
 func (h *JSONRPCHandler) storeArtifact(params interface{}) (interface{}, error) {
 	var paramsArray []string
 	if err := h.parseParams(params, &paramsArray); err != nil {
@@ -1079,15 +1394,32 @@ func (h *JSONRPCHandler) storeArtifact(params interface{}) (interface{}, error) 
 		return nil, errors.New("artifact must have a mint_id")
 	}
 
-	// Store in the node's KV store with 12-hour TTL (uint16 max is 65535 seconds)
-	mintIDKey := sha3Key("artifact:" + artifact.MintID)
 	artifactData, _ := json.Marshal(artifact)
-	h.server.store.Put(mintIDKey, artifactData, 43200) // 12 hours
 
-	// Also store under CIDHashHex for lookup by content
-	if artifact.CIDHashHex != "" {
-		cidHashKey := sha3Key("cidhash:" + artifact.CIDHashHex)
-		h.server.store.Put(cidHashKey, []byte(artifact.MintID), 43200)
+	// Primary path: persistent LevelDB (no TTL, survives restarts)
+	if h.server.artifactDB != nil {
+		// Store artifact by MintID
+		mintIDKey := []byte("artifact:" + artifact.MintID)
+		if err := h.server.artifactDB.Put(mintIDKey, artifactData, nil); err != nil {
+			return nil, fmt.Errorf("failed to store artifact: %w", err)
+		}
+
+		// Also store under CIDHashHex for lookup by content
+		if artifact.CIDHashHex != "" {
+			cidHashKey := []byte("cidhash:" + artifact.CIDHashHex)
+			if err := h.server.artifactDB.Put(cidHashKey, []byte(artifact.MintID), nil); err != nil {
+				return nil, fmt.Errorf("failed to store CID hash index: %w", err)
+			}
+		}
+	} else {
+		// Fallback: ephemeral store (legacy behavior with 12-hour TTL)
+		mintIDKey := sha3Key("artifact:" + artifact.MintID)
+		h.server.store.Put(mintIDKey, artifactData, 43200) // 12 hours
+
+		if artifact.CIDHashHex != "" {
+			cidHashKey := sha3Key("cidhash:" + artifact.CIDHashHex)
+			h.server.store.Put(cidHashKey, []byte(artifact.MintID), 43200)
+		}
 	}
 
 	return map[string]string{
@@ -1097,6 +1429,10 @@ func (h *JSONRPCHandler) storeArtifact(params interface{}) (interface{}, error) 
 }
 
 // getArtifact retrieves a stored StorageArtifact by MintID.
+//
+// FIX (Gap 4): reads from the persistent LevelDB database first. If the
+// artifact is not found there (e.g., it was stored before the persistent DB
+// was added), falls back to the ephemeral KV store for backward compatibility.
 func (h *JSONRPCHandler) getArtifact(params interface{}) (interface{}, error) {
 	var paramsArray []string
 	if err := h.parseParams(params, &paramsArray); err != nil {
@@ -1107,6 +1443,21 @@ func (h *JSONRPCHandler) getArtifact(params interface{}) (interface{}, error) {
 	}
 	mintID := paramsArray[0]
 
+	// Primary path: persistent LevelDB
+	if h.server.artifactDB != nil {
+		mintIDKey := []byte("artifact:" + mintID)
+		data, err := h.server.artifactDB.Get(mintIDKey, nil)
+		if err == nil {
+			var artifact interface{}
+			if err := json.Unmarshal(data, &artifact); err != nil {
+				return nil, fmt.Errorf("parse stored artifact: %w", err)
+			}
+			return artifact, nil
+		}
+		// Not found in persistent DB — fall through to ephemeral store
+	}
+
+	// Fallback: ephemeral store (legacy behavior)
 	mintIDKey := sha3Key("artifact:" + mintID)
 	values, ok := h.server.store.Get(mintIDKey)
 	if !ok || len(values) == 0 {
@@ -1149,11 +1500,13 @@ func (h *JSONRPCHandler) getNonce(params interface{}) (interface{}, error) {
 	return nonce, nil
 }
 
-// sha3Key creates a deterministic 32-byte key from a string using SHA3-256.
+// spxKey creates a deterministic 32-byte KV key from a string using the
+// protocol's Sphinx hash — NOT SHA3-256 — so the ephemeral artifact index
+// lives in the same hash family as every other NFT/SPX commitment. The
+// persistent artifactDB path keys on the raw "artifact:<id>" strings, so this
+// only affects the legacy in-memory fallback store.
 func sha3Key(input string) Key {
-	// Use golang.org/x/crypto/sha3 imported in anchor.go style
-	// but we need to inline it since this package doesn't import it directly
-	h := sha3.Sum256([]byte(input))
+	h := common.SpxHash([]byte(input))
 	var k Key
 	copy(k[:], h[:])
 	return k

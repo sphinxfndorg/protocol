@@ -10,12 +10,13 @@
 package core
 
 import (
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/sphinxfndorg/protocol/src/common"
 )
 
 // AnchorTag is the small payload placed into a Sphinx transaction's
@@ -48,12 +49,17 @@ type AnchorTag struct {
 // AnchorTagType is the type discriminator for mint-anchor tags.
 const AnchorTagType = "mint_anchor"
 
-// CIDHashHexFor returns hex(sha256(cid string bytes)). Single source of truth
-// for the on-chain CID commitment — matches storage.CIDHash so wallet anchors
-// and node storage artifacts are computed identically.
+// CIDHashHexFor returns hex(SphinxHash(cid string bytes)). Single source of
+// truth for the on-chain CID commitment — matches storage.CIDHash so wallet
+// anchors and node storage artifacts are computed identically.
+//
+// Both use common.SpxHash (NOT sha256/sha3): the SVM signature path already
+// standardised on SpxHash (see sphincsSigHash in kernel/opcodes), and the
+// anchor CID commitment travels inside the same signed transactions, so it
+// must use the same hash family to avoid opcode-verification mismatches on
+// NFT mint / SPX transfer flows that carry anchors.
 func CIDHashHexFor(cid string) string {
-	sum := sha256.Sum256([]byte(cid))
-	return hex.EncodeToString(sum[:])
+	return hex.EncodeToString(common.SpxHash([]byte(cid)))
 }
 
 // IsMintAnchor reports whether data is a serialized AnchorTag. It is a cheap

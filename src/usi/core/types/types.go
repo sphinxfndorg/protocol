@@ -43,6 +43,21 @@ type Meta struct {
 	// TokenURI points to the metadata JSON on IPFS (like Ethereum ERC-721).
 	TokenURI    string `json:"token_uri,omitempty"`     // ipfs://<metadataCID>
 	MetadataCID string `json:"metadata_cid,omitempty"` // CID of the metadata JSON
+
+	// On-chain anchor provenance (populated AFTER AnchorMintReceipt returns,
+	// via RefreshOnChainProvenance — NEVER before signing, so the SPHINCS+
+	// signature is never invalidated). All optional so legacy sidecars
+	// without them still decode, and "unanchored"/"pending" sentinels mark
+	// data that was signed but never anchored (or anchored but not yet
+	// confirmed in a block). Verify screens render these verbatim, so an
+	// empty value must never be mistaken for a confirmed one.
+	MintID          string `json:"mint_id,omitempty"`           // deterministic mint identifier (receipt.MintID)
+	AnchorTxID      string `json:"anchor_txid,omitempty"`       // sendrawtransaction result txid ("unanchored" if never anchored)
+	AnchorPath      string `json:"anchor_path,omitempty"`       // local anchor_*.json sidecar path
+	ConfirmedHeight uint64 `json:"confirmed_height,omitempty"`  // block height that included the anchor tx (0 = pending/unconfirmed)
+	BlockHash       string `json:"block_hash,omitempty"`        // hex hash of the confirming block ("pending" while unconfirmed)
+	TokenID         uint64 `json:"token_id,omitempty"`          // SIP-721 tokenId (collection mints only)
+	ContractAddress string `json:"contract_address,omitempty"` // SIP-721 collection contract (collection mints only)
 }
 
 // GetPublicKeyPreview returns a shortened preview of the public key
@@ -91,6 +106,13 @@ func (m *Meta) Clone() *Meta {
 		BlockHeight:        m.BlockHeight,
 		TokenURI:           m.TokenURI,
 		MetadataCID:        m.MetadataCID,
+		MintID:             m.MintID,
+		AnchorTxID:         m.AnchorTxID,
+		AnchorPath:         m.AnchorPath,
+		ConfirmedHeight:    m.ConfirmedHeight,
+		BlockHash:          m.BlockHash,
+		TokenID:            m.TokenID,
+		ContractAddress:    m.ContractAddress,
 	}
 }
 

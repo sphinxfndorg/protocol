@@ -1291,7 +1291,11 @@ func (bc *Blockchain) CreateBlock() (block *types.Block, err error) {
 			return nil, fmt.Errorf("failed to select transactions: %w", err)
 		}
 	} else {
-		logger.Info("Mempool empty; creating empty block")
+		// Dump full pool state so we can tell whether the mempool is truly
+		// empty or transactions are stuck mid-pipeline (broadcast/validation).
+		broadcast, validating, pending, invalid, all := bc.mempool.MempoolSnapshot()
+		logger.Warn("Mempool pendingPool empty — snapshot: broadcast=%d validating=%d pending=%d invalid=%d all=%d",
+			broadcast, validating, pending, invalid, all)
 	}
 
 	logger.Info("Creating block with %d transactions, estimated size: %d bytes (limit: %d, utilization: %.2f%%)",

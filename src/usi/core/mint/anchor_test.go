@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/sphinxfndorg/protocol/src/common"
 	"github.com/sphinxfndorg/protocol/src/core"
 )
 
@@ -20,7 +21,7 @@ func mintTestReceipt(cid string) *MintReceipt {
 		Subject:         "quarterly-report.pdf",
 		PayloadHash:     "payloadhash00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
 		CID:             cid,
-		OrgCode:         "SPIF",
+		OrgCode:         common.SPIFPrefix,
 		MinterPublicKey: "6d696e7465722d7075626b65792d6279746573",
 		SignatureHex:    "deadbeefdeadbeefdeadbeef",
 	}
@@ -110,7 +111,7 @@ func TestSIP721TokenBindingFlowsThroughAnchorAndNodeVerifies(t *testing.T) {
 	receipt := mintTestReceipt(cid)
 	receipt.TokenID = 7
 	receipt.TokenURI = "ipfs://bafkqameta0000000000000000000000000"
-	receipt.ContractAddress = "sc1234567890abcdef1234567890abcdef"
+	receipt.ContractAddress = common.SPIFPrefix + "1234567890abcdef1234567890abcdef"
 
 	tagBytes, err := BuildAnchorData(receipt)
 	if err != nil {
@@ -139,7 +140,7 @@ func TestAnchorVerifiesTokenBindingMatchesReceipt(t *testing.T) {
 	receipt := mintTestReceipt(cid)
 	receipt.TokenID = 3
 	receipt.TokenURI = "ipfs://bafkqameta0000000000000000000000001"
-	receipt.ContractAddress = "sc1234567890abcdef1234567890abcdef"
+	receipt.ContractAddress = common.SPIFPrefix + "1234567890abcdef1234567890abcdef"
 
 	tagBytes, err := BuildAnchorData(receipt)
 	if err != nil {

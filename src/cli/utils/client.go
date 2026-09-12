@@ -100,26 +100,50 @@ func buildSignedTransaction(opts SendTxOptions, amount *big.Int, nonce uint64) (
 		Timestamp: time.Now().Unix(),
 		ChainID:   7331, // Sphinx Mainnet chain ID (EIP-155 replay protection)
 	}
-	tx.ID = tx.Hash()
-
-	skBytes, pkBytes, err := loadSigningKeyFile(opts.KeyFile)
-	if err != nil {
+	if err := signTransactionCanonical(tx, opts.KeyFile); err != nil {
 		return nil, err
+	}
+	return tx, nil
+}
+
+// signTransactionCanonical signs a transaction with the node's canonical
+// SPHINCS+ transaction authentication path (mirrors the USI wallet's
+// signTransactionLocally and core.SignTransaction).
+//
+// ★ HASH CONTRACT: tx.ID MUST be derived with types.Transaction.Hash() —
+// which hashes the full transaction struct JSON with common.SpxHash — and
+// the auth bundle MUST come from STHINCSManager.SignTransactionAuth over
+// []byte(tx.ID), whose SignatureHash is common.SpxHash too. The node's SVM
+// verifier (OP_CHECK_SIGNATURE_HASH → OP_VERIFY) re-derives the same SpxHash;
+// any other hash construction (e.g. a bare sha256 over a partial struct, or
+// an unsigned transaction) fails SVM signature verification with
+// "error executing op code 0x69 at pc=21: VERIFY failed".
+func signTransactionCanonical(tx *types.Transaction, keyFile string) error {
+	if tx == nil {
+		return fmt.Errorf("nil transaction")
+	}
+	if tx.ID == "" {
+		tx.ID = tx.Hash()
+	}
+
+	skBytes, pkBytes, err := loadSigningKeyFile(keyFile)
+	if err != nil {
+		return err
 	}
 
 	km, err := key.NewKeyManager()
 	if err != nil {
-		return nil, fmt.Errorf("failed to initialize key manager: %w", err)
+		return fmt.Errorf("failed to initialize key manager: %w", err)
 	}
 	privateKey, publicKey, err := km.DeserializeKeyPair(skBytes, pkBytes)
 	if err != nil {
-		return nil, fmt.Errorf("failed to deserialize key file: %w", err)
+		return fmt.Errorf("failed to deserialize key file: %w", err)
 	}
 
 	manager := sign.NewSTHINCSManager(nil, km, km.GetSPHINCSParameters())
 	bundle, err := manager.SignTransactionAuth([]byte(tx.ID), privateKey, publicKey)
 	if err != nil {
-		return nil, fmt.Errorf("failed to sign transaction: %w", err)
+		return fmt.Errorf("failed to sign transaction: %w", err)
 	}
 
 	tx.Signature = bundle.Signature
@@ -132,8 +156,7 @@ func buildSignedTransaction(opts SendTxOptions, amount *big.Int, nonce uint64) (
 	tx.Proof = bundle.Proof
 
 	ensurePolicyFee(tx)
-
-	return tx, nil
+	return nil
 }
 
 func ensurePolicyFee(tx *types.Transaction) {

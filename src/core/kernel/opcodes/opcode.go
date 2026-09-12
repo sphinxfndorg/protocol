@@ -128,6 +128,18 @@ func sha3_shake256(data []byte, length int) []byte {
 	return out                  // Return the variable-length output
 }
 
+// sphincsSigHash recomputes a SPHINCS+ signature fingerprint exactly the way
+// the signing path does: STHINCSManager.ComputeSignatureHash is
+// common.SpxHash(sigBytes) — a salted, Argon2id-stretched construction, NOT
+// plain SHA3-256. OP_CHECK_SIGNATURE_HASH / OP_VERIFY_SIGNATURE_HASH must use
+// this (via common.SpxHash) so the value they recompute inside the VM matches
+// the SignatureHash the wallet computed at signing time. Using sha3_256 here
+// made the comparison fail for EVERY fresh signature, so the check pushed 0
+// and the following OP_VERIFY aborted with "VERIFY failed" (opcode 0x69).
+func sphincsSigHash(sigBytes []byte) []byte {
+	return common.SpxHash(sigBytes)
+}
+
 // Global SPHINCS+ verification function (to be set by the application)
 // This is a function pointer that allows the VM to call back into the application
 // The application registers its SPHINCS+ verification implementation here
@@ -896,8 +908,10 @@ func executeVerifyMerkleRoot(stack *Stack, memory []byte) error {
 	parts[0] = leaf0
 
 	// Leaf 4: hash of commitment (independently verifiable)
-	// This prevents commitment substitution attacks
-	commitHash := sha3_256(commitment)
+	// This prevents commitment substitution attacks.
+	// Uses the Sphinx signature-hash construction (common.SpxHash) to match
+	// STHINCSManager.CommitmentLeaf — NOT plain SHA3-256.
+	commitHash := common.SpxHash(commitment)
 	parts[4] = commitHash
 
 	// Build Merkle tree by concatenating and hashing all leaves
@@ -906,7 +920,7 @@ func executeVerifyMerkleRoot(stack *Stack, memory []byte) error {
 	for _, part := range parts {
 		allData = append(allData, part...) // Concatenate all parts
 	}
-	computedRoot := sha3_256(allData) // Hash the concatenation
+	computedRoot := common.SpxHash(allData) // Sphinx hash, matches signer side
 
 	// Compare computed root with expected root
 	if len(computedRoot) == len(expectedRoot) {
@@ -926,7 +940,8 @@ func executeVerifyMerkleRoot(stack *Stack, memory []byte) error {
 }
 
 // OP_VERIFY_COMMITMENT - Verifies the commitment hash
-// Recomputes commitment = SHA3_256(sigBytes || pkBytes || timestamp || nonce || message)
+// Recomputes commitment = SpxHash(len-prefixed sigBytes || pkBytes || timestamp || nonce || message)
+// to match STHINCSManager.SigCommitment — NOT plain SHA3-256.
 // Pushes 1 if recomputed commitment matches expected, 0 otherwise
 func executeVerifyCommitment(stack *Stack, memory []byte) error {
 	// Pop expected commitment length and pointer
@@ -1025,8 +1040,10 @@ func executeVerifyCommitment(stack *Stack, memory []byte) error {
 	writeWithLength(nonce)     // Nonce bytes
 	writeWithLength(message)   // Message bytes
 
-	// Hash the concatenated length-prefixed fields
-	computedCommitment := sha3_256(input)
+	// Hash the concatenated length-prefixed fields with the Sphinx
+	// signature-hash construction to match STHINCSManager.SigCommitment —
+	// NOT plain SHA3-256.
+	computedCommitment := common.SpxHash(input)
 
 	// Compare computed commitment with expected
 	if len(computedCommitment) == len(expectedCommitment) {
@@ -1096,12 +1113,13 @@ func executeBuildMerkleTree(stack *Stack, memory []byte) error {
 		allData = append(allData, signature[start:end]...)
 	}
 
-	// Leaf 4: hash of commitment (independently verifiable)
-	commitHash := sha3_256(commitment)
+	// Leaf 4: hash of commitment (independently verifiable) with the Sphinx
+	// signature-hash construction to match STHINCSManager.CommitmentLeaf.
+	commitHash := common.SpxHash(commitment)
 	allData = append(allData, commitHash...)
 
-	// Final root hash (SHA3-256 of all concatenated leaves)
-	rootHash := sha3_256(allData)
+	// Final root hash (Sphinx hash of all concatenated leaves)
+	rootHash := common.SpxHash(allData)
 
 	// Placeholder for root pointer (would need memory allocation in production)
 	stack.Push(0)                     // Placeholder for root pointer
@@ -1220,17 +1238,25 @@ func executeReturn(stack *Stack, memory []byte) error {
 	// Extract the data (memo, proof, or metadata) from memory
 	data := memory[dataPtr : dataPtr+dataLen]
 
-	// Maximum size limit for OP_RETURN data (like Bitcoin's 80 bytes)
-	// This prevents abuse and keeps the data prunable
-	// Can be adjusted based on network needs
-	const maxReturnSize = 80
+	// Maximum size limit for OP_RETURN data. Must match
+	// transaction.MaxReturnDataSize (4096) — the canonical chain limit
+	// for OP_RETURN-style payloads (NFT anchors, memos, metadata). The
+	// previous 80-byte Bitcoin-style limit silently discarded every NFT
+	// anchor payload (~480 bytes) at CommitBlock time: the transaction
+	// still landed in the block, but its ReturnData was never stored in
+	// returnDataStore (vm.Run() failed, logged as "OP_RETURN execution
+	// failed", data lost). Keep this in sync with the mempool's
+	// validation constant and the on-chain MaxReturnDataSize.
+	const maxReturnSize = 4096
 	if dataLen > maxReturnSize {
 		return fmt.Errorf("OP_RETURN data exceeds maximum size of %d bytes (got %d)", maxReturnSize, dataLen)
 	}
 
 	// Generate a hash of the data as a key for retrieval
-	// This allows light clients to reference the data by hash
-	dataHash := sha3_256(data)
+	// This allows light clients to reference the data by hash.
+	// Uses the Sphinx hash construction so memo/proof keys agree with the
+	// rest of the SPHINCS+ receipt pipeline — NOT plain SHA3-256.
+	dataHash := common.SpxHash(data)
 	key := fmt.Sprintf("%x", dataHash[:8]) // Use first 8 bytes as short key
 
 	// Store the data in receiptStore (already defined in your code)
@@ -1551,8 +1577,22 @@ func executeMultisigOp(op OpCode, stack *Stack) error {
 
 // ========== NEW HELPER FUNCTIONS ==========
 
-// executeComparisonOp - Handles comparison operations
+// executeComparisonOp - Handles comparison operations.
+//
+// NOTE: ISZERO takes ONE operand (the top of stack); LT/GT/SLT/SGT/EQ take
+// TWO operands (a = second-from-top, b = top). ISZERO must be handled before
+// the second Pop — otherwise it always dies with "stack underflow" because
+// there is no second value to pop.
 func executeComparisonOp(op OpCode, stack *Stack) error {
+	if op == ISZERO {
+		a, err := stack.Pop()
+		if err != nil {
+			return err
+		}
+		stack.Push(IsZeroOp(a))
+		return nil
+	}
+
 	b, err := stack.Pop()
 	if err != nil {
 		return err
@@ -1573,9 +1613,6 @@ func executeComparisonOp(op OpCode, stack *Stack) error {
 		result = SgTOp(int64(a), int64(b))
 	case EQ:
 		result = EqOp(a, b)
-	case ISZERO:
-		stack.Push(IsZeroOp(a))
-		return nil
 	}
 	stack.Push(result)
 	return nil
@@ -1998,8 +2035,13 @@ func executeCheckSignatureHash(stack *Stack, memory []byte) error {
 	// Extract expected signature hash from memory
 	expectedHash := memory[expectedHashPtr : expectedHashPtr+expectedHashLen]
 
-	// Step 1: Recompute signature hash from signature bytes
-	recomputedHash := sha3_256(signature) // Use SHA3-256 for hash
+	// Step 1: Recompute signature hash from signature bytes.
+	// MUST use the Sphinx signature-hash construction (common.SpxHash, the
+	// same function STHINCSManager.ComputeSignatureHash uses at signing
+	// time) — NOT plain SHA3-256. A different hash here never matches the
+	// wallet-supplied SignatureHash, so every fresh transaction would push 0
+	// and die on the following OP_VERIFY (0x69) with "VERIFY failed".
+	recomputedHash := sphincsSigHash(signature)
 
 	// Step 2: Verify hash matches
 	if len(recomputedHash) != len(expectedHash) {
@@ -2014,16 +2056,22 @@ func executeCheckSignatureHash(stack *Stack, memory []byte) error {
 		}
 	}
 
-	// Step 3: Check if this signature hash has been seen before (replay detection)
-	hashKey := string(recomputedHash)
-	exists := signatureHashStore[hashKey]
+	// NOTE: Replay detection is intentionally NOT performed here. This opcode
+	// only verifies that recomputedHash == expectedHash — i.e. that the
+	// signature bytes hash to the claimed SignatureHash. Replay protection
+	// belongs in executeStoreSignatureHash (OP_STORE_SIGNATURE_HASH), which is
+	// the only path that records the hash in signatureHashStore.
+	//
+	// Why: a transaction is verified TWICE in the pipeline — once at admission
+	// (BroadcastTransaction) and once in background validation
+	// (validationProcessor). Both run the same VM program. If this opcode
+	// consulted signatureHashStore, the second pass would always find the hash
+	// already stored (by the first pass's OP_STORE_SIGNATURE_HASH) and push 0,
+	// causing the following OP_VERIFY (0x69) to abort with "VERIFY failed" —
+	// which sent every anchor transaction to invalidPool instead of pendingPool,
+	// leaving the mempool at 0 pending and the wallet stuck on "pending".
 
-	if exists {
-		stack.Push(0) // Signature already used - replay attack
-	} else {
-		stack.Push(1) // Hash matches and is fresh
-	}
-
+	stack.Push(1) // Hash matches
 	return nil
 }
 
@@ -2063,8 +2111,10 @@ func executeVerifySignatureHash(stack *Stack, memory []byte) error {
 	signature := memory[sigPtr : sigPtr+sigLen]
 	expectedHash := memory[expectedHashPtr : expectedHashPtr+expectedHashLen]
 
-	// Recompute and verify hash
-	recomputedHash := sha3_256(signature)
+	// Recompute and verify hash with the Sphinx signature-hash construction
+	// (see executeCheckSignatureHash above) — plain SHA3-256 never matches
+	// the wallet's SignatureHash and would fail every fresh transaction.
+	recomputedHash := sphincsSigHash(signature)
 
 	if len(recomputedHash) != len(expectedHash) {
 		return fmt.Errorf("signature hash verification failed: length mismatch")

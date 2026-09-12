@@ -9,13 +9,17 @@ import (
 	"fmt"
 	"log"
 	"strings"
+
+	"github.com/sphinxfndorg/protocol/src/common"
 )
 
 // OrgCode represents a valid organization identifier (4-byte prefix).
 type OrgCode string
 
 const (
-	OrgSPIF OrgCode = "SPIF" // SPIF - Sphinx Fingerprint (Identity Defense System)
+	// OrgSPIF is the SPIF organization code. It is derived from the canonical
+	// common.SPIFPrefix constant so the prefix has a single source of truth.
+	OrgSPIF OrgCode = common.SPIFPrefix // SPIF - Sphinx Fingerprint (Identity Defense System)
 )
 
 // orgMeta holds display metadata for an organisation.
@@ -28,7 +32,7 @@ type orgMeta struct {
 
 // orgRegistry is the authoritative list of supported organisations.
 var orgRegistry = []orgMeta{
-	{OrgSPIF, "SPIF", "Sphinx Fingerprint", "Identity Defense System"},
+	{OrgSPIF, string(OrgSPIF), "Sphinx Fingerprint", "Identity Defense System"},
 }
 
 // orgByCode provides O(1) lookup.
@@ -163,13 +167,13 @@ func FormatOrgAddressForDisplay(addr string) string {
 	clean = strings.ReplaceAll(clean, "-", "")
 	log.Printf("[DEBUG] FormatOrgAddressForDisplay: cleaned string length: %d", len(clean))
 
-	// Detect and strip known org prefix (SPIF)
+	// Detect and strip known org prefix
 	code, rest := extractOrgCode(clean)
 	if code == "" {
 		// Fall back: treat the whole string as hex
 		rest = clean
-		code = "SPIF"
-		log.Printf("[WARN] FormatOrgAddressForDisplay: no org prefix found, using 'SPIF'")
+		code = string(OrgSPIF)
+		log.Printf("[WARN] FormatOrgAddressForDisplay: no org prefix found, using %q", code)
 	} else {
 		log.Printf("[DEBUG] FormatOrgAddressForDisplay: detected org code: %q", code)
 	}
@@ -349,7 +353,7 @@ func NormalizeFingerprint(fp string) (string, error) {
 
 	// Strip SPIF prefix
 	originalLen := len(clean)
-	clean = strings.TrimPrefix(clean, "SPIF")
+	clean = strings.TrimPrefix(clean, string(OrgSPIF))
 	_, rest := extractOrgCode(clean)
 	if rest != "" {
 		clean = rest
@@ -397,13 +401,13 @@ func NormalizeFingerprints(fps []string) ([]string, error) {
 // Internal helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-// extractOrgCode tries to peel the SPIF prefix off s
+// extractOrgCode tries to peel the org prefix off s
 // (which must already be uppercased with spaces removed).
 // Returns ("", "") if none is found.
 func extractOrgCode(s string) (code, rest string) {
-	if len(s) >= 4 && s[:4] == "SPIF" {
-		log.Printf("[DEBUG] extractOrgCode: found org code SPIF")
-		return "SPIF", s[4:]
+	if len(s) >= 4 && s[:4] == string(OrgSPIF) {
+		log.Printf("[DEBUG] extractOrgCode: found org code %s", OrgSPIF)
+		return string(OrgSPIF), s[4:]
 	}
 	log.Printf("[DEBUG] extractOrgCode: no valid org code found in string")
 	return "", ""

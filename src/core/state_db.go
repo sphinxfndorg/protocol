@@ -151,6 +151,30 @@ func (s *StateDB) SetContractValue(key string, value []byte) {
 	s.contractPending[key] = append([]byte(nil), value...)
 }
 
+// ContractExists checks whether a contract address has been deployed.
+// It checks both pending writes (in the current block's state) and the
+// committed store. This is used by mempool validation to reject calls to
+// non-existent contracts before they enter the pending pool.
+func (s *StateDB) ContractExists(address string) bool {
+	if address == "" {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// Check pending writes first
+	if _, ok := s.contractPending[address]; ok {
+		return true
+	}
+
+	// Check committed store
+	data, err := s.db.Get(contractPrefix + address)
+	if err != nil {
+		return false
+	}
+	return len(data) > 0
+}
+
 // ----------------------------------------------------------------------------
 // Validator stake state (deterministic, part of the state root)
 //
@@ -617,7 +641,7 @@ func (s *StateDB) GetWalletStats(richListLimit int) (*WalletStats, error) {
 		}
 		addrType := "Legacy"
 		if len(acc.address) == 64 {
-			addrType = "SPIF"
+			addrType = common.SPIFPrefix
 		}
 		balanceSPX := new(big.Float).Quo(
 			new(big.Float).SetInt(acc.balance),
@@ -644,8 +668,8 @@ func (s *StateDB) GetWalletStats(richListLimit int) (*WalletStats, error) {
 		stats.TotalSupplySPX = supplySPX.Text('f', 6)
 	}
 
-	logger.Info("GetWalletStats: total=%d, SPIF=%d, legacy=%d, active=%d, with_balance=%d",
-		stats.TotalAccounts, stats.SPIFAddresses, stats.LegacyAddresses,
+	logger.Info("GetWalletStats: total=%d, %s=%d, legacy=%d, active=%d, with_balance=%d",
+		stats.TotalAccounts, common.SPIFPrefix, stats.SPIFAddresses, stats.LegacyAddresses,
 		stats.ActiveWallets, stats.WalletsWithBalance)
 
 	return stats, nil

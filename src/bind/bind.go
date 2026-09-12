@@ -229,6 +229,28 @@ func handleIncomingConn(
 		}
 		logger.Debug("[%s] Served %d blocks (heights %d-%d) to peer", selfID, len(blocks), req.FromHeight, req.ToHeight)
 
+	case "transaction":
+		// Gossiped transaction — relayed by sendrawtransaction through the
+		// rpc.Server txRelay hook (StartNode's SetTxRelay wiring in
+		// nodes.go) and delivered here by p2pMgr.BroadcastMessage. Every
+		// validator must add it to its own mempool, or a wallet-submitted
+		// tx exists only on the node the wallet connected to and can sit
+		// uncommitted forever (the USI "Confirmed: pending" bug).
+		var gossipedTx types.Transaction
+		if err := json.Unmarshal(msg.Data, &gossipedTx); err != nil {
+			logger.Warn("[%s] Failed to unmarshal gossiped transaction: %v", selfID, err)
+			return
+		}
+		if !gossipedTx.IsSystemTransaction() && !gossipedTx.HasFullAuthBundle() {
+			logger.Warn("[%s] Gossiped transaction rejected: missing full SPHINCS auth bundle", selfID)
+			return
+		}
+		if err := bc.AddTransaction(&gossipedTx); err != nil {
+			logger.Warn("[%s] Failed to add gossiped transaction %s: %v", selfID, gossipedTx.ID, err)
+			return
+		}
+		logger.Info("[%s] Accepted gossiped transaction %s into mempool", selfID, gossipedTx.ID)
+
 	case "proposal", "prepare", "vote", "timeout", "randao_sync", "sync_request", "sync_response":
 		if p2pMgr == nil {
 			logger.Warn("[%s] P2P manager is nil, cannot handle consensus message", selfID)

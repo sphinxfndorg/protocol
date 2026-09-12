@@ -3093,8 +3093,8 @@ func (c *Consensus) commitBlock(block Block) {
 			}
 
 			if len(txIDs) > 0 {
-				if ma, ok := c.blockChain.(MempoolAccessor); ok && ma.GetMempool() != nil {
-					ma.GetMempool().RemoveTransactions(txIDs)
+				if ma, ok := c.blockChain.(MempoolAccessor); ok && ma.GetMempoolForEviction() != nil {
+					ma.GetMempoolForEviction().RemoveTransactions(txIDs)
 					logger.Info("CommitBlock: evicted %d transaction(s) from mempool after deterministic failure", len(txIDs))
 				} else {
 					logger.Warn("CommitBlock: blockChain does not implement MempoolAccessor — cannot evict bad transactions; the same invalid block may be rebuilt")

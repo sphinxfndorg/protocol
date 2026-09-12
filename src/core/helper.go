@@ -360,6 +360,31 @@ func (bc *Blockchain) GetMempool() *pool.Mempool {
 	return bc.mempool
 }
 
+// GetMempoolForEviction satisfies consensus.MempoolAccessor.
+//
+// This exists ONLY because Go's interface satisfaction requires an exact
+// return-type match, and *pool.Mempool (a concrete pointer type) can never
+// be type-identical to an interface return type — no matter how many
+// methods *pool.Mempool actually implements. GetMempool() above must keep
+// returning the concrete *pool.Mempool for its other callers (which use
+// more of pool.Mempool's API than just RemoveTransactions), so it can't
+// double as the MempoolAccessor implementation. This method is the one
+// consensus.Consensus.commitBlock's type assertion (c.blockChain.(consensus.
+// MempoolAccessor)) actually matches.
+//
+// Returns a genuinely nil interface (not a non-nil interface wrapping a nil
+// *pool.Mempool) when no mempool is configured, so callers can safely check
+// `!= nil` rather than tripping the classic Go "nil pointer in non-nil
+// interface" gotcha.
+func (bc *Blockchain) GetMempoolForEviction() interface {
+	RemoveTransactions(txIDs []string)
+} {
+	if bc.mempool == nil {
+		return nil
+	}
+	return bc.mempool
+}
+
 // SetMempool sets the mempool for the blockchain
 func (bc *Blockchain) SetMempool(mempool *pool.Mempool) {
 	bc.lock.Lock()

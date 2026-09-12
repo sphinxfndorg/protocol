@@ -727,12 +727,18 @@ func (s *StateDB) SetNonce(address string, nonce uint64) {
 // It validates sufficient balance, performs the debit/credit as a single
 // logical operation, and returns an error if `from` has insufficient funds.
 // The total supply is conserved: no value is created or destroyed.
+//
+// from == to (self-send) is allowed rather than rejected: the debit and
+// credit apply to the same balance entry for the same amount, so it is a
+// mathematical no-op (aside from requiring the balance to transiently cover
+// `amount`) — it can't create, destroy, or move value anywhere. This is the
+// execution-time counterpart of the mempool self-send exception in
+// validation.go: wallets anchor data (see helper.go's AnchorMintReceipt) by
+// self-sending a transaction whose ReturnData carries the payload, and that
+// pattern must not fail here after already being admitted to the mempool.
 func (s *StateDB) Transfer(from, to string, amount *big.Int) error {
 	if from == "" || to == "" {
 		return fmt.Errorf("transfer: empty address (from=%q, to=%q)", from, to)
-	}
-	if from == to {
-		return fmt.Errorf("transfer: sender and receiver are the same (%s)", from)
 	}
 	if amount == nil || amount.Sign() <= 0 {
 		return fmt.Errorf("transfer: amount must be positive, got %v", amount)

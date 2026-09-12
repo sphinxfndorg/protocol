@@ -12,8 +12,8 @@ import (
 	"math/big"
 	"time"
 
-	"github.com/sphinxfndorg/protocol/src/contracts"
 	logger "github.com/sphinxfndorg/protocol/src/console"
+	"github.com/sphinxfndorg/protocol/src/contracts"
 	svm "github.com/sphinxfndorg/protocol/src/core/kernel/opcodes"
 	vmachine "github.com/sphinxfndorg/protocol/src/core/kernel/vm"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
@@ -874,6 +874,28 @@ func (mp *Mempool) performValidation(tx *types.Transaction) error {
 			return errors.New("empty sender or receiver")
 		}
 
+		// Reject self-transfers at admission — StateDB.Transfer (state_db.go)
+		// hard-rejects from == to at execution time with no way to recover,
+		// so a self-transfer that gets this far can be validated into the
+		// pending pool indefinitely, get selected into a block, and fail
+		// ExecuteBlock/CommitBlock every single time it's retried — which
+		// consensus's generic commit-error handling then treats as a lost
+		// leader race and retries forever instead of ever discarding it.
+		// Rejecting here, at the same point that already checks for empty
+		// addresses, keeps it out of the pool entirely.
+		//
+		// EXCEPTION: a self-send that carries ReturnData is not a value
+		// transfer at all — it's a data/NFT anchor using the self-send
+		// pattern documented in wallet helper.go's AnchorMintReceipt (the
+		// same pattern SendTransaction's memo path uses). Sender==Receiver
+		// there is by design: the transaction exists only to carry the
+		// anchor payload, and StateDB.Transfer's matching exception (see
+		// state_db.go) makes the debit/credit a mathematical no-op, so it's
+		// safe to admit.
+		if tx.Sender == tx.Receiver && len(tx.ReturnData) == 0 {
+			return fmt.Errorf("sender and receiver are the same (%s)", tx.Sender)
+		}
+
 		// Validate amount is positive
 		if tx.Amount == nil || tx.Amount.Cmp(big.NewInt(0)) <= 0 {
 			return errors.New("invalid amount")
@@ -907,6 +929,17 @@ func (mp *Mempool) performValidation(tx *types.Transaction) error {
 	// Validate addresses are present
 	if tx.Sender == "" || tx.Receiver == "" {
 		return errors.New("empty sender or receiver")
+	}
+
+	// Reject self-transfers here too — see the matching comment in the
+	// system-transaction branch above for why this must happen at
+	// admission rather than being left to execution-time rejection.
+	//
+	// EXCEPTION: self-send + ReturnData is a data/NFT anchor, not a value
+	// transfer — see the matching comment in the system-transaction branch
+	// above.
+	if tx.Sender == tx.Receiver && len(tx.ReturnData) == 0 {
+		return fmt.Errorf("sender and receiver are the same (%s)", tx.Sender)
 	}
 
 	// Validate amount is positive
@@ -1015,6 +1048,18 @@ func (mp *Mempool) validateTransactionBasic(tx *types.Transaction) error {
 	// Verify sender and receiver addresses are not empty
 	if tx.Sender == "" || tx.Receiver == "" {
 		return errors.New("empty sender or receiver")
+	}
+
+	// Reject self-transfers here too — see the matching comment earlier in
+	// this file for why this must happen at admission rather than being
+	// left to execution-time rejection.
+	//
+	// EXCEPTION: self-send + ReturnData is a data/NFT anchor, not a value
+	// transfer (see the matching comment in performValidation above). This
+	// check runs before type classification, so it has to make the same
+	// call directly on the raw fields rather than via classifyTransaction.
+	if tx.Sender == tx.Receiver && len(tx.ReturnData) == 0 {
+		return fmt.Errorf("sender and receiver are the same (%s)", tx.Sender)
 	}
 
 	// Verify amount exists and is positive

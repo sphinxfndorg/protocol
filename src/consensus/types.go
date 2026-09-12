@@ -101,10 +101,21 @@ var ErrInvalidBlockTx = fmt.Errorf("block failed deterministic transaction valid
 // deterministic commit failure. It is intentionally narrow — only the
 // two methods needed for cleanup — so lightweight and test
 // implementations of BlockChain are not forced to provide a full mempool.
+//
+// Named GetMempoolForEviction (not GetMempool) deliberately: a BlockChain
+// implementation's natural GetMempool() accessor almost always returns a
+// concrete mempool type for its other callers' use (e.g. core.Blockchain's
+// *pool.Mempool), and Go interface satisfaction requires an exact
+// return-type match — a concrete pointer type is never identical to an
+// interface return type. Reusing the GetMempool name here would mean no
+// real implementation could ever satisfy this interface. A distinct method
+// name lets an implementation provide both: its normal typed accessor for
+// everyday use, and this narrow one purely for the type assertion below.
 type MempoolAccessor interface {
-	// GetMempool returns the mempool used by this blockchain, or nil
+	// GetMempoolForEviction returns the mempool used by this blockchain,
+	// narrowed to just the eviction method, or a genuinely nil interface
 	// if no mempool is configured.
-	GetMempool() interface {
+	GetMempoolForEviction() interface {
 		RemoveTransactions(txIDs []string)
 	}
 }

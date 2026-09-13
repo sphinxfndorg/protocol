@@ -41,7 +41,7 @@ type Meta struct {
 
 	// ERC-721 NFT metadata context (set when minting NFTs with metadata JSON).
 	// TokenURI points to the metadata JSON on IPFS (like Ethereum ERC-721).
-	TokenURI    string `json:"token_uri,omitempty"`     // ipfs://<metadataCID>
+	TokenURI    string `json:"token_uri,omitempty"`    // ipfs://<metadataCID>
 	MetadataCID string `json:"metadata_cid,omitempty"` // CID of the metadata JSON
 
 	// On-chain anchor provenance (populated AFTER AnchorMintReceipt returns,
@@ -51,13 +51,26 @@ type Meta struct {
 	// data that was signed but never anchored (or anchored but not yet
 	// confirmed in a block). Verify screens render these verbatim, so an
 	// empty value must never be mistaken for a confirmed one.
-	MintID          string `json:"mint_id,omitempty"`           // deterministic mint identifier (receipt.MintID)
-	AnchorTxID      string `json:"anchor_txid,omitempty"`       // sendrawtransaction result txid ("unanchored" if never anchored)
-	AnchorPath      string `json:"anchor_path,omitempty"`       // local anchor_*.json sidecar path
-	ConfirmedHeight uint64 `json:"confirmed_height,omitempty"`  // block height that included the anchor tx (0 = pending/unconfirmed)
-	BlockHash       string `json:"block_hash,omitempty"`        // hex hash of the confirming block ("pending" while unconfirmed)
-	TokenID         uint64 `json:"token_id,omitempty"`          // SIP-721 tokenId (collection mints only)
+	MintID          string `json:"mint_id,omitempty"`          // deterministic mint identifier (receipt.MintID)
+	AnchorTxID      string `json:"anchor_txid,omitempty"`      // sendrawtransaction result txid ("unanchored" if never anchored)
+	AnchorPath      string `json:"anchor_path,omitempty"`      // local anchor_*.json sidecar path
+	ConfirmedHeight uint64 `json:"confirmed_height,omitempty"` // block height that included the anchor tx (0 = pending/unconfirmed)
+	BlockHash       string `json:"block_hash,omitempty"`       // hex hash of the confirming block ("pending" while unconfirmed)
+	TokenID         uint64 `json:"token_id,omitempty"`         // SIP-721 tokenId (collection mints only)
 	ContractAddress string `json:"contract_address,omitempty"` // SIP-721 collection contract (collection mints only)
+
+	// MintFeeNSPX records the policy-priced mint fee the anchor transaction
+	// carried as its Amount (CalculateMintDataFee.TotalFee, in nSPX). It is
+	// set by the Mint Data flow after AnchorMintReceipt returns so the embedded
+	// provenance shows the price charged when the data was minted on-chain.
+	MintFeeNSPX string `json:"mint_fee,omitempty"`
+
+	// AnchorNonce records the transaction account nonce used by the anchor tx —
+	// the on-chain replay-protection counter (an account's first transaction is
+	// 0). Kept as a string so an unset value ("") is distinguishable from a
+	// legitimate nonce 0, and rendered in the on-chain provenance block so the
+	// file shows the REAL on-chain nonce alongside the signature nonce.
+	AnchorNonce string `json:"anchor_nonce,omitempty"`
 }
 
 // GetPublicKeyPreview returns a shortened preview of the public key
@@ -113,6 +126,8 @@ func (m *Meta) Clone() *Meta {
 		BlockHash:          m.BlockHash,
 		TokenID:            m.TokenID,
 		ContractAddress:    m.ContractAddress,
+		MintFeeNSPX:        m.MintFeeNSPX,
+		AnchorNonce:        m.AnchorNonce,
 	}
 }
 

@@ -23,15 +23,24 @@ import (
 // addresses should reference this constant instead of hardcoding "SPIF".
 const SPIFPrefix = "SPIF"
 
-// NormalizeSPIFAddress strips the SPIF prefix, all spaces, and hyphens,
-// then validates that the remaining string is valid hex of length 40 or 64.
-// Returns the cleaned hex string (without SPIFPrefix) or an error.
+// NormalizeSPIFAddress strips the SPIF prefix (case-insensitive), all spaces,
+// tabs, and hyphens, then validates that the remaining string is valid hex of
+// length 40 or 64. Returns the canonical cleaned hex string (uppercase, without
+// SPIFPrefix) or an error.
+//
+// Canonical form is UPPERCASE so that LevelDB state keys, mempool nonce keys,
+// and equality checks are stable regardless of whether the caller passed
+// "SPIF f6f6 ...", "f6f6...", or "F6F6...".
 func NormalizeSPIFAddress(addr string) (string, error) {
 	raw := strings.TrimSpace(addr)
-	if strings.HasPrefix(raw, SPIFPrefix) {
-		raw = strings.TrimPrefix(raw, SPIFPrefix)
-		raw = strings.ReplaceAll(raw, " ", "")
-		raw = strings.ReplaceAll(raw, "-", "")
+	// Strip all whitespace/hyphens FIRST so both prefixed ("SPIF F6F6 ...")
+	// and raw ("F6F6 ...") display forms collapse to the same key.
+	raw = strings.ReplaceAll(raw, " ", "")
+	raw = strings.ReplaceAll(raw, "\t", "")
+	raw = strings.ReplaceAll(raw, "\n", "")
+	raw = strings.ReplaceAll(raw, "-", "")
+	if len(raw) >= len(SPIFPrefix) && strings.EqualFold(raw[:len(SPIFPrefix)], SPIFPrefix) {
+		raw = raw[len(SPIFPrefix):]
 	}
 	if len(raw) != 40 && len(raw) != 64 {
 		return "", fmt.Errorf("address must be 40 or 64 hex characters, got %d", len(raw))
@@ -39,7 +48,17 @@ func NormalizeSPIFAddress(addr string) (string, error) {
 	if _, err := hex.DecodeString(raw); err != nil {
 		return "", fmt.Errorf("address is not valid hex: %w", err)
 	}
-	return raw, nil
+	return strings.ToUpper(raw), nil
+}
+
+// CanonicalSPIFAddress returns the canonical (uppercase raw hex) form of addr.
+// If addr is not a valid SPIF/hex address (e.g. "genesis" or ""), it returns
+// the input unchanged so system addresses and empties pass through.
+func CanonicalSPIFAddress(addr string) string {
+	if raw, err := NormalizeSPIFAddress(addr); err == nil {
+		return raw
+	}
+	return addr
 }
 
 // ValidateSPIFAddress returns true if the given string is a valid SPIF address.

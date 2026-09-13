@@ -8,17 +8,17 @@
 // This extends the automatic mint flow (MintAndAnchor) with an Ethereum-close
 // collection mint while keeping the receipt-anchor model intact:
 //
-//   1. BroadcastSIP721CollectionMint executes the collection contract's mint
-//      method on-chain (sendrawtransaction with ToContract/CallData). The
-//      contract (contracts/callSIP721) is executed by EVERY node during block
-//      commit, which is what makes ownerOf/approve/transfer_from and the
-//      tokenId counter consensus-enforced instead of wallet-enforced.
-//   2. The tokenId it allocates comes STRAIGHT from contract storage
-//      (sip721:info.next_token_id), never guessed locally — this is the
-//      Ethereum tokenId counter semantic.
-//   3. The same SIP-721 binding (token_id/token_uri/contract) is then folded
-//      into the AnchorTag ReturnData so the receipt commitment and the
-//      on-chain token pointer verify as one atomic unit.
+//  1. BroadcastSIP721CollectionMint executes the collection contract's mint
+//     method on-chain (sendrawtransaction with ToContract/CallData). The
+//     contract (contracts/callSIP721) is executed by EVERY node during block
+//     commit, which is what makes ownerOf/approve/transfer_from and the
+//     tokenId counter consensus-enforced instead of wallet-enforced.
+//  2. The tokenId it allocates comes STRAIGHT from contract storage
+//     (sip721:info.next_token_id), never guessed locally — this is the
+//     Ethereum tokenId counter semantic.
+//  3. The same SIP-721 binding (token_id/token_uri/contract) is then folded
+//     into the AnchorTag ReturnData so the receipt commitment and the
+//     on-chain token pointer verify as one atomic unit.
 package mint
 
 import (
@@ -192,6 +192,19 @@ func broadcastReceiptAnchor(nodeAddr, from, keyFile string, anchorData []byte) (
 	}
 
 	mintPolicy := policy.GetDefaultPolicyParams()
+
+	// The receipt anchor is a self-send that exists only to carry the AnchorTag
+	// in ReturnData, but its Amount is NOT a free constant: it records the
+	// deterministic, policy-priced mint fee (CalculateMintDataFee.TotalFee — the
+	// same target QuoteMintDataGas sizes the gas price against) so the committed
+	// anchor carries the same value on-chain that the wallet quoted. It is never
+	// hardcoded; we fall back to 1 nSPX only when the fee quote is unavailable.
+	mintFeeQuote := mintPolicy.CalculateMintDataFee(uint64(len(anchorData)), uint64(len(anchorData)), mintPolicy.MintBaseHashes, mintPolicy.MintPinningMonths)
+	mintFeeNSPX := big.NewInt(1)
+	if mintFeeQuote != nil && mintFeeQuote.TotalFee != nil && mintFeeQuote.TotalFee.Sign() > 0 {
+		mintFeeNSPX = mintFeeQuote.TotalFee
+	}
+
 	gasQuote := mintPolicy.QuoteMintDataGas(uint64(len(anchorData)), uint64(len(anchorData)), mintPolicy.MintBaseHashes, mintPolicy.MintPinningMonths)
 
 	tx := &types.Transaction{
@@ -199,7 +212,7 @@ func broadcastReceiptAnchor(nodeAddr, from, keyFile string, anchorData []byte) (
 		ChainID:    chainID,
 		Sender:     rawFrom,
 		Receiver:   rawFrom, // self-send: this tx exists only to carry data
-		Amount:     big.NewInt(1),
+		Amount:     mintFeeNSPX,
 		GasLimit:   gasQuote.GasLimit,
 		GasPrice:   gasQuote.GasPrice,
 		Nonce:      nonce,

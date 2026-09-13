@@ -449,14 +449,14 @@ func requireMintBalance(client *WalletClient) (*BalanceResponse, error) {
 	if err != nil {
 		return nil, fmt.Errorf("could not verify SPX balance (is the full node online?): %w", err)
 	}
-	if resp == nil || resp.Balance == nil {
+	if resp == nil || resp.Balance.Int == nil {
 		return nil, errors.New("could not verify SPX balance")
 	}
 
 	mintPolicy := policy.GetDefaultPolicyParams()
 	minBalance := mintPolicy.GetMinMintBalance()
-	if resp.Balance.Cmp(minBalance) < 0 {
-		held := formatSPXAmount(new(big.Float).Quo(new(big.Float).SetInt(resp.Balance), big.NewFloat(1e18)))
+	if resp.Balance.Int.Cmp(minBalance) < 0 {
+		held := formatSPXAmount(new(big.Float).Quo(new(big.Float).SetInt(resp.Balance.Int), big.NewFloat(1e18)))
 		required := formatSPXAmount(new(big.Float).SetFloat64(mintPolicy.GetMinMintBalanceSPX()))
 		return nil, fmt.Errorf("minting data requires holding at least %s SPX — your current balance is %s SPX",
 			required, held)
@@ -477,19 +477,19 @@ func requireMintBalance(client *WalletClient) (*BalanceResponse, error) {
 // (same memo pattern as SendTransaction); if Sphinx later adds a
 // first-class MINT/DATA tx type, only the tag construction here changes.
 // AnchorMintReceipt commits a signed MintReceipt to the chain and saves the anchor tag.
-func (c *WalletClient) AnchorMintReceipt(receipt *mint.MintReceipt) (txID string, anchorPath string, err error) {
+func (c *WalletClient) AnchorMintReceipt(receipt *mint.MintReceipt) (txID string, anchorPath string, mintFeeNSPX *big.Int, anchorNonce uint64, err error) {
 	if sessionPassphrase == "" {
-		return "", "", errors.New("not logged in")
+		return "", "", nil, 0, errors.New("not logged in")
 	}
 	if receipt == nil {
-		return "", "", errors.New("nil receipt")
+		return "", "", nil, 0, errors.New("nil receipt")
 	}
 
 	// Minting data is a paid operation gated on holding the policy minimum
 	// balance. Enforce it here — in addition to the GUI screens — so every
 	// wallet path that anchors a receipt obeys the holding requirement.
 	if _, err := requireMintBalance(c); err != nil {
-		return "", "", fmt.Errorf("mint rejected: %w", err)
+		return "", "", nil, 0, fmt.Errorf("mint rejected: %w", err)
 	}
 
 	// Build NFT off-chain storage + on-chain anchor payload (Ethereum-style: anchor CID hash).
@@ -500,7 +500,7 @@ func (c *WalletClient) AnchorMintReceipt(receipt *mint.MintReceipt) (txID string
 	// NOTE: This uses storage module with safe fallbacks when IPFS is disabled.
 	payloadJSON, err := json.Marshal(receipt)
 	if err != nil {
-		return "", "", fmt.Errorf("marshal mint receipt: %w", err)
+		return "", "", nil, 0, fmt.Errorf("marshal mint receipt: %w", err)
 	}
 
 	ipfsClient := storage.NewClient(storage.DefaultConfig())
@@ -546,12 +546,12 @@ func (c *WalletClient) AnchorMintReceipt(receipt *mint.MintReceipt) (txID string
 
 	anchorData, err := mint.BuildAnchorData(receipt)
 	if err != nil {
-		return "", "", fmt.Errorf("build receipt anchor payload (ethereum-style): %w", err)
+		return "", "", nil, 0, fmt.Errorf("build receipt anchor payload (ethereum-style): %w", err)
 	}
 
 	rawSender, err := normaliseAddress(sessionFingerprint)
 	if err != nil {
-		return "", "", fmt.Errorf("invalid sender address: %w", err)
+		return "", "", nil, 0, fmt.Errorf("invalid sender address: %w", err)
 	}
 
 	log.Printf("[WalletRPC] AnchorMintReceipt: anchoring mint_id=%s subject=%s",
@@ -559,7 +559,7 @@ func (c *WalletClient) AnchorMintReceipt(receipt *mint.MintReceipt) (txID string
 
 	kp, skBytes, err := keys.LoadKeyFromDisk(sessionPassphrase)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to load key: %w", err)
+		return "", "", nil, 0, fmt.Errorf("failed to load key: %w", err)
 	}
 
 	defer func() {
@@ -601,7 +601,17 @@ func (c *WalletClient) AnchorMintReceipt(receipt *mint.MintReceipt) (txID string
 	if cachedNonce, err := c.getCurrentNonce(sessionFingerprint); err == nil {
 		nonce = cachedNonce
 	} else {
-		return "", "", fmt.Errorf("failed to get account nonce from node: %w", err)
+		return "", "", nil, 0, fmt.Errorf("failed to get account nonce from node: %w", err)
+	}
+
+	// Calculate the mint fee from policy to represent the value of the signed
+	// data on-chain. Even though this is a self-send (the anchor tx exists only
+	// to carry data), the Amount field records the deterministic, policy-priced
+	// worth of the minted data in nSPX — never a hardcoded constant.
+	mintFeeQuote := mintPolicy.CalculateMintDataFee(uint64(len(payloadJSON)), uint64(len(anchorData)), mintPolicy.MintBaseHashes, mintPolicy.MintPinningMonths)
+	mintFeeNSPX = big.NewInt(1)
+	if mintFeeQuote != nil && mintFeeQuote.TotalFee != nil && mintFeeQuote.TotalFee.Sign() > 0 {
+		mintFeeNSPX = mintFeeQuote.TotalFee
 	}
 
 	tx := &types.Transaction{
@@ -609,7 +619,7 @@ func (c *WalletClient) AnchorMintReceipt(receipt *mint.MintReceipt) (txID string
 		ChainID:    chainID,
 		Sender:     rawSender,
 		Receiver:   rawSender, // self-send: this tx exists only to carry data
-		Amount:     big.NewInt(1),
+		Amount:     mintFeeNSPX,
 		GasLimit:   gasQuote.GasLimit,
 		GasPrice:   gasQuote.GasPrice,
 		Nonce:      nonce,
@@ -620,22 +630,22 @@ func (c *WalletClient) AnchorMintReceipt(receipt *mint.MintReceipt) (txID string
 	tx.ID = tx.Hash()
 
 	if err := signTransactionLocally(tx, skBytes, kp.PublicKey); err != nil {
-		return "", "", fmt.Errorf("failed to sign anchor transaction: %w", err)
+		return "", "", nil, 0, fmt.Errorf("failed to sign anchor transaction: %w", err)
 	}
 
 	txData, err := json.Marshal(tx)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to marshal transaction: %w", err)
+		return "", "", nil, 0, fmt.Errorf("failed to marshal transaction: %w", err)
 	}
 
 	rawTx := hex.EncodeToString(txData)
 
 	resultData, err := rpc.CallRPC(c.nodeAddr, "sendrawtransaction", []interface{}{rawTx}, 120)
 	if err != nil {
-		return "", "", fmt.Errorf("RPC error: %w", err)
+		return "", "", nil, 0, fmt.Errorf("RPC error: %w", err)
 	}
 	if len(resultData) == 0 || string(resultData) == "null" {
-		return "", "", errors.New("empty response")
+		return "", "", nil, 0, errors.New("empty response")
 	}
 
 	var result struct {
@@ -644,17 +654,17 @@ func (c *WalletClient) AnchorMintReceipt(receipt *mint.MintReceipt) (txID string
 		Error  string `json:"error"`
 	}
 	if err := json.Unmarshal(resultData, &result); err != nil {
-		return "", "", fmt.Errorf("parse response: %w", err)
+		return "", "", nil, 0, fmt.Errorf("parse response: %w", err)
 	}
 	if result.Error != "" {
-		return "", "", fmt.Errorf("anchor tx rejected: %s", result.Error)
+		return "", "", nil, 0, fmt.Errorf("anchor tx rejected: %s", result.Error)
 	}
 
 	// After successful RPC call:
 	// Save off-chain anchor metadata sidecar (receipt-bound on disk).
 	anchorTag, err := mint.BuildAnchorTag(receipt)
 	if err != nil {
-		return "", "", fmt.Errorf("build receipt anchor tag for sidecar: %w", err)
+		return "", "", nil, 0, fmt.Errorf("build receipt anchor tag for sidecar: %w", err)
 	}
 
 	anchorPath, err = mint.SaveAnchorTag(anchorTag, "")
@@ -665,7 +675,7 @@ func (c *WalletClient) AnchorMintReceipt(receipt *mint.MintReceipt) (txID string
 		anchorPath = ""
 	}
 	log.Printf("[WalletRPC] AnchorMintReceipt: anchored as txid=%s, anchor saved to %s", result.TxID, anchorPath)
-	return result.TxID, anchorPath, nil
+	return result.TxID, anchorPath, mintFeeNSPX, nonce, nil
 }
 
 // MintNFTInCollection executes the Ethereum-close SIP-721 collection mint for
@@ -835,7 +845,7 @@ func BuildMintScreen(window fyne.Window, client *WalletClient) fyne.CanvasObject
 			dialog.ShowError(fmt.Errorf("sign a receipt first"), window)
 			return
 		}
-		txID, anchorPath, err := client.AnchorMintReceipt(lastReceipt.Receipt)
+		txID, anchorPath, _, _, err := client.AnchorMintReceipt(lastReceipt.Receipt)
 		if err != nil {
 			dialog.ShowError(fmt.Errorf("anchor: %w", err), window)
 			return

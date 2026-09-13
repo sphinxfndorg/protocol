@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/big"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -65,6 +66,27 @@ func provenanceHeightLine(label string, height uint64) string {
 	return fmt.Sprintf("%s: %d", label, height)
 }
 
+// FormatMintFeeNSPX renders the policy-priced mint fee recorded at mint time
+// ("n/a" when unset). The exact nSPX amount is always shown; a human-readable
+// SPX equivalent is appended when the value parses as a positive integer.
+// The raw nSPX string is what travels in Meta, so the on-chain price is
+// preserved at the exact precision the anchor transaction carried.
+func FormatMintFeeNSPX(raw string) string {
+	if strings.TrimSpace(raw) == "" {
+		return ""
+	}
+	v, ok := new(big.Int).SetString(strings.TrimSpace(raw), 10)
+	if !ok || v.Sign() <= 0 {
+		return fmt.Sprintf("%s nSPX", strings.TrimSpace(raw))
+	}
+	spx := new(big.Float).SetPrec(200).Quo(
+		new(big.Float).SetPrec(200).SetInt(v),
+		big.NewFloat(1e18),
+	)
+	spxValue, _ := spx.Float64()
+	return fmt.Sprintf("%s nSPX (~%.6f SPX)", strings.TrimSpace(raw), spxValue)
+}
+
 // onChainProvenanceBlock renders a compact multi-line provenance summary for
 // use in buildSecureMetadataBlock (all formats).
 func onChainProvenanceBlock(meta *Meta) string {
@@ -73,12 +95,14 @@ func onChainProvenanceBlock(meta *Meta) string {
 	}
 	lines := []string{
 		"--- On-Chain / Storage ---",
+		provenanceLine("MintPrice", FormatMintFeeNSPX(meta.MintFeeNSPX), "n/a"),
 		provenanceLine("MintID", meta.MintID, "unanchored"),
 		provenanceLine("CID", meta.IPFSCID, "unpinned"),
 		provenanceHeightLine("MintHeight", meta.BlockHeight),
 		provenanceLine("AnchorTx", meta.AnchorTxID, "unanchored"),
 		provenanceHeightLine("Confirmed", meta.ConfirmedHeight),
 		provenanceLine("BlockHash", meta.BlockHash, "pending"),
+		provenanceLine("TxNonce", meta.AnchorNonce, "n/a"),
 	}
 	if meta.TokenID != 0 {
 		lines = append(lines, fmt.Sprintf("TokenID: %d", meta.TokenID))
@@ -123,15 +147,13 @@ func buildSecureMetadataBlock(meta *Meta, fingerprint string) string {
 	provBlock := onChainProvenanceBlock(meta)
 
 	return fmt.Sprintf(
-		"USI-SUMMARY\n"+
-			"Fingerprint: %s\n"+
+		"Fingerprint: %s\n"+
 			"Signature: %s\n"+
 			"Signature Status: VALID [OK]\n"+
 			"Signed: %s\n"+
-			"Nonce: %s (%d chars)\n"+
+			"Signature Nonce: %s (%d chars)\n"+
 			"File Hash: %s\n"+
 			"Final Hash: %s\n"+
-			"Algorithm: SHAKE-256 + PQ\n"+
 			"%s",
 		formatFingerprintLegacy(fingerprint),
 		formattedSignature,
@@ -179,6 +201,7 @@ func buildCryptographicMetadataBlock(meta *Meta, fingerprint, finalHash string) 
 	}
 	onChainLines := strings.Join([]string{
 		"--- On-Chain / Storage Provenance ---",
+		provenance("Mint Price", FormatMintFeeNSPX(meta.MintFeeNSPX), "n/a"),
 		provenance("Mint ID", meta.MintID, "unanchored"),
 		provenance("IPFS CID", meta.IPFSCID, "unpinned"),
 		provenanceHeight("Mint Block Height", meta.BlockHeight),
@@ -186,22 +209,22 @@ func buildCryptographicMetadataBlock(meta *Meta, fingerprint, finalHash string) 
 		provenance("Anchor Path", meta.AnchorPath, "unanchored"),
 		provenanceHeight("Confirmed Height", meta.ConfirmedHeight),
 		provenance("Block Hash", meta.BlockHash, "pending"),
+		provenance("Tx Nonce", meta.AnchorNonce, "n/a"),
 		provenance("Token URI", meta.TokenURI, "n/a"),
 		provenance("Metadata CID", meta.MetadataCID, "n/a"),
 		provenanceTokenID(),
 		provenance("Contract", meta.ContractAddress, "n/a (no collection)"),
 	}, "\n")
 
-	cryptoDetails := fmt.Sprintf(
-		"USI CRYPTOGRAPHIC SIGNATURE VERIFICATION\n\n"+
-			"Fingerprint: %s\n"+
-			"Signature Status: VALID\n"+
-			"Timestamp: %s\n"+
-			"Nonce: %s\n"+
-			"Algorithm: SHAKE-256 + post-quantum signature\n"+
-			"File Hash: %s\n"+
-			"Final Document Hash: %s\n\n"+
-			"%s",
+	// keywordDetails carries the full technical verification block (fingerprint,
+	// hashes, nonce, and on-chain provenance) in the "Keywords" field, so any
+	// viewer or search index that surfaces Keywords exposes the verifiable
+	// proof data rather than a vague tag list.
+	keywordDetails := fmt.Sprintf(
+		"Sphinx Protocol Signature Verification; Fingerprint: %s; "+
+			"Signature Status: VALID; Timestamp: %s; Signature Nonce: %s; "+
+			"Algorithm: SHAKE-256 + post-quantum signature; File Hash: %s; "+
+			"Final Document Hash: %s\n\n%s",
 		formatFingerprintLegacy(fingerprint),
 		time.Unix(meta.Timestamp, 0).Format("2006-01-02 15:04:05"),
 		getNoncePrefix(meta.Nonce),
@@ -210,13 +233,39 @@ func buildCryptographicMetadataBlock(meta *Meta, fingerprint, finalHash string) 
 		onChainLines,
 	)
 
+	// mintStatus/anchorStatus feed the human-readable description below with
+	// the same sentinels used throughout onChainLines, so the prose never
+	// claims an anchor that hasn't happened yet.
+	mintStatus := "pending mint"
+	if meta.BlockHeight != 0 {
+		mintStatus = fmt.Sprintf("anchored at block height %d", meta.BlockHeight)
+	}
+	anchorStatus := "not yet anchored on-chain"
+	if strings.TrimSpace(meta.AnchorTxID) != "" {
+		anchorStatus = fmt.Sprintf("confirmed on-chain via transaction %s", meta.AnchorTxID)
+	}
+
+	// description is the meaningful, human-readable summary (the "Description"
+	// most viewers show for the PDF Subject field): it explains what Sphinx
+	// Protocol is and what this specific signature proves, rather than just
+	// repeating raw verification fields.
+	description := fmt.Sprintf(
+		"This document is cryptographically signed and verified through the Sphinx Protocol — "+
+			"a post-quantum blockchain secured by SPHINCS+ signatures, SHAKE-256 hashing, and "+
+			"PBFT-based consensus, developed by the Sphinx Foundation as open-source collective "+
+			"security infrastructure. Signature fingerprint %s was signed on %s, is %s, and %s. "+
+			"Recompute the file hash and check it against the Sphinx chain to confirm this document "+
+			"has not been altered since signing.",
+		formatFingerprintLegacy(fingerprint),
+		time.Unix(meta.Timestamp, 0).Format("2006-01-02 15:04:05"),
+		mintStatus,
+		anchorStatus,
+	)
+
 	return map[string]string{
-		"Title":        "Cryptographically Signed Document - E2E Cipher Protocol",
-		"Author":       "USI Secure Vault",
-		"Subject":      cryptoDetails,
-		"Keywords":     "Integrity Protection; Cryptographic Signature; USI",
-		"Creator":      "USI v0.002 Secure",
-		"Producer":     "E2E Cipher Protocol",
+		"Author":       "Sphinx Protocol",
+		"Subject":      description,
+		"Keywords":     keywordDetails,
 		"Fingerprint":  fingerprint,
 		"USISignature": string(metaJSON),
 		"SigningTime":  time.Now().Format(time.RFC3339),
@@ -1327,7 +1376,7 @@ func buildPDFStyleXMPPacket(meta *Meta, fingerprint string) string {
 			"Fingerprint: %s\n"+
 			"Signature Status: VALID\n"+
 			"Timestamp: %s\n"+
-			"Nonce: %s\n"+
+			"Signature Nonce: %s\n"+
 			"Algorithm: SHAKE-256 + post-quantum signature\n"+
 			"File Hash: %s\n"+
 			"Final Document Hash: %s",
@@ -1337,6 +1386,10 @@ func buildPDFStyleXMPPacket(meta *Meta, fingerprint string) string {
 		formatHashWithSpaces(meta.FileHash, 4),
 		formatHashWithSpaces(meta.FinalDocumentHash, 4),
 	)
+
+	// descriptionText is what Finder/Preview show as "Description" (dc:description) —
+	// just the full provenance block, with no extra tag lines appended.
+	descriptionText := secureBlock
 
 	pubKeyA, pubKeyB := splitHalf(meta.PublicKey)
 	sigA, sigB := splitHalf(meta.Signature)
@@ -1383,10 +1436,6 @@ func buildPDFStyleXMPPacket(meta *Meta, fingerprint string) string {
       <dc:creator><rdf:Seq><rdf:li>%s</rdf:li></rdf:Seq></dc:creator>
       <dc:subject>
         <rdf:Bag>
-          <rdf:li>USI-SIGNED</rdf:li>
-          <rdf:li>Cryptographic Signature</rdf:li>
-          <rdf:li>E2E Cipher Protocol</rdf:li>
-          <rdf:li>Integrity Protected</rdf:li>
           <rdf:li>%s</rdf:li>
         </rdf:Bag>
       </dc:subject>
@@ -1395,7 +1444,6 @@ func buildPDFStyleXMPPacket(meta *Meta, fingerprint string) string {
       <xmp:ModifyDate>%s</xmp:ModifyDate>
       <xmp:MetadataDate>%s</xmp:MetadataDate>
       <xmp:CreatorTool>E2E Cipher Protocol v0.002</xmp:CreatorTool>
-      <xmp:Label>USI-SIGNED</xmp:Label>
       <xmpRights:Marked>True</xmpRights:Marked>
       <xmpRights:UsageTerms><rdf:Alt><rdf:li xml:lang="x-default">Cryptographically signed. Verify with USI before use.</rdf:li></rdf:Alt></xmpRights:UsageTerms>
       <usi:SecureMetadata>%s</usi:SecureMetadata>
@@ -1420,12 +1468,14 @@ func buildPDFStyleXMPPacket(meta *Meta, fingerprint string) string {
       <usi:Signature_B>%s</usi:Signature_B>
       <usi:OnChainProvenance>%s</usi:OnChainProvenance>
       <usi:MintID>%s</usi:MintID>
+      <usi:MintPrice>%s</usi:MintPrice>
       <usi:IPFSCID>%s</usi:IPFSCID>
       <usi:MintBlockHeight>%s</usi:MintBlockHeight>
       <usi:AnchorTxID>%s</usi:AnchorTxID>
       <usi:AnchorPath>%s</usi:AnchorPath>
       <usi:ConfirmedHeight>%s</usi:ConfirmedHeight>
       <usi:BlockHash>%s</usi:BlockHash>
+      <usi:TxNonce>%s</usi:TxNonce>
       <usi:TokenURI>%s</usi:TokenURI>
       <usi:MetadataCID>%s</usi:MetadataCID>
       <usi:TokenID>%s</usi:TokenID>
@@ -1435,9 +1485,9 @@ func buildPDFStyleXMPPacket(meta *Meta, fingerprint string) string {
 </x:xmpmeta>
 <?xpacket end="w"?>`,
 		xmlEscape(docTitle),
-		xmlEscape(cryptoDetails),
+		xmlEscape(descriptionText),
 		xmlEscape(signer),
-		xmlEscape(secureBlock),
+		xmlEscape(cryptoDetails),
 		ts, ts, ts,
 		xmlEscape(secureBlock),
 		xmlEscape(cryptoDetails),
@@ -1457,12 +1507,14 @@ func buildPDFStyleXMPPacket(meta *Meta, fingerprint string) string {
 		xmlEscape(sigB),
 		xmlEscape(onChain),
 		xmlEscape(meta.MintID),
+		xmlEscape(FormatMintFeeNSPX(meta.MintFeeNSPX)),
 		xmlEscape(meta.IPFSCID),
 		provenanceHeightStr(meta.BlockHeight),
 		xmlEscape(meta.AnchorTxID),
 		xmlEscape(meta.AnchorPath),
 		provenanceHeightStr(meta.ConfirmedHeight),
 		xmlEscape(meta.BlockHash),
+		xmlEscape(meta.AnchorNonce),
 		xmlEscape(tokenURIStr),
 		xmlEscape(metadataCIDStr),
 		xmlEscape(tokenIDStr),
@@ -1529,7 +1581,7 @@ func buildOfficeCustomPropsPDFStyle(meta *Meta, fingerprint string) []byte {
 			"Fingerprint: %s\n"+
 			"Signature Status: VALID\n"+
 			"Timestamp: %s\n"+
-			"Nonce: %s",
+			"Signature Nonce: %s",
 		formatFingerprintLegacy(fingerprint),
 		ts,
 		getNoncePrefix(nonce),
@@ -1578,6 +1630,8 @@ func buildOfficeCustomPropsPDFStyle(meta *Meta, fingerprint string) []byte {
 		{30, "USI_MetadataCID", provenanceLine("MetadataCID", meta.MetadataCID, "n/a")},
 		{31, "USI_TokenID", tokenIDStr(meta)},
 		{32, "USI_ContractAddress", contractAddressStr(meta)},
+		{33, "USI_MintPrice", FormatMintFeeNSPX(meta.MintFeeNSPX)},
+		{34, "USI_TxNonce", provenanceLine("TxNonce", meta.AnchorNonce, "n/a")},
 	}
 
 	var sb strings.Builder
@@ -1748,7 +1802,7 @@ func setRichXattrs(filePath string, meta *Meta, fingerprint string) error {
 			"Fingerprint: %s\n"+
 			"Signature Status: VALID\n"+
 			"Timestamp: %s\n"+
-			"Nonce: %s\n"+
+			"Signature Nonce: %s\n"+
 			"Algorithm: SHAKE-256 + post-quantum signature\n"+
 			"File Hash: %s\n"+
 			"Final Document Hash: %s",

@@ -1062,7 +1062,7 @@ func (mp *Mempool) getSenderBalance(sender string) *big.Int {
 // getMinimumGasPrice returns the minimum acceptable gas price for transactions
 // This is a stub method that would be configurable in production
 func (mp *Mempool) getMinimumGasPrice() *big.Int {
-	// Return 1 Gwei as minimum gas price (1,000,000,000 wei)
+	// Return 1 gSPX as minimum gas price (1,000,000,000 nSPX)
 	return new(big.Int).SetUint64(1000000000)
 }
 

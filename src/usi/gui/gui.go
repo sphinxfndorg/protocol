@@ -424,18 +424,36 @@ func Run() {
 
 							addActivity(fmt.Sprintf("Sent %s %s to %s (tx: %s)",
 								formatSPXAmount(amount), chainHeader.Symbol, recipientEntry.Text[:16], txID[:8]+"..."))
-							statusText.Text = "SUCCESS Transaction sent! TxID: " + txID[:16] + "..."
+							statusText.Text = "✓ Transaction broadcast! TxID: " + txID[:16] + "..."
 							statusText.Color = colAccent
 							statusText.Refresh()
-
-							dialog.ShowInformation("Transaction Sent",
-								fmt.Sprintf("Successfully sent %s %s to %s\n\nTxID: %s",
-									formatSPXAmount(amount), chainHeader.Symbol, recipientEntry.Text, txID), window)
 
 							recipientEntry.SetText("")
 							amountEntry.SetText("")
 							memoEntry.SetText("")
 						})
+
+						// Background confirmation checker: poll the node until the
+						// transaction is committed to a block, then update the status.
+						bgTxID := txID
+						bgAmount := formatSPXAmount(amount)
+						bgRecipient := recipientEntry.Text
+						go func() {
+							conf, _ := walletClient.WaitForTxConfirmation(bgTxID, 300*time.Second)
+							fyne.Do(func() {
+								if conf != nil {
+									statusText.Text = fmt.Sprintf("✓ Transaction confirmed! TxID: %s\nConfirmed in block %d (%s)", bgTxID[:16]+"...", conf.Height, conf.Hash[:16]+"...")
+									statusText.Color = colAccent
+									statusText.Refresh()
+									addActivity(fmt.Sprintf("Send %s to %s confirmed in block %d", bgAmount, bgRecipient[:16]+"...", conf.Height))
+								} else {
+									statusText.Text = fmt.Sprintf("⚠ Transaction still pending after 5 min: %s\nIt may confirm later or be dropped by the network.", bgTxID[:16]+"...")
+									statusText.Color = colWarn
+									statusText.Refresh()
+									addActivity(fmt.Sprintf("Send %s to %s still pending after 5 min", bgAmount, bgRecipient[:16]+"..."))
+								}
+							})
+						}()
 					}()
 				})
 		})
@@ -1190,7 +1208,7 @@ func Run() {
 
 		var selectedFile string
 		var selectedFileSize uint64
-// NFT metadata fields (ERC-721 compatible) - declared early because the
+		// NFT metadata fields (ERC-721 compatible) - declared early because the
 		// IPFS metadata upload below (before the sign action) reads their text.
 		nftNameEntry := widget.NewEntry()
 		nftNameEntry.SetPlaceHolder("NFT name (e.g. My Digital Artwork)")
@@ -1360,8 +1378,8 @@ func Run() {
 			}
 
 			validatePassphraseDialog(window, "Confirm Passphrase",
-				fmt.Sprintf("Enter your passphrase to sign this document.\n\nMinting costs %.2f %s, charged on-chain. Your wallet must hold at least %.0f %s.",
-					mintFeeSPX(), chainHeader.Symbol, mintPolicy.GetMinMintBalanceSPX(), chainHeader.Symbol),
+				fmt.Sprintf("Enter your passphrase to sign this document.\n\nMinting costs ~%s %s (policy estimate), charged on-chain. Your wallet must hold at least %.0f %s.",
+					formatSPXAmount(new(big.Float).SetFloat64(mintFeeSPX())), chainHeader.Symbol, mintPolicy.GetMinMintBalanceSPX(), chainHeader.Symbol),
 				func(passphrase string) {
 					prog := widget.NewProgressBar()
 					progLbl := widget.NewLabel("Preparing signature…")
@@ -1481,63 +1499,77 @@ func Run() {
 						}
 
 						if mintErr == nil {
-							txID, anchorPath, anchorErr := walletClient.AnchorMintReceipt(mintRes.Receipt)
-						// Wait (bounded) for the anchor tx to be committed so the provenance
-						// stamped below records the REAL confirming block instead of the
-						// "pending" sentinel. A timeout is NOT fatal: the anchor stays
-						// on-chain and provenance falls back to pending while a background
-						// poller keeps trying, so the sidecar eventually shows the real
-						// block hash/height once the node validates and confirms the tx.
-						var confirmed *TxConfirmation
-						if anchorErr == nil {
-							fyne.Do(func() { progLbl.SetText("Waiting for block confirmation…") })
-							confirmed, _ = walletClient.WaitForTxConfirmation(txID, 300*time.Second)
-						}
-
-						// Build the confirmedBlock adapter from the wait result (nil if timed out).
-						var confirmedBlock interface {
-							GetHeight() uint64
-							GetHash() string
-						}
-						if confirmed != nil {
-							confirmedBlock = &confirmedBlockInfo{height: confirmed.Height, hash: confirmed.Hash}
-						}
-						// Stamp the anchor + REAL confirming block into the file's embedded
-						// provenance (writes meta.ConfirmedHeight / meta.BlockHash, i.e. the
-						// real block hash and height, into the sidecar data). Falls back to
-						// "pending" on timeout.
-						provErr := sign.RefreshOnChainProvenance(selectedFile, meta, publicFingerprint, txID, anchorPath, mintRes.Receipt.MintID, 0, "", confirmedBlock)
-						if provErr != nil {
-							log.Printf("[WARN] Mint Data: provenance refresh incomplete: %v", provErr)
-						}
-
-						// Background poller: if the initial 300s wait timed out, keep
-						// polling for up to 600s more and rewrite the REAL block hash/
-						// height into the provenance the moment the node confirms the
-						// anchor tx (files are captured before selectedFile is reset).
-						if confirmed == nil {
-							bgFile := selectedFile
-							bgTxID := txID
-							bgAnchorPath := anchorPath
-							log.Printf("[Mint Data] txid=%s not yet confirmed after 300s — background poller continuing (600s)", bgTxID)
-							go func() {
-								bgConfirmed, _ := walletClient.WaitForTxConfirmation(bgTxID, 600*time.Second)
-								if bgConfirmed != nil {
-									bgBlock := &confirmedBlockInfo{height: bgConfirmed.Height, hash: bgConfirmed.Hash}
-									bgErr := sign.RefreshOnChainProvenance(bgFile, meta, publicFingerprint, bgTxID, bgAnchorPath, mintRes.Receipt.MintID, 0, "", bgBlock)
-									if bgErr != nil {
-										log.Printf("[WARN] Mint Data: background provenance refresh failed: %v", bgErr)
-									} else {
-										log.Printf("[Mint Data] Background poller: txid=%s confirmed at height=%d hash=%s — provenance updated to REAL block", bgTxID, bgConfirmed.Height, bgConfirmed.Hash)
-									}
-								} else {
-									log.Printf("[WARN] Mint Data: txid=%s still unconfirmed after 900s total — provenance remains pending", bgTxID)
+							txID, anchorPath, mintFeeNSPX, anchorNonce, anchorErr := walletClient.AnchorMintReceipt(mintRes.Receipt)
+							// Record the policy-priced mint fee actually charged by the anchor
+							// transaction so the embedded provenance (USI-SUMMARY / XMP / PDF /
+							// Office / xattrs) shows the price paid when this data was minted.
+							if anchorErr == nil {
+								if mintFeeNSPX != nil {
+									meta.MintFeeNSPX = mintFeeNSPX.String()
 								}
-							}()
-						}
+								// Record the REAL on-chain transaction nonce (the account
+								// replay-protection counter — an account's first tx is 0)
+								// so the embedded provenance shows the exact nonce the
+								// anchor tx carried on-chain.
+								meta.AnchorNonce = fmt.Sprintf("%d", anchorNonce)
+							}
+							// Wait (bounded) for the anchor tx to be committed so the provenance
+							// stamped below records the REAL confirming block instead of the
+							// "pending" sentinel. A timeout is NOT fatal: the anchor stays
+							// on-chain and provenance falls back to pending while a background
+							// poller keeps trying, so the sidecar eventually shows the real
+							// block hash/height once the node validates and confirms the tx.
+							var confirmed *TxConfirmation
+							if anchorErr == nil {
+								fyne.Do(func() { progLbl.SetText("Waiting for block confirmation…") })
+								confirmed, _ = walletClient.WaitForTxConfirmation(txID, 300*time.Second)
+							}
+
+							// Build the confirmedBlock adapter from the wait result (nil if timed out).
+							var confirmedBlock interface {
+								GetHeight() uint64
+								GetHash() string
+							}
+							if confirmed != nil {
+								confirmedBlock = &confirmedBlockInfo{height: confirmed.Height, hash: confirmed.Hash}
+							}
+							// Stamp the anchor + REAL confirming block into the file's embedded
+							// provenance (writes meta.ConfirmedHeight / meta.BlockHash, i.e. the
+							// real block hash and height, into the sidecar data). Falls back to
+							// "pending" on timeout.
+							provErr := sign.RefreshOnChainProvenance(selectedFile, meta, publicFingerprint, txID, anchorPath, mintRes.Receipt.MintID, 0, "", confirmedBlock)
+							if provErr != nil {
+								log.Printf("[WARN] Mint Data: provenance refresh incomplete: %v", provErr)
+							}
+
+							// Background poller: if the initial 300s wait timed out, keep
+							// polling for up to 600s more and rewrite the REAL block hash/
+							// height into the provenance the moment the node confirms the
+							// anchor tx (files are captured before selectedFile is reset).
+							if confirmed == nil {
+								bgFile := selectedFile
+								bgTxID := txID
+								bgAnchorPath := anchorPath
+								log.Printf("[Mint Data] txid=%s not yet confirmed after 300s — background poller continuing (600s)", bgTxID)
+								go func() {
+									bgConfirmed, _ := walletClient.WaitForTxConfirmation(bgTxID, 600*time.Second)
+									if bgConfirmed != nil {
+										bgBlock := &confirmedBlockInfo{height: bgConfirmed.Height, hash: bgConfirmed.Hash}
+										bgErr := sign.RefreshOnChainProvenance(bgFile, meta, publicFingerprint, bgTxID, bgAnchorPath, mintRes.Receipt.MintID, 0, "", bgBlock)
+										if bgErr != nil {
+											log.Printf("[WARN] Mint Data: background provenance refresh failed: %v", bgErr)
+										} else {
+											log.Printf("[Mint Data] Background poller: txid=%s confirmed at height=%d hash=%s — provenance updated to REAL block", bgTxID, bgConfirmed.Height, bgConfirmed.Hash)
+										}
+									} else {
+										log.Printf("[WARN] Mint Data: txid=%s still unconfirmed after 900s total — provenance remains pending", bgTxID)
+									}
+								}()
+							}
 							fyne.Do(func() {
 								progDlg.Hide()
 								if anchorErr != nil {
+									log.Printf("[ERROR] Mint Data: NFT anchor failed for %s: %v", filepath.Base(selectedFile), anchorErr)
 									addActivity(fmt.Sprintf("Signed document: %s (NFT anchor failed: %v)", filepath.Base(selectedFile), anchorErr))
 									statusText.Text = "✓  Document signed, but NFT anchor failed: " + anchorErr.Error()
 									statusText.Color = colWarn
@@ -1565,8 +1597,8 @@ func Run() {
 										confNote = "\nAnchor pending — background poller will write the real block hash/height once the node confirms it"
 									}
 									dialog.ShowInformation("Minted ✓",
-										fmt.Sprintf("Document signed and NFT minted on-chain!\n\nSignature: %s.usimeta\nTXID: %s\nCID: %s\nBlock height: %d\nAnchor: %s\n\nMint fee charged: %.2f %s%s",
-											filepath.Base(selectedFile), txID, cid, blockHeight, anchorPath + confNote, mintFeeSPX(), chainHeader.Symbol, ipfsNote), window)
+										fmt.Sprintf("Document signed and NFT minted on-chain!\n\nSignature: %s.usimeta\nTXID: %s\nCID: %s\nBlock height: %d\nAnchor: %s\n\nMint fee charged: %s%s",
+											filepath.Base(selectedFile), txID, cid, blockHeight, anchorPath+confNote, sign.FormatMintFeeNSPX(meta.MintFeeNSPX), ipfsNote), window)
 								}
 								selectedFile = ""
 								resetDropZone()
@@ -1634,15 +1666,15 @@ func Run() {
 			spacer(12),
 			infoPanel("Mint Pricing (policy)", []fyne.CanvasObject{
 				infoRow("Min. balance", fmt.Sprintf("%.0f %s", mintPolicy.GetMinMintBalanceSPX(), chainHeader.Symbol), colAccent),
-				infoRow("Cost per mint", fmt.Sprintf("%.2f %s", mintFeeSPX(), chainHeader.Symbol), colWarn),
+				infoRow("Est. cost per mint", fmt.Sprintf("%s %s", formatSPXAmount(new(big.Float).SetFloat64(mintFeeSPX())), chainHeader.Symbol), colWarn),
 				infoRow("Charged via", "anchor tx gas", colText),
 			}),
 			spacer(12),
 			alertBox(fmt.Sprintf("You must hold at least %.0f %s in your wallet to mint data. The node rejects the mint below this floor.",
 				mintPolicy.GetMinMintBalanceSPX(), chainHeader.Symbol), color.RGBA{96, 165, 250, 20}, colInfo),
 			spacer(12),
-			alertBox(fmt.Sprintf("Each mint costs %.2f %s, deducted on-chain through the anchor transaction.",
-				mintFeeSPX(), chainHeader.Symbol), color.RGBA{74, 222, 158, 15}, colAccent),
+			alertBox(fmt.Sprintf("Each mint costs %s %s, deducted on-chain through the anchor transaction.",
+				formatSPXAmount(new(big.Float).SetFloat64(mintFeeSPX())), chainHeader.Symbol), color.RGBA{74, 222, 158, 15}, colAccent),
 			spacer(12),
 			alertBox("A document can only be signed once. Re-signing is blocked to preserve integrity.", color.RGBA{255, 179, 71, 20}, colWarn),
 		)
@@ -2055,9 +2087,9 @@ func Run() {
 					log.Printf("[Wallet] Failed to fetch balance: %v", err)
 					return
 				}
-				if resp != nil && resp.Balance != nil {
+				if resp != nil && resp.Balance.Int != nil {
 					balanceSPX := new(big.Float).Quo(
-						new(big.Float).SetInt(resp.Balance),
+						new(big.Float).SetInt(resp.Balance.Int),
 						big.NewFloat(1e18),
 					)
 					balValue.Text = formatSPXAmount(balanceSPX)
@@ -2182,9 +2214,9 @@ func Run() {
 
 						// Format amount
 						amountSPX := "0"
-						if tx.Amount != nil {
+						if tx.Amount.Int != nil {
 							amountFloat := new(big.Float).Quo(
-								new(big.Float).SetInt(tx.Amount),
+								new(big.Float).SetInt(tx.Amount.Int),
 								big.NewFloat(1e18),
 							)
 							amountSPX = formatSPXAmount(amountFloat)

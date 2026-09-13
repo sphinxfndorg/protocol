@@ -1,9 +1,0 @@
-{
-  "type": "mint_anchor",
-  "mint_id": "a25bc2b27aee76ec606a6e6c5c7d0a9bac5ec79956852a9b9a6b5927ffc9da0e",
-  "subject": "Logo.png",
-  "cid": "spxhash-723a7f8b07b5907ccd8f7b81fee77c299a143756ae83d715482da722012a0299",
-  "minter_public_key": "26ab03b69f62fb057ee47fbb2ef6d43922ae05b1976bf10e72e971b43ee7c62a",
-  "receipt_hash": "6c1b7b93234e38b4ae3c75c20bfeb98dccc7fd5aa300b227321b0d44e33c132d",
-  "cid_hash_hex": "8f8ec300f32453ed3327cf0cf324af058d4ceabb421eba87ad663996579807b0"
-}

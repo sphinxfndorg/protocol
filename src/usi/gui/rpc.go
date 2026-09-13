@@ -104,31 +104,12 @@ func (c *WalletClient) GetBalance(address string) (*BalanceResponse, error) {
 		return nil, errors.New("empty response from RPC")
 	}
 
-	var result struct {
-		Address  string `json:"address"`
-		Balance  string `json:"balance"`
-		Pending  string `json:"pending"`
-		Unlocked string `json:"unlocked"`
-	}
-	if err := json.Unmarshal(resultData, &result); err != nil {
+	var resp BalanceResponse
+	if err := json.Unmarshal(resultData, &resp); err != nil {
 		return nil, fmt.Errorf("parse response: %w", err)
 	}
 
-	balance := new(big.Int)
-	balance.SetString(result.Balance, 10)
-
-	pending := new(big.Int)
-	pending.SetString(result.Pending, 10)
-
-	unlocked := new(big.Int)
-	unlocked.SetString(result.Unlocked, 10)
-
-	return &BalanceResponse{
-		Address:  result.Address,
-		Balance:  balance,
-		Pending:  pending,
-		Unlocked: unlocked,
-	}, nil
+	return &resp, nil
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -425,6 +406,14 @@ func (c *WalletClient) SendTransaction(toAddress string, amount *big.Int, memo s
 
 	if result.Error != "" {
 		return "", fmt.Errorf("tx rejected: %s", result.Error)
+	}
+
+	// Verify the transaction was actually accepted by the node by checking
+	// its presence in the mempool. If it's not found, the node silently
+	// rejected it (e.g., nonce mismatch, insufficient gas) without returning
+	// an explicit error.
+	if strings.TrimSpace(result.TxID) == "" {
+		return "", errors.New("node returned empty txid — transaction may have been rejected")
 	}
 
 	return result.TxID, nil

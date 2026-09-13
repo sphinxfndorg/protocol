@@ -147,12 +147,23 @@ func FetchLeafFromDB(db *leveldb.DB, key string) ([]byte, error) {
 	return db.Get([]byte(key), nil)
 }
 
-// PruneOldLeaves removes old leaf nodes from the LevelDB.
-func PruneOldLeaves(db *leveldb.DB, numLeaves int) error {
+// leafKeyPrefix scopes every saved leaf key. Keys are formed as
+// leaf:<messageID>:<index>, where messageID is the signer-provided evidence ID
+// (a hash of the signed message). This keeps one signed message's leaves from
+// colliding with another's when a shared LevelDB serves many signers.
+const leafKeyPrefix = "leaf:"
+
+// PruneOldLeaves removes leaf nodes for ONE evidence batch (identified by id)
+// from the LevelDB. Because keys are prefixed with the batch's id, pruning one
+// message's leaves can never touch another message's leaves.
+func PruneOldLeaves(db *leveldb.DB, id string, numLeaves int) error {
+	if db == nil {
+		return fmt.Errorf("leveldb is nil")
+	}
 	// Loop over the number of leaves to be deleted
 	for i := 0; i < numLeaves; i++ {
-		// Generate the key for the leaf node
-		key := fmt.Sprintf("leaf-%d", i)
+		// Generate the key for the leaf node within this evidence batch
+		key := fmt.Sprintf("%s%s:%d", leafKeyPrefix, id, i)
 		// Attempt to delete the leaf node by key
 		err := db.Delete([]byte(key), nil)
 		// If an error occurs, return it, except for the ErrNotFound case
@@ -164,14 +175,19 @@ func PruneOldLeaves(db *leveldb.DB, numLeaves int) error {
 	return nil
 }
 
-// SaveLeavesBatchToDB performs batch operations for LevelDB to save leaf nodes efficiently.
-func SaveLeavesBatchToDB(db *leveldb.DB, leaves [][]byte) error {
+// SaveLeavesBatchToDB performs batch operations for LevelDB to save leaf nodes
+// efficiently. id scopes the batch (e.g. a hash of the signed message), so each
+// signed message's five leaves are individually addressable in a shared DB.
+func SaveLeavesBatchToDB(db *leveldb.DB, id string, leaves [][]byte) error {
+	if db == nil {
+		return fmt.Errorf("leveldb is nil")
+	}
 	// Create a new batch to accumulate multiple write operations
 	batch := new(leveldb.Batch)
 	// Iterate over the leaves to be added
 	for i, leaf := range leaves {
-		// Generate the key for each leaf node
-		key := fmt.Sprintf("leaf-%d", i)
+		// Generate the key for each leaf node within this evidence batch
+		key := fmt.Sprintf("%s%s:%d", leafKeyPrefix, id, i)
 		// Add the leaf node to the batch
 		batch.Put([]byte(key), leaf)
 	}
@@ -183,17 +199,6 @@ func SaveLeavesBatchToDB(db *leveldb.DB, leaves [][]byte) error {
 func FetchLeafConcurrent(db *leveldb.DB, key string) ([]byte, error) {
 	// Retrieve the leaf node from LevelDB
 	return db.Get([]byte(key), nil)
-}
-
-// setMaxFileSize updates the global maxFileSize variable.
-func setMaxFileSize(sizeInGiB int) {
-	// Ensure a valid file size is provided
-	if sizeInGiB <= 0 {
-		fmt.Println("Invalid size. Must be greater than 0.")
-		return
-	}
-	// Convert the size from GiB to bytes
-	maxFileSize = sizeInGiB * (1 << 30)
 }
 
 // MemoryMapFile maps a file into memory with size checks

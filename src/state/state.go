@@ -2335,11 +2335,16 @@ func (s *Storage) storeBlockToDisk(block *types.Block) error {
 	for i, tx := range block.Body.TxsList {
 		timestampISO := common.GetTimeService().GetTimeInfo(tx.Timestamp).ISOUTC
 
-		// Convert transaction to map
+		// Convert transaction to map.
+		// JSON-ONLY display: sender/receiver are rendered with the "SPIF "
+		// prefix (e.g. "SPIF F6F6 66A0 ...") while tx.Sender/tx.Receiver stay
+		// canonical raw hex in memory/state. The loader below maps the
+		// prefixed form back via common.CanonicalSPIFAddress, so consensus,
+		// nonces, and tx hashes are unaffected.
 		txMap := map[string]interface{}{
 			"id":        tx.ID,
-			"sender":    tx.Sender,
-			"receiver":  tx.Receiver,
+			"sender":    spifDisplayAddress(tx.Sender),
+			"receiver":  spifDisplayAddress(tx.Receiver),
 			"amount":    tx.Amount.String(), // Convert big.Int to string
 			"gas_limit": tx.GasLimit.String(),
 			"gas_price": tx.GasPrice.String(),
@@ -2535,8 +2540,8 @@ func (s *Storage) loadBlockFromDisk(hash string) (*types.Block, error) {
 	for i, txMap := range tempBlock.Body.TxsList {
 		tx := &types.Transaction{
 			ID:       getStringFromMap(txMap, "id"),
-			Sender:   getStringFromMap(txMap, "sender"),
-			Receiver: getStringFromMap(txMap, "receiver"),
+			Sender:   common.CanonicalSPIFAddress(getStringFromMap(txMap, "sender")),
+			Receiver: common.CanonicalSPIFAddress(getStringFromMap(txMap, "receiver")),
 			Nonce:    getUint64FromMap(txMap, "nonce"),
 		}
 		if amountStr, ok := txMap["amount"].(string); ok {
@@ -2595,6 +2600,17 @@ func (s *Storage) loadBlockFromDisk(hash string) (*types.Block, error) {
 }
 
 // Helper functions for map conversion
+// spifDisplayAddress renders addr with the "SPIF " prefix for block JSON
+// output ONLY (e.g. "SPIF F6F6 66A0 ..."). In-memory/state form stays
+// canonical raw hex. Non-SPIF values ("genesis", "", short system addrs)
+// pass through unchanged. Never fails — on any error the input is returned.
+func spifDisplayAddress(addr string) string {
+	if formatted, err := common.FormatSPIFAddress(addr); err == nil {
+		return formatted
+	}
+	return addr
+}
+
 func getStringFromMap(m map[string]interface{}, key string) string {
 	if val, ok := m[key]; ok {
 		if str, ok := val.(string); ok {

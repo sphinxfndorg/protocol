@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"time"
 
 	"github.com/sphinxfndorg/protocol/src/policy"
@@ -59,16 +60,39 @@ func broadcastAnchorTransaction(nodeAddr, from, keyFile string, anchorData []byt
 	// Use the same policy quote enforced by core. This legacy mint path emits a
 	// raw RPC payload rather than a transaction struct, so the values are
 	// encoded as decimal strings here.
-	gasQuote := policy.GetDefaultPolicyParams().QuoteTransactionGas(uint64(len(anchorData)))
+	mintPolicy := policy.GetDefaultPolicyParams()
+	gasQuote := mintPolicy.QuoteTransactionGas(uint64(len(anchorData)))
+
+	// The mempool enforces an EXACT nonce match ("invalid nonce: %d must equal
+	// %d"), so the nonce must be the account's live value from the node — never
+	// assumed 0 (that is only correct for an account that has never sent a tx).
+	nonceData, err := rpc.CallRPC(nodeAddr, "getnonce", []interface{}{from}, 60)
+	if err != nil {
+		return "", fmt.Errorf("failed to get account nonce: %w", err)
+	}
+	var nonce uint64
+	if err := json.Unmarshal(nonceData, &nonce); err != nil {
+		return "", fmt.Errorf("parse nonce response: %w", err)
+	}
+
+	// Price the anchor's Amount with the same policy fee schedule the wallet
+	// quotes (CalculateMintDataFee.TotalFee) instead of a hardcoded zero — the
+	// anchor is a self-send whose value represents the policy-priced worth of
+	// the committed data. Fall back to 1 nSPX only if the quote is unavailable.
+	mintFeeQuote := mintPolicy.CalculateMintDataFee(uint64(len(anchorData)), uint64(len(anchorData)), mintPolicy.MintBaseHashes, mintPolicy.MintPinningMonths)
+	mintFeeNSPX := big.NewInt(1)
+	if mintFeeQuote != nil && mintFeeQuote.TotalFee != nil && mintFeeQuote.TotalFee.Sign() > 0 {
+		mintFeeNSPX = mintFeeQuote.TotalFee
+	}
 
 	// Create the transaction payload
 	txPayload := map[string]interface{}{
 		"sender":      from,
 		"receiver":    from, // Send to self — this is an anchor, not a transfer
-		"amount":      "0",
+		"amount":      mintFeeNSPX.String(),
 		"gas_limit":   gasQuote.GasLimit.String(),
 		"gas_price":   gasQuote.GasPrice.String(),
-		"nonce":       0,
+		"nonce":       nonce,
 		"timestamp":   time.Now().Unix(),
 		"return_data": hex.EncodeToString(anchorData),
 	}

@@ -1,0 +1,29 @@
+{
+  "block_hash": "e4ffc0a502d959a17deaf2d97b24a1f4c3a758c8c32c04ce996a9a1010059410",
+  "block_height": 18,
+  "phase": "committed",
+  "state_changes": [
+    {
+      "address": "Node-127.0.0.1:30305",
+      "previous_balance": "10000039717861798360",
+      "previous_nonce": 0
+    },
+    {
+      "address": "system:staking-fee-pool",
+      "previous_balance": "283105081972059067524",
+      "previous_nonce": 0
+    },
+    {
+      "address": "system:treasury-fee-pool",
+      "previous_balance": "70776272975381129282",
+      "previous_nonce": 0
+    }
+  ],
+  "committed": true,
+  "previous_tip_hash": "1fcba80b3c05ea8761e7cb92834f82292953ac5cf1e8d5463c9e75600acbd3c8",
+  "previous_tip_height": 17,
+  "started_at": "2026-09-14T03:35:30.152921+07:00",
+  "committed_at": "2026-09-14T03:35:32.118658+07:00",
+  "block_file_written": true,
+  "index_updated": true
+}

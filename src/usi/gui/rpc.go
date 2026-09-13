@@ -508,9 +508,29 @@ func (c *WalletClient) GetTransactionHistory(address string, limit int) ([]Trans
 		return []TransactionResponse{}, nil
 	}
 
-	var txs []TransactionResponse
-	if err := json.Unmarshal(resultData, &txs); err != nil {
+	// The node returns []*types.Transaction directly. We need to unmarshal
+	// into the proper struct first, then map fields to TransactionResponse
+	// because the JSON field names differ (e.g., "id" vs "txid").
+	var rawTxs []types.Transaction
+	if err := json.Unmarshal(resultData, &rawTxs); err != nil {
 		return nil, fmt.Errorf("parse response: %w", err)
+	}
+
+	txs := make([]TransactionResponse, 0, len(rawTxs))
+	for _, tx := range rawTxs {
+		resp := TransactionResponse{
+			TxID:       tx.ID,
+			Sender:     tx.Sender,
+			Receiver:   tx.Receiver,
+			ReturnData: tx.ReturnData,
+			Status:     "confirmed", // transactions from blocks are confirmed
+		}
+		if tx.Amount != nil {
+			resp.Amount = BigInt{tx.Amount}
+		}
+		// Timestamp from Unix int64 to time.Time
+		resp.Timestamp = time.Unix(tx.Timestamp, 0)
+		txs = append(txs, resp)
 	}
 
 	return txs, nil

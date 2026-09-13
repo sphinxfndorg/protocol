@@ -147,9 +147,17 @@ func TestTransfer_SameSenderReceiver(t *testing.T) {
 	s := newTestStateDB(t)
 	s.SetBalance("alice", big.NewInt(1000))
 
-	err := s.Transfer("alice", "alice", big.NewInt(100))
-	if err == nil {
-		t.Error("expected error for same sender and receiver, got nil")
+	// Self-send is intentionally allowed: it is a mathematical no-op (debit and
+	// credit cancel out) and is used by wallets to anchor data/NFT receipts
+	// via ReturnData. See state_db.go Transfer for the rationale.
+	if err := s.Transfer("alice", "alice", big.NewInt(100)); err != nil {
+		t.Fatalf("self-send should be allowed, got error: %v", err)
+	}
+
+	// Balance must be unchanged after a self-send.
+	bal, _ := s.GetBalance("alice")
+	if bal.Cmp(big.NewInt(1000)) != 0 {
+		t.Errorf("alice balance should be unchanged after self-send: want 1000, got %s", bal.String())
 	}
 }
 

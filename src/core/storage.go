@@ -82,8 +82,21 @@ func (jm *JournalManager) StartAtomicCommit(blockHash string, blockHeight uint64
 	logger.Info(" Started atomic commit journal for block %s at height %d", blockHash[:16], blockHeight)
 }
 
-// RecordStateChange records an account state change for potential rollback
-// Must be called BEFORE modifying the state DB
+// ████████ JOURNAL MONITORING HOOK - Every state change call logs ████████
+// RecordStateChange records an account state change for potential rollback.
+// Must be called BEFORE modifying the state DB. If the journal manager is
+// nil (e.g. during early init or when journaling is disabled), this is a
+// no-op.
+func RecordStateChange(address string, prevBalance *big.Int, prevNonce uint64) {
+	jm := GetJournalManager()
+	if jm != nil {
+		jm.RecordStateChange(address, prevBalance, prevNonce)
+	}
+}
+
+// RecordStateChange (alias) is the method form; delegates to the same hook.
+// Kept for backward compatibility with any direct jm.RecordStateChange calls
+// found in the codebase.
 func (jm *JournalManager) RecordStateChange(address string, prevBalance *big.Int, prevNonce uint64) {
 	jm.mu.Lock()
 	defer jm.mu.Unlock()
@@ -163,16 +176,108 @@ func (jm *JournalManager) Commit(previousWeight *big.Int) error {
 	return nil
 }
 
+// rollbackUsingRecordedState restores account state using the recorded state
+// changes from the journal. This is much faster than rebuildStateToHeight()
+// which replays all blocks from genesis. Returns an error if the recorded state
+// is incomplete or corrupted, in which case the caller should fall back to
+// rebuildStateToHeight().
+func (jm *JournalManager) rollbackUsingRecordedState() error {
+	if jm.bc == nil {
+		return fmt.Errorf("no blockchain attached")
+	}
+
+	db, err := jm.bc.storage.GetDB()
+	if err != nil {
+		return fmt.Errorf("failed to get DB: %w", err)
+	}
+
+	// Track which addresses we've already restored to avoid overwriting
+	// earlier (more original) state with later state from the same block.
+	// The journal records state changes in order, so the FIRST record for
+	// each address contains the original state before any modifications.
+	restored := make(map[string]bool)
+
+	for _, change := range jm.activeTx.StateChanged {
+		if restored[change.Address] {
+			continue
+		}
+		restored[change.Address] = true
+
+		key := accountPrefix + change.Address
+		prevBalance, ok := new(big.Int).SetString(change.PreviousBalance, 10)
+		if !ok {
+			return fmt.Errorf("failed to parse previous balance for %s: %s",
+				change.Address, change.PreviousBalance)
+		}
+
+		existingData, err := db.Get(key)
+		accountExisted := err == nil && len(existingData) > 0
+
+		if !accountExisted && prevBalance.Sign() == 0 && change.PreviousNonce == 0 {
+			if err := db.Delete(key); err != nil {
+				return fmt.Errorf("failed to delete account %s: %w", change.Address, err)
+			}
+			logger.Info("rollbackUsingRecordedState: deleted account %s", change.Address)
+		} else {
+			rec := accountRecord{
+				Balance: change.PreviousBalance,
+				Nonce:   change.PreviousNonce,
+			}
+			data, err := json.Marshal(rec)
+			if err != nil {
+				return fmt.Errorf("failed to marshal account record for %s: %w", change.Address, err)
+			}
+			if err := db.Put(key, data); err != nil {
+				return fmt.Errorf("failed to write account record for %s: %w", change.Address, err)
+			}
+			logger.Info("rollbackUsingRecordedState: restored %s to balance=%s nonce=%d",
+				change.Address, change.PreviousBalance, change.PreviousNonce)
+		}
+	}
+
+	return jm.restoreSupplyCounters()
+}
+
+// restoreSupplyCounters recomputes the total supply from current account state
+func (jm *JournalManager) restoreSupplyCounters() error {
+	db, err := jm.bc.storage.GetDB()
+	if err != nil {
+		return fmt.Errorf("failed to get DB: %w", err)
+	}
+
+	totalSupply := new(big.Int)
+	keys, err := db.ListKeysWithPrefix(accountPrefix)
+	if err != nil {
+		return fmt.Errorf("failed to list account keys: %w", err)
+	}
+
+	for _, key := range keys {
+		data, err := db.Get(key)
+		if err != nil || len(data) == 0 {
+			continue
+		}
+		var rec accountRecord
+		if err := json.Unmarshal(data, &rec); err != nil {
+			continue
+		}
+		bal, ok := new(big.Int).SetString(rec.Balance, 10)
+		if !ok {
+			continue
+		}
+		totalSupply.Add(totalSupply, bal)
+	}
+
+	if err := db.Put(totalSupplyKey, []byte(totalSupply.String())); err != nil {
+		return fmt.Errorf("failed to write total supply: %w", err)
+	}
+
+	logger.Info("restoreSupplyCounters: recomputed total supply = %s", totalSupply.String())
+	return nil
+}
+
 // Rollback reverts all changes made in the current transaction.
-// Called synchronously from CommitBlock when something after the state DB
-// flush fails (e.g. StoreBlock). At that point stateDB.Commit() has already
-// written the new block's balance/nonce/supply changes to LevelDB, but the
-// block itself never made it to storage — so state and storage now disagree
-// about the chain tip. This used to just clear jm's in-memory pointer and
-// log "success" without touching the state DB at all, silently leaving that
-// divergence in place. Now it actually replays state back to the journal's
-// recorded PreviousTipHeight via bc.rebuildStateToHeight, the same primitive
-// RollbackToHeight and the new reorg path use.
+// Uses fast recorded-state rollback first, falls back to rebuildStateToHeight
+// if the recorded state is incomplete or corrupted.
 func (jm *JournalManager) Rollback() error {
 	jm.mu.Lock()
 	tx := jm.activeTx
@@ -187,17 +292,18 @@ func (jm *JournalManager) Rollback() error {
 		tx.BlockHash[:16], tx.PreviousTipHeight)
 
 	if bc == nil {
-		logger.Warn("JournalManager.Rollback: no blockchain attached — clearing journal pointer only, " +
-			"state DB changes for this block were NOT reverted. This should not happen once " +
-			"AttachBlockchain has been called during startup.")
-	} else if err := bc.rebuildStateToHeight(tx.PreviousTipHeight); err != nil {
-		// Don't clear activeTx on failure — leave the journal file in place so
-		// a subsequent restart's recovery pass gets another chance at it,
-		// rather than silently dropping the only record of the divergence.
-		return fmt.Errorf("JournalManager.Rollback: failed to restore state to height %d: %w",
-			tx.PreviousTipHeight, err)
+		logger.Warn("JournalManager.Rollback: no blockchain attached — clearing journal pointer only")
 	} else {
-		logger.Info("SUCCESS State restored to height %d after failed commit", tx.PreviousTipHeight)
+		// Try fast rollback using recorded state first
+		if err := jm.rollbackUsingRecordedState(); err != nil {
+			logger.Warn("JournalManager.Rollback: fast rollback failed, falling back to rebuildStateToHeight: %v", err)
+			if err := bc.rebuildStateToHeight(tx.PreviousTipHeight); err != nil {
+				return fmt.Errorf("JournalManager.Rollback: failed to restore state to height %d: %w",
+					tx.PreviousTipHeight, err)
+			}
+		} else {
+			logger.Info("SUCCESS State restored using recorded state changes")
+		}
 	}
 
 	jm.mu.Lock()
@@ -205,9 +311,6 @@ func (jm *JournalManager) Rollback() error {
 	jm.activeTx = nil
 	jm.mu.Unlock()
 
-	// Remove the on-disk journal now that state has actually been repaired —
-	// keeping it around after a successful rollback would make a later
-	// restart try to "recover" an already-consistent state.
 	if tx.BlockHash != "" {
 		txPath := filepath.Join(jm.journalDir, fmt.Sprintf("tx_%s.json", tx.BlockHash[:16]))
 		if err := os.Remove(txPath); err != nil && !os.IsNotExist(err) {
@@ -306,18 +409,26 @@ func (jm *JournalManager) RepairIncompleteCommits() error {
 		logger.Warn("Repairing incomplete commit for block %s: restoring state to height %d",
 			tx.BlockHash[:16], tx.PreviousTipHeight)
 
-		if err := bc.rebuildStateToHeight(tx.PreviousTipHeight); err != nil {
-			return fmt.Errorf("RepairIncompleteCommits: failed to restore state to height %d for block %s: %w",
-				tx.PreviousTipHeight, tx.BlockHash[:16], err)
+		// Try fast rollback using recorded state first
+		jm.activeTx = tx
+		if err := jm.rollbackUsingRecordedState(); err != nil {
+			logger.Warn("RepairIncompleteCommits: fast rollback failed for block %s, falling back to rebuildStateToHeight: %v",
+				tx.BlockHash[:16], err)
+			jm.activeTx = nil
+			if err := bc.rebuildStateToHeight(tx.PreviousTipHeight); err != nil {
+				return fmt.Errorf("RepairIncompleteCommits: failed to restore state to height %d for block %s: %w",
+					tx.PreviousTipHeight, tx.BlockHash[:16], err)
+			}
+		} else {
+			logger.Info("SUCCESS Repaired incomplete commit for block %s using recorded state changes",
+				tx.BlockHash[:16])
+			jm.activeTx = nil
 		}
 
 		txPath := filepath.Join(jm.journalDir, fmt.Sprintf("tx_%s.json", tx.BlockHash[:16]))
 		if err := os.Remove(txPath); err != nil && !os.IsNotExist(err) {
 			logger.Warn("RepairIncompleteCommits: failed to remove repaired journal file: %v", err)
 		}
-
-		logger.Info("SUCCESS Repaired incomplete commit for block %s — state restored to height %d",
-			tx.BlockHash[:16], tx.PreviousTipHeight)
 	}
 
 	return nil

@@ -1,0 +1,9 @@
+{
+  "type": "mint_anchor",
+  "mint_id": "81b970759982e2fb4d475cbcdcd82f7092070bc2727e49a13c69b6ccd83b0978",
+  "subject": "nft.png",
+  "cid": "spxhash-eafb873f1b33be71ff17d5ab9f7314ce3e31a14a82120304f3e43f4e0e313748",
+  "minter_public_key": "26ab03b69f62fb057ee47fbb2ef6d43922ae05b1976bf10e72e971b43ee7c62a",
+  "receipt_hash": "8ec4f6a37ee98ddb55e1d16eeba1a0be16bc4f7a0da8bfed75c0be29c5d374df",
+  "cid_hash_hex": "7d1f895e035f0bde034eec6fefa2bdcbdc4a0271a42434ed3a99e79a57400576"
+}

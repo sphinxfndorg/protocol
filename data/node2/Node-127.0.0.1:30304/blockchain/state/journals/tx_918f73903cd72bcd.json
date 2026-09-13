@@ -1,0 +1,19 @@
+{
+  "block_hash": "918f73903cd72bcd8acf9871bb517d6bc7ca825ee6983a1b2f456505690ee979",
+  "block_height": 14,
+  "phase": "committed",
+  "state_changes": [
+    {
+      "address": "Node-127.0.0.1:30304",
+      "previous_balance": "20000000000000000000",
+      "previous_nonce": 0
+    }
+  ],
+  "committed": true,
+  "previous_tip_hash": "bafc02cfe67096111f091c78cc16d2b70a7a2a9654ea6277308f534dff5ebc6d",
+  "previous_tip_height": 13,
+  "started_at": "2026-09-14T03:35:07.107162+07:00",
+  "committed_at": "2026-09-14T03:35:07.162243+07:00",
+  "block_file_written": true,
+  "index_updated": true
+}

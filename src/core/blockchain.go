@@ -1786,6 +1786,24 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 	}
 
 	// ════════════════════════════════════════════════════════════════════════
+	// CRASH-SAFETY: open the atomic-commit journal BEFORE touching the state
+	// DB so every account balance/nonce change inside ExecuteBlock can be
+	// recorded (via RecordStateChange) for crash rollback. MUST be before
+	// ExecuteBlock — otherwise state changes are invisible to the journal.
+	// ════════════════════════════════════════════════════════════════════════
+	var previousTipHash string
+	var previousTipHeight uint64
+	if latestBlock != nil {
+		previousTipHash = latestBlock.GetHash()
+		previousTipHeight = latestBlock.GetHeight()
+	}
+	jm := GetJournalManager()
+	if jm != nil {
+		jm.StartAtomicCommit(typeBlock.GetHash(), typeBlock.GetHeight(), previousTipHash, previousTipHeight)
+		jm.UpdatePhase("state_applied")
+	}
+
+	// ════════════════════════════════════════════════════════════════════════
 	// CRITICAL: Execute block, compute real StateRoot, embed in header
 	// ════════════════════════════════════════════════════════════════════════
 	// The state root MUST be computed and embedded in the block header BEFORE
@@ -1803,6 +1821,9 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 		// exactly as deterministic as an auth failure: rebuilding the same
 		// block will fail the same way every time, so the offending
 		// transaction(s) need to be evicted rather than retried.
+		if jm != nil {
+			jm.Rollback()
+		}
 		return fmt.Errorf("CommitBlock: execution failed: %w: %w", err, consensus.ErrInvalidBlockTx)
 	}
 	logger.Info("SUCCESS Block executed, stateRoot=%x", stateRoot)
@@ -1842,38 +1863,11 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 			typeBlock.GetHeight(), typeBlock.Header.StateRoot, stateRoot,
 		)
 	}
-	// ════════════════════════════════════════════════════════════════════════
 
-	// ════════════════════════════════════════════════════════════════════════
-	// CRASH-SAFETY FIX: actually use the journal instead of just initializing it
-	// ════════════════════════════════════════════════════════════════════════
-	// JournalManager existed but nothing ever called StartAtomicCommit,
-	// UpdatePhase, or Commit — InitJournalManager only ran the startup
-	// recovery scan over journal files that were never written. That left a
-	// real crash window unguarded: between stateDB.Commit() (state flushed to
-	// LevelDB) and bc.storage.StoreBlock() (block persisted), a crash would
-	// advance account state on disk for a block that was never actually
-	// stored — silent, undetected divergence of exactly the kind this
-	// project has already hit once.
-	//
-	// Opening the journal here, before the state DB is touched, means a crash
-	// anywhere in this critical section leaves a journal file on disk that
-	// startup recovery (JournalManager.PerformCrashRecovery, also fixed
-	// below to do a real rollback instead of just deleting the file) can
-	// detect and repair by replaying rebuildStateToHeight back to the last
-	// block storage actually has.
-	var previousTipHash string
-	var previousTipHeight uint64
-	if latestBlock != nil {
-		previousTipHash = latestBlock.GetHash()
-		previousTipHeight = latestBlock.GetHeight()
-	}
-	jm := GetJournalManager()
-	if jm != nil {
-		jm.StartAtomicCommit(typeBlock.GetHash(), typeBlock.GetHeight(), previousTipHash, previousTipHeight)
-		jm.UpdatePhase("state_applied")
-	}
-	// ════════════════════════════════════════════════════════════════════════
+	// State root validation passed — the block's execution root matches the
+	// consensus-approved header. State changes from the first ExecuteBlock
+	// above have already been recorded by the journal (started before execution)
+	// and committed to LevelDB. Now proceed to finalize the block.
 
 	txIDs := make([]string, len(typeBlock.Body.TxsList))
 	for i, tx := range typeBlock.Body.TxsList {

@@ -91,7 +91,7 @@ type Transaction struct {
 	Nonce      uint64   `json:"nonce"`
 	Timestamp  int64    `json:"timestamp"`
 	Signature  []byte   `json:"signature"`
-	ReturnData []byte   `json:"return_data,omitempty"` // OP_RETURN data (memos, proofs, metadata)
+	ReturnData []byte   `json:"return_data"` // OP_RETURN data (memos, proofs, metadata)
 	// Optional data
 	Data           []byte `json:"data,omitempty"`
 	Code           []byte `json:"code,omitempty"`             // Contract deployment bytecode

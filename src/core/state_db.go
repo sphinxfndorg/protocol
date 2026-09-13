@@ -682,6 +682,10 @@ func (s *StateDB) GetWalletStats(richListLimit int) (*WalletStats, error) {
 // SetBalance sets the balance of address to amount (nSPX).
 // Used during genesis to credit allocations.
 func (s *StateDB) SetBalance(address string, amount *big.Int) {
+	current := s.load(address)
+	prevBalance := current.balance // snapshot before change
+	prevNonce := current.nonce
+	RecordStateChange(address, prevBalance, prevNonce)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.dirty(address).balance = new(big.Int).Set(amount)
@@ -692,6 +696,10 @@ func (s *StateDB) AddBalance(address string, amount *big.Int) {
 	if amount == nil || amount.Sign() <= 0 {
 		return
 	}
+	current := s.load(address)
+	prevBalance := current.balance
+	prevNonce := current.nonce
+	RecordStateChange(address, prevBalance, prevNonce)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	e := s.dirty(address)
@@ -704,6 +712,10 @@ func (s *StateDB) SubBalance(address string, amount *big.Int) error {
 	if amount == nil || amount.Sign() <= 0 {
 		return nil
 	}
+	current := s.load(address)
+	prevBalance := current.balance
+	prevNonce := current.nonce
+	RecordStateChange(address, prevBalance, prevNonce)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	e := s.dirty(address)
@@ -718,6 +730,10 @@ func (s *StateDB) SubBalance(address string, amount *big.Int) error {
 // SetNonce sets the nonce of address to the specified value.
 // Used during rollback to restore previous nonce value.
 func (s *StateDB) SetNonce(address string, nonce uint64) {
+	current := s.load(address)
+	prevBalance := current.balance
+	prevNonce := current.nonce
+	RecordStateChange(address, prevBalance, prevNonce)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.dirty(address).nonce = nonce
@@ -744,6 +760,14 @@ func (s *StateDB) Transfer(from, to string, amount *big.Int) error {
 		return fmt.Errorf("transfer: amount must be positive, got %v", amount)
 	}
 
+	// Record state change for both addresses BEFORE modification
+	fromCurrent := s.load(from)
+	toCurrent := s.load(to)
+	RecordStateChange(from, fromCurrent.balance, fromCurrent.nonce)
+	if from != to {
+		RecordStateChange(to, toCurrent.balance, toCurrent.nonce)
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -762,6 +786,10 @@ func (s *StateDB) Transfer(from, to string, amount *big.Int) error {
 
 // IncrementNonce adds 1 to the nonce of address.
 func (s *StateDB) IncrementNonce(address string) {
+	current := s.load(address)
+	prevBalance := current.balance
+	prevNonce := current.nonce
+	RecordStateChange(address, prevBalance, prevNonce)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.dirty(address).nonce++

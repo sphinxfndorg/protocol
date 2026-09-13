@@ -139,6 +139,15 @@ func infoRow(label, value string, valueColor color.Color) fyne.CanvasObject {
 	return container.NewHBox(lbl, layout.NewSpacer(), val)
 }
 
+// infoRowDynamic renders a label + value pair where the value is a live
+// *canvas.Text that can be updated after construction (used by popup dialogs
+// that mutate their content from a background goroutine).
+func infoRowDynamic(label string, val *canvas.Text) fyne.CanvasObject {
+	lbl := canvas.NewText(label, colMuted)
+	lbl.TextSize = 11
+	return container.NewHBox(lbl, layout.NewSpacer(), val)
+}
+
 // infoPanel renders a card with a title and a list of label/value rows.
 func infoPanel(title string, rows []fyne.CanvasObject) fyne.CanvasObject {
 	inner := container.NewVBox()

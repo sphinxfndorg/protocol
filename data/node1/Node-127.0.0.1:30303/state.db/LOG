@@ -1,15 +1,15 @@
 =============== Sep 14, 2026 (WIB) ===============
-00:41:10.011818 log@legend F·NumFile S·FileSize N·Entry C·BadEntry B·BadBlock Ke·KeyError D·DroppedEntry L·Level Q·SeqNum T·TimeElapsed
-00:41:10.037474 db@open opening
-00:41:10.038297 version@stat F·[] S·0B[] Sc·[]
-00:41:10.052661 db@janitor F·2 G·0
-00:41:10.052734 db@open done T·15.191699ms
+03:33:07.786422 log@legend F·NumFile S·FileSize N·Entry C·BadEntry B·BadBlock Ke·KeyError D·DroppedEntry L·Level Q·SeqNum T·TimeElapsed
+03:33:07.809898 db@open opening
+03:33:07.810909 version@stat F·[] S·0B[] Sc·[]
+03:33:07.837553 db@janitor F·2 G·0
+03:33:07.837624 db@open done T·27.672218ms
 =============== Sep 14, 2026 (WIB) ===============
-00:41:10.095093 log@legend F·NumFile S·FileSize N·Entry C·BadEntry B·BadBlock Ke·KeyError D·DroppedEntry L·Level Q·SeqNum T·TimeElapsed
-00:41:10.095540 version@stat F·[] S·0B[] Sc·[]
-00:41:10.095575 db@open opening
-00:41:10.095678 journal@recovery F·1
-00:41:10.095947 journal@recovery recovering @1
-00:41:10.096811 version@stat F·[] S·0B[] Sc·[]
-00:41:10.137568 db@janitor F·2 G·0
-00:41:10.137617 db@open done T·42.02529ms
+03:33:07.893522 log@legend F·NumFile S·FileSize N·Entry C·BadEntry B·BadBlock Ke·KeyError D·DroppedEntry L·Level Q·SeqNum T·TimeElapsed
+03:33:07.893736 version@stat F·[] S·0B[] Sc·[]
+03:33:07.893756 db@open opening
+03:33:07.893832 journal@recovery F·1
+03:33:07.894184 journal@recovery recovering @1
+03:33:07.894917 version@stat F·[] S·0B[] Sc·[]
+03:33:07.928703 db@janitor F·2 G·0
+03:33:07.928814 db@open done T·35.043256ms

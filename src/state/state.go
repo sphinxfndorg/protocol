@@ -2343,6 +2343,7 @@ func (s *Storage) storeBlockToDisk(block *types.Block) error {
 		// nonces, and tx hashes are unaffected.
 		txMap := map[string]interface{}{
 			"id":        tx.ID,
+			"chain_id":  tx.ChainID,
 			"sender":    spifDisplayAddress(tx.Sender),
 			"receiver":  spifDisplayAddress(tx.Receiver),
 			"amount":    tx.Amount.String(), // Convert big.Int to string
@@ -2351,6 +2352,32 @@ func (s *Storage) storeBlockToDisk(block *types.Block) error {
 			"nonce":     tx.Nonce,
 			"timestamp": timestampISO, // ISO format
 			"signature": hex.EncodeToString(tx.Signature),
+		}
+		// OP_RETURN data (memo) — stored as readable text string
+		if len(tx.ReturnData) > 0 {
+			txMap["return_data"] = string(tx.ReturnData)
+		}
+		// SPHINCS+ auth bundle fields — required for HasFullAuthBundle() after restart
+		if len(tx.SignatureHash) > 0 {
+			txMap["signature_hash"] = hex.EncodeToString(tx.SignatureHash)
+		}
+		if len(tx.PublicKey) > 0 {
+			txMap["public_key"] = hex.EncodeToString(tx.PublicKey)
+		}
+		if len(tx.AuthTimestamp) > 0 {
+			txMap["auth_timestamp"] = hex.EncodeToString(tx.AuthTimestamp)
+		}
+		if len(tx.AuthNonce) > 0 {
+			txMap["auth_nonce"] = hex.EncodeToString(tx.AuthNonce)
+		}
+		if len(tx.MerkleRootHash) > 0 {
+			txMap["merkle_root_hash"] = hex.EncodeToString(tx.MerkleRootHash)
+		}
+		if len(tx.Commitment) > 0 {
+			txMap["commitment"] = hex.EncodeToString(tx.Commitment)
+		}
+		if len(tx.Proof) > 0 {
+			txMap["proof"] = hex.EncodeToString(tx.Proof)
 		}
 		serializableBlock.Body.TxsList[i] = txMap
 	}
@@ -2540,6 +2567,7 @@ func (s *Storage) loadBlockFromDisk(hash string) (*types.Block, error) {
 	for i, txMap := range tempBlock.Body.TxsList {
 		tx := &types.Transaction{
 			ID:       getStringFromMap(txMap, "id"),
+			ChainID:  getUint64FromMap(txMap, "chain_id"),
 			Sender:   common.CanonicalSPIFAddress(getStringFromMap(txMap, "sender")),
 			Receiver: common.CanonicalSPIFAddress(getStringFromMap(txMap, "receiver")),
 			Nonce:    getUint64FromMap(txMap, "nonce"),
@@ -2573,6 +2601,46 @@ func (s *Storage) loadBlockFromDisk(hash string) (*types.Block, error) {
 		if sigStr, ok := txMap["signature"].(string); ok {
 			if sig, err := hex.DecodeString(sigStr); err == nil {
 				tx.Signature = sig
+			}
+		}
+		// OP_RETURN data (memo) — stored as readable text string
+		if rdStr, ok := txMap["return_data"].(string); ok && rdStr != "" {
+			tx.ReturnData = []byte(rdStr)
+		}
+		// SPHINCS+ auth bundle fields — required for HasFullAuthBundle() after restart
+		if sigHashStr, ok := txMap["signature_hash"].(string); ok && sigHashStr != "" {
+			if sh, err := hex.DecodeString(sigHashStr); err == nil {
+				tx.SignatureHash = sh
+			}
+		}
+		if pkStr, ok := txMap["public_key"].(string); ok && pkStr != "" {
+			if pk, err := hex.DecodeString(pkStr); err == nil {
+				tx.PublicKey = pk
+			}
+		}
+		if atStr, ok := txMap["auth_timestamp"].(string); ok && atStr != "" {
+			if at, err := hex.DecodeString(atStr); err == nil {
+				tx.AuthTimestamp = at
+			}
+		}
+		if anStr, ok := txMap["auth_nonce"].(string); ok && anStr != "" {
+			if an, err := hex.DecodeString(anStr); err == nil {
+				tx.AuthNonce = an
+			}
+		}
+		if mrhStr, ok := txMap["merkle_root_hash"].(string); ok && mrhStr != "" {
+			if mrh, err := hex.DecodeString(mrhStr); err == nil {
+				tx.MerkleRootHash = mrh
+			}
+		}
+		if cStr, ok := txMap["commitment"].(string); ok && cStr != "" {
+			if c, err := hex.DecodeString(cStr); err == nil {
+				tx.Commitment = c
+			}
+		}
+		if pStr, ok := txMap["proof"].(string); ok && pStr != "" {
+			if p, err := hex.DecodeString(pStr); err == nil {
+				tx.Proof = p
 			}
 		}
 		block.Body.TxsList[i] = tx

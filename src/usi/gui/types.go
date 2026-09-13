@@ -90,11 +90,12 @@ type BalanceResponse struct {
 
 // TransactionResponse represents a transaction
 type TransactionResponse struct {
-	TxID      string    `json:"txid"`
-	Sender    string    `json:"sender"`
-	Receiver  string    `json:"receiver"`
-	Amount    BigInt    `json:"amount"`
-	Fee       BigInt    `json:"fee"`
-	Timestamp time.Time `json:"timestamp"`
-	Status    string    `json:"status"`
+	TxID       string    `json:"txid"`
+	Sender     string    `json:"sender"`
+	Receiver   string    `json:"receiver"`
+	Amount     BigInt    `json:"amount"`
+	Fee        BigInt    `json:"fee"`
+	Timestamp  time.Time `json:"timestamp"`
+	Status     string    `json:"status"`
+	ReturnData []byte    `json:"return_data,omitempty"` // OP_RETURN data (memo)
 }

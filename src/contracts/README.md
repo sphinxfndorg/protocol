@@ -22,6 +22,44 @@ The contract address is deterministic:
 Call the deployed address using `ToContract` and JSON made by `BuildCallData`.
 SIP-20 supports `mint`, `transfer`, `balance_of`, and `info`.
 
+## Native SIP-721 collection
+
+Deploy a collection with `Runtime: "native", Standard: "sip721"`. The deployer
+becomes the collection owner and the only minter. `mint(to, token_uri,
+mint_id, royalty_bps, usage_fee, royalty_recipient)` allocates an
+Ethereum-style incrementing `token_id` and records `ownerOf`/`tokenURI` in
+contract storage. `transfer_from` and `approve` follow ERC-721 approvals.
+Reads: `owner_of`, `token_uri`, `token_id_of_mint`, `info`.
+
+### Embedded economics
+
+A token's terms are frozen at mint and enforced by every node at consensus —
+no wallet, marketplace, or indexer is trusted to report them:
+
+- `royalty_bps` (0..10000) — resale royalty. Each value-carrying
+  `transfer_from` sale splits the price the buyer's transaction escrows at the
+  contract (`tx.Amount`): `max(amount, policy.MinTokenSaleValue) ×
+  royalty_bps/10000` (capped at the escrow) goes to the creator forever, the
+  remainder to the seller. Sale flow: the seller `approve`s a buyer, and the
+  buyer signs the purchase. There is deliberately no unapproved force-purchase
+  path.
+- `usage_fee` (decimal nSPX) — per licensed-access micro-fee.
+  `purchase_license` requires the transaction to carry exactly the posted fee,
+  forwards it to the creator, and records a single active licensee
+  (`sip721:token:<id>:licensee`). `revoke_license` is limited to the creator
+  or collection owner. This enforces payment + entitlement — the license
+  receipt — not a bytes-gate over off-chain IPFS reads.
+- `royalty_recipient` — optional payout override; defaults to the creator (the
+  collection owner at mint).
+- `terms_of` reads a token's frozen terms and current licensee for
+  marketplaces and indexers.
+
+Terms are immutable: there is deliberately no `set_terms`, so the current
+owner can never rewrite the economics of a token someone already bought or
+listed. The same terms are committed in the mint-anchor `AnchorTag` at the
+receipt layer (`core.ValidateAnchorData`), making the creator's value model
+verifiably pre-announced for every participant.
+
 ## SVM1 bytecode
 
 SVM1 is a bounded deterministic runtime for simple applications. A program

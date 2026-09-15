@@ -21,6 +21,7 @@ import (
 	"github.com/sphinxfndorg/protocol/src/common"
 	"github.com/sphinxfndorg/protocol/src/consensus"
 	logger "github.com/sphinxfndorg/protocol/src/console"
+	"github.com/sphinxfndorg/protocol/src/contracts"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
 	denom "github.com/sphinxfndorg/protocol/src/params/denom"
 	"github.com/sphinxfndorg/protocol/src/policy"
@@ -570,13 +571,27 @@ func (bc *Blockchain) applyTransactions(block *types.Block, stateDB *StateDB) er
 		// Transfer the amount to recipient, then deduct gas fee from sender.
 		// Both operations are buffered in s.pending and only flushed on Commit,
 		// so an abort before Commit leaves no partial state.
+		// Resolve the value destination. A contract call pays its contract; a
+		// deployment pays the address the contract will occupy (derived exactly
+		// as contracts.Deploy derives it); a plain transaction pays Receiver.
 		recipient := tx.Receiver
-		if tx.ToContract != "" {
+		switch {
+		case tx.ToContract != "":
 			recipient = tx.ToContract
+		case tx.IsContractDeployment():
+			recipient = contracts.ContractAddress(tx.Sender, tx.Nonce, tx.Code)
 		}
-		if err := stateDB.Transfer(tx.Sender, recipient, tx.Amount); err != nil {
-			logger.Error("applyTransactions: tx[%d] Transfer: %v", i, err)
-			return errors.New("failed to transfer balance")
+		// A contract deployment or value-less contract call (list / cancel /
+		// revoke_license) legitimately carries zero value. StateDB.Transfer
+		// requires a strictly positive amount and non-empty addresses, so the
+		// only correct action for a zero-value tx is to move nothing at all —
+		// transfer(_, _, 0) is a no-op by definition. Skipping it is what makes
+		// deploys and zero-value calls executable; gas is still charged below.
+		if tx.Amount.Sign() > 0 {
+			if err := stateDB.Transfer(tx.Sender, recipient, tx.Amount); err != nil {
+				logger.Error("applyTransactions: tx[%d] Transfer: %v", i, err)
+				return errors.New("failed to transfer balance")
+			}
 		}
 		if gasFee.Sign() > 0 {
 			if err := stateDB.SubBalance(tx.Sender, gasFee); err != nil {

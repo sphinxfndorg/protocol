@@ -377,3 +377,14 @@ func TestMintDataFeeIsComputedByPolicy(t *testing.T) {
 		t.Fatalf("larger anchor payload must cost more")
 	}
 }
+
+// MinTokenSaleValue is the governance floor used to price SIP-721 resale
+// royalties: royalty applies to max(sale_value, floor). Default is 0.1 SPX
+// (1e17 nSPX) — low enough not to block ordinary collectibles, meaningful
+// enough that dust-price settlement still pays a real royalty.
+func TestMinTokenSaleValueDefault(t *testing.T) {
+	p := NewPolicyParameters()
+	if p.MinTokenSaleValue == nil || p.MinTokenSaleValue.Cmp(big.NewInt(1e17)) != 0 {
+		t.Fatalf("MinTokenSaleValue = %v, want 1e17 nSPX (0.1 SPX)", p.MinTokenSaleValue)
+	}
+}

@@ -78,6 +78,17 @@ func formatSPXAmount(amount *big.Float) string {
 	return result
 }
 
+// formatNSPXAmount renders an nSPX integer amount (1 SPX = 10^18 nSPX) as a
+// human-readable SPX string with the same grouping/trimming as
+// formatSPXAmount. Used for policy-quoted values that arrive in nSPX
+// (the resale floor MinTokenSaleValue, license fees).
+func formatNSPXAmount(nspx *big.Int) string {
+	if nspx == nil {
+		return "0"
+	}
+	return formatSPXAmount(new(big.Float).Quo(new(big.Float).SetInt(nspx), big.NewFloat(1e18)))
+}
+
 // =========================================================================
 // UI HELPER COMPONENTS
 // =========================================================================

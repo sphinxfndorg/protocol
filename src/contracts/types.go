@@ -3,6 +3,8 @@
 
 package contracts
 
+import "math/big"
+
 type Store interface {
 	ContractExists(address string) bool
 	SetContractCode(address string, code []byte)
@@ -48,6 +50,23 @@ type ExecutionResult struct {
 type ContractEvent struct {
 	Topic string `json:"topic"`
 	Data  string `json:"data"`
+}
+
+// NativeCallContext hands the native runtime the consensus value carried by the
+// calling transaction (tx.Amount — already escrowed at the contract address by
+// the executor) plus a balance-movement callback anchored at that contract.
+// Native standards (e.g. SIP-721 resale royalties and license fees) split the
+// escrow the same deterministic, atomically-buffered way the SVM/WASM
+// host-call surface does.
+//
+// PriceFloor is the policy minimum sale value used to price resale royalties:
+// royalty applies to max(amount, floor), which makes settling at dust prices
+// cost the evaders real royalties instead of being free. nil disables the
+// floor.
+type NativeCallContext struct {
+	Value      *big.Int                               // tx.Amount as seen at execution
+	PriceFloor *big.Int                               // policy MinTokenSaleValue; nil = none
+	Transfer   func(to string, amount *big.Int) error // contract address -> to
 }
 
 type SIP20Info struct {

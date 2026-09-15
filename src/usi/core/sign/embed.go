@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"math/big"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -49,72 +48,10 @@ type orgBundleResolver interface {
 // METADATA BLOCK BUILDERS
 // ─────────────────────────────────────────────────────────────────────────────
 
-// provenanceLine renders a single on-chain field with an explicit sentinel
-// when the value is missing/unset, so verify screens never mistake "no data"
-// for a confirmed anchor.
-func provenanceLine(label, value, emptySentinel string) string {
-	if strings.TrimSpace(value) == "" {
-		return fmt.Sprintf("%s: %s", label, emptySentinel)
-	}
-	return fmt.Sprintf("%s: %s", label, value)
-}
-
-func provenanceHeightLine(label string, height uint64) string {
-	if height == 0 {
-		return fmt.Sprintf("%s: pending", label)
-	}
-	return fmt.Sprintf("%s: %d", label, height)
-}
-
-// FormatMintFeeNSPX renders the policy-priced mint fee recorded at mint time
-// ("n/a" when unset). The exact nSPX amount is always shown; a human-readable
-// SPX equivalent is appended when the value parses as a positive integer.
-// The raw nSPX string is what travels in Meta, so the on-chain price is
-// preserved at the exact precision the anchor transaction carried.
-func FormatMintFeeNSPX(raw string) string {
-	if strings.TrimSpace(raw) == "" {
-		return ""
-	}
-	v, ok := new(big.Int).SetString(strings.TrimSpace(raw), 10)
-	if !ok || v.Sign() <= 0 {
-		return fmt.Sprintf("%s nSPX", strings.TrimSpace(raw))
-	}
-	spx := new(big.Float).SetPrec(200).Quo(
-		new(big.Float).SetPrec(200).SetInt(v),
-		big.NewFloat(1e18),
-	)
-	spxValue, _ := spx.Float64()
-	return fmt.Sprintf("%s nSPX (~%.6f SPX)", strings.TrimSpace(raw), spxValue)
-}
-
-// onChainProvenanceBlock renders a compact multi-line provenance summary for
-// use in buildSecureMetadataBlock (all formats).
-func onChainProvenanceBlock(meta *Meta) string {
-	if meta == nil {
-		return ""
-	}
-	lines := []string{
-		"--- On-Chain / Storage ---",
-		provenanceLine("MintPrice", FormatMintFeeNSPX(meta.MintFeeNSPX), "n/a"),
-		provenanceLine("MintID", meta.MintID, "unanchored"),
-		provenanceLine("CID", meta.IPFSCID, "unpinned"),
-		provenanceHeightLine("MintHeight", meta.BlockHeight),
-		provenanceLine("AnchorTx", meta.AnchorTxID, "unanchored"),
-		provenanceHeightLine("Confirmed", meta.ConfirmedHeight),
-		provenanceLine("BlockHash", meta.BlockHash, "pending"),
-		provenanceLine("TxNonce", meta.AnchorNonce, "n/a"),
-	}
-	if meta.TokenID != 0 {
-		lines = append(lines, fmt.Sprintf("TokenID: %d", meta.TokenID))
-	}
-	if meta.ContractAddress != "" {
-		lines = append(lines, provenanceLine("Contract", meta.ContractAddress, "n/a"))
-	}
-	if meta.TokenURI != "" {
-		lines = append(lines, provenanceLine("TokenURI", meta.TokenURI, "n/a"))
-	}
-	return strings.Join(lines, "\n")
-}
+// On-chain provenance is defined, populated, and rendered in meta.go
+// (OnChainProvenance + OnChainBlock/OnChainDetailBlock) so every container —
+// PDF, XMP, PNG, JPEG, Office, xattrs, footer — renders exactly the same
+// on-chain facts.
 
 func buildSecureMetadataBlock(meta *Meta, fingerprint string) string {
 	nonce := meta.Nonce
@@ -144,7 +81,7 @@ func buildSecureMetadataBlock(meta *Meta, fingerprint string) string {
 		shortFinalHash = shortFileHash
 	}
 
-	provBlock := onChainProvenanceBlock(meta)
+	provBlock := OnChainBlock(meta)
 
 	return fmt.Sprintf(
 		"Fingerprint: %s\n"+
@@ -174,47 +111,13 @@ func buildCryptographicMetadataBlock(meta *Meta, fingerprint, finalHash string) 
 	}
 	defer secureZeroBytes(metaJSON)
 
-	// On-chain / storage provenance: every value rendered here comes from
-	// Meta fields populated by the Mint Data flow (gui.go) — IPFSCID and
-	// BlockHeight before signing; MintID/AnchorTxID/AnchorPath/ConfirmedHeight/
-	// BlockHash/TokenID/ContractAddress after the anchor via
-	// RefreshOnChainProvenance. Missing values render as explicit sentinels
-	// ("unanchored"/"pending") so a verify screen can never mistake "no
-	// data" for a confirmed anchor. See types.Meta for the field contract.
-	provenance := func(label, value, emptySentinel string) string {
-		if strings.TrimSpace(value) == "" {
-			return fmt.Sprintf("%s: %s", label, emptySentinel)
-		}
-		return fmt.Sprintf("%s: %s", label, value)
-	}
-	provenanceHeight := func(label string, height uint64) string {
-		if height == 0 {
-			return fmt.Sprintf("%s: pending", label)
-		}
-		return fmt.Sprintf("%s: %d", label, height)
-	}
-	provenanceTokenID := func() string {
-		if meta.TokenID == 0 {
-			return "Token ID: n/a (legacy receipt anchor — no collection)"
-		}
-		return fmt.Sprintf("Token ID: %d", meta.TokenID)
-	}
-	onChainLines := strings.Join([]string{
-		"--- On-Chain / Storage Provenance ---",
-		provenance("Mint Price", FormatMintFeeNSPX(meta.MintFeeNSPX), "n/a"),
-		provenance("Mint ID", meta.MintID, "unanchored"),
-		provenance("IPFS CID", meta.IPFSCID, "unpinned"),
-		provenanceHeight("Mint Block Height", meta.BlockHeight),
-		provenance("Anchor TxID", meta.AnchorTxID, "unanchored"),
-		provenance("Anchor Path", meta.AnchorPath, "unanchored"),
-		provenanceHeight("Confirmed Height", meta.ConfirmedHeight),
-		provenance("Block Hash", meta.BlockHash, "pending"),
-		provenance("Tx Nonce", meta.AnchorNonce, "n/a"),
-		provenance("Token URI", meta.TokenURI, "n/a"),
-		provenance("Metadata CID", meta.MetadataCID, "n/a"),
-		provenanceTokenID(),
-		provenance("Contract", meta.ContractAddress, "n/a (no collection)"),
-	}, "\n")
+	// On-chain / storage provenance: every value rendered here is defined and
+	// populated in meta.go (OnChainProvenance) — IPFS CID and block height
+	// before signing; the anchor txid/mint id/confirming block/token binding
+	// after the anchor via RefreshOnChainProvenance. Missing values render as
+	// explicit sentinels ("unanchored"/"pending") so a verify screen can never
+	// mistake "no data" for a confirmed anchor.
+	onChainLines := OnChainDetailBlock(meta)
 
 	// keywordDetails carries the full technical verification block (fingerprint,
 	// hashes, nonce, and on-chain provenance) in the "Keywords" field, so any
@@ -850,8 +753,7 @@ func createUSIMetaFile(filePath string, inputMeta *Meta, passphrase string, skip
 		return fmt.Errorf("signing document: %w", err)
 	}
 
-	// Fix 1: Ensure public key and org code are always embedded in Meta
-	// In createUSIMetaFile, after Sign():
+	// Ensure public key and org code are always embedded in Meta.
 	meta := &Meta{
 		Signature:          hex.EncodeToString(sig.Signature),
 		PublicKey:          hex.EncodeToString(sig.PublicKey),
@@ -863,28 +765,12 @@ func createUSIMetaFile(filePath string, inputMeta *Meta, passphrase string, skip
 		Nonce:              generateSecureNonce(),
 		Signer:             inputMeta.Signer,
 		DocumentTitle:      inputMeta.DocumentTitle,
-		// On-chain / pinning context: the Mint Data flow sets these before
-		// embedding so the sidecar output carries the IPFS CID the payload
-		// was pinned under and the chain-tip block height at mint time.
-		// TokenURI/MetadataCID travel the same path (ERC-721 metadata JSON
-		// CID + ipfs:// pointer) so PDF/XMP/Office/sidecar outputs all agree.
-		IPFSCID:     inputMeta.IPFSCID,
-		BlockHeight: inputMeta.BlockHeight,
-		TokenURI:    inputMeta.TokenURI,
-		MetadataCID: inputMeta.MetadataCID,
-		// Pre-anchor provenance (if the Mint flow already knows them):
-		// MintID is deterministic and known before broadcast. AnchorTxID /
-		// AnchorPath / ConfirmedHeight / BlockHash / TokenID / Contract are
-		// normally stamped post-anchor via RefreshOnChainProvenance — but if
-		// a caller pre-fills them, preserve (never drop) them here.
-		MintID:          inputMeta.MintID,
-		AnchorTxID:      inputMeta.AnchorTxID,
-		AnchorPath:      inputMeta.AnchorPath,
-		ConfirmedHeight: inputMeta.ConfirmedHeight,
-		BlockHash:       inputMeta.BlockHash,
-		TokenID:         inputMeta.TokenID,
-		ContractAddress: inputMeta.ContractAddress,
 	}
+	// On-chain / storage provenance travels with the signature. meta.go owns
+	// which fields carry it (OnChainProvenance) and gui.Mint Data populates
+	// them stage by stage, so PDF/XMP/Office/sidecar/footer outputs all agree
+	// by construction — never copied field-by-field here.
+	ApplyOnChainData(meta, OnChainData(inputMeta))
 	// Add this line to record the nonce
 	if err := recordSigningNonce(meta.Nonce); err != nil {
 		return fmt.Errorf("nonce replay check failed: %w", err)
@@ -1404,7 +1290,7 @@ func buildPDFStyleXMPPacket(meta *Meta, fingerprint string) string {
 	}
 
 	// On-chain / storage provenance (same fields as buildCryptographicMetadataBlock).
-	onChain := onChainProvenanceBlock(meta)
+	onChain := OnChainBlock(meta)
 	tokenIDStr := "n/a"
 	if meta.TokenID != 0 {
 		tokenIDStr = fmt.Sprintf("%d", meta.TokenID)
@@ -1480,6 +1366,9 @@ func buildPDFStyleXMPPacket(meta *Meta, fingerprint string) string {
       <usi:MetadataCID>%s</usi:MetadataCID>
       <usi:TokenID>%s</usi:TokenID>
       <usi:ContractAddress>%s</usi:ContractAddress>
+      <usi:RoyaltyBPS>%s</usi:RoyaltyBPS>
+      <usi:UsageFeeNSPX>%s</usi:UsageFeeNSPX>
+      <usi:RoyaltyRecipient>%s</usi:RoyaltyRecipient>
     </rdf:Description>
   </rdf:RDF>
 </x:xmpmeta>
@@ -1519,6 +1408,10 @@ func buildPDFStyleXMPPacket(meta *Meta, fingerprint string) string {
 		xmlEscape(metadataCIDStr),
 		xmlEscape(tokenIDStr),
 		xmlEscape(contractStr),
+		// Embedded economics frozen at mint.
+		fmt.Sprintf("%d", meta.RoyaltyBPS),
+		FormatMintFeeNSPX(meta.UsageFeeNSPX),
+		xmlEscape(meta.RoyaltyRecipient),
 	)
 }
 
@@ -1618,7 +1511,7 @@ func buildOfficeCustomPropsPDFStyle(meta *Meta, fingerprint string) []byte {
 		{19, "USI_Signer", meta.Signer},
 		{20, "USI_DocumentTitle", meta.DocumentTitle},
 		// On-chain / storage provenance (same fields as XMP and PDF metadata).
-		{21, "USI_OnChainProvenance", onChainProvenanceBlock(meta)},
+		{21, "USI_OnChainProvenance", OnChainBlock(meta)},
 		{22, "USI_MintID", provenanceLine("MintID", meta.MintID, "unanchored")},
 		{23, "USI_IPFSCID", provenanceLine("CID", meta.IPFSCID, "unpinned")},
 		{24, "USI_MintBlockHeight", provenanceHeightLine("MintHeight", meta.BlockHeight)},
@@ -1632,6 +1525,10 @@ func buildOfficeCustomPropsPDFStyle(meta *Meta, fingerprint string) []byte {
 		{32, "USI_ContractAddress", contractAddressStr(meta)},
 		{33, "USI_MintPrice", FormatMintFeeNSPX(meta.MintFeeNSPX)},
 		{34, "USI_TxNonce", provenanceLine("TxNonce", meta.AnchorNonce, "n/a")},
+		// Embedded economics frozen at mint.
+		{35, "USI_RoyaltyBPS", fmt.Sprintf("%d", meta.RoyaltyBPS)},
+		{36, "USI_UsageFeeNSPX", FormatMintFeeNSPX(meta.UsageFeeNSPX)},
+		{37, "USI_RoyaltyRecipient", meta.RoyaltyRecipient},
 	}
 
 	var sb strings.Builder
@@ -1812,6 +1709,12 @@ func setRichXattrs(filePath string, meta *Meta, fingerprint string) error {
 		formattedFileHash,
 		formattedFinalHash,
 	)
+
+	if meta.RoyaltyBPS != 0 || meta.UsageFeeNSPX != "" || meta.RoyaltyRecipient != "" {
+		description += fmt.Sprintf("\n\nEmbedded Economics (frozen at mint):\n"+
+			"RoyaltyBPS: %d\nUsageFeeNSPX: %s\nRoyaltyRecipient: %s",
+			meta.RoyaltyBPS, FormatMintFeeNSPX(meta.UsageFeeNSPX), meta.RoyaltyRecipient)
+	}
 
 	signer := meta.Signer
 	if signer == "" {
@@ -2000,6 +1903,10 @@ f = sys.argv[1]
 // CALLER CONTRACT (gui.go Mint Data flow): call AFTER AnchorMintReceipt (and
 // MintNFTInCollection for collection mints) returns. confirmedBlock == nil
 // means anchored-but-pending (ConfirmedHeight 0, BlockHash "pending").
+//
+// The field-level stamping lives in meta.go (StampAnchorProvenance) so the
+// on-chain data model has a single owner; this function only resolves the
+// confirming block and re-writes the container metadata.
 func RefreshOnChainProvenance(filePath string, meta *Meta, fingerprint string, anchorTxID, anchorPath string, receiptMintID string, tokenID uint64, contractAddress string, confirmedBlock interface {
 	GetHeight() uint64
 	GetHash() string
@@ -2007,24 +1914,14 @@ func RefreshOnChainProvenance(filePath string, meta *Meta, fingerprint string, a
 	if meta == nil {
 		return errors.New("nil meta")
 	}
-	if strings.TrimSpace(anchorTxID) == "" {
-		return errors.New("empty anchor txid — refusing to stamp unanchored provenance")
-	}
-	meta.MintID = receiptMintID
-	meta.AnchorTxID = anchorTxID
-	meta.AnchorPath = anchorPath
-	meta.TokenID = tokenID
-	meta.ContractAddress = contractAddress
+	var confirmedHeight uint64
+	var blockHash string
 	if confirmedBlock != nil {
-		meta.ConfirmedHeight = confirmedBlock.GetHeight()
-		if h := strings.TrimSpace(confirmedBlock.GetHash()); h != "" {
-			meta.BlockHash = h
-		} else {
-			meta.BlockHash = "pending"
-		}
-	} else {
-		meta.ConfirmedHeight = 0
-		meta.BlockHash = "pending"
+		confirmedHeight = confirmedBlock.GetHeight()
+		blockHash = confirmedBlock.GetHash()
+	}
+	if err := StampAnchorProvenance(meta, anchorTxID, anchorPath, receiptMintID, tokenID, contractAddress, confirmedHeight, blockHash); err != nil {
+		return err
 	}
 
 	var refreshErrs []string

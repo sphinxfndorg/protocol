@@ -87,16 +87,19 @@ func BuildAnchorData(r *MintReceipt) ([]byte, error) {
 		return nil, err
 	}
 	tag := AnchorTag{
-		Type:            AnchorTagType,
-		MintID:          r.MintID,
-		Subject:         r.Subject,
-		CID:             r.CID,
-		MinterPublicKey: r.MinterPublicKey,
-		ReceiptHash:     hex.EncodeToString(h),
-		CIDHashHex:      core.CIDHashHexFor(r.CID),
-		TokenID:         r.TokenID,
-		TokenURI:        r.TokenURI,
-		Contract:        r.ContractAddress,
+		Type:             AnchorTagType,
+		MintID:           r.MintID,
+		Subject:          r.Subject,
+		CID:              r.CID,
+		MinterPublicKey:  r.MinterPublicKey,
+		ReceiptHash:      hex.EncodeToString(h),
+		CIDHashHex:       core.CIDHashHexFor(r.CID),
+		TokenID:          r.TokenID,
+		TokenURI:         r.TokenURI,
+		Contract:         r.ContractAddress,
+		RoyaltyBPS:       r.RoyaltyBPS,
+		UsageFeeNSPX:     r.UsageFeeNSPX,
+		RoyaltyRecipient: r.RoyaltyRecipient,
 	}
 	out, err := json.Marshal(tag)
 	if err != nil {
@@ -139,6 +142,9 @@ func VerifyAnchor(r *MintReceipt, anchorData []byte) (bool, error) {
 			return false, errors.New("contract mismatch between anchor and receipt")
 		}
 	}
+	if err := verifyAnchorTerms(r, &tag); err != nil {
+		return false, err
+	}
 
 	return true, nil
 }
@@ -171,16 +177,19 @@ func BuildAnchorTag(r *MintReceipt) (*AnchorTag, error) {
 		return nil, err
 	}
 	return &AnchorTag{
-		Type:            AnchorTagType,
-		MintID:          r.MintID,
-		Subject:         r.Subject,
-		CID:             r.CID,
-		MinterPublicKey: r.MinterPublicKey,
-		ReceiptHash:     hex.EncodeToString(h),
-		CIDHashHex:      core.CIDHashHexFor(r.CID),
-		TokenID:         r.TokenID,
-		TokenURI:        r.TokenURI,
-		Contract:        r.ContractAddress,
+		Type:             AnchorTagType,
+		MintID:           r.MintID,
+		Subject:          r.Subject,
+		CID:              r.CID,
+		MinterPublicKey:  r.MinterPublicKey,
+		ReceiptHash:      hex.EncodeToString(h),
+		CIDHashHex:       core.CIDHashHexFor(r.CID),
+		TokenID:          r.TokenID,
+		TokenURI:         r.TokenURI,
+		Contract:         r.ContractAddress,
+		RoyaltyBPS:       r.RoyaltyBPS,
+		UsageFeeNSPX:     r.UsageFeeNSPX,
+		RoyaltyRecipient: r.RoyaltyRecipient,
 	}, nil
 }
 
@@ -246,8 +255,28 @@ func VerifyAnchorWithTag(r *MintReceipt, tag *AnchorTag) (bool, error) {
 			return false, errors.New("contract mismatch between anchor and receipt")
 		}
 	}
+	if err := verifyAnchorTerms(r, tag); err != nil {
+		return false, err
+	}
 
 	return true, nil
+}
+
+// verifyAnchorTerms checks that the anchor's embedded economics match the
+// receipt exactly. The terms are part of the receipt's on-chain commitment
+// identity — a tampered royalty_bps / usage_fee / royalty_recipient must fail
+// verification the same way a swapped CID or token_id does.
+func verifyAnchorTerms(r *MintReceipt, tag *AnchorTag) error {
+	if tag.RoyaltyBPS != r.RoyaltyBPS {
+		return fmt.Errorf("royalty_bps mismatch between anchor and receipt: anchor=%d receipt=%d", tag.RoyaltyBPS, r.RoyaltyBPS)
+	}
+	if strings.TrimSpace(tag.UsageFeeNSPX) != strings.TrimSpace(r.UsageFeeNSPX) {
+		return errors.New("usage_fee_nspx mismatch between anchor and receipt")
+	}
+	if strings.TrimSpace(tag.RoyaltyRecipient) != strings.TrimSpace(r.RoyaltyRecipient) {
+		return errors.New("royalty_recipient mismatch between anchor and receipt")
+	}
+	return nil
 }
 
 // VerifyAnchoredReceiptWithTag verifies signature, payload, and anchor tag.

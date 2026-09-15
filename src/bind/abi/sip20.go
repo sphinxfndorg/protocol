@@ -80,7 +80,9 @@ func NewSIP721DeployTx(options TxOptions, spec contracts.DeploySpec) (*types.Tra
 }
 
 // NewSIP721CallTx constructs an unsigned, policy-quoted SIP-721 call
-// (mint/transfer_from/approve/owner_of/token_uri). The call executes inside
+// (mint/transfer_from/approve/owner_of/token_uri, the marketplace
+// list/buy/cancel/listing_of, and the licensing
+// purchase_license/revoke_license/terms_of). The call executes inside
 // core.executeContractTransaction, so ownerOf/approval rules are enforced by
 // every node at consensus, not just by the wallet.
 func NewSIP721CallTx(options TxOptions, contractAddress, method string, args map[string]string) (*types.Transaction, error) {

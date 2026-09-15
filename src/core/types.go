@@ -5,10 +5,13 @@
 package core
 
 import (
+	"encoding/json"
 	"math/big"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/sphinxfndorg/protocol/src/common"
 	"github.com/sphinxfndorg/protocol/src/consensus"
 	database "github.com/sphinxfndorg/protocol/src/core/state"
 	sign "github.com/sphinxfndorg/protocol/src/core/sthincs/sign/backend"
@@ -845,11 +848,77 @@ type BlockchainOption func(*blockchainInitOptions)
 // ROLLBACK JOURNAL - Records state changes for crash-safe rollback
 // ============================================================================
 
+// formatJournalAddress returns the canonical display form of a journal address
+// using common.FormatSPIFAddress so it stays identical to every other SPIF
+// address rendered by the protocol. Real SPIF hex addresses become
+// "SPIF XXXX XXXX ..."; non-hex addresses (system:* pools, Node-*:p2p
+// endpoints) pass through unchanged. The in-memory canonical form (raw
+// uppercase hex) is unchanged — rollback builds LevelDB keys directly from it.
+func formatJournalAddress(raw string) string {
+	if formatted, err := common.FormatSPIFAddress(raw); err == nil {
+		return formatted
+	}
+	return raw
+}
+
+// parseJournalAddress is the inverse of formatJournalAddress: it strips a
+// leading "SPIF " prefix and normalizes the remainder to canonical uppercase
+// hex for SPIF addresses using common.NormalizeSPIFAddress, leaving non-hex
+// addresses (system:* / Node-*:) untouched.
+func parseJournalAddress(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if strings.HasPrefix(raw, common.SPIFPrefix+" ") || strings.HasPrefix(raw, strings.ToLower(common.SPIFPrefix)+" ") {
+		rest := strings.TrimSpace(raw[len(common.SPIFPrefix)+1:])
+		if norm, err := common.NormalizeSPIFAddress(rest); err == nil {
+			return norm
+		}
+		// Malformed prefixed address — fall through to raw.
+	}
+	return raw
+}
+
 // StateChangeJournal records a single account state change for potential rollback
 type StateChangeJournal struct {
 	Address         string `json:"address"`
 	PreviousBalance string `json:"previous_balance"`
 	PreviousNonce   uint64 `json:"previous_nonce"`
+}
+
+// MarshalJSON renders the journal address with the "SPIF:" prefix for SPIF
+// hex addresses, matching the display form used elsewhere in the protocol.
+// Non-hex addresses (system:* pools, Node-*:p2p endpoints) are left as-is.
+// The in-memory canonical form (raw uppercase hex) is unchanged — rollback
+// builds LevelDB keys directly from it (see storage.rollbackUsingRecordedState).
+func (j StateChangeJournal) MarshalJSON() ([]byte, error) {
+	addr := formatJournalAddress(j.Address)
+	return json.Marshal(struct {
+		Address         string `json:"address"`
+		PreviousBalance string `json:"previous_balance"`
+		PreviousNonce   uint64 `json:"previous_nonce"`
+	}{
+		Address:         addr,
+		PreviousBalance: j.PreviousBalance,
+		PreviousNonce:   j.PreviousNonce,
+	})
+}
+
+// UnmarshalJSON parses journal addresses in either form: raw uppercase hex
+// (legacy journals) or "SPIF:"-prefixed (new journals). Either way the
+// canonical field is stored as raw uppercase hex so rollback and LevelDB keys
+// continue to work unchanged. Non-hex addresses pass through.
+func (j *StateChangeJournal) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Address         string `json:"address"`
+		PreviousBalance string `json:"previous_balance"`
+		PreviousNonce   uint64 `json:"previous_nonce"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	j.Address = parseJournalAddress(raw.Address)
+	j.PreviousBalance = raw.PreviousBalance
+	j.PreviousNonce = raw.PreviousNonce
+	return nil
 }
 
 // AtomicCommitJournal records all state changes for a single block commit

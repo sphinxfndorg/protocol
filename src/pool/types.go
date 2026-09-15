@@ -54,6 +54,23 @@ type PooledTransaction struct {
 	RetryCount  int
 	Error       string
 	Priority    int // Higher priority transactions get included first
+
+	// Validated is true only once performValidation has fully accepted the
+	// transaction. It separates the two very different kinds of entry that
+	// live in pendingPool:
+	//
+	//	StatusPending + Validated   → validated, ready for block inclusion
+	//	StatusPending + !Validated  → parked because validationChan was full;
+	//	                              still needs validating
+	//
+	// Only validated entries may be selected into a block, and only
+	// un-validated ones may be re-queued for validation (see
+	// drainPendingPool). Conflating the two is what made the block producer
+	// see "0 pending tx" while a valid anchor sat in the pool: drainPendingPool
+	// emptied the whole pendingPool every 500ms to re-validate it, so
+	// already-validated transactions kept vanishing from the pool the producer
+	// reads for the entire duration of each re-validation.
+	Validated bool
 }
 
 // BalanceResult represents the balance information for an address

@@ -43,16 +43,26 @@ var SIP20ABI = Contract{
 
 // SIP721ABI is the stable client-facing schema for the native SIP-721 runtime.
 // Method names mirror contracts/callSIP721 so wallets encode once and every
-// node decodes identically: mint/transfer_from/approve/owner_of/token_uri.
+// node decodes identically: mint/transfer_from/approve/owner_of/token_uri,
+// plus the marketplace (list/buy/cancel/listing_of) and licensing
+// (purchase_license/revoke_license/terms_of) methods.
 var SIP721ABI = Contract{
 	Name: SIP721, Version: 1,
 	Methods: []Method{
-		{Name: "mint", Inputs: []Argument{{Name: "to", Type: "address", Required: true}, {Name: "token_uri", Type: "string", Required: true}, {Name: "mint_id", Type: "string", Required: false}}},
+		{Name: "mint", Inputs: []Argument{{Name: "to", Type: "address", Required: true}, {Name: "token_uri", Type: "string", Required: true}, {Name: "mint_id", Type: "string", Required: false},
+			{Name: "royalty_bps", Type: "uint64", Required: false}, {Name: "usage_fee", Type: "string", Required: false}, {Name: "royalty_recipient", Type: "address", Required: false}}},
 		{Name: "transfer_from", Inputs: []Argument{{Name: "from", Type: "address", Required: true}, {Name: "to", Type: "address", Required: true}, {Name: "token_id", Type: "uint64", Required: true}}},
 		{Name: "approve", Inputs: []Argument{{Name: "to", Type: "address", Required: true}, {Name: "token_id", Type: "uint64", Required: true}}},
 		{Name: "owner_of", Inputs: []Argument{{Name: "token_id", Type: "uint64", Required: true}}},
 		{Name: "token_uri", Inputs: []Argument{{Name: "token_id", Type: "uint64", Required: true}}},
 		{Name: "token_id_of_mint", Inputs: []Argument{{Name: "mint_id", Type: "string", Required: true}}},
+		{Name: "purchase_license", Inputs: []Argument{{Name: "token_id", Type: "uint64", Required: true}, {Name: "licensee", Type: "address", Required: false}}},
+		{Name: "revoke_license", Inputs: []Argument{{Name: "token_id", Type: "uint64", Required: true}}},
+		{Name: "terms_of", Inputs: []Argument{{Name: "token_id", Type: "uint64", Required: true}}},
+		{Name: "list", Inputs: []Argument{{Name: "token_id", Type: "uint64", Required: true}, {Name: "price", Type: "string", Required: true}}},
+		{Name: "buy", Inputs: []Argument{{Name: "token_id", Type: "uint64", Required: true}}},
+		{Name: "cancel", Inputs: []Argument{{Name: "token_id", Type: "uint64", Required: true}}},
+		{Name: "listing_of", Inputs: []Argument{{Name: "token_id", Type: "uint64", Required: true}}},
 		{Name: "info"},
 	},
 }

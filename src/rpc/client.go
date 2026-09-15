@@ -105,19 +105,55 @@ func CallRPC(address, method string, params interface{}, ttlSeconds uint16) (jso
 		return nil, fmt.Errorf("unexpected response type %q (expected \"jsonrpc\")", respMsg.Type)
 	}
 
-	var jsonResp JSONRPCResponse
-	if err := json.Unmarshal(respMsg.Data, &jsonResp); err != nil {
+	return decodeRPCResult(respMsg.Data)
+}
+
+// rpcResponseEnvelope is the LOSSLESS shape of a JSON-RPC 2.0 response: the
+// `result` member is kept as the exact bytes the server sent rather than
+// being decoded into an interface{}.
+//
+// ★ FIX: decoding into rpc.JSONRPCResponse previously turned every JSON number
+// in `result` into a float64 and then re-marshalled it, because Result is
+// typed interface{}. That silently corrupted large integers: the node emits
+// nSPX amounts (and block-header Difficulty/GasLimit/ChainWeight) as exact
+// plain-digit big.Int values, but a float64 cannot hold ~10^25 exactly, and
+// encoding/json renders such floats in exponent notation. A transaction
+// history response therefore arrived at the wallet as
+//
+//	"amount": 1e+25
+//
+// instead of
+//
+//	"amount": 19999999999705000000000000
+//
+// which the wallet's types.Transaction (Amount *big.Int) rejected outright with
+// `math/big: cannot unmarshal "1e+25" into a *big.Int` — the reported
+// "[Wallet] Failed to fetch transaction history" error — and which also lost
+// the low-order digits of every amount it did parse.
+type rpcResponseEnvelope struct {
+	JSONRPC string          `json:"jsonrpc"`
+	Result  json.RawMessage `json:"result"`
+	Error   *RPCError       `json:"error"`
+	ID      json.RawMessage `json:"id"`
+}
+
+// decodeRPCResult parses a JSON-RPC 2.0 response body and returns the raw
+// `result` value verbatim, so callers unmarshal it themselves with whatever
+// numeric fidelity they need. A missing or null result is reported as "null"
+// (exactly what the previous interface{} + re-marshal path produced), and an
+// error member is surfaced with the same message as before.
+func decodeRPCResult(data []byte) (json.RawMessage, error) {
+	var env rpcResponseEnvelope
+	if err := json.Unmarshal(data, &env); err != nil {
 		return nil, fmt.Errorf("parse JSON-RPC response: %w", err)
 	}
-	if jsonResp.Error != nil {
-		return nil, fmt.Errorf("RPC error (%d): %s", jsonResp.Error.Code, jsonResp.Error.Message)
+	if env.Error != nil {
+		return nil, fmt.Errorf("RPC error (%d): %s", env.Error.Code, env.Error.Message)
 	}
-
-	resultBytes, err := json.Marshal(jsonResp.Result)
-	if err != nil {
-		return nil, fmt.Errorf("re-marshal result: %w", err)
+	if env.Result == nil {
+		return json.RawMessage("null"), nil
 	}
-	return resultBytes, nil
+	return env.Result, nil
 }
 
 // writeFramedMessage writes a 4-byte big-endian length prefix followed by

@@ -36,46 +36,30 @@ func NewJSONRPCHandler(server *Server) *JSONRPCHandler {
 func (h *JSONRPCHandler) getBlockByNumber(params interface{}) (interface{}, error) {
 	var paramsArray []interface{}
 	if err := h.parseParams(params, &paramsArray); err != nil {
-		return nil, err // Failed to parse parameters
+		return nil, err
 	}
 	if len(paramsArray) < 1 {
-		return nil, errors.New("missing block number parameter") // Require at least one parameter
+		return nil, errors.New("missing block number parameter")
 	}
 
 	height, ok := paramsArray[0].(float64)
 	if !ok {
-		return nil, errors.New("invalid block number parameter") // Height must be numeric
+		return nil, errors.New("invalid block number parameter")
 	}
 
-	// Use the direct method that returns *types.Block (not wrapped)
 	block := h.server.blockchain.GetBlockByNumber(uint64(height))
 	if block == nil {
-		return nil, errors.New("block not found") // Block does not exist at this height
+		return nil, errors.New("block not found")
 	}
 	return block, nil
 }
 
 // getBlockHeader returns ONLY the header of a single block — never the body.
-//
-// ★ NODE-TYPE CONTRACT (lightweight path): wallets such as src/usi are
-// lightweight clients, NOT vault full nodes. Full nodes download entire
-// blocks (see src/core/sync.go); lightweight wallets download block headers
-// only. This is the lightweight counterpart of getblock/getblocks: it
-// deliberately serializes the types.BlockHeader and never the BlockBody, so
-// a wallet can track the chain tip / header chain without pulling
-// transactions, uncles, or attestations across the wire.
-//
-// Params (all optional):
-//   - none / ["latest"] / [""]   → chain tip header
-//   - [height uint] (0 = genesis) → header at that height
-//   - [hash string]              → header by block hash
 func (h *JSONRPCHandler) getBlockHeader(params interface{}) (interface{}, error) {
 	if h.server.blockchain == nil {
 		return nil, errors.New("blockchain not initialized")
 	}
 
-	// getConcrete unwraps a consensus.Block (usually *core.BlockHelper) into
-	// its underlying *types.Block so we can reach .Header directly.
 	getConcrete := func(b consensus.Block) (*types.Block, error) {
 		if b == nil {
 			return nil, errors.New("block not found")
@@ -107,7 +91,7 @@ func (h *JSONRPCHandler) getBlockHeader(params interface{}) (interface{}, error)
 		default:
 			switch v := paramsArray[0].(type) {
 			case float64:
-				if v < 0 { // negative height → tip
+				if v < 0 {
 					raw, blkError = getTip()
 				} else {
 					raw = h.server.blockchain.GetBlockByNumber(uint64(v))
@@ -136,10 +120,6 @@ func (h *JSONRPCHandler) getBlockHeader(params interface{}) (interface{}, error)
 }
 
 // getHeaders returns up to `count` block headers starting at `start_height`.
-// Lightweight bulk header sync: headers ONLY, never block bodies. This is the
-// RPC counterpart of the P2P getheaders/headers message pair (src/p2p) and is
-// what a lightweight wallet uses to header-sync the chain without holding a
-// single full block. Defaults: start_height=0, count=100.
 func (h *JSONRPCHandler) getHeaders(params interface{}) (interface{}, error) {
 	if h.server.blockchain == nil {
 		return nil, errors.New("blockchain not initialized")
@@ -202,8 +182,7 @@ func (h *JSONRPCHandler) getBlockHash(params interface{}) (interface{}, error) {
 	return hash, nil
 }
 
-// getSupplyStatus returns detailed supply information including genesis allocation,
-// rewards minted, remaining supply, and distribution status.
+// getSupplyStatus returns detailed supply information.
 func (h *JSONRPCHandler) getSupplyStatus(params interface{}) (interface{}, error) {
 	if h.server.blockchain == nil {
 		return nil, errors.New("blockchain not initialized")
@@ -231,17 +210,17 @@ func (h *JSONRPCHandler) getMiningInfo(_ interface{}) (interface{}, error) {
 	return h.server.blockchain.GetMiningInfo(), nil
 }
 
-// estimateFee estimates the transaction fee per byte for confirmation within N blocks
+// estimateFee estimates the transaction fee per byte.
 func (h *JSONRPCHandler) estimateFee(params interface{}) (interface{}, error) {
 	var paramsArray []interface{}
 	if err := h.parseParams(params, &paramsArray); err != nil {
 		return nil, err
 	}
 
-	blocks := 6 // default
+	blocks := 6
 	if len(paramsArray) > 0 {
 		if blocksParam, ok := paramsArray[0].(float64); ok {
-			blocks = int(blocksParam) // Override default if provided
+			blocks = int(blocksParam)
 		}
 	}
 
@@ -253,7 +232,7 @@ func (h *JSONRPCHandler) getMemPoolInfo(_ interface{}) (interface{}, error) {
 	return h.server.blockchain.GetMemPoolInfo(), nil
 }
 
-// validateAddress checks if a given address is valid according to network rules
+// validateAddress checks if a given address is valid.
 func (h *JSONRPCHandler) validateAddress(params interface{}) (interface{}, error) {
 	var paramsArray []string
 	if err := h.parseParams(params, &paramsArray); err != nil {
@@ -293,11 +272,6 @@ func (h *JSONRPCHandler) verifyMessage(params interface{}) (interface{}, error) 
 }
 
 // getBalance returns the confirmed, pending, and unlocked balance for an address.
-//
-// NOTE: this assumes core.Blockchain exposes a GetBalance(address string) method
-// returning (confirmed, pending, unlocked *big.Int) or an equivalent struct. Adjust
-// the call below to match the real signature on *core.Blockchain.
-// getBalance returns the confirmed, pending, and unlocked balance for an address.
 func (h *JSONRPCHandler) getBalance(params interface{}) (interface{}, error) {
 	var paramsArray []string
 	if err := h.parseParams(params, &paramsArray); err != nil {
@@ -328,10 +302,6 @@ func (h *JSONRPCHandler) getBalance(params interface{}) (interface{}, error) {
 }
 
 // getTransactionHistory returns recent transactions involving the given address.
-//
-// NOTE: this assumes core.Blockchain exposes a GetTransactionHistory(address string,
-// limit int) ([]*types.Transaction, error) method or equivalent. Adjust the call
-// below to match the real signature on *core.Blockchain.
 func (h *JSONRPCHandler) getTransactionHistory(params interface{}) (interface{}, error) {
 	var paramsArray []interface{}
 	if err := h.parseParams(params, &paramsArray); err != nil {
@@ -352,7 +322,6 @@ func (h *JSONRPCHandler) getTransactionHistory(params interface{}) (interface{},
 		}
 	}
 
-	// Use exported method (capital N)
 	stateDB, err := h.server.blockchain.NewStateDB()
 	if err != nil {
 		return nil, err
@@ -361,7 +330,7 @@ func (h *JSONRPCHandler) getTransactionHistory(params interface{}) (interface{},
 	return stateDB.GetTransactionHistory(address, limit)
 }
 
-// getRawTransaction returns raw transaction data, optionally in verbose format
+// getRawTransaction returns raw transaction data.
 func (h *JSONRPCHandler) getRawTransaction(params interface{}) (interface{}, error) {
 	var paramsArray []interface{}
 	if err := h.parseParams(params, &paramsArray); err != nil {
@@ -379,7 +348,7 @@ func (h *JSONRPCHandler) getRawTransaction(params interface{}) (interface{}, err
 	verbose := false
 	if len(paramsArray) > 1 {
 		if verboseParam, ok := paramsArray[1].(bool); ok {
-			verbose = verboseParam // Second param controls verbosity
+			verbose = verboseParam
 		}
 	}
 
@@ -390,7 +359,7 @@ func (h *JSONRPCHandler) getRawTransaction(params interface{}) (interface{}, err
 	return result, nil
 }
 
-// getCheckpoint returns the current checkpoint information
+// getCheckpoint returns the current checkpoint information.
 func (h *JSONRPCHandler) getCheckpoint(params interface{}) (interface{}, error) {
 	if h.server.blockchain == nil {
 		return nil, errors.New("blockchain not initialized")
@@ -406,7 +375,6 @@ func (h *JSONRPCHandler) getCheckpoint(params interface{}) (interface{}, error) 
 
 // registerMethods registers all supported RPC methods with their handler functions
 func (h *JSONRPCHandler) registerMethods() {
-	// Existing methods
 	h.methods["getblockcount"] = h.getBlockCount
 	h.methods["getbestblockhash"] = h.getBestBlockHash
 	h.methods["getblock"] = h.getBlock
@@ -414,9 +382,6 @@ func (h *JSONRPCHandler) registerMethods() {
 	h.methods["sendrawtransaction"] = h.sendRawTransaction
 	h.methods["gettransaction"] = h.getTransaction
 	h.methods["gettransactionreceipt"] = h.getTransactionReceipt
-	// spx_/sphinx_ aliases: the CLI's WatchTransaction and the bind client
-	// already call these names; they previously had NO node-side handler, so
-	// every confirmation poll failed and nothing could ever confirm on-chain.
 	h.methods["spx_getTransactionReceipt"] = h.getTransactionReceipt
 	h.methods["sphinx_getTransactionReceipt"] = h.getTransactionReceipt
 	h.methods["ping"] = h.ping
@@ -425,7 +390,6 @@ func (h *JSONRPCHandler) registerMethods() {
 	h.methods["get"] = h.get
 	h.methods["store"] = h.store
 
-	// New blockchain methods
 	h.methods["getblockbynumber"] = h.getBlockByNumber
 	h.methods["getblockhash"] = h.getBlockHash
 	h.methods["getdifficulty"] = h.getDifficulty
@@ -442,19 +406,15 @@ func (h *JSONRPCHandler) registerMethods() {
 	h.methods["getsupplystatus"] = h.getSupplyStatus
 	h.methods["getcheckpoint"] = h.getCheckpoint
 
-	// Lightweight header-only sync endpoints (wallets download headers, not
-	// entire block bodies — see getBlockHeader/getHeaders).
 	h.methods["getblockheader"] = h.getBlockHeader
 	h.methods["getheaders"] = h.getHeaders
 
-	// Mint/NFT storage methods
 	h.methods["storeartifact"] = h.storeArtifact
 	h.methods["getartifact"] = h.getArtifact
 	h.methods["getnonce"] = h.getNonce
 	h.methods["getcontract"] = h.getContract
 	h.methods["getcontractstorage"] = h.getContractStorage
 
-	// Contract deployment/call convenience methods (Gap 5/6 fix)
 	h.methods["deploycontract"] = h.deployContract
 	h.methods["callcontract"] = h.callContract
 }
@@ -501,14 +461,20 @@ func (h *JSONRPCHandler) getContractStorage(params interface{}) (interface{}, er
 // deployContract builds an unsigned contract deployment transaction and returns
 // it as hex-encoded JSON for the client to sign and submit via sendrawtransaction.
 //
-// FIX (Gap 5/6): thin wrapper around sendRawTransaction that pre-populates Code.
+// ★ FIX: Nonce is now *uint64 so the handler distinguishes "not provided" from
+// a client that deliberately passes 0. A client that has already claimed a
+// pending-aware nonce via getnonce (or its own wallet reservation) can now
+// inject that exact value and have it honored verbatim — including 0 for a
+// first-ever tx on a fresh account — instead of being silently overwritten by
+// a raw state-DB read.
 //
 // Params (single object):
 //   - from:        sender SPIF address (required)
 //   - code:        hex-encoded deploy code JSON (required)
 //   - gasLimit:    optional gas limit
 //   - gasPrice:    optional gas price in nSPX
-//   - nonce:       optional nonce (default: queried from node)
+//   - nonce:       optional nonce (absent = query state; present = use verbatim,
+//     including 0)
 //
 // Returns: { "tx": "<hex>", "contractAddress": "<predicted>" }
 func (h *JSONRPCHandler) deployContract(params interface{}) (interface{}, error) {
@@ -517,11 +483,11 @@ func (h *JSONRPCHandler) deployContract(params interface{}) (interface{}, error)
 	}
 
 	var paramsStruct struct {
-		From     string `json:"from"`
-		Code     string `json:"code"`
-		GasLimit uint64 `json:"gasLimit"`
-		GasPrice string `json:"gasPrice"`
-		Nonce    uint64 `json:"nonce"`
+		From     string  `json:"from"`
+		Code     string  `json:"code"`
+		GasLimit uint64  `json:"gasLimit"`
+		GasPrice string  `json:"gasPrice"`
+		Nonce    *uint64 `json:"nonce"` // ★ FIX: pointer distinguishes absent from 0
 	}
 	paramsJSON, err := json.Marshal(params)
 	if err != nil {
@@ -543,14 +509,21 @@ func (h *JSONRPCHandler) deployContract(params interface{}) (interface{}, error)
 		return nil, fmt.Errorf("invalid code hex: %w", err)
 	}
 
-	// Normalize sender address
 	rawFrom, err := common.NormalizeSPIFAddress(paramsStruct.From)
 	if err != nil {
 		return nil, fmt.Errorf("invalid sender address: %w", err)
 	}
 
-	nonce := paramsStruct.Nonce
-	if nonce == 0 {
+	// ★ FIX: honor a client-provided nonce verbatim (including 0). Only fall
+	// back to a state-DB read when the field was genuinely absent. The old
+	// `if nonce == 0 { re-query }` form made a client-passed 0 indistinguishable
+	// from "not provided", so the state read always won — which is how a
+	// wallet that had reserved nonce 0 ended up broadcasting a tx the
+	// pending-aware mempool validator rejected as "invalid nonce: 0 must equal 1".
+	nonce := uint64(0)
+	if paramsStruct.Nonce != nil {
+		nonce = *paramsStruct.Nonce
+	} else {
 		stateDB, dbErr := h.server.blockchain.NewStateDB()
 		if dbErr != nil {
 			return nil, fmt.Errorf("failed to query nonce: %w", dbErr)
@@ -605,7 +578,9 @@ func (h *JSONRPCHandler) deployContract(params interface{}) (interface{}, error)
 // callContract builds an unsigned contract call transaction and returns it as
 // hex-encoded JSON for the client to sign and submit via sendrawtransaction.
 //
-// FIX (Gap 5/6): thin wrapper around sendRawTransaction that pre-populates ToContract + CallData.
+// ★ FIX: Nonce is now *uint64 for the same reason as deployContract — a
+// client that already claimed nonce 0 for its very first contract call must
+// be able to say "use 0" and have that survive the handler.
 //
 // Params (single object):
 //   - from:        sender SPIF address (required)
@@ -614,7 +589,7 @@ func (h *JSONRPCHandler) deployContract(params interface{}) (interface{}, error)
 //   - value:       optional nSPX to send (default: 0)
 //   - gasLimit:    optional gas limit
 //   - gasPrice:    optional gas price in nSPX
-//   - nonce:       optional nonce (default: queried from node)
+//   - nonce:       optional nonce (absent = query state; present = use verbatim)
 //
 // Returns: { "tx": "<hex>" }
 func (h *JSONRPCHandler) callContract(params interface{}) (interface{}, error) {
@@ -623,13 +598,13 @@ func (h *JSONRPCHandler) callContract(params interface{}) (interface{}, error) {
 	}
 
 	var paramsStruct struct {
-		From     string `json:"from"`
-		To       string `json:"to"`
-		CallData string `json:"callData"`
-		Value    string `json:"value"`
-		GasLimit uint64 `json:"gasLimit"`
-		GasPrice string `json:"gasPrice"`
-		Nonce    uint64 `json:"nonce"`
+		From     string  `json:"from"`
+		To       string  `json:"to"`
+		CallData string  `json:"callData"`
+		Value    string  `json:"value"`
+		GasLimit uint64  `json:"gasLimit"`
+		GasPrice string  `json:"gasPrice"`
+		Nonce    *uint64 `json:"nonce"` // ★ FIX: pointer distinguishes absent from 0
 	}
 	paramsJSON, err := json.Marshal(params)
 	if err != nil {
@@ -654,14 +629,16 @@ func (h *JSONRPCHandler) callContract(params interface{}) (interface{}, error) {
 		return nil, fmt.Errorf("invalid callData hex: %w", err)
 	}
 
-	// Normalize sender address
 	rawFrom, err := common.NormalizeSPIFAddress(paramsStruct.From)
 	if err != nil {
 		return nil, fmt.Errorf("invalid sender address: %w", err)
 	}
 
-	nonce := paramsStruct.Nonce
-	if nonce == 0 {
+	// ★ FIX: same pointer-honoring logic as deployContract.
+	nonce := uint64(0)
+	if paramsStruct.Nonce != nil {
+		nonce = *paramsStruct.Nonce
+	} else {
 		stateDB, dbErr := h.server.blockchain.NewStateDB()
 		if dbErr != nil {
 			return nil, fmt.Errorf("failed to query nonce: %w", dbErr)
@@ -672,7 +649,6 @@ func (h *JSONRPCHandler) callContract(params interface{}) (interface{}, error) {
 			return nil, fmt.Errorf("failed to get nonce: %w", err)
 		}
 	}
-
 	amount := big.NewInt(0)
 	if paramsStruct.Value != "" {
 		if _, ok := amount.SetString(paramsStruct.Value, 10); !ok {
@@ -719,24 +695,20 @@ func (h *JSONRPCHandler) callContract(params interface{}) (interface{}, error) {
 }
 
 // ProcessRequest processes a JSON-RPC request or batch of requests.
-// It first attempts to parse as binary Message, then falls back to JSON-RPC.
 func (h *JSONRPCHandler) ProcessRequest(data []byte) ([]byte, error) {
-	// Try to parse as a Message (binary format)
 	var msg Message
 	if err := msg.Unmarshal(data); err == nil {
-		return h.processBinaryMessage(msg) // Handle binary protocol message
+		return h.processBinaryMessage(msg)
 	}
 
-	// Fallback to JSON-RPC
 	var singleReq JSONRPCRequest
 	if err := json.Unmarshal(data, &singleReq); err == nil && singleReq.JSONRPC == "2.0" {
-		return h.processSingleRequest(singleReq) // Handle single JSON-RPC request
+		return h.processSingleRequest(singleReq)
 	}
 
-	// Try to parse as a batch request
 	var batchReq []JSONRPCRequest
 	if err := json.Unmarshal(data, &batchReq); err == nil && len(batchReq) > 0 {
-		return h.processBatchRequest(batchReq) // Handle batch of JSON-RPC requests
+		return h.processBatchRequest(batchReq)
 	}
 
 	return h.errorResponse(nil, ErrCodeParseError, "Parse error: invalid JSON or binary format")
@@ -746,24 +718,21 @@ func (h *JSONRPCHandler) ProcessRequest(data []byte) ([]byte, error) {
 func (h *JSONRPCHandler) processBinaryMessage(msg Message) ([]byte, error) {
 	start := time.Now()
 	method := msg.RPCType.String()
-	h.server.metrics.RequestCount.WithLabelValues(method).Inc() // Increment request counter
+	h.server.metrics.RequestCount.WithLabelValues(method).Inc()
 	defer func() {
-		h.server.metrics.RequestLatency.WithLabelValues(method).Observe(time.Since(start).Seconds()) // Record latency
+		h.server.metrics.RequestLatency.WithLabelValues(method).Observe(time.Since(start).Seconds())
 	}()
 
-	// Validate TTL
 	if msg.TTL == 0 {
 		return h.errorResponse(msg.RPCID, ErrCodeInvalidRequest, "Invalid TTL")
 	}
 
-	// Map RPCType to method name
 	methodName, err := h.mapRPCTypeToMethod(msg.RPCType)
 	if err != nil {
 		h.server.metrics.ErrorCount.WithLabelValues(method).Inc()
 		return h.errorResponse(msg.RPCID, ErrCodeMethodNotFound, err.Error())
 	}
 
-	// Convert Values to params
 	var params interface{}
 	if len(msg.Values) > 0 {
 		if err := json.Unmarshal(msg.Values[0], &params); err != nil {
@@ -772,14 +741,12 @@ func (h *JSONRPCHandler) processBinaryMessage(msg Message) ([]byte, error) {
 		}
 	}
 
-	// Execute method
 	handler, exists := h.methods[methodName]
 	if !exists {
 		h.server.metrics.ErrorCount.WithLabelValues(method).Inc()
 		return h.errorResponse(msg.RPCID, ErrCodeMethodNotFound, fmt.Sprintf("Method %s not found", methodName))
 	}
 
-	// Track queries for specific RPC types
 	if msg.Query {
 		switch msg.RPCType {
 		case RPCPing:
@@ -799,14 +766,13 @@ func (h *JSONRPCHandler) processBinaryMessage(msg Message) ([]byte, error) {
 		return h.errorResponse(msg.RPCID, ErrCodeInvalidParams, err.Error())
 	}
 
-	// Prepare response Message
 	respMsg := Message{
 		RPCType:   msg.RPCType,
 		Query:     false,
 		TTL:       msg.TTL,
 		Target:    msg.From.NodeID,
 		RPCID:     msg.RPCID,
-		From:      msg.From, // Use server's node info in production
+		From:      msg.From,
 		Values:    [][]byte{},
 		Iteration: msg.Iteration,
 		Secret:    msg.Secret,
@@ -863,7 +829,7 @@ func (h *JSONRPCHandler) processBatchRequest(reqs []JSONRPCRequest) ([]byte, err
 	for _, req := range reqs {
 		respData, err := h.processSingleRequest(req)
 		if err != nil {
-			continue // Skip failed requests in batch
+			continue
 		}
 		var resp JSONRPCResponse
 		if err := json.Unmarshal(respData, &resp); err != nil {
@@ -945,7 +911,7 @@ func (h *JSONRPCHandler) mapRPCTypeToMethod(rpcType RPCType) (string, error) {
 		return "getbalance", nil
 	case RPCGetTransactionHistory:
 		return "gettransactionhistory", nil
-	case RPCGetSupplyStatus: // ADD THIS
+	case RPCGetSupplyStatus:
 		return "getsupplystatus", nil
 	case RPCGetCheckpoint:
 		return "getcheckpoint", nil
@@ -1015,7 +981,7 @@ func (t RPCType) String() string {
 		return "getbalance"
 	case RPCGetTransactionHistory:
 		return "gettransactionhistory"
-	case RPCGetSupplyStatus: // ADD THIS
+	case RPCGetSupplyStatus:
 		return "getsupplystatus"
 	case RPCGetCheckpoint:
 		return "getcheckpoint"
@@ -1058,13 +1024,11 @@ func (h *JSONRPCHandler) getBlock(params interface{}) (interface{}, error) {
 	}
 	hashStr := paramsArray[0]
 
-	// Get block using the consensus interface
 	block := h.server.blockchain.GetBlockByHash(hashStr)
 	if block == nil {
 		return nil, errors.New("block not found")
 	}
 
-	// Convert back to types.Block for JSON serialization
 	if adapter, ok := block.(*core.BlockHelper); ok {
 		return adapter.GetUnderlyingBlock(), nil
 	}
@@ -1100,8 +1064,6 @@ func (h *JSONRPCHandler) sendRawTransaction(params interface{}) (interface{}, er
 		tx.ID = tx.Hash()
 	}
 
-	// ========== LOCAL SIGNATURE VERIFICATION ==========
-	// Try local verification first to reduce latency
 	if !tx.IsSystemTransaction() {
 		if h.server.sphincsManager == nil {
 			return nil, errors.New("SPHINCS manager not available - cannot verify transaction")
@@ -1110,36 +1072,20 @@ func (h *JSONRPCHandler) sendRawTransaction(params interface{}) (interface{}, er
 			return nil, fmt.Errorf("signature verification failed: %w", err)
 		}
 	} else if !tx.IsSystemTransaction() && !tx.HasFullAuthBundle() {
-		// Fallback to bundle check if no SPHINCS manager
 		return nil, errors.New("transaction missing full SPHINCS auth bundle")
 	}
-	// =================================================
 
-	// Add to blockchain/mempool
 	if err := h.server.blockchain.AddTransaction(&tx); err != nil {
 		return nil, err
 	}
 
-	// Broadcast via network (non-blocking: the wallet RPC listener runs with a
-	// nil messageCh in production StartNode — nodes.go SECTION 6 passes nil
-	// to rpc.NewServer — so a plain channel send here either blocks forever
-	// on a nil channel (dropping the response, client sees "reading length
-	// prefix" until its 120s deadline, GUI reports "NFT anchor failed") or
-	// stalls the TCP handler behind a full queue. The tx is already in the
-	// mempool via AddTransaction above; gossip is best-effort.
 	txData, err := json.Marshal(&tx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal transaction: %v", err)
 	}
-	// Relay to peers FIRST: every validator (above all the rotating PBFT
-	// leaders) must see this tx or it can sit uncommitted forever. The
-	// SetTxRelay hook is wired to the P2P consensus manager by StartNode —
-	// production runs the wallet RPC listener with a nil messageCh, so this
-	// hook is the only gossip path for wallet-submitted transactions.
 	if relay := h.server.txRelay; relay != nil {
 		relay(&tx)
 	}
-	// Legacy fallback for in-process paths where a messageCh was provided.
 	if ch := h.server.messageCh; ch != nil {
 		select {
 		case ch <- &security.Message{
@@ -1153,27 +1099,24 @@ func (h *JSONRPCHandler) sendRawTransaction(params interface{}) (interface{}, er
 	return map[string]string{"txid": tx.ID}, nil
 }
 
-// Add local verification helper
+// verifyTransactionLocally verifies a transaction's SPHINCS+ auth bundle.
 func (h *JSONRPCHandler) verifyTransactionLocally(tx *types.Transaction) error {
 	if h.server.sphincsManager == nil {
 		return errors.New("SPHINCS manager not available")
 	}
 
-	// Extract timestamp bytes
 	tsBytes := tx.AuthTimestamp
 	if len(tsBytes) == 0 {
 		tsBytes = make([]byte, 8)
 		binary.BigEndian.PutUint64(tsBytes, uint64(tx.Timestamp))
 	}
 
-	// Extract nonce bytes
 	nonceBytes := tx.AuthNonce
 	if len(nonceBytes) == 0 {
 		nonceBytes = make([]byte, 16)
 		binary.BigEndian.PutUint64(nonceBytes[0:8], tx.Nonce)
 	}
 
-	// Verify full SPHINCS authentication
 	return h.server.sphincsManager.VerifyTransactionAuth(
 		[]byte(tx.ID),
 		tsBytes,
@@ -1184,7 +1127,7 @@ func (h *JSONRPCHandler) verifyTransactionLocally(tx *types.Transaction) error {
 		tx.MerkleRootHash,
 		tx.Commitment,
 		tx.Proof,
-		false, // Don't mutate state
+		false,
 	)
 }
 
@@ -1199,7 +1142,6 @@ func (h *JSONRPCHandler) getTransaction(params interface{}) (interface{}, error)
 	}
 	txID := paramsArray[0]
 
-	// Use the string-based method
 	tx, err := h.server.blockchain.GetTransactionByIDString(txID)
 	if err != nil {
 		return nil, err
@@ -1207,12 +1149,7 @@ func (h *JSONRPCHandler) getTransaction(params interface{}) (interface{}, error)
 	return tx, nil
 }
 
-// getTransactionReceipt returns the confirmation provenance of a transaction:
-// whether it has been committed to a block, and the height/hash of that block.
-// Wallets poll this after broadcasting (e.g. an anchored mint receipt) to
-// stamp real block references into signed artifacts instead of a "pending"
-// sentinel. An uncommitted (mempool) or unknown tx returns confirmed=false
-// rather than an error, so polling stays simple.
+// getTransactionReceipt returns the confirmation provenance of a transaction.
 func (h *JSONRPCHandler) getTransactionReceipt(params interface{}) (interface{}, error) {
 	var paramsArray []string
 	if err := h.parseParams(params, &paramsArray); err != nil {
@@ -1239,12 +1176,6 @@ func (h *JSONRPCHandler) getTransactionReceipt(params interface{}) (interface{},
 		response["blockhash"] = blockHash
 	}
 
-	// Attach the local mempool breakdown so wallets/operators can see exactly
-	// WHY a tx is not confirming: stuck "validating" means the background
-	// validation worker is stalled; "invalid" > 0 means admission-class
-	// validation rejected it (the per-tx reason is in the node console:
-	// "Transaction validation failed: ID=... error=..."); "total" == 0 means
-	// the tx never arrived on THIS node at all.
 	broadcast, validating, pending, invalid, all := h.server.blockchain.MempoolSnapshot()
 	response["pool"] = map[string]interface{}{
 		"broadcast":  broadcast,
@@ -1253,9 +1184,6 @@ func (h *JSONRPCHandler) getTransactionReceipt(params interface{}) (interface{},
 		"invalid":    invalid,
 		"total":      all,
 	}
-	// If the tx has already been rejected by validation, surface the exact
-	// reason — the wallet then prints it and the operator knows immediately
-	// that the anchor can NEVER confirm (vs. still-in-flight).
 	if reason, exists := h.server.blockchain.GetTransactionError(txID); exists {
 		response["invalid_reason"] = reason
 	}
@@ -1272,7 +1200,7 @@ func (h *JSONRPCHandler) join(params interface{}) (interface{}, error) {
 	return map[string]string{"status": "joined"}, nil
 }
 
-// findNode locates a node by its ID (placeholder implementation)
+// findNode locates a node by its ID
 func (h *JSONRPCHandler) findNode(params interface{}) (interface{}, error) {
 	var paramsArray []string
 	if err := h.parseParams(params, &paramsArray); err != nil {
@@ -1288,7 +1216,6 @@ func (h *JSONRPCHandler) findNode(params interface{}) (interface{}, error) {
 	}
 	var nodeID NodeID
 	copy(nodeID[:], nodeIDBytes)
-	// Placeholder: Implement node lookup logic
 	return map[string]string{"nodeID": nodeIDStr}, nil
 }
 
@@ -1312,7 +1239,6 @@ func (h *JSONRPCHandler) get(params interface{}) (interface{}, error) {
 	if !ok {
 		return nil, errors.New("key not found")
 	}
-	// Convert values to hex strings for JSON response
 	hexValues := make([]string, len(values))
 	for i, v := range values {
 		hexValues[i] = hex.EncodeToString(v)
@@ -1360,14 +1286,6 @@ func (h *JSONRPCHandler) parseParams(params interface{}, target interface{}) err
 }
 
 // storeArtifact persists a StorageArtifact keyed by MintID.
-//
-// FIX (Gap 4): artifacts are now stored in a persistent LevelDB database
-// instead of the ephemeral KV store with a 12-hour TTL. This prevents NFT
-// metadata from silently disappearing after 12 hours, which was a data-loss
-// bug. The persistent store has no TTL — artifacts are durable and survive
-// restarts. If the persistent DB is unavailable (e.g., failed to open at
-// startup), the handler falls back to the ephemeral store for backward
-// compatibility.
 func (h *JSONRPCHandler) storeArtifact(params interface{}) (interface{}, error) {
 	var paramsArray []string
 	if err := h.parseParams(params, &paramsArray); err != nil {
@@ -1377,7 +1295,6 @@ func (h *JSONRPCHandler) storeArtifact(params interface{}) (interface{}, error) 
 		return nil, errors.New("missing artifact JSON parameter")
 	}
 
-	// Parse artifact JSON
 	var artifact struct {
 		MintID        string `json:"mint_id"`
 		Subject       string `json:"subject"`
@@ -1396,15 +1313,11 @@ func (h *JSONRPCHandler) storeArtifact(params interface{}) (interface{}, error) 
 
 	artifactData, _ := json.Marshal(artifact)
 
-	// Primary path: persistent LevelDB (no TTL, survives restarts)
 	if h.server.artifactDB != nil {
-		// Store artifact by MintID
 		mintIDKey := []byte("artifact:" + artifact.MintID)
 		if err := h.server.artifactDB.Put(mintIDKey, artifactData, nil); err != nil {
 			return nil, fmt.Errorf("failed to store artifact: %w", err)
 		}
-
-		// Also store under CIDHashHex for lookup by content
 		if artifact.CIDHashHex != "" {
 			cidHashKey := []byte("cidhash:" + artifact.CIDHashHex)
 			if err := h.server.artifactDB.Put(cidHashKey, []byte(artifact.MintID), nil); err != nil {
@@ -1412,9 +1325,8 @@ func (h *JSONRPCHandler) storeArtifact(params interface{}) (interface{}, error) 
 			}
 		}
 	} else {
-		// Fallback: ephemeral store (legacy behavior with 12-hour TTL)
 		mintIDKey := sha3Key("artifact:" + artifact.MintID)
-		h.server.store.Put(mintIDKey, artifactData, 43200) // 12 hours
+		h.server.store.Put(mintIDKey, artifactData, 43200)
 
 		if artifact.CIDHashHex != "" {
 			cidHashKey := sha3Key("cidhash:" + artifact.CIDHashHex)
@@ -1429,10 +1341,6 @@ func (h *JSONRPCHandler) storeArtifact(params interface{}) (interface{}, error) 
 }
 
 // getArtifact retrieves a stored StorageArtifact by MintID.
-//
-// FIX (Gap 4): reads from the persistent LevelDB database first. If the
-// artifact is not found there (e.g., it was stored before the persistent DB
-// was added), falls back to the ephemeral KV store for backward compatibility.
 func (h *JSONRPCHandler) getArtifact(params interface{}) (interface{}, error) {
 	var paramsArray []string
 	if err := h.parseParams(params, &paramsArray); err != nil {
@@ -1443,7 +1351,6 @@ func (h *JSONRPCHandler) getArtifact(params interface{}) (interface{}, error) {
 	}
 	mintID := paramsArray[0]
 
-	// Primary path: persistent LevelDB
 	if h.server.artifactDB != nil {
 		mintIDKey := []byte("artifact:" + mintID)
 		data, err := h.server.artifactDB.Get(mintIDKey, nil)
@@ -1454,10 +1361,8 @@ func (h *JSONRPCHandler) getArtifact(params interface{}) (interface{}, error) {
 			}
 			return artifact, nil
 		}
-		// Not found in persistent DB — fall through to ephemeral store
 	}
 
-	// Fallback: ephemeral store (legacy behavior)
 	mintIDKey := sha3Key("artifact:" + mintID)
 	values, ok := h.server.store.Get(mintIDKey)
 	if !ok || len(values) == 0 {
@@ -1475,6 +1380,15 @@ func (h *JSONRPCHandler) getArtifact(params interface{}) (interface{}, error) {
 }
 
 // getNonce returns the next nonce for an address.
+//
+// The return value is the MEMPOOL's pending-aware nonce (see
+// Mempool.GetSenderNonce), which accounts for both committed state AND any
+// transactions already parked in the mempool for this sender. This is what a
+// wallet must use to build a new tx, because the mempool's validator accepts
+// a tx only when its nonce exactly equals this pending-aware value — a raw
+// state-DB read would return the committed nonce and produce a tx the
+// validator rejects with "invalid nonce: N must equal N+1" while a prior tx
+// from the same sender is still in flight.
 func (h *JSONRPCHandler) getNonce(params interface{}) (interface{}, error) {
 	var paramsArray []string
 	if err := h.parseParams(params, &paramsArray); err != nil {
@@ -1485,10 +1399,12 @@ func (h *JSONRPCHandler) getNonce(params interface{}) (interface{}, error) {
 	}
 	address := paramsArray[0]
 
-	// Query the state DB for the current nonce
+	if h.server.blockchain != nil && h.server.blockchain.GetMempool() != nil {
+		return h.server.blockchain.GetMempool().GetSenderNonce(address), nil
+	}
+
 	stateDB, err := h.server.blockchain.NewStateDB()
 	if err != nil {
-		// Fallback to 0 if state DB is unavailable
 		return uint64(0), nil
 	}
 	defer stateDB.Close()
@@ -1500,11 +1416,8 @@ func (h *JSONRPCHandler) getNonce(params interface{}) (interface{}, error) {
 	return nonce, nil
 }
 
-// spxKey creates a deterministic 32-byte KV key from a string using the
-// protocol's Sphinx hash — NOT SHA3-256 — so the ephemeral artifact index
-// lives in the same hash family as every other NFT/SPX commitment. The
-// persistent artifactDB path keys on the raw "artifact:<id>" strings, so this
-// only affects the legacy in-memory fallback store.
+// sha3Key creates a deterministic 32-byte KV key from a string using the
+// protocol's Sphinx hash.
 func sha3Key(input string) Key {
 	h := common.SpxHash([]byte(input))
 	var k Key
@@ -1523,17 +1436,7 @@ func NewRPCCaller(nodeID NodeID) *RPCCallerImpl {
 }
 
 // GetCheckpoint retrieves a checkpoint from a peer.
-//
-// peerAddress MUST be the peer's dedicated wallet/JSON-RPC listener address —
-// the transport.TCPServer bound to nodeConfig.WSPort (or 127.0.0.1:8700+idx)
-// in StartNode SECTION 11a — NOT its P2P gossip address. rpc.CallRPC dials
-// the address and performs a Kyber768/X25519 handshake followed by encrypted
-// "jsonrpc" framing, a protocol only that wallet listener implements. Dialing
-// the P2P gossip port instead makes handleIncomingConn read the handshake
-// bytes as a message length and reset the connection.
 func (c *RPCCallerImpl) GetCheckpoint(peerAddress string) (*consensus.CheckpointMessage, error) {
-	// CallRPC(address, method, params, ttlSeconds) returns the JSON-RPC
-	// "result" field directly as json.RawMessage (no wrapping .Values slice).
 	resp, err := CallRPC(peerAddress, "getcheckpoint", nil, 60)
 	if err != nil {
 		return nil, fmt.Errorf("RPC call failed: %w", err)
@@ -1552,9 +1455,6 @@ func (c *RPCCallerImpl) GetCheckpoint(peerAddress string) (*consensus.Checkpoint
 }
 
 // GetSupplyStatus retrieves supply status from a peer.
-//
-// peerAddress must be the peer's dedicated wallet/JSON-RPC listener address
-// (see GetCheckpoint) — rpc.CallRPC cannot talk to the peer's P2P gossip port.
 func (c *RPCCallerImpl) GetSupplyStatus(peerAddress string) (map[string]interface{}, error) {
 	resp, err := CallRPC(peerAddress, "getsupplystatus", nil, 60)
 	if err != nil {

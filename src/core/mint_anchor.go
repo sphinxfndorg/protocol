@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"strings"
 
 	"github.com/sphinxfndorg/protocol/src/common"
@@ -44,6 +45,19 @@ type AnchorTag struct {
 	TokenID         uint64 `json:"token_id,omitempty"`          // SIP-721 tokenId counter value (0 = legacy receipt anchor)
 	TokenURI        string `json:"token_uri,omitempty"`         // ipfs://<metadataCID> bound to tokenID
 	Contract        string `json:"contract,omitempty"`          // SIP-721 collection (sc...) owning tokenURI[tokenId]
+
+	// Embedded economics, committed at mint time and enforced by the SIP-721
+	// runtime at consensus: RoyaltyBPS is the resale-royalty share (0..10000
+	// basis points of the sale value carried by each transfer_from),
+	// UsageFeeNSPX the per licensed-access fee in nSPX enforced by
+	// purchase_license, and RoyaltyRecipient the optional payout override
+	// (default = the anchor sender / collection creator). Committing the terms
+	// here makes the creator's value model verifiably pre-announced for any
+	// participant — marketplaces, licensees, indexes — without trusting a third
+	// party to report it.
+	RoyaltyBPS       uint64 `json:"royalty_bps,omitempty"`
+	UsageFeeNSPX     string `json:"usage_fee_nspx,omitempty"`
+	RoyaltyRecipient string `json:"royalty_recipient,omitempty"`
 }
 
 // AnchorTagType is the type discriminator for mint-anchor tags.
@@ -160,6 +174,22 @@ func ValidateAnchorData(data []byte) error {
 	if tag.MinterPublicKey != "" {
 		if _, err := hex.DecodeString(tag.MinterPublicKey); err != nil {
 			return fmt.Errorf("mint anchor minter_public_key is not valid hex: %w", err)
+		}
+	}
+	// Embedded-economics bound checks. These run on EVERY node at admission
+	// and re-runs on every proposed/synced block, so an anchor can never
+	// announce terms the SIP-721 runtime would be unable to enforce.
+	if tag.RoyaltyBPS > 10000 {
+		return fmt.Errorf("mint anchor royalty_bps out of range: %d (max 10000)", tag.RoyaltyBPS)
+	}
+	if tag.UsageFeeNSPX != "" {
+		if fee, ok := new(big.Int).SetString(tag.UsageFeeNSPX, 10); !ok || fee.Sign() <= 0 {
+			return fmt.Errorf("mint anchor usage_fee_nspx is invalid: %q (positive decimal nSPX required)", tag.UsageFeeNSPX)
+		}
+	}
+	if tag.RoyaltyRecipient != "" {
+		if _, err := common.NormalizeSPIFAddress(tag.RoyaltyRecipient); err != nil {
+			return fmt.Errorf("mint anchor royalty_recipient is invalid: %w", err)
 		}
 	}
 	return nil

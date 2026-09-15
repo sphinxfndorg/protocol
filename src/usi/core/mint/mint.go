@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math/big"
 	"strings"
 	"time"
 
@@ -118,6 +119,14 @@ type MintAndAnchorOptions struct {
 	Collection string // SIP-721 collection contract address (sc...); "" = legacy anchor only
 	To         string // token recipient for contract mint; defaults to From
 
+	// Embedded economics, frozen at mint and enforced by the SIP-721 native
+	// runtime at consensus. Resale royalties are secondary-only: minting stays
+	// on the flat policy fee, so no auction dynamics ever touch an ordinary
+	// mint. Terms once set are immutable per token.
+	RoyaltyBPS       uint64 // resale royalty share (0..10000 basis points of the sale value); 0 = none
+	UsageFeeNSPX     string // per licensed-access fee in nSPX (purchase_license); "" = no licenses
+	RoyaltyRecipient string // payout override for royalties and license fees; "" = collection owner (minter)
+
 	// IPFS configuration
 	IPFSAddr       string // IPFS API address (e.g. "http://127.0.0.1:5001")
 	GatewayBaseURL string // IPFS gateway base URL (e.g. "http://127.0.0.1:8080")
@@ -175,6 +184,9 @@ func MintAndAnchor(opts *MintAndAnchorOptions) (*MintAndAnchorResult, error) {
 	}
 	if opts.Passphrase == "" {
 		return nil, errors.New("passphrase required")
+	}
+	if err := validateMintRoyaltyTerms(opts.RoyaltyBPS, opts.UsageFeeNSPX, opts.RoyaltyRecipient); err != nil {
+		return nil, err
 	}
 
 	// Step 1: Create the signed receipt (local)
@@ -281,25 +293,32 @@ func MintAndAnchor(opts *MintAndAnchorOptions) (*MintAndAnchorResult, error) {
 		// mint), allocates next_token_id from sip721:info, and stores
 		// tokenURI[tokenId] + owner and the sip721:mint reverse index. The tokenId
 		// is read back from contract storage and trusted as the single counter value.
-		tokenID, collectionMintTxID, err = BroadcastSIP721CollectionMint(
-			opts.NodeAddr, opts.Collection, opts.From, opts.KeyFile, recipientTo, tokenURI, receipt.MintID)
+		tokenID, collectionMintTxID, err = BroadcastSIP721CollectionMintWithTerms(
+			opts.NodeAddr, opts.Collection, opts.From, opts.KeyFile, recipientTo, tokenURI, receipt.MintID,
+			opts.RoyaltyBPS, opts.UsageFeeNSPX, opts.RoyaltyRecipient)
 		if err != nil {
 			return nil, fmt.Errorf("collection mint aborted: %w", err)
 		}
 		receipt.TokenID = tokenID
 		receipt.ContractAddress = strings.TrimSpace(opts.Collection)
+		receipt.RoyaltyBPS = opts.RoyaltyBPS
+		receipt.UsageFeeNSPX = strings.TrimSpace(opts.UsageFeeNSPX)
+		receipt.RoyaltyRecipient = strings.TrimSpace(opts.RoyaltyRecipient)
 		fmt.Printf("   SUCCESS Token #%d minted in %s (tx=%s)\n", tokenID, opts.Collection, collectionMintTxID)
 	}
 
 	anchorTag := &AnchorTag{
-		Type:            AnchorTagType,
-		MintID:          receipt.MintID,
-		Subject:         receipt.Subject,
-		CID:             mediaCID,
-		MinterPublicKey: receipt.MinterPublicKey,
-		TokenID:         receipt.TokenID,
-		TokenURI:        receipt.TokenURI,
-		Contract:        receipt.ContractAddress,
+		Type:             AnchorTagType,
+		MintID:           receipt.MintID,
+		Subject:          receipt.Subject,
+		CID:              mediaCID,
+		MinterPublicKey:  receipt.MinterPublicKey,
+		TokenID:          receipt.TokenID,
+		TokenURI:         receipt.TokenURI,
+		Contract:         receipt.ContractAddress,
+		RoyaltyBPS:       receipt.RoyaltyBPS,
+		UsageFeeNSPX:     receipt.UsageFeeNSPX,
+		RoyaltyRecipient: receipt.RoyaltyRecipient,
 	}
 	// Node-side mint verification (src/core.ValidateTransactionPolicy) checks
 	// the tag's CID commitment — emit it whenever a real CID was pinned so the
@@ -381,4 +400,30 @@ func MintAndAnchor(opts *MintAndAnchorOptions) (*MintAndAnchorResult, error) {
 		AnchorPath:  anchorPath,
 		Elapsed:     elapsed,
 	}, nil
+}
+
+// validateMintRoyaltyTerms fails fast on terms the node would reject at
+// consensus (core.ValidateAnchorData on the AnchorTag, and the SIP-721
+// runtime's parseSIP721MintTerms on the collection mint): royalty_bps is
+// 0..10000, usage_fee is positive decimal nSPX, and an explicit
+// royalty_recipient is a valid SPIF address. Wallet and node share the same
+// bound checks so a mint can never be broadcast with unenforceable terms.
+func validateMintRoyaltyTerms(royaltyBPS uint64, usageFeeNSPX, royaltyRecipient string) error {
+	if royaltyBPS > 10000 {
+		return fmt.Errorf("royalty_bps out of range: %d (max 10000)", royaltyBPS)
+	}
+	uf := strings.TrimSpace(usageFeeNSPX)
+	if uf != "" {
+		fee, ok := new(big.Int).SetString(uf, 10)
+		if !ok || fee.Sign() <= 0 {
+			return fmt.Errorf("invalid usage_fee: %q (positive decimal nSPX required)", uf)
+		}
+	}
+	rr := strings.TrimSpace(royaltyRecipient)
+	if rr != "" {
+		if _, err := common.NormalizeSPIFAddress(rr); err != nil {
+			return fmt.Errorf("invalid royalty_recipient: %w", err)
+		}
+	}
+	return nil
 }

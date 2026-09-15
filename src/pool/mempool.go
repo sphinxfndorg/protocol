@@ -272,6 +272,84 @@ func (mp *Mempool) broadcastProcessor() {
 	}
 }
 
+// sweepStuck re-queues transactions that are stranded outside pendingPool
+// with no other path back into validation:
+//
+//   - broadcastPool: BroadcastTransaction's send to validationChan is
+//     non-blocking ("will be picked up by next processing cycle" — there is
+//     no next cycle). A dropped send here parks a tx until the 24h expiry.
+//   - validationPool: config.ValidationTimeout is read by GetStats but never
+//     enforced. If validateTransaction discards its result via
+//     stillOwnsSlot, or the tx was queued but the worker never drained it,
+//     the entry sits with StatusValidating forever — never mineable, never
+//     invalid, never retried.
+//
+// Both classes present identically from the outside: sendrawtransaction
+// returns a txid, MempoolSnapshot shows the tx sitting in broadcast/
+// validating, and pendingPool never grows. Call this on the same ticker as
+// drainPendingPool.
+func (mp *Mempool) sweepStuck() {
+	mp.lock.Lock()
+	var requeue []*PooledTransaction
+
+	for _, pt := range mp.broadcastPool {
+		requeue = append(requeue, pt)
+	}
+
+	cutoff := time.Now().Add(-mp.config.ValidationTimeout)
+	var timedOutIDs []string
+	for id, pt := range mp.validationPool {
+		if pt.LastUpdated.Before(cutoff) {
+			timedOutIDs = append(timedOutIDs, id)
+		}
+	}
+	for _, id := range timedOutIDs {
+		pt := mp.validationPool[id]
+		delete(mp.validationPool, id)
+		pt.Status = StatusBroadcast
+		pt.LastUpdated = time.Now()
+		mp.broadcastPool[id] = pt
+		requeue = append(requeue, pt)
+		logger.Warn("sweepStuck: tx %s exceeded ValidationTimeout (%s) in validationPool, re-queued",
+			id, mp.config.ValidationTimeout)
+	}
+	mp.lock.Unlock()
+
+	if len(requeue) == 0 {
+		return
+	}
+
+	for _, pt := range requeue {
+		mp.lock.Lock()
+		// Re-check ownership: another goroutine (replacement, prune,
+		// block-inclusion removal) may have evicted this exact instance
+		// between the scan above and this send.
+		if !mp.stillOwnsSlot(pt.Transaction.ID, pt) {
+			mp.lock.Unlock()
+			continue
+		}
+		pt.Status = StatusValidating
+		pt.LastUpdated = time.Now()
+		delete(mp.broadcastPool, pt.Transaction.ID)
+		mp.validationPool[pt.Transaction.ID] = pt
+		mp.lock.Unlock()
+
+		select {
+		case mp.validationChan <- pt:
+			logger.Debug("sweepStuck: re-queued tx %s for validation", pt.Transaction.ID)
+		default:
+			mp.lock.Lock()
+			if mp.stillOwnsSlot(pt.Transaction.ID, pt) {
+				delete(mp.validationPool, pt.Transaction.ID)
+				pt.Status = StatusBroadcast
+				mp.broadcastPool[pt.Transaction.ID] = pt
+			}
+			mp.lock.Unlock()
+			logger.Warn("sweepStuck: validationChan full, tx %s stays parked for next sweep", pt.Transaction.ID)
+		}
+	}
+}
+
 // processBroadcastTransaction moves broadcast transactions to validation
 func (mp *Mempool) processBroadcastTransaction(tx *types.Transaction) {
 	mp.lock.Lock()
@@ -294,11 +372,14 @@ func (mp *Mempool) processBroadcastTransaction(tx *types.Transaction) {
 	case mp.validationChan <- pooledTx:
 		logger.Debug("Transaction sent for validation: ID=%s", tx.ID)
 	default:
-		// If validation channel is full, mark as pending and validate later
+		// Validation channel is full: park the transaction in pendingPool but
+		// leave it UNVALIDATED. It must not be selectable for a block until
+		// drainPendingPool re-queues it and validation actually succeeds.
 		pooledTx.Status = StatusPending
+		pooledTx.Validated = false
 		delete(mp.validationPool, tx.ID)
 		mp.pendingPool[tx.ID] = pooledTx
-		logger.Warn("Validation channel full, transaction %s moved to pending", tx.ID)
+		logger.Warn("Validation channel full, transaction %s parked in pendingPool awaiting validation", tx.ID)
 	}
 }
 
@@ -356,7 +437,10 @@ func (mp *Mempool) GetPendingTransactions() []*types.Transaction {
 
 	var txs []*types.Transaction
 	for _, pooledTx := range mp.pendingPool {
-		if pooledTx.Status == StatusPending {
+		// Only fully-validated entries are mineable. pendingPool also holds
+		// transactions parked there while validationChan was full
+		// (Validated=false), which must not reach a block unvalidated.
+		if pooledTx.Status == StatusPending && pooledTx.Validated {
 			txs = append(txs, pooledTx.Transaction)
 		}
 	}
@@ -382,7 +466,8 @@ func (mp *Mempool) SelectTransactionsForBlock(maxBlockSize, targetBlockSize uint
 	// Get all pending transactions and sort by priority
 	var pendingList []*PooledTransaction
 	for _, pooledTx := range mp.pendingPool {
-		if pooledTx.Status == StatusPending {
+		// Only fully-validated entries are mineable (see GetPendingTransactions).
+		if pooledTx.Status == StatusPending && pooledTx.Validated {
 			pendingList = append(pendingList, pooledTx)
 		}
 	}
@@ -690,6 +775,7 @@ func (mp *Mempool) RetryFailedTransactions(maxRetries int) int {
 		if pooledTx.RetryCount < maxRetries {
 			// Move back to broadcast pool for retry
 			pooledTx.Status = StatusBroadcast
+			pooledTx.Validated = false
 			pooledTx.RetryCount++
 			pooledTx.LastUpdated = time.Now()
 

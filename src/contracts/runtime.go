@@ -111,6 +111,15 @@ func Deploy(store Store, tx *types.Transaction) (*ExecutionResult, error) {
 }
 
 func Call(store Store, tx *types.Transaction) (*ExecutionResult, error) {
+	return CallWithContext(store, tx, nil)
+}
+
+// CallWithContext executes a native contract call with the kernel's value
+// context (tx.Amount, policy floor, balance-transfer hook) for standards that
+// settle value — currently SIP-721 resale royalties and license fees. A nil
+// context preserves legacy behavior: the standard sees no value and never
+// moves balances.
+func CallWithContext(store Store, tx *types.Transaction, ctx *NativeCallContext) (*ExecutionResult, error) {
 	if store == nil {
 		return nil, errors.New("nil contract store")
 	}
@@ -142,7 +151,7 @@ func Call(store Store, tx *types.Transaction) (*ExecutionResult, error) {
 	case StandardSIP20:
 		return callSIP20(store, address, tx.Sender, &call)
 	case StandardSIP721:
-		return callSIP721(store, address, tx.Sender, &call)
+		return callSIP721WithContext(store, address, tx.Sender, &call, ctx)
 	default:
 		return nil, fmt.Errorf("unsupported contract standard: %s", meta.Standard)
 	}
@@ -150,11 +159,30 @@ func Call(store Store, tx *types.Transaction) (*ExecutionResult, error) {
 
 func ContractAddress(sender string, nonce uint64, code []byte) string {
 	input := fmt.Sprintf("%s:%d:%x", sender, nonce, sha256.Sum256(code))
-	sum := sha256.Sum256([]byte(input))
-	// Contract addresses use the same SPIF format as identity addresses:
-	// common.SPIFPrefix + 40 hex characters (20-byte hash), matching the
-	// protocol-wide address scheme (see common.NormalizeSPIFAddress).
-	return common.SPIFPrefix + hex.EncodeToString(sum[:20])
+	// Same hash family, width, and wire format as every identity address on
+	// the protocol: SpxHash (SphinxHash/SHAKE-256 with the protocol salt) →
+	// 32 bytes → 64 hex characters, rendered as the canonical grouped SPIF
+	// display form ("SPIF XXXX XXXX …", 16 groups of 4, uppercase). The
+	// previous form — "SPIF" + 40 lowercase hex (a 20-byte sha256 tail) —
+	// was neither grouped, nor uppercase, nor 64-hex, so generated contract
+	// addresses visibly disagreed with every other SPIF address in the UI
+	// (state_db.go's account classifier treats 64-hex as the SPIF form and
+	// 40-hex as legacy).
+	sum := common.SpxHash([]byte(input))
+	if len(sum) != 32 {
+		// SpxHash can only fail if the Sphinx hasher cannot initialize; fall
+		// back to the full sha256 digest so a contract address is still
+		// produced rather than panicking inside a consensus execution path.
+		full := sha256.Sum256([]byte(input))
+		sum = full[:]
+	}
+	addr, err := common.FormatSPIFAddress(hex.EncodeToString(sum))
+	if err != nil {
+		// Unreachable for 64-hex input; keep a valid address rather than
+		// panicking in a consensus path.
+		return common.SPIFPrefix + " " + strings.ToUpper(hex.EncodeToString(sum))
+	}
+	return addr
 }
 
 func normalizeDeploySpec(spec *DeploySpec) {

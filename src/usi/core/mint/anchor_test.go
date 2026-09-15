@@ -162,3 +162,44 @@ func TestAnchorVerifiesTokenBindingMatchesReceipt(t *testing.T) {
 		t.Fatal("token_uri tampering must break VerifyAnchor")
 	}
 }
+
+func TestAnchorCarriesRoyaltyTermsAndNodeVerifies(t *testing.T) {
+	cid := "bafkqaccd1234abcd1234abcd1234abcd"
+	receipt := mintTestReceipt(cid)
+	recipient := "F6F6F6F6F6F6F6F6F6F6F6F6F6F6F6F6F6F6F6F6"
+	receipt.RoyaltyBPS = 250
+	receipt.UsageFeeNSPX = "100000000000000000" // 0.1 SPX in nSPX
+	receipt.RoyaltyRecipient = recipient
+
+	tagBytes, err := BuildAnchorData(receipt)
+	if err != nil {
+		t.Fatalf("BuildAnchorData with terms: %v", err)
+	}
+	// The node validator must accept the terms-bearing anchor verbatim.
+	if err := core.ValidateAnchorData(tagBytes); err != nil {
+		t.Fatalf("terms-bearing anchor must verify at nodes: %v", err)
+	}
+
+	var tag AnchorTag
+	if err := json.Unmarshal(tagBytes, &tag); err != nil {
+		t.Fatal(err)
+	}
+	if tag.RoyaltyBPS != 250 || tag.UsageFeeNSPX != "100000000000000000" || tag.RoyaltyRecipient != recipient {
+		t.Fatalf("anchor did not carry embedded economics: %#v", tag)
+	}
+
+	// Tampering with the terms breaks receipt↔anchor verification.
+	var tampered AnchorTag = tag
+	tampered.RoyaltyBPS = 251
+	tamperedBytes, _ := json.Marshal(tampered)
+	if ok, _ := VerifyAnchor(receipt, tamperedBytes); ok {
+		t.Fatal("royalty_bps tampering must break VerifyAnchor")
+	}
+	// Out-of-range terms are rejected by the node outright.
+	var outOfRange AnchorTag = tag
+	outOfRange.RoyaltyBPS = 10001
+	oorBytes, _ := json.Marshal(outOfRange)
+	if err := core.ValidateAnchorData(oorBytes); err == nil {
+		t.Fatal("royalty_bps above 10000 must be rejected by the node")
+	}
+}

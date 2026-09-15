@@ -10,6 +10,8 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"strconv"
+	"strings"
 	"time"
 
 	logger "github.com/sphinxfndorg/protocol/src/console"
@@ -19,42 +21,27 @@ import (
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
 )
 
-// mintAnchorTagType mirrors core.AnchorTagType ("mint_anchor"). Duplicated
-// here rather than imported: core/helper.go already imports this package
-// (pool), so pool importing core back would be an import cycle. This is the
-// same cheap type-peek as core.IsMintAnchor — keep the two in sync if the
-// anchor tag type string ever changes.
+// mintAnchorTagType mirrors core.AnchorTagType ("mint_anchor").
 const mintAnchorTagType = "mint_anchor"
 
-// isMintAnchorReturnData reports whether data is a serialized mint-anchor
-// tag, i.e. genuinely verifiable on-chain data (see core.ValidateAnchorData,
-// which runs the real structural check on every proposed and synced block)
-// rather than an arbitrary OP_RETURN-style payload. Used to gate the
-// self-send exception below: a self-send is only safe to admit *because* it
-// is a real anchor, not merely because it happens to carry some bytes — an
-// empty-ish or malformed payload with no verifiable content is just a
-// disguised value self-transfer and should still be rejected as one.
+// isMintAnchorReturnData reports whether data is a self-send data/NFT anchor.
 func isMintAnchorReturnData(data []byte) bool {
 	var peek struct {
 		Type string `json:"type"`
 	}
-	if err := json.Unmarshal(data, &peek); err != nil {
-		return false
+	if err := json.Unmarshal(data, &peek); err == nil && peek.Type == mintAnchorTagType {
+		return true
 	}
-	return peek.Type == mintAnchorTagType
+	return types.IsNFTAnchorReturnData(data)
 }
 
 // uint32ToBytesPool converts uint32 to big-endian 4 bytes for VM PUSH4 operands.
-// This is used when pushing 32-bit values onto the SVM stack.
 func uint32ToBytesPool(n uint32) []byte {
-	// Shift and mask each byte to create big-endian representation
 	return []byte{byte(n >> 24), byte(n >> 16), byte(n >> 8), byte(n)}
 }
 
 // uint64ToBytesPool converts uint64 to big-endian 8 bytes for VM PUSH8 operands.
-// This is used when pushing 64-bit values (timestamps, nonces, balances) onto the SVM stack.
 func uint64ToBytesPool(n uint64) []byte {
-	// Shift and mask each byte to create big-endian representation (most significant byte first)
 	return []byte{
 		byte(n >> 56), byte(n >> 48), byte(n >> 40), byte(n >> 32),
 		byte(n >> 24), byte(n >> 16), byte(n >> 8), byte(n),
@@ -62,52 +49,29 @@ func uint64ToBytesPool(n uint64) []byte {
 }
 
 // verifyTransactionSignature uses SVM to verify transaction signature.
-//
-// Memory layout:  [0 .. sigLen)             → signature bytes
-//
-//	[sigLen .. sigLen+pkLen)   → public key bytes (real SPHINCS+ key, NOT sender address)
-//	[sigLen+pkLen .. end)      → full message bytes
-//
-// OP_CHECK_SPHINCS pop order: msgLen, msgPtr, pkLen, pkPtr, sigLen, sigPtr
-// Push order (bottom→top):   sigPtr, sigLen, pkPtr, pkLen, msgPtr, msgLen
-//
-// IMPORTANT: tx.PublicKey must carry the sender's serialized SPHINCS+ public key.
-// tx.Sender is a human-readable address string and must NOT be used as pkBytes —
-// passing an address string to DeserializePublicKey causes "incorrect length" errors.
-// go/src/pool/validation.go
-
 func (mp *Mempool) verifyTransactionSignature(tx *types.Transaction) error {
-	// Genesis vault transactions are TRUSTED protocol transactions
-	// They don't have SPHINCS+ signatures - skip all cryptographic verification
-	// The genesis vault address is a special system address used for initial coin distribution
 	if tx.IsSystemTransaction() {
 		logger.Debug("Genesis vault transaction %s is trusted, skipping signature verification", tx.ID)
 		return nil
 	}
 
-	// For NON-genesis transactions, we REQUIRE full SPHINCS+ verification
-	// Check if signature hash exists (32-byte hash used for replay protection)
 	if len(tx.SignatureHash) == 0 {
 		return fmt.Errorf("missing signature hash for transaction %s", tx.ID)
 	}
 
-	// Verify signature hash is exactly 32 bytes (standard hash length)
 	if len(tx.SignatureHash) != 32 {
 		return fmt.Errorf("invalid signature hash length: expected 32, got %d for tx %s",
 			len(tx.SignatureHash), tx.ID)
 	}
 
-	// Check if signature data is present
 	if len(tx.Signature) == 0 {
 		return fmt.Errorf("missing signature for transaction %s", tx.ID)
 	}
 
-	// Check if public key is present (required for SPHINCS+ verification)
 	if len(tx.PublicKey) == 0 {
 		return fmt.Errorf("missing public key for transaction %s", tx.ID)
 	}
 
-	// Get the public key (already set in tx.PublicKey for non-genesis)
 	pkBytes := tx.PublicKey
 
 	tsBytes := tx.AuthTimestamp
@@ -125,20 +89,6 @@ func (mp *Mempool) verifyTransactionSignature(tx *types.Transaction) error {
 		return fmt.Errorf("missing full SPHINCS transaction auth bundle")
 	}
 
-	// ========== 1. SPHINCS Manager Verification (mandatory) ==========
-	//
-	// CONSISTENCY REQUIREMENT: this check must agree with the block-commit
-	// path (core.validateTransactionAuth → validateBlockTransactionAuth),
-	// which hard-fails when the SPHINCS manager is missing. The old code
-	// treated a nil manager as non-fatal here (warn + fall through to
-	// SVM-only verification), while commit treated it as fatal — so a
-	// transaction could be admitted to the mempool yet never committable,
-	// and every leader round would rebuild the identical block and hit the
-	// identical CommitBlock auth failure forever.
-	//
-	// New behavior: a nil manager rejects non-system transactions, exactly
-	// like the commit path. System transactions return earlier above, so
-	// this cannot block genesis/vault flow.
 	if mp.sphincsManager == nil {
 		return fmt.Errorf("SPHINCS manager is not configured, cannot verify transaction %s", tx.ID)
 	}
@@ -158,144 +108,86 @@ func (mp *Mempool) verifyTransactionSignature(tx *types.Transaction) error {
 	}
 	logger.Debug("SPHINCS manager verification passed: %s", tx.ID)
 
-	// ========== 2. SVM Verification ==========
-
-	// Build the message that was signed
-	// Format: timestamp(8) || nonce(16) || txID
-	// This ensures each transaction has a unique signed message
-	const maxMsgSize = 1 << 20 // 1 MB maximum message size
+	const maxMsgSize = 1 << 20
 	if len(tx.ID) > maxMsgSize-24 {
 		return fmt.Errorf("transaction ID too large: %d bytes (max: %d)", len(tx.ID), maxMsgSize-24)
 	}
 	fullMsg := make([]byte, 0, 8+16+len(tx.ID))
 	fullMsg = append(fullMsg, tsBytes...)
 	fullMsg = append(fullMsg, nonceBytes...)
-
-	// Append transaction ID as the final part of the message
 	fullMsg = append(fullMsg, []byte(tx.ID)...)
 
-	// Setup memory layout for SVM verification
-	// Memory is organized as: [signature][signature_hash][public_key][message]
 	sigLen := len(tx.Signature)
 	pkLen := len(pkBytes)
 	msgLen := len(fullMsg)
 
-	// Calculate offsets for each section in memory
-	hashOffset := sigLen          // Signature hash starts right after signature
-	pkOffset := hashOffset + 32   // Public key starts after signature hash (32 bytes)
-	msgOffset := pkOffset + pkLen // Message starts after public key
+	hashOffset := sigLen
+	pkOffset := hashOffset + 32
+	msgOffset := pkOffset + pkLen
 
-	// Allocate contiguous memory block for all data
-	const maxMemoryLayoutSize = 1 << 20 // 1 MB maximum memory layout size
+	const maxMemoryLayoutSize = 1 << 20
 	totalMemorySize := sigLen + 32 + pkLen + msgLen
 	if totalMemorySize > maxMemoryLayoutSize {
 		return fmt.Errorf("memory layout size %d exceeds maximum %d", totalMemorySize, maxMemoryLayoutSize)
 	}
 	memoryLayout := make([]byte, totalMemorySize)
 
-	// Copy signature to memory at offset 0
 	copy(memoryLayout[0:sigLen], tx.Signature)
-	// Copy signature hash to memory right after signature
 	copy(memoryLayout[hashOffset:hashOffset+32], tx.SignatureHash)
-	// Copy public key to memory after signature hash
 	copy(memoryLayout[pkOffset:pkOffset+pkLen], pkBytes)
-	// Copy message to memory after public key
 	copy(memoryLayout[msgOffset:msgOffset+msgLen], fullMsg)
 
-	// Build bytecode for verification
 	bc := []byte{}
 
-	// OP_CHECK_SIGNATURE_HASH - Verifies the signature hash matches the transaction data
-	// This prevents replay attacks by ensuring each signature is unique per transaction
-	//
-	// executeCheckSignatureHash (opcode.go) pops in this order:
-	//   expectedHashLen, expectedHashPtr, sigLen, sigPtr
-	// Pop always returns the TOP of stack first, and the TOP is whatever was
-	// PUSHed LAST. So to have expectedHashLen come out of the first Pop(),
-	// it must be pushed LAST — the push order below is the pop order
-	// reversed, not repeated in the same order.
-
-	// Push the signature offset (0, at the start of memory) — pushed first,
-	// ends up at the BOTTOM, popped LAST as sigPtr.
 	bc = append(bc, byte(svm.PUSH4))
 	bc = append(bc, uint32ToBytesPool(0)...)
 
-	// Push the signature length — popped as sigLen.
 	bc = append(bc, byte(svm.PUSH4))
 	bc = append(bc, uint32ToBytesPool(uint32(sigLen))...)
 
-	// Push the memory offset where the signature hash is stored — popped as expectedHashPtr.
 	bc = append(bc, byte(svm.PUSH4))
 	bc = append(bc, uint32ToBytesPool(uint32(hashOffset))...)
 
-	// Push 32 (hash length) — pushed LAST, ends up on TOP, popped FIRST as expectedHashLen.
 	bc = append(bc, byte(svm.PUSH4))
 	bc = append(bc, uint32ToBytesPool(32)...)
 
-	// Execute OP_CHECK_SIGNATURE_HASH opcode
 	bc = append(bc, byte(svm.OP_CHECK_SIGNATURE_HASH))
-	// OP_VERIFY ensures the result is true (non-zero)
 	bc = append(bc, byte(svm.OP_VERIFY))
 
-	// OP_CHECK_SPHINCS - Verifies the SPHINCS+ signature
-	//
-	// executeCheckSphincs (opcode.go) pops in this order:
-	//   msgLen, msgPtr, pubkeyLen, pubkeyPtr, sigLen, sigPtr
-	// Same reasoning as above: push the LAST-popped item FIRST.
-
-	// Push signature offset (0, at the start of memory) — popped LAST as sigPtr.
 	bc = append(bc, byte(svm.PUSH4))
 	bc = append(bc, uint32ToBytesPool(0)...)
 
-	// Push signature length — popped as sigLen.
 	bc = append(bc, byte(svm.PUSH4))
 	bc = append(bc, uint32ToBytesPool(uint32(sigLen))...)
 
-	// Push public key offset — popped as pubkeyPtr.
 	bc = append(bc, byte(svm.PUSH4))
 	bc = append(bc, uint32ToBytesPool(uint32(pkOffset))...)
 
-	// Push public key length — popped as pubkeyLen.
 	bc = append(bc, byte(svm.PUSH4))
 	bc = append(bc, uint32ToBytesPool(uint32(pkLen))...)
 
-	// Push message offset (where message is stored in memory) — popped as msgPtr.
 	bc = append(bc, byte(svm.PUSH4))
 	bc = append(bc, uint32ToBytesPool(uint32(msgOffset))...)
 
-	// Push message length — pushed LAST, popped FIRST as msgLen.
 	bc = append(bc, byte(svm.PUSH4))
 	bc = append(bc, uint32ToBytesPool(uint32(msgLen))...)
 
-	// Execute OP_CHECK_SPHINCS opcode to verify the signature
 	bc = append(bc, byte(svm.OP_CHECK_SPHINCS))
-	// OP_VERIFY ensures the verification succeeded
 	bc = append(bc, byte(svm.OP_VERIFY))
 
-	// Store the signature hash to prevent replay attacks
-	// This records that this signature hash has been used
-	//
-	// executeStoreSignatureHash (opcode.go) pops in this order: hashLen, hashPtr.
-	// Push hashPtr first (bottom, popped last), hashLen last (top, popped first).
-
-	// Push the memory offset of the signature hash — popped as hashPtr.
 	bc = append(bc, byte(svm.PUSH4))
 	bc = append(bc, uint32ToBytesPool(uint32(hashOffset))...)
 
-	// Push 32 (hash length) — pushed LAST, popped FIRST as hashLen.
 	bc = append(bc, byte(svm.PUSH4))
 	bc = append(bc, uint32ToBytesPool(32)...)
 
-	// Store the signature hash in the VM's state
 	bc = append(bc, byte(svm.OP_STORE_SIGNATURE_HASH))
 
-	// Execute verification program with the prepared memory layout
 	result, err := vmachine.RunProgramWithMemory(bc, memoryLayout)
 	if err != nil {
 		return fmt.Errorf("signature verification failed for tx %s: %w", tx.ID, err)
 	}
 
-	// Result is ignored as OP_VERIFY would have failed if verification failed
 	_ = result
 
 	logger.Debug("Transaction signature verified successfully: %s", tx.ID)
@@ -303,21 +195,7 @@ func (mp *Mempool) verifyTransactionSignature(tx *types.Transaction) error {
 }
 
 // verifyTransactionNonce uses SVM to validate transaction nonce.
-//
-// The chain enforces strict account-nonce semantics: a transaction is only
-// valid if its nonce exactly equals the sender's current state nonce (see
-// executor.go's applyTransactions, which rejects with "bad nonce: got X want
-// Y" on any mismatch, not just on nonces that are too low). This function
-// previously required tx.Nonce > currentNonce (strictly greater), which is
-// off by one against that contract: the correct next nonce for any sender
-// IS the current nonce, not one past it. That mismatch let transactions with
-// nonces ahead of the correct value sit in pendingPool, while the one
-// transaction that would actually be accepted by applyTransactions failed
-// mempool admission. Equality is expressed as (>= AND <=) using the same
-// GT/LT/ISZERO idiom already used elsewhere in this file, since no EQ opcode
-// is available.
 func (mp *Mempool) verifyTransactionNonce(tx *types.Transaction, currentNonce uint64) error {
-	// ---- Check tx.Nonce >= currentNonce, i.e. NOT(tx.Nonce < currentNonce) ----
 	bcGTE := []byte{}
 	bcGTE = append(bcGTE, byte(svm.PUSH8))
 	bcGTE = append(bcGTE, uint64ToBytesPool(tx.Nonce)...)
@@ -335,7 +213,6 @@ func (mp *Mempool) verifyTransactionNonce(tx *types.Transaction, currentNonce ui
 		return fmt.Errorf("VM result error: %w", err)
 	}
 
-	// ---- Check tx.Nonce <= currentNonce, i.e. NOT(tx.Nonce > currentNonce) ----
 	bcLTE := []byte{}
 	bcLTE = append(bcLTE, byte(svm.PUSH8))
 	bcLTE = append(bcLTE, uint64ToBytesPool(tx.Nonce)...)
@@ -353,7 +230,6 @@ func (mp *Mempool) verifyTransactionNonce(tx *types.Transaction, currentNonce ui
 		return fmt.Errorf("VM result error: %w", err)
 	}
 
-	// Nonce is valid only if both >= and <= hold, i.e. tx.Nonce == currentNonce.
 	if resultGTE != 1 || resultLTE != 1 {
 		return fmt.Errorf("invalid nonce: %d must equal %d", tx.Nonce, currentNonce)
 	}
@@ -361,51 +237,40 @@ func (mp *Mempool) verifyTransactionNonce(tx *types.Transaction, currentNonce ui
 }
 
 // verifyTransactionBalance uses SVM to check sender has sufficient balance.
-// Ensures the sender has enough funds to cover the transaction amount
 func (mp *Mempool) verifyTransactionBalance(tx *types.Transaction, senderBalance *big.Int) error {
-	// Quick check using big.Int comparison (more efficient for large numbers)
 	if senderBalance.Cmp(tx.Amount) < 0 {
 		return fmt.Errorf("insufficient balance: have %s, need %s",
 			senderBalance.String(), tx.Amount.String())
 	}
 
-	// Only proceed with VM verification if values fit in uint64
 	if !senderBalance.IsUint64() || !tx.Amount.IsUint64() {
 		return nil
 	}
 
-	// Convert to uint64 for VM operations
 	balanceUint := senderBalance.Uint64()
 	amountUint := tx.Amount.Uint64()
 
 	bc := []byte{}
 
-	// Push sender's balance onto the stack
 	bc = append(bc, byte(svm.PUSH8))
 	bc = append(bc, uint64ToBytesPool(balanceUint)...)
 
-	// Push transaction amount onto the stack
 	bc = append(bc, byte(svm.PUSH8))
 	bc = append(bc, uint64ToBytesPool(amountUint)...)
 
-	// Check if balance is less than amount (LT pushes 1 if true, 0 otherwise)
 	bc = append(bc, byte(svm.LT))
-	// ISZERO inverts the result (1 if balance >= amount, 0 otherwise)
 	bc = append(bc, byte(svm.ISZERO))
 
-	// Create and run the VM
 	vm := vmachine.NewVM(bc)
 	if err := vm.Run(); err != nil {
 		return fmt.Errorf("VM balance validation failed: %w", err)
 	}
 
-	// Get the verification result
 	result, err := vm.GetResult()
 	if err != nil {
 		return fmt.Errorf("VM result error: %w", err)
 	}
 
-	// Verify balance is sufficient (result should be 1)
 	if result != 1 {
 		return fmt.Errorf("insufficient balance: have %d, need %d", balanceUint, amountUint)
 	}
@@ -413,63 +278,45 @@ func (mp *Mempool) verifyTransactionBalance(tx *types.Transaction, senderBalance
 }
 
 // verifyTransactionGas uses SVM to validate gas parameters.
-// Checks that gas limit is within acceptable bounds and gas price meets minimum requirement
 func (mp *Mempool) verifyTransactionGas(tx *types.Transaction, minGasPrice *big.Int) error {
-	const maxGasLimit = uint64(1_000_000) // Maximum allowed gas per transaction
+	const maxGasLimit = uint64(1_000_000)
 
-	// Extract uint64 values for VM operations
 	gasLimitUint := tx.GasLimit.Uint64()
 	gasPriceUint := tx.GasPrice.Uint64()
 	minGasPriceUint := minGasPrice.Uint64()
 
 	bc := []byte{}
 
-	// Check 1: Gas limit must not exceed maximum allowed
-
-	// Push transaction gas limit onto stack
 	bc = append(bc, byte(svm.PUSH8))
 	bc = append(bc, uint64ToBytesPool(gasLimitUint)...)
 
-	// Push maximum gas limit onto stack
 	bc = append(bc, byte(svm.PUSH8))
 	bc = append(bc, uint64ToBytesPool(maxGasLimit)...)
 
-	// Check if gas limit exceeds maximum (GT pushes 1 if gasLimit > maxGasLimit)
 	bc = append(bc, byte(svm.GT))
-	// ISZERO makes it 1 if gasLimit <= maxGasLimit (valid)
 	bc = append(bc, byte(svm.ISZERO))
 
-	// Check 2: Gas price must meet or exceed minimum
-
-	// Push transaction gas price onto stack
 	bc = append(bc, byte(svm.PUSH8))
 	bc = append(bc, uint64ToBytesPool(gasPriceUint)...)
 
-	// Push minimum gas price onto stack
 	bc = append(bc, byte(svm.PUSH8))
 	bc = append(bc, uint64ToBytesPool(minGasPriceUint)...)
 
-	// Check if gas price is below minimum (LT pushes 1 if gasPrice < minGasPrice)
 	bc = append(bc, byte(svm.LT))
-	// ISZERO makes it 1 if gasPrice >= minGasPrice (valid)
 	bc = append(bc, byte(svm.ISZERO))
 
-	// AND combines both checks - result is 1 only if BOTH conditions are true
 	bc = append(bc, byte(svm.And))
 
-	// Create and run the VM
 	vm := vmachine.NewVM(bc)
 	if err := vm.Run(); err != nil {
 		return fmt.Errorf("VM gas validation failed: %w", err)
 	}
 
-	// Get the combined validation result
 	result, err := vm.GetResult()
 	if err != nil {
 		return fmt.Errorf("VM result error: %w", err)
 	}
 
-	// Verify both conditions passed
 	if result != 1 {
 		return fmt.Errorf("gas validation failed: limit=%d (max=%d), price=%d (min=%d)",
 			gasLimitUint, maxGasLimit, gasPriceUint, minGasPriceUint)
@@ -478,39 +325,31 @@ func (mp *Mempool) verifyTransactionGas(tx *types.Transaction, minGasPrice *big.
 }
 
 // verifyTransactionReplayProtection uses SVM to check tx.Timestamp > lastTimestamp.
-// Prevents replay attacks by ensuring transaction timestamps are strictly increasing
 func (mp *Mempool) verifyTransactionReplayProtection(tx *types.Transaction, lastTimestamp int64) error {
-	// If no previous timestamp exists, skip validation (first transaction from this sender)
 	if lastTimestamp == 0 {
 		return nil
 	}
 
 	bc := []byte{}
 
-	// Push transaction timestamp onto stack
 	bc = append(bc, byte(svm.PUSH8))
 	bc = append(bc, uint64ToBytesPool(uint64(tx.Timestamp))...)
 
-	// Push last recorded timestamp onto stack
 	bc = append(bc, byte(svm.PUSH8))
 	bc = append(bc, uint64ToBytesPool(uint64(lastTimestamp))...)
 
-	// Check if current timestamp is greater than last timestamp
 	bc = append(bc, byte(svm.GT))
 
-	// Create and run the VM
 	vm := vmachine.NewVM(bc)
 	if err := vm.Run(); err != nil {
 		return fmt.Errorf("VM replay protection validation failed: %w", err)
 	}
 
-	// Get the comparison result
 	result, err := vm.GetResult()
 	if err != nil {
 		return fmt.Errorf("VM result error: %w", err)
 	}
 
-	// Verify timestamp is newer (result should be 1)
 	if result != 1 {
 		return fmt.Errorf("replay protection failed: timestamp %d must be > last %d",
 			tx.Timestamp, lastTimestamp)
@@ -534,190 +373,178 @@ func (mp *Mempool) getLastTransactionTimestamp(sender string) int64 {
 
 	timestamp, err := stateDB.GetLastTransactionTimestamp(sender)
 	if err != nil {
-		// If no previous transactions, return 0 (skip replay protection)
 		return 0
 	}
 
 	return timestamp
 }
 
-// validationProcessor is a background goroutine that processes transactions for validation
-// It reads from validationChan and validates each transaction asynchronously.
-// It also drains pendingPool on a short ticker so transactions that were bumped to
-// pending (because the validation channel was full) still get validated and can be
-// included in blocks — without this, they stay in pendingPool forever and show up as
-// "pending=1" in the RPC forever without ever being confirmed.
+// validationProcessor is a background goroutine that processes transactions for validation.
 func (mp *Mempool) validationProcessor() {
 	pendingTicker := time.NewTicker(500 * time.Millisecond)
 	defer pendingTicker.Stop()
 	for {
 		select {
 		case pooledTx := <-mp.validationChan:
-			// Process a single transaction for validation
 			mp.validateTransaction(pooledTx)
 		case <-pendingTicker.C:
-			// Drain any transactions that were bumped to pendingPool because
-			// the validation channel was full. Validate them now so they can
-			// progress to pendingPool with a real validation result.
 			mp.drainPendingPool()
+			mp.sweepStuck()
 		case <-mp.stopChan:
-			// Shutdown signal received - exit the goroutine
 			return
 		}
 	}
 }
 
-// drainPendingPool moves all transactions from pendingPool back into the
-// validation channel so they get validated. If the channel is full, they
-// stay in pendingPool and we retry on the next tick. This ensures that
-// transactions that overflowed the validation channel are not stuck forever.
+// drainPendingPool re-queues transactions that were PARKED in pendingPool.
 func (mp *Mempool) drainPendingPool() {
 	mp.lock.Lock()
-	if len(mp.pendingPool) == 0 {
-		mp.lock.Unlock()
-		return
-	}
-
-	// Collect all pending transactions and remove them from pendingPool
 	var toValidate []*PooledTransaction
 	for _, pt := range mp.pendingPool {
+		if pt.Validated || pt.Status != StatusPending {
+			continue
+		}
 		toValidate = append(toValidate, pt)
 		delete(mp.pendingPool, pt.Transaction.ID)
+	}
+	if len(toValidate) == 0 {
+		mp.lock.Unlock()
+		return
 	}
 	mp.lock.Unlock()
 
 	for _, pt := range toValidate {
-		// Try to send to validation channel; if full, put back into pendingPool
 		select {
 		case mp.validationChan <- pt:
-			logger.Debug("drainPendingPool: re-queued tx %s for validation", pt.Transaction.ID)
+			logger.Debug("drainPendingPool: re-queued unvalidated tx %s for validation", pt.Transaction.ID)
 		default:
-			// Channel full — put back for next tick
 			mp.lock.Lock()
 			pt.Status = StatusPending
+			pt.Validated = false
 			pt.LastUpdated = time.Now()
 			mp.pendingPool[pt.Transaction.ID] = pt
 			mp.lock.Unlock()
-			logger.Warn("drainPendingPool: channel full, tx %s stays in pending", pt.Transaction.ID)
+			logger.Warn("drainPendingPool: channel full, tx %s stays parked", pt.Transaction.ID)
 		}
 	}
 }
 
-// validateTransaction performs comprehensive validation on a pooled transaction
-// Updates transaction status based on validation results
+// clearAccountNonceSlotIfOwner removes the (sender, nonce) entry from
+// accountNonceIndex if — and only if — the current occupant is the given txID.
+//
+// ★ FIX: this is the companion helper to removeTransactionFromAllPools'
+// existing index cleanup. Every path that parks a transaction in invalidPool
+// MUST call this first, because parking directly into invalidPool bypasses
+// removeTransactionFromAllPools (which is the only other place that clears
+// the index). Leaving the entry behind means the invalid tx keeps "owning"
+// its (sender, nonce) slot forever: the next valid tx from the same sender is
+// either rejected as a replacement ("replacement transaction underpriced")
+// or computed a nonce one past the phantom occupant by getSenderNonce —
+// exactly how a rejected deploy blocked the next deploy attempt with
+// "invalid nonce: 0 must equal 1".
+//
+// The guard `mp.accountNonceIndex[nonceKey] == txID` is essential: if a
+// replacement already claimed the slot (BroadcastTransaction inserts under
+// the same key when a fee-bump replaces an occupant), that entry belongs to
+// the NEWER tx and must not be cleared by a stale rejection of the older one.
+//
+// Callers must hold mp.lock (validateTransaction already does, at every site
+// this is called from).
+func (mp *Mempool) clearAccountNonceSlotIfOwner(txID string, tx *types.Transaction) {
+	if tx == nil {
+		return
+	}
+	nonceKey := tx.Sender + ":" + strconv.FormatUint(tx.Nonce, 10)
+	if mp.accountNonceIndex[nonceKey] == txID {
+		delete(mp.accountNonceIndex, nonceKey)
+	}
+}
+
+// validateTransaction performs comprehensive validation on a pooled transaction.
 func (mp *Mempool) validateTransaction(pooledTx *PooledTransaction) {
-	startTime := time.Now() // Track validation duration for metrics
+	startTime := time.Now()
 	tx := pooledTx.Transaction
 
 	logger.Info("validateTransaction: ID=%s ReturnData=%d bytes", tx.ID, len(tx.ReturnData))
 
-	// Check OP_RETURN data size limit (prevents memory exhaustion attacks).
-	// Must match transaction.MaxReturnDataSize (4096) — the canonical
-	// blockchain limit — so that valid anchors (which can be ~500 bytes or
-	// more) pass mempool admission. Previously this was 256, which silently
-	// rejected every NFT/metadata anchor as invalid (sent to invalidPool,
-	// never reached pendingPool) while the broader chain happily accepted
-	// up to 4096. That mismatch is why every block after genesis was empty:
-	// sendrawtransaction succeeded (tx entered broadcastPool), validation
-	// failed the size check (tx moved to invalidPool), block producer saw
-	// 0 pending txs, empty blocks kept shipping.
 	const maxReturnSize = types.MaxReturnDataSize
 	if len(tx.ReturnData) > maxReturnSize {
-		// Lock the mempool to safely update transaction state
 		mp.lock.Lock()
 		defer mp.lock.Unlock()
 
-		// This tx may have been replaced, pruned, or removed after block
-		// inclusion while we were off checking ReturnData size. If so, it's
-		// no longer ours to write back — see stillOwnsSlot's doc comment.
 		if !mp.stillOwnsSlot(tx.ID, pooledTx) {
 			logger.Debug("validateTransaction: %s no longer tracked (evicted while validating), discarding OP_RETURN result", tx.ID)
 			return
 		}
 
-		// Mark transaction as invalid due to oversized return data
 		pooledTx.Status = StatusInvalid
 		pooledTx.Error = fmt.Sprintf("OP_RETURN data exceeds maximum size of %d bytes", maxReturnSize)
 		pooledTx.LastUpdated = time.Now()
 
-		// Move transaction from validation pool to invalid pool
 		delete(mp.validationPool, tx.ID)
+		// ★ FIX: release the (sender, nonce) slot before parking in
+		// invalidPool. Without this the invalid tx keeps blocking the
+		// sender's next tx on the same slot.
+		mp.clearAccountNonceSlotIfOwner(tx.ID, tx)
 		mp.invalidPool[tx.ID] = pooledTx
 
-		// Update statistics
 		mp.stats.totalInvalid++
 		logger.Warn("Transaction validation failed: ID=%s, OP_RETURN size exceeded", tx.ID)
 		return
 	}
 
-	// Classify transaction type for type-specific validation
 	txType := classifyTransaction(tx)
 	if err := mp.validateTransactionByType(tx, txType); err != nil {
-		// Lock the mempool to safely update transaction state
 		mp.lock.Lock()
 		defer mp.lock.Unlock()
 
-		// Check if this tx is still tracked
 		if !mp.stillOwnsSlot(tx.ID, pooledTx) {
 			logger.Debug("validateTransaction: %s no longer tracked (evicted while classifying), discarding type check result", tx.ID)
 			return
 		}
 
-		// Mark transaction as invalid due to type-specific validation failure
 		pooledTx.Status = StatusInvalid
 		pooledTx.Error = err.Error()
 		pooledTx.LastUpdated = time.Now()
 
-		// Move transaction from validation pool to invalid pool
 		delete(mp.validationPool, tx.ID)
+		// ★ FIX: same slot cleanup as above.
+		mp.clearAccountNonceSlotIfOwner(tx.ID, tx)
 		mp.invalidPool[tx.ID] = pooledTx
 
-		// Update statistics
 		mp.stats.totalInvalid++
 		logger.Warn("Transaction validation failed: ID=%s, type check failed: %v", tx.ID, err)
 		return
 	}
 
-	// Perform all validation checks (signature, nonce, balance, gas, replay protection)
 	err := mp.performValidation(tx)
 
-	// Lock to update mempool state with validation results
 	mp.lock.Lock()
 	defer mp.lock.Unlock()
 
-	// performValidation ran unlocked and can take real time (SPHINCS+/SVM
-	// checks). While it was running, this exact tx.ID may have been evicted
-	// by a fee-bump replacement, a stale-nonce prune, or a block-inclusion
-	// removal — all of which delete it from allTransactions and the
-	// account-nonce index. If that happened, this pooledTx is stale: writing
-	// it into pendingPool/invalidPool now would resurrect an already-
-	// superseded (or already-committed) transaction as freshly selectable,
-	// orphaned from allTransactions. Discard the result instead — including
-	// skipping the validationTime/stats accounting below, since this
-	// validation's outcome is being thrown away, not applied.
 	if !mp.stillOwnsSlot(tx.ID, pooledTx) {
 		logger.Debug("validateTransaction: %s no longer tracked (evicted while validating), discarding validation result", tx.ID)
 		return
 	}
 
-	// Calculate and record validation duration for performance monitoring
 	validationTime := time.Since(startTime)
 	mp.stats.validationTime += validationTime
 
 	if err != nil {
-		// Validation failed - mark as invalid and move to invalid pool
 		pooledTx.Status = StatusInvalid
+		pooledTx.Validated = false
 		pooledTx.Error = err.Error()
 		pooledTx.LastUpdated = time.Now()
 
 		delete(mp.validationPool, tx.ID)
+		mp.clearAccountNonceSlotIfOwner(tx.ID, tx) // ★ FIX
 		mp.invalidPool[tx.ID] = pooledTx
 
 		mp.stats.totalInvalid++
 		logger.Warn("Transaction validation failed: ID=%s, error=%v", tx.ID, err)
 	} else {
-		// Validation succeeded - mark as pending and move to pending pool
 		pooledTx.Status = StatusPending
+		pooledTx.Validated = true
 		pooledTx.LastUpdated = time.Now()
 
 		delete(mp.validationPool, tx.ID)
@@ -729,16 +556,7 @@ func (mp *Mempool) validateTransaction(pooledTx *PooledTransaction) {
 	}
 }
 
-// classifyTransaction inspects a transaction's populated fields to determine
-// its intended purpose. This enables type-specific validation in performValidation
-// so that garbage transactions are rejected at the mempool boundary instead of
-// wasting block space by failing later at execution time.
-//
-// Classification rules (in priority order):
-//   - TxTypeDeployment: Code is non-empty (contract deployment)
-//   - TxTypeCall: ToContract is non-empty (contract call)
-//   - TxTypeNFTAnchor: ReturnData is non-empty AND Amount is zero (NFT/metadata anchor)
-//   - TxTypeTransfer: everything else (plain SPX transfer)
+// classifyTransaction inspects a transaction's populated fields.
 func classifyTransaction(tx *types.Transaction) TxType {
 	switch {
 	case len(tx.Code) > 0:
@@ -777,10 +595,7 @@ func (t TxType) String() string {
 	}
 }
 
-// validateTransactionByType runs type-specific validation checks based on the
-// classified transaction type. This is a defense-in-depth measure: the generic
-// validation (signature, nonce, balance, gas) already passed by the time this
-// is called; these checks reject structurally-invalid payloads early.
+// validateTransactionByType runs type-specific validation checks.
 func (mp *Mempool) validateTransactionByType(tx *types.Transaction, txType TxType) error {
 	switch txType {
 	case TxTypeDeployment:
@@ -790,13 +605,11 @@ func (mp *Mempool) validateTransactionByType(tx *types.Transaction, txType TxTyp
 	case TxTypeNFTAnchor:
 		return mp.validateNFTAnchor(tx)
 	default:
-		return nil // transfer: no extra checks needed
+		return nil
 	}
 }
 
 // validateDeployment checks that the Code field parses as a valid DeploySpec.
-// This catches malformed deployment payloads at the mempool instead of letting
-// them occupy block space only to fail at execution.
 func (mp *Mempool) validateDeployment(tx *types.Transaction) error {
 	var spec contracts.DeploySpec
 	if err := json.Unmarshal(tx.Code, &spec); err != nil {
@@ -809,26 +622,21 @@ func (mp *Mempool) validateDeployment(tx *types.Transaction) error {
 }
 
 // validateCall checks that the target contract already exists in state.
-// This prevents calls to non-existent contracts from entering the mempool,
-// saving block space and providing faster feedback to the caller.
 func (mp *Mempool) validateCall(tx *types.Transaction) error {
 	if mp.stateProvider == nil {
-		// Without state access we cannot verify; let it through (execution will fail)
 		return nil
 	}
 	stateDB, err := mp.stateProvider.NewStateDB()
 	if err != nil {
-		return nil // state unavailable; defer to execution
+		return nil
 	}
 	defer stateDB.Close()
 
-	// Check contract existence via the contract store
 	contractAddr := tx.ToContract
 	if !stateDB.ContractExists(contractAddr) {
 		return fmt.Errorf("contract %s does not exist", contractAddr)
 	}
 
-	// Validate CallData parses as a valid CallSpec
 	var call contracts.CallSpec
 	if err := json.Unmarshal(tx.CallData, &call); err != nil {
 		return fmt.Errorf("invalid call data: not a valid CallSpec: %w", err)
@@ -840,23 +648,18 @@ func (mp *Mempool) validateCall(tx *types.Transaction) error {
 }
 
 // validateNFTAnchor performs lightweight validation on NFT anchor transactions.
-// Since SIP-721 metadata is stored on-chain via tokenURI, this mainly validates
-// that the ReturnData is well-formed (valid JSON or a recognizable CID format).
 func (mp *Mempool) validateNFTAnchor(tx *types.Transaction) error {
 	data := tx.ReturnData
 
-	// Try parsing as JSON (could be metadata, anchor tag, etc.)
 	var jsonCheck interface{}
 	if err := json.Unmarshal(data, &jsonCheck); err == nil {
-		return nil // valid JSON is acceptable
+		return nil
 	}
 
-	// If not JSON, check for a recognizable CID-like string (ipfs://...)
 	if len(data) > 6 && string(data[:7]) == "ipfs://" {
 		return nil
 	}
 
-	// Allow raw hex (could be a CID in binary form)
 	if isHexString(string(data)) {
 		return nil
 	}
@@ -874,67 +677,28 @@ func isHexString(s string) bool {
 	return len(s) > 0 && len(s)%2 == 0
 }
 
-// performValidation executes all validation checks for a transaction
-// Returns an error if any validation check fails
+// performValidation executes all validation checks for a transaction.
 func (mp *Mempool) performValidation(tx *types.Transaction) error {
-	// Genesis vault transactions are TRUSTED protocol transactions
-	// They don't have SPHINCS+ signatures because they're system-level distributions.
-	// IMPORTANT: "trusted" only ever meant "skip cryptographic signature
-	// verification". Nonce and replay-protection checks still apply to system
-	// transactions — a stale or duplicate nonce from the vault is exactly as
-	// invalid as one from a regular sender, and skipping the check here was
-	// the reason stale-nonce vault transactions could sit in pendingPool
-	// forever and later get selected into a block with a nonce the chain had
-	// already passed (e.g. "bad nonce: got 0 want 9").
 	if tx.IsSystemTransaction() {
 		logger.Debug("Genesis vault transaction %s is trusted, skipping cryptographic verification", tx.ID)
 
-		// Still do basic sanity checks for safety
 		if err := tx.SanityCheck(); err != nil {
 			return fmt.Errorf("sanity check failed: %w", err)
 		}
 
-		// Validate sender and receiver addresses are not empty
 		if tx.Sender == "" || tx.Receiver == "" {
 			return errors.New("empty sender or receiver")
 		}
 
-		// Reject self-transfers at admission — StateDB.Transfer (state_db.go)
-		// hard-rejects from == to at execution time with no way to recover,
-		// so a self-transfer that gets this far can be validated into the
-		// pending pool indefinitely, get selected into a block, and fail
-		// ExecuteBlock/CommitBlock every single time it's retried — which
-		// consensus's generic commit-error handling then treats as a lost
-		// leader race and retries forever instead of ever discarding it.
-		// Rejecting here, at the same point that already checks for empty
-		// addresses, keeps it out of the pool entirely.
-		//
-		// EXCEPTION: a self-send whose ReturnData is a verified mint-anchor
-		// tag is not a value transfer at all — it's a data/NFT anchor using
-		// the self-send pattern documented in wallet helper.go's
-		// AnchorMintReceipt (the same pattern SendTransaction's memo path
-		// uses). Sender==Receiver there is by design: the transaction
-		// exists only to carry the anchor payload, and StateDB.Transfer's
-		// matching exception (see state_db.go) makes the debit/credit a
-		// mathematical no-op, so it's safe to admit. Gated on the actual
-		// tag content (isMintAnchorReturnData), not merely on ReturnData
-		// being non-empty, so a self-send can't dodge this check by
-		// attaching arbitrary junk bytes — see core.IsMintAnchor for the
-		// canonical version of this check.
 		if tx.Sender == tx.Receiver && !isMintAnchorReturnData(tx.ReturnData) {
 			return fmt.Errorf("sender and receiver are the same (%s)", tx.Sender)
 		}
 
-		// Validate amount is positive
 		if tx.Amount == nil || tx.Amount.Cmp(big.NewInt(0)) <= 0 {
 			return errors.New("invalid amount")
 		}
 
-		// Verify nonce even for system transactions. No signature verification
-		// needed for genesis vault, but nonce ordering must still hold or stale
-		// vault transactions accumulate in pendingPool with no way to be
-		// invalidated later.
-		currentNonce := mp.getSenderNonce(tx.Sender)
+		currentNonce := mp.getSenderNonceExcluding(tx.Sender, tx.ID) // ★ FIX
 		if err := mp.verifyTransactionNonce(tx, currentNonce); err != nil {
 			return fmt.Errorf("nonce validation failed: %w", err)
 		}
@@ -942,69 +706,54 @@ func (mp *Mempool) performValidation(tx *types.Transaction) error {
 		return nil
 	}
 
-	// For NON-genesis transactions, ALL verifications must pass
-
-	// Check transaction size against configured maximum
 	txSize := mp.CalculateTransactionSize(tx)
 	if txSize > mp.config.MaxTxSize {
 		return fmt.Errorf("transaction size %d exceeds maximum %d bytes", txSize, mp.config.MaxTxSize)
 	}
 
-	// Perform basic sanity checks (valid fields, proper formatting)
 	if err := tx.SanityCheck(); err != nil {
 		return fmt.Errorf("sanity check failed: %w", err)
 	}
 
-	// Validate addresses are present
-	if tx.Sender == "" || tx.Receiver == "" {
+	contractPayload := tx.HasContractPayload()
+	if tx.Sender == "" || (tx.Receiver == "" && !contractPayload) {
 		return errors.New("empty sender or receiver")
 	}
 
-	// Reject self-transfers here too — see the matching comment in the
-	// system-transaction branch above for why this must happen at
-	// admission rather than being left to execution-time rejection.
-	//
-	// EXCEPTION: self-send + a verified mint-anchor tag is a data/NFT
-	// anchor, not a value transfer — see the matching comment in the
-	// system-transaction branch above.
 	if tx.Sender == tx.Receiver && !isMintAnchorReturnData(tx.ReturnData) {
 		return fmt.Errorf("sender and receiver are the same (%s)", tx.Sender)
 	}
 
-	// Validate amount is positive
-	if tx.Amount == nil || tx.Amount.Cmp(big.NewInt(0)) <= 0 {
+	if tx.Amount == nil || tx.Amount.Sign() < 0 {
+		return errors.New("invalid amount")
+	}
+	if tx.Amount.Sign() == 0 && !contractPayload {
 		return errors.New("invalid amount")
 	}
 
-	// Validate gas parameters exist
 	if tx.GasLimit == nil || tx.GasPrice == nil {
 		return errors.New("missing gas parameters")
 	}
 
-	// Verify cryptographic signature (this will fail if signature is invalid or public key missing)
 	if err := mp.verifyTransactionSignature(tx); err != nil {
 		return fmt.Errorf("signature validation failed: %w", err)
 	}
 
-	// Verify nonce to prevent replay attacks
-	currentNonce := mp.getSenderNonce(tx.Sender)
+	currentNonce := mp.getSenderNonceExcluding(tx.Sender, tx.ID) // ★ FIX
 	if err := mp.verifyTransactionNonce(tx, currentNonce); err != nil {
 		return fmt.Errorf("nonce validation failed: %w", err)
 	}
 
-	// Verify sender has sufficient balance for the transaction
 	senderBalance := mp.getSenderBalance(tx.Sender)
 	if err := mp.verifyTransactionBalance(tx, senderBalance); err != nil {
 		return fmt.Errorf("balance validation failed: %w", err)
 	}
 
-	// Verify gas parameters meet minimum requirements
 	minGasPrice := mp.getMinimumGasPrice()
 	if err := mp.verifyTransactionGas(tx, minGasPrice); err != nil {
 		return fmt.Errorf("gas validation failed: %w", err)
 	}
 
-	// Verify timestamp is newer than last transaction (replay protection)
 	lastTimestamp := mp.getLastTransactionTimestamp(tx.Sender)
 	if err := mp.verifyTransactionReplayProtection(tx, lastTimestamp); err != nil {
 		return fmt.Errorf("replay protection failed: %w", err)
@@ -1014,9 +763,34 @@ func (mp *Mempool) performValidation(tx *types.Transaction) error {
 	return nil
 }
 
-// getSenderNonce retrieves the current nonce for a given sender address
-// This is a stub method that would query the blockchain state in production
+// getSenderNonce retrieves the current nonce for a given sender address.
+//
+// The return value is the PENDING-AWARE next nonce: the committed state nonce
+// is combined with the highest nonce this sender already has parked in the
+// mempool's account-nonce index. That means a wallet which broadcasts two
+// dependent transactions back-to-back (e.g. a deploy followed by a collection
+// mint) has the second see nonce N+1 even though only nonce N has committed
+// yet. A committed-only read would return N and produce a tx the validator
+// here rejects with "invalid nonce: N must equal N+1".
+//
+// ★ FIX: excludeTxID lets a caller validating transaction X exclude X's own
+// accountNonceIndex entry from this count. BroadcastTransaction registers a
+// tx's (sender, nonce) slot in accountNonceIndex at ADMISSION time, before
+// performValidation ever runs — so without this exclusion, every transaction
+// counted its own slot while validating itself, inflating "highest" by one
+// and rejecting every single transaction (including a brand-new account's
+// very first, nonce 0) with "invalid nonce: 0 must equal 1". Pass "" to
+// count every entry (used by the external GetSenderNonce, e.g. the RPC
+// getnonce handler, where the caller's not-yet-broadcast tx has no entry to
+// exclude in the first place).
 func (mp *Mempool) getSenderNonce(sender string) uint64 {
+	return mp.getSenderNonceExcluding(sender, "")
+}
+
+// getSenderNonceExcluding is getSenderNonce with one accountNonceIndex entry
+// (identified by txID) skipped during the scan. See getSenderNonce's ★ FIX
+// note for why this exists.
+func (mp *Mempool) getSenderNonceExcluding(sender, excludeTxID string) uint64 {
 	if mp.stateProvider == nil {
 		logger.Warn("StateProvider not set, returning default nonce 0")
 		return 0
@@ -1029,14 +803,47 @@ func (mp *Mempool) getSenderNonce(sender string) uint64 {
 	}
 	defer stateDB.Close()
 
-	nonce, err := stateDB.GetNonce(sender)
+	committed, err := stateDB.GetNonce(sender)
 	if err != nil {
-		return 0 // ← Returns 0 for new accounts
+		committed = 0
 	}
-	return nonce
+
+	mp.lock.RLock()
+	highest := committed
+	for key, occupantID := range mp.accountNonceIndex {
+		if excludeTxID != "" && occupantID == excludeTxID {
+			continue
+		}
+		parts := strings.SplitN(key, ":", 2)
+		if len(parts) != 2 || parts[0] != sender {
+			continue
+		}
+		n, perr := strconv.ParseUint(parts[1], 10, 64)
+		if perr != nil {
+			continue
+		}
+		if n >= highest {
+			highest = n + 1
+		}
+	}
+	mp.lock.RUnlock()
+
+	return highest
 }
 
-// getSenderBalance retrieves the current balance for a given sender address
+// GetSenderNonce returns the next nonce this sender may use, accounting for
+// both the committed state DB nonce AND any transactions already parked in
+// the mempool for this sender.
+//
+// External callers (RPC handlers, wallet CLIs) must use this instead of
+// reading stateDB.GetNonce directly, because a wallet that broadcasts two
+// dependent transactions back-to-back expects the second tx to carry nonce
+// N+1 even though only nonce N has committed to a block yet.
+func (mp *Mempool) GetSenderNonce(sender string) uint64 {
+	return mp.getSenderNonce(sender)
+}
+
+// getSenderBalance retrieves the current balance for a given sender address.
 func (mp *Mempool) getSenderBalance(sender string) *big.Int {
 	if mp.stateProvider == nil {
 		logger.Warn("StateProvider not set, returning default balance 0")
@@ -1059,41 +866,30 @@ func (mp *Mempool) getSenderBalance(sender string) *big.Int {
 	return balance
 }
 
-// getMinimumGasPrice returns the minimum acceptable gas price for transactions
-// This is a stub method that would be configurable in production
+// getMinimumGasPrice returns the minimum acceptable gas price for transactions.
 func (mp *Mempool) getMinimumGasPrice() *big.Int {
-	// Return 1 gSPX as minimum gas price (1,000,000,000 nSPX)
 	return new(big.Int).SetUint64(1000000000)
 }
 
-// validateTransactionBasic performs minimal validation on a transaction
-// This is a lightweight check for fundamental transaction properties
+// validateTransactionBasic performs minimal validation on a transaction.
 func (mp *Mempool) validateTransactionBasic(tx *types.Transaction) error {
-	// Check for nil transaction pointer
 	if tx == nil {
 		return errors.New("nil transaction")
 	}
 
-	// Verify sender and receiver addresses are not empty
-	if tx.Sender == "" || tx.Receiver == "" {
+	contractPayload := tx.HasContractPayload()
+	if tx.Sender == "" || (tx.Receiver == "" && !contractPayload) {
 		return errors.New("empty sender or receiver")
 	}
 
-	// Reject self-transfers here too — see the matching comment earlier in
-	// this file for why this must happen at admission rather than being
-	// left to execution-time rejection.
-	//
-	// EXCEPTION: self-send + a verified mint-anchor tag is a data/NFT
-	// anchor, not a value transfer (see the matching comment in
-	// performValidation above). This check runs before type
-	// classification, so it has to make the same call directly on the raw
-	// fields rather than via classifyTransaction.
 	if tx.Sender == tx.Receiver && !isMintAnchorReturnData(tx.ReturnData) {
 		return fmt.Errorf("sender and receiver are the same (%s)", tx.Sender)
 	}
 
-	// Verify amount exists and is positive
-	if tx.Amount == nil || tx.Amount.Cmp(big.NewInt(0)) <= 0 {
+	if tx.Amount == nil || tx.Amount.Sign() < 0 {
+		return errors.New("invalid amount")
+	}
+	if tx.Amount.Sign() == 0 && !contractPayload {
 		return errors.New("invalid amount")
 	}
 

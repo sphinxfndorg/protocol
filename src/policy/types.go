@@ -75,6 +75,15 @@ type PolicyParameters struct {
 	MintBaseHashes     uint64   `json:"mint_base_hashes"`      // hashes committed per mint (SPHINCS+ auth bundle)
 	MintPinningMonths  uint64   `json:"mint_pinning_months"`   // default IPFS retention per mint (months)
 
+	// Embedded-economics floor: MinTokenSaleValue is the minimum nSPX a
+	// SIP-721 resale may claim as its price for royalty purposes. When a
+	// transfer_from settlement carries less than this (dust-price wash
+	// trading), the resale royalty is computed on the floor instead of the
+	// carried value — so evasion costs real royalties rather than being free.
+	// nil disables the floor. Royalty is still capped at the escrowed value,
+	// so the seller never pays out of pocket.
+	MinTokenSaleValue *big.Int `json:"min_token_sale_value,omitempty"`
+
 	// Inflation parameters
 	// The BPS fields are the consensus representation. The float fields below
 	// remain for wallet/UI projections and backward-compatible APIs only.

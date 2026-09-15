@@ -73,6 +73,12 @@ func NewPolicyParameters() *PolicyParameters {
 		MintBaseHashes:     5,              // payload hash + sig hash + merkle root + commitment + proof
 		MintPinningMonths:  1,              // 1 month default IPFS retention
 
+		// Embedded-economics floor for SIP-721 resale royalties: 0.1 SPX. Low
+		// enough not to block ordinary collectibles, high enough that settling
+		// at dust prices still yields a real royalty. Royalty = bps ×
+		// max(sale_value, floor), capped at the escrowed sale value.
+		MinTokenSaleValue: new(big.Int).Mul(big.NewInt(1), new(big.Int).Exp(big.NewInt(10), big.NewInt(17), nil)), // 0.1 SPX = 1e17 nSPX
+
 		// Inflation parameters
 		InitialInflationBPS:  500,  // 5.00% annual inflation
 		InflationDecayBPS:    8000, // 80.00% of the preceding year's rate

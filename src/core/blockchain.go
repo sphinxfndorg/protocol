@@ -19,7 +19,6 @@ import (
 
 	"github.com/sphinxfndorg/protocol/src/common"
 	"github.com/sphinxfndorg/protocol/src/consensus"
-
 	"github.com/sphinxfndorg/protocol/src/pool"
 
 	logger "github.com/sphinxfndorg/protocol/src/console"

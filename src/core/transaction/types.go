@@ -261,4 +261,20 @@ type NFTAnchorPayload struct {
 	CID        string `json:"cid"`
 	CIDHashHex string `json:"ch"` // sha256(CID) as hex
 	Timestamp  int64  `json:"ts"`
+
+	// RoyaltyBPS is the anchored asset's resale-royalty share in basis points
+	// (0..10000) of the sale price carried by each transfer_from transaction.
+	// 0 (unset) = no resale royalty. Deliberately a fraction of value, never a
+	// flat fee, so it prices the liquid trade, not the mint.
+	RoyaltyBPS uint64 `json:"rbps,omitempty"`
+
+	// UsageFeeNSPX is the per licensed-access micro-fee in nSPX for this
+	// anchored data (dataset pull, license exercise, training ingest). Decimal
+	// string so arbitrary nSPX magnitudes survive JSON round-trips.
+	UsageFeeNSPX string `json:"ufee,omitempty"`
+
+	// RoyaltyRecipient overrides the default payout address (anchor sender).
+	// Lets a collection route creator revenue elsewhere (treasury, joint
+	// ownership) without changing ownership semantics.
+	RoyaltyRecipient string `json:"rr,omitempty"`
 }

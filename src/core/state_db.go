@@ -155,24 +155,41 @@ func (s *StateDB) SetContractValue(key string, value []byte) {
 // It checks both pending writes (in the current block's state) and the
 // committed store. This is used by mempool validation to reject calls to
 // non-existent contracts before they enter the pending pool.
+//
+// Contracts are stored under a composite key address:meta: (see contractKey
+// in contract_runtime.go and contractStore.ContractExists). To stay
+// consistent with the execution-time check, every accepted rendering of the
+// incoming address is consulted (canonical grouped form, raw as-supplied, and
+// the legacy 20-byte form) via contractAddressRenderings, so a caller passing
+// the spaced display form, bare raw hex, mixed case, or a legacy address all
+// resolve to the same key.
 func (s *StateDB) ContractExists(address string) bool {
 	if address == "" {
 		return false
 	}
+	renderings := contractAddressRenderings(address)
+	metaKeys := make([]string, 0, len(renderings))
+	for _, rendering := range renderings {
+		metaKeys = append(metaKeys, rendering+":meta:")
+	}
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	// Check pending writes first
-	if _, ok := s.contractPending[address]; ok {
-		return true
+	// Check pending writes first — contracts are keyed as address:meta:
+	for _, metaKey := range metaKeys {
+		if _, ok := s.contractPending[metaKey]; ok {
+			return true
+		}
 	}
 
-	// Check committed store
-	data, err := s.db.Get(contractPrefix + address)
-	if err != nil {
-		return false
+	// Check the committed store — on-disk key is contract:address:meta:
+	for _, metaKey := range metaKeys {
+		if _, err := s.db.Get(contractPrefix + metaKey); err == nil {
+			return true
+		}
 	}
-	return len(data) > 0
+	return false
 }
 
 // ----------------------------------------------------------------------------

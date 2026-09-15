@@ -5,6 +5,8 @@
 package common
 
 import (
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -207,41 +209,98 @@ func EnsureNodeDirs(address string) error {
 	return nil
 }
 
-// WriteKeysToFile writes keys using network address
+// WriteKeysToFile writes keys using network address.
+//
+// Keys are persisted as base64-encoded text (single line, trailing newline)
+// instead of raw binary, so the files are human-readable, safe to copy/paste
+// into terminals, and never render as garbage in text editors.
+// ReadKeysFromFile decodes this format back to the original key bytes.
 func WriteKeysToFile(address string, privateKey, publicKey []byte) error {
 	if err := EnsureNodeDirs(address); err != nil {
 		return err
 	}
 
 	privateKeyPath := GetPrivateKeyPath(address)
-	if err := os.WriteFile(privateKeyPath, privateKey, 0600); err != nil {
+	if err := os.WriteFile(privateKeyPath, []byte(base64.StdEncoding.EncodeToString(privateKey)+"\n"), 0600); err != nil {
 		return fmt.Errorf("failed to write private key: %w", err)
 	}
 
 	publicKeyPath := GetPublicKeyPath(address)
-	if err := os.WriteFile(publicKeyPath, publicKey, 0644); err != nil {
+	if err := os.WriteFile(publicKeyPath, []byte(base64.StdEncoding.EncodeToString(publicKey)+"\n"), 0644); err != nil {
 		return fmt.Errorf("failed to write public key: %w", err)
 	}
 
 	return nil
 }
 
-// ReadKeysFromFile reads keys using network address
+// ReadKeysFromFile reads keys using network address.
+//
+// On-disk formats are detected transparently by canonical length:
+//   - base64-encoded text (current format)  – pk = 44 chars, sk = 88 chars
+//   - hex-encoded text (interim format)     – pk = 64 chars, sk = 128 chars
+//   - legacy raw SPHINCS+ binary            – pk = 32 bytes, sk = 64 bytes
+//
+// The SPHINCS+ size invariant (sk = 2×pk) is validated on read so a corrupt
+// or mismatched pair is detected instead of surfacing garbage downstream.
 func ReadKeysFromFile(address string) ([]byte, []byte, error) {
 	privateKeyPath := GetPrivateKeyPath(address)
 	publicKeyPath := GetPublicKeyPath(address)
 
-	privateKey, err := os.ReadFile(privateKeyPath)
+	privateKey, err := decodeKeyFile(privateKeyPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to read private key: %w", err)
 	}
 
-	publicKey, err := os.ReadFile(publicKeyPath)
+	publicKey, err := decodeKeyFile(publicKeyPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to read public key: %w", err)
 	}
 
+	if len(privateKey) != 2*len(publicKey) {
+		return nil, nil, fmt.Errorf("key size mismatch: private key is %d bytes, public key is %d bytes (want sk = 2×pk)",
+			len(privateKey), len(publicKey))
+	}
+
 	return privateKey, publicKey, nil
+}
+
+// decodeKeyFile reads a single key file, transparently decoding the base64
+// text format written by WriteKeysToFile. Short fixed-length files (32/64
+// bytes) are treated as the legacy raw SPHINCS+ binary layout
+// (pk = PKseed||PKroot, sk = SKseed||SKprf||PKseed||PKroot), and hex-encoded
+// files written by an interim format are still accepted. This preserves
+// backward compatibility with nodes created before the base64 encoding change.
+func decodeKeyFile(path string) ([]byte, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	// Legacy raw serialized SPHINCS+ keys have fixed sizes.
+	if len(data) == 32 || len(data) == 64 {
+		return data, nil
+	}
+
+	s := strings.TrimSpace(string(data))
+
+	switch len(s) {
+	// Base64 (current format): pk = 44 chars, sk = 88 chars.
+	case 44, 88:
+		decoded, err := base64.StdEncoding.DecodeString(s)
+		if err != nil {
+			return nil, fmt.Errorf("invalid base64 key encoding: %w", err)
+		}
+		return decoded, nil
+	// Hex (interim format): pk = 64 chars, sk = 128 chars.
+	case 64, 128:
+		decoded, err := hex.DecodeString(s)
+		if err != nil {
+			return nil, fmt.Errorf("invalid hex key encoding: %w", err)
+		}
+		return decoded, nil
+	default:
+		return nil, fmt.Errorf("invalid key encoding: unexpected length %d (expected raw 32/64 bytes, base64 44/88, or hex 64/128)", len(s))
+	}
 }
 
 // KeysExist checks if keys exist for a network address

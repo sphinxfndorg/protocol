@@ -12,16 +12,22 @@ import (
 	"strings"
 )
 
-// canonicalReceiptBytesV2 is the corrected deterministic serialization.
+// canonicalReceiptBytes is the corrected deterministic serialization.
 func canonicalReceiptBytes(r *MintReceipt) ([]byte, error) {
-	var metaKV [][2]string
-	if r.Metadata != nil {
-		metaKV = make([][2]string, 0, len(r.Metadata))
-		for k, v := range r.Metadata {
-			metaKV = append(metaKV, [2]string{k, v})
-		}
-		sort.Slice(metaKV, func(i, j int) bool { return metaKV[i][0] < metaKV[j][0] })
+	// Always build a non-nil, possibly-empty slice. MintReceipt.Metadata is
+	// `json:"metadata,omitempty"`, so a freshly-minted receipt (Metadata =
+	// map[string]string{}) drops the field entirely on disk; LoadReceipt then
+	// comes back with Metadata == nil. Branching on r.Metadata != nil made
+	// those two states canonicalize differently (json.Marshal([][2]string{})
+	// -> "[]" vs json.Marshal(nil) -> "null"), so a receipt failed Verify
+	// after every save/load round-trip even though nothing about it changed.
+	// Ranging a nil map is legal and yields zero iterations, so this is safe
+	// for both cases and always produces "[]" for empty metadata.
+	metaKV := make([][2]string, 0, len(r.Metadata))
+	for k, v := range r.Metadata {
+		metaKV = append(metaKV, [2]string{k, v})
 	}
+	sort.Slice(metaKV, func(i, j int) bool { return metaKV[i][0] < metaKV[j][0] })
 
 	mintID := strings.TrimSpace(r.MintID)
 	subject := strings.TrimSpace(r.Subject)
@@ -64,10 +70,14 @@ func canonicalReceiptBytes(r *MintReceipt) ([]byte, error) {
 	writeStr(orgCode)
 	writeStr(minterPK)
 
-	// Metadata canonical form
-	// encode as JSON of array of [key,value] sorted
-	var metaArr [][2]string = metaKV
-	metaJSON, _ := json.Marshal(metaArr)
+	// Metadata canonical form: JSON array of [key,value] pairs, sorted.
+	// metaKV is always a non-nil (possibly empty) slice, so this is always
+	// "[]" for no metadata — never "null" — regardless of whether the
+	// receipt was just built by Mint() or reloaded from disk via LoadReceipt.
+	metaJSON, err := json.Marshal(metaKV)
+	if err != nil {
+		return nil, err
+	}
 	writeBytes(metaJSON)
 
 	// RequireExternalPayload

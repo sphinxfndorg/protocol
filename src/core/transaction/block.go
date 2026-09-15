@@ -936,6 +936,28 @@ func (b *Block) SanityCheck() error {
 	return nil
 }
 
+// IsContractDeployment reports whether tx deploys a new contract. A deployment
+// has no external recipient by design: its destination is the contract address
+// the chain derives from (Sender, Nonce, Code) at execution time, so Receiver is
+// legitimately empty and the carried value is normally zero.
+func (tx *Transaction) IsContractDeployment() bool { return len(tx.Code) > 0 }
+
+// IsContractCall reports whether tx targets an existing contract (ToContract).
+func (tx *Transaction) IsContractCall() bool { return tx.ToContract != "" }
+
+// HasContractPayload reports whether tx is a contract deployment or contract
+// call, i.e. its destination is a CONTRACT rather than the value recipient named
+// in Receiver. Such transactions are exempt from the "Receiver must be
+// non-empty" and "Amount must be positive" rules that apply to plain value
+// transfers: a deploy has no recipient (the address is derived), and both
+// deploys and value-less calls (list / cancel / revoke_license) legitimately
+// carry zero value. Requiring either made every contract transaction impossible
+// — rejected at mempool admission ("empty sender or receiver" / "invalid
+// amount"), at block validation, and by consensus alike.
+func (tx *Transaction) HasContractPayload() bool {
+	return tx.IsContractDeployment() || tx.IsContractCall()
+}
+
 // SanityCheck verifies the validity of a transaction.
 // Performs basic transaction validation
 // Returns: Error if validation fails
@@ -950,7 +972,12 @@ func (tx *Transaction) SanityCheck() error {
 	if tx.Sender == "" {
 		return fmt.Errorf("transaction sender is missing")
 	}
-	if tx.Receiver == "" {
+	// A contract deploy/call has no Receiver by design: the destination is the
+	// contract — ToContract for a call, or the address derived from
+	// Sender+Nonce+Code for a deployment (see HasContractPayload). Demanding
+	// Receiver here rejected every contract transaction at admission, block
+	// validation, and consensus alike, which made deployment impossible.
+	if tx.Receiver == "" && !tx.HasContractPayload() {
 		return fmt.Errorf("transaction receiver is missing")
 	}
 

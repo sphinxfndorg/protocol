@@ -21,7 +21,7 @@ type Meta struct {
 	DocumentSignature string `json:"document_signature"`
 
 	// Organisation — carried with the file so any device can route the lookup
-	OrgCode string `json:"org_code,omitempty"` // "TNAL", "TNAD", "PLRI", etc.
+	OrgCode string `json:"org_code,omitempty"`
 
 	// Timestamps
 	Timestamp          int64 `json:"timestamp"`
@@ -41,8 +41,13 @@ type Meta struct {
 
 	// ERC-721 NFT metadata context (set when minting NFTs with metadata JSON).
 	// TokenURI points to the metadata JSON on IPFS (like Ethereum ERC-721).
-	TokenURI    string `json:"token_uri,omitempty"`    // ipfs://<metadataCID>
-	MetadataCID string `json:"metadata_cid,omitempty"` // CID of the metadata JSON
+	// NFTName/NFTDescription mirror the metadata JSON's name/description so
+	// the on-chain provenance block shows what the token represents without
+	// fetching the JSON from IPFS.
+	TokenURI       string `json:"token_uri,omitempty"`       // ipfs://<metadataCID>
+	MetadataCID    string `json:"metadata_cid,omitempty"`    // CID of the metadata JSON
+	NFTName        string `json:"nft_name,omitempty"`        // ERC-721 metadata name (frozen at mint)
+	NFTDescription string `json:"nft_description,omitempty"` // ERC-721 metadata description (frozen at mint)
 
 	// On-chain anchor provenance (populated AFTER AnchorMintReceipt returns,
 	// via RefreshOnChainProvenance — NEVER before signing, so the SPHINCS+
@@ -58,6 +63,15 @@ type Meta struct {
 	BlockHash       string `json:"block_hash,omitempty"`       // hex hash of the confirming block ("pending" while unconfirmed)
 	TokenID         uint64 `json:"token_id,omitempty"`         // SIP-721 tokenId (collection mints only)
 	ContractAddress string `json:"contract_address,omitempty"` // SIP-721 collection contract (collection mints only)
+
+	// Embedded economics frozen at SIP-721 mint time and enforced by the native
+	// runtime on every transfer_from / purchase_license. They travel with the
+	// signed document so any verifier can see what economics were attached to
+	// this anchor without consulting the chain. Zero/empty = legacy no-terms
+	// token (royalties and license fees do not apply).
+	RoyaltyBPS       uint64 `json:"royalty_bps,omitempty"`       // 0..10000 basis points of sale value
+	UsageFeeNSPX     string `json:"usage_fee_nspx,omitempty"`    // per licensed-access fee, decimal nSPX
+	RoyaltyRecipient string `json:"royalty_recipient,omitempty"` // "" = the mint caller (creator)
 
 	// MintFeeNSPX records the policy-priced mint fee the anchor transaction
 	// carried as its Amount (CalculateMintDataFee.TotalFee, in nSPX). It is
@@ -119,6 +133,8 @@ func (m *Meta) Clone() *Meta {
 		BlockHeight:        m.BlockHeight,
 		TokenURI:           m.TokenURI,
 		MetadataCID:        m.MetadataCID,
+		NFTName:            m.NFTName,
+		NFTDescription:     m.NFTDescription,
 		MintID:             m.MintID,
 		AnchorTxID:         m.AnchorTxID,
 		AnchorPath:         m.AnchorPath,
@@ -128,6 +144,10 @@ func (m *Meta) Clone() *Meta {
 		ContractAddress:    m.ContractAddress,
 		MintFeeNSPX:        m.MintFeeNSPX,
 		AnchorNonce:        m.AnchorNonce,
+		// Embedded economics frozen at mint.
+		RoyaltyBPS:       m.RoyaltyBPS,
+		UsageFeeNSPX:     m.UsageFeeNSPX,
+		RoyaltyRecipient: m.RoyaltyRecipient,
 	}
 }
 

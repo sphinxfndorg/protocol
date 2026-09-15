@@ -624,7 +624,30 @@ type MintJob struct {
 	PublicFingerprint  string
 	NFTName            string
 	NFTDescription     string
-	MintFeeSPX         func() float64
+
+	// Embedded-economics terms frozen into the mint receipt and the
+	// on-chain anchor (and, for collection mints, into SIP-721 token
+	// storage) at consensus. RoyaltyBPS is the resale royalty in basis
+	// points (0 = no resale royalty), UsageFeeNSPX the per licensed-access
+	// fee as a decimal nSPX string ("" = no licensing), RoyaltyRecipient an
+	// optional payout override in canonical raw-hex form ("" = the minting
+	// identity). The receipt's SPHINCS+ signature does not cover these
+	// fields (canonicalReceiptBytes excludes them), so the mint worker
+	// stamps them on after mint.Mint signs — BuildAnchorData then carries
+	// them into the AnchorTag, whose terms every node re-validates at
+	// consensus and VerifyAnchor requires to match the receipt.
+	RoyaltyBPS       uint64
+	UsageFeeNSPX     string
+	RoyaltyRecipient string
+
+	// Collection is the SIP-721 collection contract the mint must create its
+	// marketplace token in. A bare receipt anchor (Collection == "") is not
+	// listable/buyable/licensable — only a real token inside a collection is —
+	// so the Mint Data screen defaults this to the user's saved collection and
+	// warns when it is empty.
+	Collection string
+
+	MintFeeSPX func() float64
 
 	// StatusText is the small inline status line already on the Sign
 	// screen itself (kept in sync so it still reflects the final result
@@ -638,6 +661,156 @@ type MintJob struct {
 	// ClearSelectedFile clears the screen's selectedFile variable so a
 	// finished job can't be re-submitted by mistake.
 	ClearSelectedFile func()
+}
+
+// normalizeRoyaltyRecipient validates the optional royalty-recipient input
+// from the Mint Data screen and returns it in the canonical raw-uppercase-hex
+// form the node's ValidateAnchorData and the SIP-721 runtime both store and
+// pay out with (common.NormalizeSPIFAddress strips the SPIF prefix and
+// uppercases the hex). An empty input is allowed: the field is optional and
+// means "pay the minting identity".
+func normalizeRoyaltyRecipient(input string) (string, error) {
+	raw := strings.TrimSpace(input)
+	if raw == "" {
+		return "", nil
+	}
+	norm, err := common.NormalizeSPIFAddress(raw)
+	if err != nil {
+		return "", fmt.Errorf("royalty recipient: %w", err)
+	}
+	return norm, nil
+}
+
+// describeMintTerms renders a MintJob's embedded-economics terms as a short
+// human-readable summary for the Mint Status dialog ("none" = legacy token
+// with no resale royalty and no licensing).
+func describeMintTerms(job MintJob) string {
+	if job.RoyaltyBPS == 0 && job.UsageFeeNSPX == "" && job.RoyaltyRecipient == "" {
+		return "none (legacy token)"
+	}
+	var parts []string
+	if job.RoyaltyBPS > 0 {
+		pct := new(big.Float).Quo(
+			new(big.Float).SetInt64(int64(job.RoyaltyBPS)),
+			big.NewFloat(100),
+		)
+		parts = append(parts, pct.Text('f', -1)+"% resale royalty")
+	}
+	if job.UsageFeeNSPX != "" {
+		fee, ok := new(big.Int).SetString(job.UsageFeeNSPX, 10)
+		if ok {
+			parts = append(parts, formatNSPXAmount(fee)+" SPX / use")
+		} else {
+			parts = append(parts, job.UsageFeeNSPX+" nSPX / use")
+		}
+	}
+	if job.RoyaltyRecipient != "" {
+		short := job.RoyaltyRecipient
+		if len(short) > 14 {
+			short = short[:10] + "…" + short[len(short)-4:]
+		}
+		parts = append(parts, "pay to "+short)
+	}
+	return strings.Join(parts, " · ")
+}
+
+// pinNFTMetadata pins the ERC-721 metadata JSON for a mint and returns the
+// metadata CID together with its ipfs:// tokenURI.
+//
+// It uses AddBytesToIPFSWithFallback — the SAME fallback contract as the media
+// payload pin — so a missing or unreachable IPFS daemon cannot abort a
+// collection mint after the file has already been signed. That is exactly the
+// bug behind "Marketplace Token Failed: a collection mint needs an ERC-721
+// metadata tokenURI — fill in the NFT name": the name WAS set, the strict
+// metadata upload failed because the daemon was unreachable, and the resulting
+// empty tokenURI was then misreported as a missing name.
+//
+// The fallback is a deterministic, content-addressed identifier (spxhash-…), so
+// the tokenURI is still a stable commitment and the marketplace token can be
+// minted; the metadata becomes retrievable under the identical CID once pinning
+// succeeds. The returned error is non-nil exactly when that fallback was used,
+// so callers log it as a warning rather than failing the mint.
+//
+// The bytes are marshalled exactly as mint.UploadNFTMetadata marshals them
+// (MarshalIndent with two spaces), so a successful real pin yields the same
+// content CID this function would otherwise have produced.
+func pinNFTMetadata(uploader *storage.Client, nftMeta *mint.NFTMetadata, filename string) (metadataCID, tokenURI string, warn error) {
+	if nftMeta == nil {
+		return "", "", errors.New("nil NFT metadata")
+	}
+	if uploader == nil {
+		return "", "", errors.New("nil IPFS uploader")
+	}
+	data, err := json.MarshalIndent(nftMeta, "", "  ")
+	if err != nil {
+		return "", "", fmt.Errorf("marshal NFT metadata: %w", err)
+	}
+	cid, warn := uploader.AddBytesToIPFSWithFallback(data, filename)
+	if strings.TrimSpace(cid) == "" {
+		return "", "", errors.New("empty metadata CID")
+	}
+	return cid, "ipfs://" + cid, warn
+}
+
+// savedCollectionFile is where this identity's default SIP-721 collection is
+// remembered between runs (~/.sphinx/usi_collection.json). Mint Data mints its
+// marketplace token into it and Marketplace searches it by default, which is
+// what makes the two screens agree without retyping a contract address.
+func savedCollectionFile() string {
+	return filepath.Join(filepath.Dir(keys.KeyDir), "usi_collection.json")
+}
+
+// SavedCollection is the local memory of the collection this identity mints
+// into: the contract address plus the display name/symbol read back from chain.
+type SavedCollection struct {
+	Address    string `json:"address"`
+	Name       string `json:"name,omitempty"`
+	Symbol     string `json:"symbol,omitempty"`
+	DeployedAt int64  `json:"deployed_at,omitempty"`
+}
+
+// loadSavedCollection returns the remembered collection, or the zero value when
+// none has been deployed/saved yet (never an error — an absent file simply
+// means "no collection yet").
+func loadSavedCollection() SavedCollection {
+	return loadCollectionFrom(savedCollectionFile())
+}
+
+// loadCollectionFrom is loadSavedCollection's path-parameterised core, so the
+// persistence rules (absent file, corrupt file) can be tested without touching
+// the user's real key directory.
+func loadCollectionFrom(path string) SavedCollection {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return SavedCollection{}
+	}
+	var sc SavedCollection
+	if err := json.Unmarshal(data, &sc); err != nil {
+		log.Printf("[WARN] loadSavedCollection: ignoring corrupt %s: %v", path, err)
+		return SavedCollection{}
+	}
+	return sc
+}
+
+// saveCollection persists the collection address/name locally (0600, under the
+// key directory's parent) so both Mint Data and Marketplace can reuse it.
+func saveCollection(sc SavedCollection) error {
+	return saveCollectionTo(savedCollectionFile(), sc)
+}
+
+// saveCollectionTo is saveCollection's path-parameterised core.
+func saveCollectionTo(path string, sc SavedCollection) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return fmt.Errorf("create collection dir: %w", err)
+	}
+	data, err := json.MarshalIndent(sc, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal collection: %w", err)
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		return fmt.Errorf("write collection: %w", err)
+	}
+	return nil
 }
 
 // mintStatusFields groups the live-updating widgets inside the Mint Data
@@ -657,6 +830,8 @@ type mintStatusFields struct {
 	fileVal        *canvas.Text
 	cidVal         *canvas.Text
 	tokenURIVal    *canvas.Text
+	termsVal       *canvas.Text
+	tokenVal       *canvas.Text
 	txidVal        *canvas.Text
 	blockHeightVal *canvas.Text
 	anchorVal      *canvas.Text
@@ -705,6 +880,17 @@ func showMintStatusDialog(job MintJob) {
 	f.tokenURIVal.TextSize = 11
 	f.tokenURIVal.TextStyle = fyne.TextStyle{Monospace: true}
 
+	// The embedded-economics terms are known before the pipeline starts —
+	// they were validated on the Mint Data screen and travel inside the job.
+	f.termsVal = canvas.NewText(describeMintTerms(job), colMuted)
+	f.termsVal.TextSize = 11
+	f.termsVal.TextStyle = fyne.TextStyle{Monospace: true}
+
+	// Marketplace token binding — filled in once the collection mint commits.
+	f.tokenVal = canvas.NewText("—", colFaint)
+	f.tokenVal.TextSize = 11
+	f.tokenVal.TextStyle = fyne.TextStyle{Monospace: true}
+
 	f.txidVal = canvas.NewText("—", colFaint)
 	f.txidVal.TextSize = 11
 	f.txidVal.TextStyle = fyne.TextStyle{Monospace: true}
@@ -740,6 +926,10 @@ func showMintStatusDialog(job MintJob) {
 		infoRowDynamic("IPFS CID", f.cidVal),
 		spacer(4),
 		infoRowDynamic("Token URI", f.tokenURIVal),
+		spacer(4),
+		infoRowDynamic("Embedded Terms", f.termsVal),
+		spacer(4),
+		infoRowDynamic("Marketplace Token", f.tokenVal),
 		spacer(10),
 		hRule(),
 		spacer(10),
@@ -833,6 +1023,15 @@ func mintStatusDialogWorker(job MintJob, f mintStatusFields) {
 	meta.OrgCode = "SPIF"
 	meta.Signer = job.SessionFingerprint
 	meta.DocumentTitle = fileBase
+	// Embedded economics are known from the mint form before signing, so they
+	// are populated through meta.go (SetAnchorEconomics) and travel with the
+	// signed document — no need to consult the chain to learn the terms.
+	sign.SetAnchorEconomics(meta, job.RoyaltyBPS, job.UsageFeeNSPX, job.RoyaltyRecipient)
+	// NFT name/description are known from the mint form up front too, so
+	// they're recorded the same way — before signing — rather than only
+	// living in the pinned metadata JSON below (which a bare/non-collection
+	// mint may never upload, and which an unreachable IPFS daemon can lose).
+	sign.SetNFTMetadata(meta, strings.TrimSpace(job.NFTName), strings.TrimSpace(job.NFTDescription))
 
 	// Upload signed payload bytes to IPFS BEFORE the sidecar is written (so
 	// the on-chain mint can bind to a real CID and the .usimeta sidecar can
@@ -865,7 +1064,7 @@ func mintStatusDialogWorker(job MintJob, f mintStatusFields) {
 	// ERC-721 NFTs (name, description, image ipfs://<mediaCID>, attrs).
 	var tokenURI string
 	var metadataCID string
-	if cid != "" && job.NFTName != "" {
+	if cid != "" && strings.TrimSpace(job.NFTName) != "" {
 		step(0.63, "Uploading metadata JSON…")
 		nftMeta := mint.BuildNFTMetadata(
 			job.NFTName,
@@ -878,19 +1077,24 @@ func mintStatusDialogWorker(job MintJob, f mintStatusFields) {
 			"", // mintID not known yet
 			0,  // blockHeight not known yet
 		)
-		metadataCID, tokenURI, err = mint.UploadNFTMetadata(nftMeta, ipfsClient)
-		if err != nil {
-			log.Printf("[WARN] Mint Data: metadata JSON upload failed: %v", err)
-			tokenURI = ""
-			metadataCID = ""
+		// Pin the metadata JSON with the SAME fallback contract as the payload
+		// above (see pinNFTMetadata), so an unreachable IPFS daemon cannot abort
+		// a collection mint after the file is already signed.
+		var metaWarn error
+		metadataCID, tokenURI, metaWarn = pinNFTMetadata(ipfsClient, nftMeta, fileBase+"_metadata.json")
+		if metaWarn != nil {
+			log.Printf("[WARN] Mint Data: metadata JSON pinned via deterministic fallback %s: %v", tokenURI, metaWarn)
 		} else {
 			log.Printf("[INFO] Mint Data: metadata JSON uploaded, tokenURI=%s", tokenURI)
-			fyne.Do(func() {
-				f.tokenURIVal.Text = tokenURI
-				f.tokenURIVal.Color = colText
-				f.tokenURIVal.Refresh()
-			})
 		}
+		fyne.Do(func() {
+			f.tokenURIVal.Text = tokenURI
+			f.tokenURIVal.Color = colText
+			if metaWarn != nil {
+				f.tokenURIVal.Color = colWarn
+			}
+			f.tokenURIVal.Refresh()
+		})
 	}
 
 	// Fetch the chain-tip block header (lightweight, header-only path —
@@ -905,10 +1109,7 @@ func mintStatusDialogWorker(job MintJob, f mintStatusFields) {
 		blockHeight = tipHdr.Height
 	}
 
-	meta.IPFSCID = cid
-	meta.BlockHeight = blockHeight
-	meta.TokenURI = tokenURI
-	meta.MetadataCID = metadataCID
+	sign.SetPinningContext(meta, cid, blockHeight, tokenURI, metadataCID)
 
 	step(0.7, "Embedding signature…")
 	if err := sign.EmbedSignature(job.SelectedFile, meta, job.PublicFingerprint, job.Passphrase); err != nil {
@@ -932,6 +1133,17 @@ func mintStatusDialogWorker(job MintJob, f mintStatusFields) {
 	if mintErr == nil && tokenURI != "" {
 		mintRes.Receipt.TokenURI = tokenURI
 		mintRes.Receipt.MetadataCID = metadataCID
+	}
+	// Stamp the embedded-economics terms after mint.Mint signs, exactly like
+	// the TokenURI/MetadataCID stamping above: canonicalReceiptBytes excludes
+	// these optional fields, so the receipt's SPHINCS+ signature stays valid,
+	// while AnchorMintReceipt → mint.BuildAnchorData carries them into the
+	// AnchorTag whose terms every node validates at consensus and
+	// VerifyAnchor requires to match the receipt.
+	if mintErr == nil {
+		mintRes.Receipt.RoyaltyBPS = job.RoyaltyBPS
+		mintRes.Receipt.UsageFeeNSPX = job.UsageFeeNSPX
+		mintRes.Receipt.RoyaltyRecipient = job.RoyaltyRecipient
 	}
 
 	if mintErr != nil {
@@ -964,12 +1176,157 @@ func mintStatusDialogWorker(job MintJob, f mintStatusFields) {
 		return
 	}
 
+	// ── Marketplace binding — MUST happen before the anchor ──────────────
+	// ReceiptCommitmentHash hashes the whole signed receipt, including
+	// TokenID/TokenURI/ContractAddress, so the collection mint has to run
+	// and confirm BEFORE the anchor is built. Anchoring first (as this
+	// worker previously did) produced an anchor whose ReceiptHash could
+	// never match the receipt on disk once the binding was stamped on,
+	// and the back-to-back nonces (anchor N, collection mint N+1) left the
+	// collection mint rejected until N confirmed.
+	collection := strings.TrimSpace(job.Collection)
+	if collection != "" {
+		if tokenURI == "" {
+			fail("Marketplace Token Failed", errors.New(
+				"a collection mint needs an ERC-721 metadata tokenURI, which requires a non-empty NFT name — set the NFT name and mint again"))
+			return
+		}
+		step(0.82, "Minting marketplace token…")
+		fyne.Do(func() {
+			f.liveStatus.Text = "Minting token in " + collection + "…"
+			f.liveStatus.Color = colInfo
+			f.liveStatus.Refresh()
+		})
+
+		tokenID, collTxID, collErr := job.Client.MintNFTInCollection(mintRes.Receipt, collection, "")
+		if collErr != nil {
+			fail("Marketplace Token Failed", fmt.Errorf(
+				"SIP-721 token mint failed (%v) — nothing was anchored; fix the collection and mint again", collErr))
+			return
+		}
+		fyne.Do(func() {
+			f.tokenVal.Text = fmt.Sprintf("#%d in %s", tokenID, collection)
+			f.tokenVal.Color = colAccent
+			f.tokenVal.Refresh()
+			f.liveStatus.Text = fmt.Sprintf("Token #%d minted (tx=%s…) — waiting for confirmation before anchor…",
+				tokenID, collTxID[:min(12, len(collTxID))])
+			f.liveStatus.Color = colAccent
+			f.liveStatus.Refresh()
+		})
+
+		// The anchor needs nonce N+1, which only becomes valid once the
+		// collection mint (nonce N) commits. Fix 1 lets the mempool accept
+		// N+1 while N is pending, but waiting here also guarantees the
+		// anchor's ReceiptHash is built against a receipt whose token
+		// binding is already final on-chain.
+		step(0.88, "Waiting for collection mint to confirm…")
+		collConf, collConfErr := job.Client.WaitForTxConfirmation(collTxID, 300*time.Second)
+		if collConfErr != nil {
+			fail("Marketplace Token Failed", fmt.Errorf(
+				"collection mint tx %s was rejected: %w", collTxID, collConfErr))
+			return
+		}
+		if collConf == nil {
+			// Collection mint still pending after 5 min. It will likely
+			// commit shortly, and the anchor must FOLLOW it to keep nonce
+			// order valid — broadcasting the anchor now would collide with
+			// the still-pending collection mint at the same nonce slot.
+			// Instead of hard-failing (which would leave the file signed
+			// but unanchored, and block re-minting because the file is now
+			// IsAlreadySigned), kick a background poller that broadcasts
+			// the anchor the moment the collection mint confirms.
+			//
+			// The receipt already carries TokenID/ContractAddress (set by
+			// MintNFTInCollection), so the anchor tag will commit to the
+			// same SIP-721 binding the collection mint recorded — the two
+			// stay consistent regardless of which block confirms first.
+			bgCollTxID := collTxID
+			bgReceipt := mintRes.Receipt
+			bgFile := job.SelectedFile
+			bgMeta := meta
+			go func() {
+				bgConf, _ := job.Client.WaitForTxConfirmation(bgCollTxID, 15*time.Minute)
+				if bgConf == nil {
+					log.Printf("[Mint Data] collection mint %s never confirmed within 20 min total — receipt stays unanchored", bgCollTxID)
+					return
+				}
+				log.Printf("[Mint Data] collection mint %s confirmed at height=%d — broadcasting deferred anchor now", bgCollTxID, bgConf.Height)
+
+				txID, anchorPath, fee, nonce, err := job.Client.AnchorMintReceipt(bgReceipt)
+				if err != nil {
+					log.Printf("[Mint Data] deferred anchor broadcast failed: %v", err)
+					return
+				}
+				sign.SetAnchorFee(bgMeta, fee, nonce)
+
+				// Wait for the deferred anchor to confirm too, so the
+				// sidecar records the real block instead of pending.
+				anchorConf, _ := job.Client.WaitForTxConfirmation(txID, 10*time.Minute)
+				var confirmedBlock interface {
+					GetHeight() uint64
+					GetHash() string
+				}
+				if anchorConf != nil {
+					confirmedBlock = &confirmedBlockInfo{height: anchorConf.Height, hash: anchorConf.Hash}
+				}
+				if provErr := sign.RefreshOnChainProvenance(bgFile, bgMeta, job.PublicFingerprint,
+					txID, anchorPath, bgReceipt.MintID, bgReceipt.TokenID, bgReceipt.ContractAddress, confirmedBlock); provErr != nil {
+					log.Printf("[Mint Data] deferred anchor provenance refresh incomplete: %v", provErr)
+				}
+				log.Printf("[Mint Data] deferred anchor confirmed: txid=%s anchor=%s", txID, anchorPath)
+				addActivity(fmt.Sprintf("Deferred anchor broadcast: %s (tx=%s)", fileBase, txID))
+			}()
+
+			// Surface the deferred state in the dialog. Do NOT call fail()
+			// — the receipt and sidecar are internally consistent; only the
+			// on-chain anchor is deferred. The user can close the dialog and
+			// keep using the wallet; the background poller finishes the job.
+			fyne.Do(func() {
+				f.statusIcon.Text = "⚠"
+				f.statusIcon.Color = colWarn
+				f.statusTitle.Text = "Mint Deferred — Anchor Pending"
+				f.statusTitle.Color = colWarn
+				f.statusSub.Text = fmt.Sprintf(
+					"Collection mint tx %s is still pending after 5 min.\nA background poller will anchor the receipt once it confirms — safe to close this dialog.",
+					bgCollTxID)
+				f.statusSub.Color = colWarn
+				f.liveStatus.Text = "Anchor deferred — background poller will finish"
+				f.liveStatus.Color = colWarn
+				f.progress.SetValue(0.9)
+
+				job.StatusText.Text = fmt.Sprintf("⚠  Mint deferred — collection mint %s still pending; anchor will follow automatically", bgCollTxID[:min(12, len(bgCollTxID))])
+				job.StatusText.Color = colWarn
+				job.StatusText.Refresh()
+
+				f.inner.Add(spacer(12))
+				closeBtn := widget.NewButtonWithIcon("Close", theme.ConfirmIcon(), func() {
+					f.dlg.Hide()
+					job.ClearSelectedFile()
+					job.ResetDropZone()
+				})
+				closeBtn.Importance = widget.HighImportance
+				f.inner.Add(container.NewCenter(closeBtn))
+				f.inner.Refresh()
+			})
+			return
+		}
+		addActivity(fmt.Sprintf("Minted marketplace token #%d in %s (block %d)", tokenID, collection, collConf.Height))
+	}
+	// ── Anchor the receipt (now carries the binding) ──────────────────────
+	step(0.9, "Anchoring NFT on-chain…")
+	fyne.Do(func() {
+		f.statusTitle.Text = "Anchoring On-Chain…"
+		f.statusSub.Text = "Broadcasting mint receipt to the network…"
+		f.liveStatus.Text = "Broadcasting anchor transaction…"
+		f.liveStatus.Color = colInfo
+		f.statusTitle.Refresh()
+		f.statusSub.Refresh()
+		f.liveStatus.Refresh()
+	})
+
 	txID, anchorPath, mintFeeNSPX, anchorNonce, anchorErr := job.Client.AnchorMintReceipt(mintRes.Receipt)
 	if anchorErr == nil {
-		if mintFeeNSPX != nil {
-			meta.MintFeeNSPX = mintFeeNSPX.String()
-		}
-		meta.AnchorNonce = fmt.Sprintf("%d", anchorNonce)
+		sign.SetAnchorFee(meta, mintFeeNSPX, anchorNonce)
 	}
 
 	fyne.Do(func() {
@@ -1029,7 +1386,19 @@ func mintStatusDialogWorker(job MintJob, f mintStatusFields) {
 		f.liveStatus.Color = colFaint
 		f.liveStatus.Refresh()
 	})
-	confirmed, _ := job.Client.WaitForTxConfirmation(txID, 300*time.Second)
+	confirmed, confErr := job.Client.WaitForTxConfirmation(txID, 300*time.Second)
+	if confErr != nil {
+		// The node TERMINALLY rejected the anchor transaction (mempool
+		// validation moved it to the invalid pool), so it can never confirm.
+		// Report the node's exact reason now instead of polling out the
+		// 300s(+600s background) budget and then claiming it was merely
+		// "still pending" — that made a refused anchor look like one that
+		// simply never got mined (0 pending tx, forever).
+		log.Printf("[ERROR] Mint Data: anchor tx %s rejected by node: %v", txID, confErr)
+		addActivity(fmt.Sprintf("Signed document: %s (NFT anchor rejected: %v)", fileBase, confErr))
+		fail("NFT Anchor Rejected", confErr)
+		return
+	}
 
 	var confirmedBlock interface {
 		GetHeight() uint64
@@ -1039,7 +1408,7 @@ func mintStatusDialogWorker(job MintJob, f mintStatusFields) {
 		confirmedBlock = &confirmedBlockInfo{height: confirmed.Height, hash: confirmed.Hash}
 	}
 
-	provErr := sign.RefreshOnChainProvenance(job.SelectedFile, meta, job.PublicFingerprint, txID, anchorPath, mintRes.Receipt.MintID, 0, "", confirmedBlock)
+	provErr := sign.RefreshOnChainProvenance(job.SelectedFile, meta, job.PublicFingerprint, txID, anchorPath, mintRes.Receipt.MintID, mintRes.Receipt.TokenID, mintRes.Receipt.ContractAddress, confirmedBlock)
 	if provErr != nil {
 		log.Printf("[WARN] Mint Data: provenance refresh incomplete: %v", provErr)
 	}
@@ -1056,7 +1425,7 @@ func mintStatusDialogWorker(job MintJob, f mintStatusFields) {
 			bgConfirmed, _ := job.Client.WaitForTxConfirmation(bgTxID, 600*time.Second)
 			if bgConfirmed != nil {
 				bgBlock := &confirmedBlockInfo{height: bgConfirmed.Height, hash: bgConfirmed.Hash}
-				bgErr := sign.RefreshOnChainProvenance(bgFile, meta, job.PublicFingerprint, bgTxID, bgAnchorPath, mintRes.Receipt.MintID, 0, "", bgBlock)
+				bgErr := sign.RefreshOnChainProvenance(bgFile, meta, job.PublicFingerprint, bgTxID, bgAnchorPath, mintRes.Receipt.MintID, mintRes.Receipt.TokenID, mintRes.Receipt.ContractAddress, bgBlock)
 				if bgErr != nil {
 					log.Printf("[WARN] Mint Data: background provenance refresh failed: %v", bgErr)
 				} else {
@@ -1070,12 +1439,16 @@ func mintStatusDialogWorker(job MintJob, f mintStatusFields) {
 
 	fyne.Do(func() {
 		anchorSuffix := ipfsNote
+		marketSuffix := ""
+		if mintRes.Receipt.ContractAddress != "" {
+			marketSuffix = fmt.Sprintf(" · token #%d in %s", mintRes.Receipt.TokenID, mintRes.Receipt.ContractAddress)
+		}
 		if confirmed != nil {
 			f.statusIcon.Text = "✓"
 			f.statusIcon.Color = colAccent
 			f.statusTitle.Text = "Minted ✓"
 			f.statusTitle.Color = colAccent
-			f.statusSub.Text = "Signed & minted — confirmed on-chain"
+			f.statusSub.Text = "Signed, minted & tradeable on-chain" + marketSuffix
 			f.statusSub.Color = colAccent
 
 			f.blockHeightVal.Text = fmt.Sprintf("%d", confirmed.Height)
@@ -1088,7 +1461,7 @@ func mintStatusDialogWorker(job MintJob, f mintStatusFields) {
 			f.statusIcon.Color = colAccent
 			f.statusTitle.Text = "Minted — Confirmation Pending"
 			f.statusTitle.Color = colWarn
-			f.statusSub.Text = "Anchored on-chain; still waiting on block confirmation"
+			f.statusSub.Text = "Anchored on-chain; still waiting on block confirmation" + marketSuffix
 			f.statusSub.Color = colWarn
 
 			f.liveStatus.Text = "Anchor pending — background poller will update the sidecar once confirmed"
@@ -1096,8 +1469,12 @@ func mintStatusDialogWorker(job MintJob, f mintStatusFields) {
 		}
 		f.progress.SetValue(1)
 
-		addActivity(fmt.Sprintf("Signed & minted NFT: %s (tx=%s, cid=%s, height=%d, anchor=%s%s)", fileBase, txID, cid, blockHeight, anchorPath, anchorSuffix))
-		job.StatusText.Text = fmt.Sprintf("✓  Signed & minted NFT%s. txid=%s\ncid=%s\nheight=%d\nAnchor: %s", anchorSuffix, txID, cid, blockHeight, anchorPath)
+		addActivity(fmt.Sprintf("Signed & minted NFT: %s (tx=%s, cid=%s, height=%d, anchor=%s%s%s)", fileBase, txID, cid, blockHeight, anchorPath, anchorSuffix, marketSuffix))
+		marketLine := ""
+		if mintRes.Receipt.ContractAddress != "" {
+			marketLine = fmt.Sprintf("\ntoken: #%d in %s", mintRes.Receipt.TokenID, mintRes.Receipt.ContractAddress)
+		}
+		job.StatusText.Text = fmt.Sprintf("✓  Signed & minted NFT%s. txid=%s\ncid=%s\nheight=%d\nAnchor: %s%s", anchorSuffix, txID, cid, blockHeight, anchorPath, marketLine)
 		job.StatusText.Color = colAccent
 		job.StatusText.Refresh()
 
@@ -1359,11 +1736,13 @@ func (c *WalletClient) AnchorMintReceipt(receipt *mint.MintReceipt) (txID string
 	tx.ID = tx.Hash()
 
 	if err := signTransactionLocally(tx, skBytes, kp.PublicKey); err != nil {
+		c.releasePendingNonce(sessionFingerprint, nonce)
 		return "", "", nil, 0, fmt.Errorf("failed to sign anchor transaction: %w", err)
 	}
 
 	txData, err := json.Marshal(tx)
 	if err != nil {
+		c.releasePendingNonce(sessionFingerprint, nonce)
 		return "", "", nil, 0, fmt.Errorf("failed to marshal transaction: %w", err)
 	}
 
@@ -1371,9 +1750,11 @@ func (c *WalletClient) AnchorMintReceipt(receipt *mint.MintReceipt) (txID string
 
 	resultData, err := rpc.CallRPC(c.nodeAddr, "sendrawtransaction", []interface{}{rawTx}, 120)
 	if err != nil {
+		c.releasePendingNonce(sessionFingerprint, nonce)
 		return "", "", nil, 0, fmt.Errorf("RPC error: %w", err)
 	}
 	if len(resultData) == 0 || string(resultData) == "null" {
+		c.releasePendingNonce(sessionFingerprint, nonce)
 		return "", "", nil, 0, errors.New("empty response")
 	}
 
@@ -1383,9 +1764,11 @@ func (c *WalletClient) AnchorMintReceipt(receipt *mint.MintReceipt) (txID string
 		Error  string `json:"error"`
 	}
 	if err := json.Unmarshal(resultData, &result); err != nil {
+		c.releasePendingNonce(sessionFingerprint, nonce)
 		return "", "", nil, 0, fmt.Errorf("parse response: %w", err)
 	}
 	if result.Error != "" {
+		c.releasePendingNonce(sessionFingerprint, nonce)
 		return "", "", nil, 0, fmt.Errorf("anchor tx rejected: %s", result.Error)
 	}
 
@@ -1443,10 +1826,14 @@ func (c *WalletClient) MintNFTInCollection(receipt *mint.MintReceipt, collection
 		}
 	}
 
-	// mint.BroadcastSIP721CollectionMint builds/signs the collection.mint
-	// contract call and waits (bounded) for the tokenId to be committed. Its
-	// "keyFile" parameter is the local key passphrase here.
-	tokenID, txID, err = mint.BroadcastSIP721CollectionMint(c.nodeAddr, collection, rawFrom, sessionPassphrase, rawTo, receipt.TokenURI, receipt.MintID)
+	// mint.BroadcastSIP721CollectionMintWithTerms builds/signs the
+	// collection.mint contract call and waits (bounded) for the tokenId to be
+	// committed. Its "keyFile" parameter is the local key passphrase here.
+	// The receipt's frozen terms ride along so the SIP-721 token's embedded
+	// economics match its anchor (zero/empty terms mint a legacy token — the
+	// node stores no terms and no royalty/license enforcement applies).
+	tokenID, txID, err = mint.BroadcastSIP721CollectionMintWithTerms(c.nodeAddr, collection, rawFrom, sessionPassphrase, rawTo, receipt.TokenURI, receipt.MintID,
+		receipt.RoyaltyBPS, receipt.UsageFeeNSPX, receipt.RoyaltyRecipient)
 	if err != nil {
 		return 0, "", err
 	}

@@ -50,6 +50,15 @@ type MintReceipt struct {
 	// tokenURI[tokenId] / ownerOf[tokenId] in consensus storage.
 	ContractAddress string `json:"contract_address,omitempty"`
 
+	// Embedded-economics terms set by the minter before anchoring. They travel
+	// in the AnchorTag (and thus the signed receipt's own on-chain commitment)
+	// and are enforced by the SIP-721 native runtime at consensus: RoyaltyBPS
+	// is the resale-royalty share, UsageFeeNSPX the per licensed-access fee,
+	// RoyaltyRecipient the optional payout override.
+	RoyaltyBPS       uint64 `json:"royalty_bps,omitempty"`
+	UsageFeeNSPX     string `json:"usage_fee_nspx,omitempty"`
+	RoyaltyRecipient string `json:"royalty_recipient,omitempty"`
+
 	// MetadataCID is the IPFS CID of the ERC-721 metadata JSON document.
 	// This is the JSON that TokenURI points to.
 	MetadataCID string `json:"metadata_cid,omitempty"`
@@ -102,17 +111,19 @@ type MintResult struct {
 // the tokenURI — exactly like Ethereum ERC-721 metadata standard.
 //
 // On Ethereum:
-//   tokenURI → ipfs://<metadataCID>/metadata.json
-//   metadata.json.image → ipfs://<mediaCID>
+//
+//	tokenURI → ipfs://<metadataCID>/metadata.json
+//	metadata.json.image → ipfs://<mediaCID>
 //
 // On Sphinx:
-//   TokenURI  → ipfs://<metadataCID>  (points to this JSON)
-//   MediaCID  → ipfs://<mediaCID>     (points to actual payload/media)
+//
+//	TokenURI  → ipfs://<metadataCID>  (points to this JSON)
+//	MediaCID  → ipfs://<mediaCID>     (points to actual payload/media)
 type NFTMetadata struct {
 	// ERC-721 standard fields
-	Name        string `json:"name"`        // NFT name/title
-	Description string `json:"description"` // NFT description
-	Image       string `json:"image"`       // ipfs://<mediaCID> — the actual media
+	Name         string `json:"name"`                    // NFT name/title
+	Description  string `json:"description"`             // NFT description
+	Image        string `json:"image"`                   // ipfs://<mediaCID> — the actual media
 	AnimationURL string `json:"animation_url,omitempty"` // For video/audio NFTs
 
 	// External link back to the minter's page
@@ -122,11 +133,11 @@ type NFTMetadata struct {
 	Attributes []NFTAttribute `json:"attributes,omitempty"`
 
 	// Sphinx-specific extensions (not part of ERC-721, but useful)
-	MintID          string `json:"mint_id,omitempty"`          // Deterministic mint ID
+	MintID          string `json:"mint_id,omitempty"`           // Deterministic mint ID
 	MinterPublicKey string `json:"minter_public_key,omitempty"` // Quantum-safe identity
 	OrgCode         string `json:"org_code,omitempty"`          // e.g. "SPIF"
-	Subject         string `json:"subject,omitempty"`          // Asset identifier
-	BlockHeight     uint64 `json:"block_height,omitempty"`     // Chain height at mint
+	Subject         string `json:"subject,omitempty"`           // Asset identifier
+	BlockHeight     uint64 `json:"block_height,omitempty"`      // Chain height at mint
 }
 
 // NFTAttribute is a single ERC-721 attribute trait.

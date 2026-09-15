@@ -34,6 +34,7 @@ jobs:
             libxinerama-dev \
             libxcursor-dev \
             libxi-dev \
+            libxxf86vm-dev \
             libxkbcommon-dev \
             pkg-config
 

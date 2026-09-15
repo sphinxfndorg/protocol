@@ -36,6 +36,7 @@ jobs:
             libxinerama-dev \
             libxcursor-dev \
             libxi-dev \
+            libxxf86vm-dev \
             libxkbcommon-dev \
             pkg-config
 
@@ -58,7 +59,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install system dependencies for CodeQL
-        run: sudo apt-get update && sudo apt-get install -y libgl1-mesa-dev libegl1-mesa-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxkbcommon-dev pkg-config libglfw3 libglfw3-dev
+        run: sudo apt-get update && sudo apt-get install -y libgl1-mesa-dev libegl1-mesa-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxxf86vm-dev libxkbcommon-dev pkg-config libglfw3 libglfw3-dev
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v3

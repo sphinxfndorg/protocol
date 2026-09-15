@@ -196,11 +196,62 @@ func Run() {
 			return styledCard(inner, 0, 110)
 		}
 
-		statsRow := container.NewGridWithColumns(3,
+		// makeStatCardDynamic is the same visual as makeStatCard but also
+		// hands back the value *canvas.Text so callers can update it in
+		// place once an async fetch (e.g. wallet balance) resolves,
+		// without rebuilding the whole stats row.
+		makeStatCardDynamic := func(icon, labelText, valueText string, valueCol color.Color, subText string) (fyne.CanvasObject, *canvas.Text) {
+			iconT := canvas.NewText(icon, colAccent)
+			iconT.TextSize = 22
+			labelT := canvas.NewText(strings.ToUpper(labelText), colFaint)
+			labelT.TextSize = 10
+			labelT.TextStyle = fyne.TextStyle{Monospace: true}
+			valueT := canvas.NewText(valueText, valueCol)
+			valueT.TextSize = 30
+			valueT.TextStyle = fyne.TextStyle{Bold: true}
+			subT := canvas.NewText(subText, colMuted)
+			subT.TextSize = 11
+
+			inner := container.NewVBox(
+				container.NewCenter(iconT),
+				spacer(4),
+				container.NewCenter(labelT),
+				container.NewCenter(valueT),
+				container.NewCenter(subT),
+			)
+			return styledCard(inner, 0, 110), valueT
+		}
+
+		balanceCard, balanceValueText := makeStatCardDynamic("◆", fmt.Sprintf("%s Balance", chainHeader.Symbol), "···", colAccent, "wallet balance")
+
+		statsRow := container.NewGridWithColumns(4,
+			balanceCard,
 			makeStatCard("", "Total Vaults", vaultCount, colText, "encrypted folders"),
 			makeStatCard("✍", "Signed Docs", signedCount, colText, "with valid signatures"),
 			makeStatCard("🕐", "Last Activity", lastActivity, colWarn, "most recent operation"),
 		)
+
+		// Fetch balance asynchronously so the dashboard renders immediately
+		// and the card fills in once the node responds — same pattern the
+		// Wallet screen already uses for its hero balance card.
+		go func() {
+			resp, err := walletClient.GetBalance("")
+			fyne.Do(func() {
+				if err != nil || resp == nil || resp.Balance.Int == nil {
+					balanceValueText.Text = "—"
+					balanceValueText.Color = colMuted
+					balanceValueText.Refresh()
+					return
+				}
+				balanceSPX := new(big.Float).Quo(
+					new(big.Float).SetInt(resp.Balance.Int),
+					big.NewFloat(1e18),
+				)
+				balanceValueText.Text = formatSPXAmount(balanceSPX)
+				balanceValueText.Color = colAccent
+				balanceValueText.Refresh()
+			})
+		}()
 
 		fpShort := publicFingerprint
 		if len(fpShort) > 40 {
@@ -221,13 +272,45 @@ func Run() {
 		fpBg.CornerRadius = 8
 		fpBg.StrokeColor = colAccent
 		fpBg.StrokeWidth = 1
-		fpContainer := container.NewMax(fpBg, container.NewPadded(fpLabel))
+
+		// Copy button for the fingerprint — the dashboard is the first place
+		// a user sees their identity, but until now only the Receive screen
+		// let them copy it. Same icon/action as copyAddrBtn on Receive.
+		fpCopyBtn := widget.NewButtonWithIcon("", theme.ContentCopyIcon(), func() {
+			myApp.Clipboard().SetContent(publicFingerprint)
+			dialog.ShowInformation("Copied", "Fingerprint copied to clipboard", window)
+		})
+		fpCopyBtn.Importance = widget.LowImportance
+		fpContainer := container.NewMax(fpBg, container.NewBorder(nil, nil, nil, fpCopyBtn, container.NewPadded(fpLabel)))
+
+		// Live network-sync value — mirrors the "CHAIN TIP · HEADER SYNC"
+		// readout already used on the Wallet screen, so the dashboard shows
+		// at a glance whether this lightweight client is actually talking
+		// to a node, not just displaying the static chain descriptor.
+		syncValue := canvas.NewText("Checking…", colMuted)
+		syncValue.TextSize = 11
+		syncValue.TextStyle = fyne.TextStyle{Monospace: true}
+		go func() {
+			hdr, err := walletClient.GetChainTipHeader()
+			fyne.Do(func() {
+				if err != nil || hdr == nil {
+					syncValue.Text = "Offline"
+					syncValue.Color = colDanger
+					syncValue.Refresh()
+					return
+				}
+				syncValue.Text = fmt.Sprintf("Synced · height %d", hdr.Height)
+				syncValue.Color = colAccent
+				syncValue.Refresh()
+			})
+		}()
 
 		keyInfoRows := []fyne.CanvasObject{
 			infoRow("Network", chainHeader.ChainName, colAccent),
 			infoRow("Symbol", chainHeader.Symbol, colAccent),
 			infoRow("Chain ID", fmt.Sprintf("%d", chainHeader.ChainID), colText),
 			infoRow("Status", keyStatus, keyStatusCol),
+			infoRowDynamic("Sync", syncValue),
 			infoRow("Signature", "SPHINCS+", colText),
 			infoRow("Hash", "SHAKE-256", colText),
 			infoRow("Encryption", "AES-256-GCM", colText),
@@ -250,6 +333,16 @@ func Run() {
 			noAct := canvas.NewText("No activities recorded yet.", colMuted)
 			noAct.TextSize = 12
 			activityBox.Add(container.NewCenter(noAct))
+			activityBox.Add(spacer(8))
+			// Give first-time users a next step instead of a dead end —
+			// jumps straight to Mint Data (Sign), the most common first
+			// action, using the same nav target the sidebar's "Mint Data"
+			// button already points to.
+			firstActionBtn := widget.NewButtonWithIcon("Sign your first document", theme.DocumentCreateIcon(), func() {
+				showSignScreen()
+			})
+			firstActionBtn.Importance = widget.LowImportance
+			activityBox.Add(container.NewCenter(firstActionBtn))
 		} else {
 			for i, activity := range activityList {
 				if i >= 10 {
@@ -286,7 +379,20 @@ func Run() {
 
 				iconT := canvas.NewText(icon, iconCol)
 				iconT.TextSize = 11
-				actT := canvas.NewText(activity, colText)
+				// ★ FIX: activity strings routinely embed full tx hashes,
+				// CIDs, or anchor ids (e.g. "Signed & minted NFT: file.pdf
+				// (tx=<64 chars>, cid=<64 chars>, ...)"). canvas.Text never
+				// wraps, so one long entry here was enough to force the
+				// whole dashboard — and window — wider. This only clips the
+				// on-screen row; the full string stays in activityList
+				// untouched (used elsewhere, e.g. the "Last Activity" stat
+				// card's timestamp parsing above).
+				activityDisplay := activity
+				const maxActivityChars = 90
+				if len(activityDisplay) > maxActivityChars {
+					activityDisplay = activityDisplay[:maxActivityChars] + "…"
+				}
+				actT := canvas.NewText(activityDisplay, colText)
 				actT.TextSize = 11
 				actT.TextStyle = fyne.TextStyle{Monospace: true}
 
@@ -336,7 +442,7 @@ func Run() {
 		updateLayout(true)
 
 		if sessionPassphrase == "" {
-			dialog.ShowError(errors.New("please login first"), window)
+			showErrorDialog(errors.New("please login first"), window)
 			return
 		}
 
@@ -353,11 +459,11 @@ func Run() {
 
 		sendBtn := widget.NewButtonWithIcon(fmt.Sprintf("Send %s", chainHeader.Symbol), theme.MailSendIcon(), func() {
 			if recipientEntry.Text == "" {
-				dialog.ShowError(errors.New("please enter a recipient address"), window)
+				showErrorDialog(errors.New("please enter a recipient address"), window)
 				return
 			}
 			if amountEntry.Text == "" {
-				dialog.ShowError(errors.New("please enter an amount"), window)
+				showErrorDialog(errors.New("please enter an amount"), window)
 				return
 			}
 
@@ -370,7 +476,7 @@ func Run() {
 			amount := new(big.Float).SetPrec(256)
 			_, ok := amount.SetString(amountEntry.Text)
 			if !ok || amount.Cmp(big.NewFloat(0)) <= 0 {
-				dialog.ShowError(errors.New("invalid amount"), window)
+				showErrorDialog(errors.New("invalid amount"), window)
 				return
 			}
 
@@ -393,7 +499,7 @@ func Run() {
 			scaledNSPX := new(big.Float).SetPrec(256).Mul(amount, multiplier)
 			amountNSPX, _ := scaledNSPX.Int(nil)
 			if amountNSPX == nil || amountNSPX.Sign() <= 0 {
-				dialog.ShowError(errors.New("invalid amount"), window)
+				showErrorDialog(errors.New("invalid amount"), window)
 				return
 			}
 
@@ -461,7 +567,7 @@ func Run() {
 		updateLayout(true)
 
 		if sessionPassphrase == "" {
-			dialog.ShowError(errors.New("please login first"), window)
+			showErrorDialog(errors.New("please login first"), window)
 			return
 		}
 
@@ -585,7 +691,7 @@ func Run() {
 				if err == nil && uri != nil {
 					p := uri.Path()
 					if strings.HasSuffix(p, ".vault") {
-						dialog.ShowError(errors.New("select a regular folder, not a .vault file"), window)
+						showErrorDialog(errors.New("select a regular folder, not a .vault file"), window)
 						return
 					}
 					selectedFolder = p
@@ -622,11 +728,11 @@ func Run() {
 
 		encryptBtn := widget.NewButtonWithIcon("Lock Folder", theme.ConfirmIcon(), func() {
 			if selectedFolder == "" {
-				dialog.ShowError(errors.New("please select a folder first"), window)
+				showErrorDialog(errors.New("please select a folder first"), window)
 				return
 			}
 			if sessionPassphrase == "" {
-				dialog.ShowError(errors.New("not logged in — please log in again"), window)
+				showErrorDialog(errors.New("not logged in — please log in again"), window)
 				return
 			}
 
@@ -638,20 +744,20 @@ func Run() {
 					recipients = keys.ParseFingerprints(recipientEntry.Text)
 					normalizedRecipients, err := vault.ValidateAndNormalizeRecipients(recipients)
 					if err != nil {
-						dialog.ShowError(fmt.Errorf("invalid recipient fingerprints: %w", err), window)
+						showErrorDialog(fmt.Errorf("invalid recipient fingerprints: %w", err), window)
 						return
 					}
 					recipients = normalizedRecipients
 
 					store := getKeyStore()
 					if store == nil {
-						dialog.ShowError(fmt.Errorf("failed to connect to key directory"), window)
+						showErrorDialog(fmt.Errorf("failed to connect to key directory"), window)
 						return
 					}
 
 					recipientPubs, err = vault.ResolveMultipleRecipients(store, recipients)
 					if err != nil {
-						dialog.ShowError(fmt.Errorf("failed to resolve recipients: %w\n\nMake sure they have registered", err), window)
+						showErrorDialog(fmt.Errorf("failed to resolve recipients: %w\n\nMake sure they have registered", err), window)
 						return
 					}
 					defer store.Close()
@@ -663,7 +769,7 @@ func Run() {
 				if embeddedMessage != "" {
 					messageFilePath = filepath.Join(selectedFolder, ".encrypted_message.txt")
 					if err := os.WriteFile(messageFilePath, []byte(embeddedMessage), 0600); err != nil {
-						dialog.ShowError(fmt.Errorf("failed to create message file: %w", err), window)
+						showErrorDialog(fmt.Errorf("failed to create message file: %w", err), window)
 						return
 					}
 				}
@@ -696,12 +802,12 @@ func Run() {
 					fyne.Do(func() {
 						progDlg.Hide()
 						if err != nil {
-							dialog.ShowError(err, window)
+							showErrorDialog(err, window)
 							return
 						}
 						if deliveryErr != nil {
 							addActivity(fmt.Sprintf("Encrypted but not delivered: %s", filepath.Base(selectedFolder)))
-							dialog.ShowError(fmt.Errorf("vault was encrypted, but peer delivery failed: %w", deliveryErr), window)
+							showErrorDialog(fmt.Errorf("vault was encrypted, but peer delivery failed: %w", deliveryErr), window)
 							return
 						}
 						if embeddedMessage != "" {
@@ -994,7 +1100,7 @@ func Run() {
 					p := reader.URI().Path()
 					reader.Close()
 					if !strings.HasSuffix(p, ".vault") {
-						dialog.ShowError(errors.New("please select a .vault file"), window)
+						showErrorDialog(errors.New("please select a .vault file"), window)
 						return
 					}
 					selectedVault = p
@@ -1025,11 +1131,11 @@ func Run() {
 
 		decryptBtn := widget.NewButtonWithIcon("Unlock Vault", theme.ConfirmIcon(), func() {
 			if selectedVault == "" {
-				dialog.ShowError(errors.New("please select a .vault file"), window)
+				showErrorDialog(errors.New("please select a .vault file"), window)
 				return
 			}
 			if sessionPassphrase == "" {
-				dialog.ShowError(errors.New("not logged in — please log in again"), window)
+				showErrorDialog(errors.New("not logged in — please log in again"), window)
 				return
 			}
 
@@ -1055,7 +1161,7 @@ func Run() {
 							statusText.Text = "✗  Decryption failed"
 							statusText.Color = colDanger
 							statusText.Refresh()
-							dialog.ShowError(err, window)
+							showErrorDialog(err, window)
 							return
 						}
 
@@ -1194,7 +1300,7 @@ func Run() {
 				collectionAddrVal.Color = colMuted
 				setCollectionStatus("No collection yet — deploy one so your mint can be listed/bought/rented.", colWarn)
 			} else {
-				collectionAddrVal.Text = activeCollection.Address
+				collectionAddrVal.Text = truncMiddle(activeCollection.Address, 14)
 				collectionAddrVal.Color = colAccent
 				setCollectionStatus(fmt.Sprintf("Generated for you: %s (%s) — mints go into this collection.",
 					activeCollection.Name, activeCollection.Symbol), colAccent)
@@ -1224,7 +1330,7 @@ func Run() {
 		copyCollectionBtn := widget.NewButtonWithIcon("", theme.ContentCopyIcon(), func() {
 			addr := activeCollection.Address
 			if strings.TrimSpace(addr) == "" {
-				dialog.ShowError(errors.New("no collection yet — deploy one first, then copy its address here"), window)
+				showErrorDialog(errors.New("no collection yet — deploy one first, then copy its address here"), window)
 				return
 			}
 			myApp.Clipboard().SetContent(addr)
@@ -1246,7 +1352,7 @@ func Run() {
 					}
 					addr := strings.TrimSpace(addrEntry.Text)
 					if addr == "" {
-						dialog.ShowError(errors.New("enter the collection contract address"), window)
+						showErrorDialog(errors.New("enter the collection contract address"), window)
 						return
 					}
 					setCollectionStatus("Checking collection…", colInfo)
@@ -1284,7 +1390,7 @@ func Run() {
 					name := strings.TrimSpace(nameEntry.Text)
 					symbol := strings.TrimSpace(symbolEntry.Text)
 					if name == "" || symbol == "" {
-						dialog.ShowError(errors.New("name and symbol are both required"), window)
+						showErrorDialog(errors.New("name and symbol are both required"), window)
 						return
 					}
 					setCollectionStatus("Deploying collection… the contract address is generated on-chain.", colInfo)
@@ -1442,7 +1548,7 @@ func Run() {
 					p := reader.URI().Path()
 					reader.Close()
 					if strings.HasSuffix(p, ".vault") {
-						dialog.ShowError(errors.New("cannot sign a .vault file"), window)
+						showErrorDialog(errors.New("cannot sign a .vault file"), window)
 						return
 					}
 					selectedFile = p
@@ -1454,23 +1560,34 @@ func Run() {
 		})
 		browseBtn.Importance = widget.HighImportance
 
-		statusText := canvas.NewText("", colMuted)
-		statusText.TextSize = 13
+		// ★ FIX: this was a canvas.Text — which cannot wrap, at any width,
+		// ever. Truncating individual hashes wasn't enough on its own: the
+		// assembled success message (icon + description + tx + cid +
+		// height + anchor + token) is still a long sentence, and one long
+		// unbroken line is exactly what was forcing the window wider on
+		// every completed mint (see the two prior screenshots). A
+		// wrapping widget.Label reflows within whatever width the layout
+		// actually gives it instead of demanding one line's worth of
+		// pixels no matter how long the text is.
+		statusText := widget.NewLabel("")
+		statusText.Wrapping = fyne.TextWrapWord
+		statusText.Alignment = fyne.TextAlignCenter
 		statusText.TextStyle = fyne.TextStyle{Bold: true}
+		statusText.Importance = widget.LowImportance
 
 		signBtn := widget.NewButtonWithIcon("Mint Data", theme.ConfirmIcon(), func() {
 			if selectedFile == "" {
-				dialog.ShowError(errors.New("please select a file"), window)
+				showErrorDialog(errors.New("please select a file"), window)
 				return
 			}
 			if sessionPassphrase == "" {
-				dialog.ShowError(errors.New("not logged in — please log in again"), window)
+				showErrorDialog(errors.New("not logged in — please log in again"), window)
 				return
 			}
 
 			signed, prevFP, err := sign.IsAlreadySigned(selectedFile)
 			if err != nil {
-				dialog.ShowError(fmt.Errorf("metadata error: %w", err), window)
+				showErrorDialog(fmt.Errorf("metadata error: %w", err), window)
 				return
 			}
 			if signed {
@@ -1483,7 +1600,7 @@ func Run() {
 			// 100 SPX in this wallet). Verify through the node before spending
 			// anything on the anchor transaction.
 			if _, balErr := requireMintBalance(walletClient); balErr != nil {
-				dialog.ShowError(balErr, window)
+				showErrorDialog(balErr, window)
 				return
 			}
 
@@ -1498,12 +1615,12 @@ func Run() {
 			if txt := strings.TrimSpace(nftRoyaltyEntry.Text); txt != "" {
 				pct, ok := new(big.Float).SetPrec(256).SetString(txt)
 				if !ok || pct.Sign() < 0 || pct.Cmp(big.NewFloat(100)) > 0 {
-					dialog.ShowError(errors.New("resale royalty must be a percentage between 0 and 100"), window)
+					showErrorDialog(errors.New("resale royalty must be a percentage between 0 and 100"), window)
 					return
 				}
 				bpsInt, _ := new(big.Float).Mul(pct, big.NewFloat(100)).Int(nil)
 				if bpsInt == nil || bpsInt.IsUint64() == false || bpsInt.Uint64() > 10000 {
-					dialog.ShowError(errors.New("resale royalty out of range (max 100%)"), window)
+					showErrorDialog(errors.New("resale royalty out of range (max 100%)"), window)
 					return
 				}
 				royaltyBPS = bpsInt.Uint64()
@@ -1512,19 +1629,19 @@ func Run() {
 			if txt := strings.TrimSpace(nftUsageFeeEntry.Text); txt != "" {
 				feeSPX, ok := new(big.Float).SetPrec(256).SetString(txt)
 				if !ok || feeSPX.Sign() <= 0 {
-					dialog.ShowError(errors.New("license fee must be a positive SPX amount"), window)
+					showErrorDialog(errors.New("license fee must be a positive SPX amount"), window)
 					return
 				}
 				feeNSPX, _ := new(big.Float).Mul(feeSPX, big.NewFloat(1e18)).Int(nil)
 				if feeNSPX == nil || feeNSPX.Sign() <= 0 {
-					dialog.ShowError(errors.New("license fee is too small to represent in nSPX"), window)
+					showErrorDialog(errors.New("license fee is too small to represent in nSPX"), window)
 					return
 				}
 				usageFeeNSPX = feeNSPX.String()
 			}
 			royaltyRecipient, recipErr := normalizeRoyaltyRecipient(nftRecipientEntry.Text)
 			if recipErr != nil {
-				dialog.ShowError(recipErr, window)
+				showErrorDialog(recipErr, window)
 				return
 			}
 
@@ -1533,7 +1650,7 @@ func Run() {
 			// of letting the mint worker fail after the file is already signed.
 			collectionAddr := strings.TrimSpace(activeCollection.Address)
 			if collectionAddr != "" && strings.TrimSpace(nftNameEntry.Text) == "" {
-				dialog.ShowError(errors.New(
+				showErrorDialog(errors.New(
 					"a collection is set — fill in the NFT name so the marketplace metadata can be pinned to IPFS, or clear the collection field to mint a bare (non-tradeable) receipt"), window)
 				return
 			}
@@ -1595,6 +1712,7 @@ func Run() {
 			selectedFile = ""
 			resetDropZone()
 			statusText.Text = ""
+			statusText.Importance = widget.LowImportance
 			statusText.Refresh()
 		})
 
@@ -1684,7 +1802,14 @@ func Run() {
 			spacer(8),
 			nftRecipientEntry,
 			spacer(20),
-			container.NewCenter(statusText),
+			// Not wrapped in container.NewCenter — Center resizes a child
+			// to its own MinSize before centering, which for a wrapping
+			// Label reports its natural (unwrapped) width on first layout,
+			// silently reproducing the exact same width-blowout bug. Left
+			// directly in this VBox, the label gets the VBox's actual
+			// (bounded) width to wrap within; centered text is achieved via
+			// Alignment on the label itself instead.
+			statusText,
 			spacer(20),
 			container.NewHBox(signBtn, spacer(8), clearBtn),
 		)
@@ -1805,7 +1930,7 @@ func Run() {
 					p := reader.URI().Path()
 					reader.Close()
 					if strings.HasSuffix(p, ".vault") {
-						dialog.ShowError(errors.New("cannot verify .vault files — verify the source files instead"), window)
+						showErrorDialog(errors.New("cannot verify .vault files — verify the source files instead"), window)
 						return
 					}
 					selectedFile = p
@@ -1824,7 +1949,7 @@ func Run() {
 
 		verifyBtn := widget.NewButtonWithIcon("Verify Data", theme.ConfirmIcon(), func() {
 			if selectedFile == "" {
-				dialog.ShowError(errors.New("please select a file"), window)
+				showErrorDialog(errors.New("please select a file"), window)
 				return
 			}
 
@@ -1880,7 +2005,7 @@ func Run() {
 						statusBig.Color = colDanger
 						resultStatusLbl.Text = "FAILED"
 						resultStatusLbl.Color = colDanger
-						dialog.ShowError(errors.New("signature invalid — file may have been tampered with"), window)
+						showErrorDialog(errors.New("signature invalid — file may have been tampered with"), window)
 					}
 					statusBig.Refresh()
 					resultSignerLbl.Refresh()
@@ -2180,9 +2305,13 @@ func Run() {
 
 		// ── Transaction history container ─────────────────────────
 		txBox := container.NewVBox()
+		// Width left at 0 so the card fills whatever space it's given —
+		// now the full screen width (see txSection below) instead of the
+		// old 62%-wide form column. Height nudged up slightly since a
+		// wider box can comfortably show a bit more without scrolling.
 		txScroll := container.NewScroll(txBox)
-		txScroll.SetMinSize(fyne.NewSize(0, 220))
-		txCard := styledCard(txScroll, 0, 220)
+		txScroll.SetMinSize(fyne.NewSize(0, 260))
+		txCard := styledCard(txScroll, 0, 260)
 
 		// ── Fetch transaction history ─────────────────────────────
 		fetchTransactionHistory := func() {
@@ -2305,7 +2434,7 @@ func Run() {
 		// ── Send button ────────────────────────────────────────────
 		sendBtn := widget.NewButtonWithIcon(fmt.Sprintf("Send %s", chainHeader.Symbol), theme.MailSendIcon(), func() {
 			if sessionPassphrase == "" {
-				dialog.ShowError(errors.New("please login first"), window)
+				showErrorDialog(errors.New("please login first"), window)
 				return
 			}
 			showSendScreen()
@@ -2315,7 +2444,7 @@ func Run() {
 		// ── Receive button ────────────────────────────────────────────
 		receiveBtn := widget.NewButtonWithIcon(fmt.Sprintf("Receive %s", chainHeader.Symbol), theme.DownloadIcon(), func() {
 			if sessionPassphrase == "" {
-				dialog.ShowError(errors.New("please login first"), window)
+				showErrorDialog(errors.New("please login first"), window)
 				return
 			}
 			showReceiveScreen()
@@ -2412,6 +2541,15 @@ func Run() {
 			spacer(12),
 			actionRow,
 			spacer(20),
+		)
+
+		// ── Transaction history — full width ───────────────────────
+		// Previously this sat inside the 62%-wide left column of the
+		// balance/address split, which cramped every row (date, txid,
+		// amount, status) into a narrow strip. It reads as a table, not a
+		// form field, so it gets its own full-width section below the
+		// split instead of competing for space with the stats panel.
+		txSection := container.NewVBox(
 			hRule(),
 			spacer(12),
 			sectionLabel("Transaction History"),
@@ -2420,7 +2558,7 @@ func Run() {
 			spacer(24),
 		)
 
-		setScreen(opLayout(form, panel))
+		setScreen(container.NewVBox(opLayout(form, panel), txSection))
 	}
 	// =========================================================================
 	// MARKETPLACE SCREEN
@@ -2430,7 +2568,7 @@ func Run() {
 		updateLayout(true)
 
 		if sessionPassphrase == "" {
-			dialog.ShowError(errors.New("please login first"), window)
+			showErrorDialog(errors.New("please login first"), window)
 			return
 		}
 
@@ -2884,20 +3022,20 @@ func Run() {
 
 		listingBtn := widget.NewButtonWithIcon("List Item", theme.ContentAddIcon(), func() {
 			if state.listed {
-				dialog.ShowError(errors.New("this token is already listed"), window)
+				showErrorDialog(errors.New("this token is already listed"), window)
 				return
 			}
 			if state.owner == "" {
-				dialog.ShowError(errors.New("cannot list: token does not exist"), window)
+				showErrorDialog(errors.New("cannot list: token does not exist"), window)
 				return
 			}
 			if !sameIdentity(state.owner, sessionFingerprint) {
-				dialog.ShowError(errors.New("only the token owner can list it"), window)
+				showErrorDialog(errors.New("only the token owner can list it"), window)
 				return
 			}
 			rawPrice := priceEntry.Text
 			if rawPrice == "" {
-				dialog.ShowError(errors.New("please enter a list price"), window)
+				showErrorDialog(errors.New("please enter a list price"), window)
 				return
 			}
 			// The user enters the price in the selected unit; the contract
@@ -2913,7 +3051,7 @@ func Run() {
 				price, parseErr = parseSPXToNSPX(rawPrice)
 			}
 			if parseErr != nil || price == nil || price.Sign() <= 0 {
-				dialog.ShowError(fmt.Errorf("invalid list price: %w", parseErr), window)
+				showErrorDialog(fmt.Errorf("invalid list price: %w", parseErr), window)
 				return
 			}
 			validatePassphraseDialog(window, "Confirm Listing",
@@ -2922,7 +3060,7 @@ func Run() {
 				func(passphrase string) {
 					if err := callSIP721Method(collectionEntry.Text, "list",
 						map[string]string{"token_id": tokenIDEntry.Text, "price_nspx": price.String()}, nil); err != nil {
-						dialog.ShowError(err, window)
+						showErrorDialog(err, window)
 						return
 					}
 					dialog.ShowInformation("Listed", fmt.Sprintf("Token %s is now listed for sale.", tokenIDEntry.Text), window)
@@ -2933,15 +3071,15 @@ func Run() {
 
 		buyBtn := widget.NewButtonWithIcon("Buy Item", theme.ConfirmIcon(), func() {
 			if !state.listed {
-				dialog.ShowError(errors.New("this token is not listed"), window)
+				showErrorDialog(errors.New("this token is not listed"), window)
 				return
 			}
 			if sameIdentity(state.seller, sessionFingerprint) {
-				dialog.ShowError(errors.New("you cannot buy your own listing"), window)
+				showErrorDialog(errors.New("you cannot buy your own listing"), window)
 				return
 			}
 			if state.priceNSPX == nil {
-				dialog.ShowError(errors.New("invalid listing price"), window)
+				showErrorDialog(errors.New("invalid listing price"), window)
 				return
 			}
 			validatePassphraseDialog(window, "Confirm Purchase",
@@ -2954,13 +3092,13 @@ func Run() {
 					// stale cached price (doc §2) can't be sent.
 					fresh, ferr := walletClient.GetSIP721Listing(collectionEntry.Text, tokenIDEntry.Text)
 					if ferr != nil || fresh == nil {
-						dialog.ShowError(errors.New("listing changed — please refresh and try again"), window)
+						showErrorDialog(errors.New("listing changed — please refresh and try again"), window)
 						refreshListing()
 						return
 					}
 					if err := callSIP721Method(collectionEntry.Text, "buy",
 						map[string]string{"token_id": tokenIDEntry.Text}, fresh.Price); err != nil {
-						dialog.ShowError(err, window)
+						showErrorDialog(err, window)
 						return
 					}
 					dialog.ShowInformation("Purchased", fmt.Sprintf("You now own token %s.", tokenIDEntry.Text), window)
@@ -2971,11 +3109,11 @@ func Run() {
 
 		cancelBtn := widget.NewButtonWithIcon("Cancel Listing", theme.CancelIcon(), func() {
 			if !state.listed {
-				dialog.ShowError(errors.New("there is no listing to cancel"), window)
+				showErrorDialog(errors.New("there is no listing to cancel"), window)
 				return
 			}
 			if !sameIdentity(state.seller, sessionFingerprint) {
-				dialog.ShowError(errors.New("only the listing seller can cancel"), window)
+				showErrorDialog(errors.New("only the listing seller can cancel"), window)
 				return
 			}
 			validatePassphraseDialog(window, "Confirm Cancel",
@@ -2984,7 +3122,7 @@ func Run() {
 				func(passphrase string) {
 					if err := callSIP721Method(collectionEntry.Text, "cancel",
 						map[string]string{"token_id": tokenIDEntry.Text}, nil); err != nil {
-						dialog.ShowError(err, window)
+						showErrorDialog(err, window)
 						return
 					}
 					dialog.ShowInformation("Cancelled", "Listing cancelled.", window)
@@ -2995,11 +3133,11 @@ func Run() {
 
 		purchaseLicenseBtn := widget.NewButtonWithIcon("Purchase License", theme.DocumentIcon(), func() {
 			if !state.hasTerms || !state.hasFee || state.feeNSPX == nil {
-				dialog.ShowError(errors.New("this token has no license fee set"), window)
+				showErrorDialog(errors.New("this token has no license fee set"), window)
 				return
 			}
 			if sameIdentity(state.licensee, sessionFingerprint) {
-				dialog.ShowError(errors.New("you already hold an active license for this token"), window)
+				showErrorDialog(errors.New("you already hold an active license for this token"), window)
 				return
 			}
 			validatePassphraseDialog(window, "Confirm License Purchase",
@@ -3010,13 +3148,13 @@ func Run() {
 					// the fee immediately before submitting, same as buy.
 					fresh, ferr := walletClient.GetSIP721Terms(collectionEntry.Text, tokenIDEntry.Text)
 					if ferr != nil || fresh == nil || fresh.UsageFeeNSPX == nil {
-						dialog.ShowError(errors.New("license terms changed — please refresh and try again"), window)
+						showErrorDialog(errors.New("license terms changed — please refresh and try again"), window)
 						refreshListing()
 						return
 					}
 					if err := callSIP721Method(collectionEntry.Text, "purchase_license",
 						map[string]string{"token_id": tokenIDEntry.Text}, fresh.UsageFeeNSPX); err != nil {
-						dialog.ShowError(err, window)
+						showErrorDialog(err, window)
 						return
 					}
 					dialog.ShowInformation("Licensed", fmt.Sprintf("License purchased for token %s.", tokenIDEntry.Text), window)
@@ -3027,7 +3165,7 @@ func Run() {
 
 		revokeLicenseBtn := widget.NewButtonWithIcon("Revoke License", theme.DeleteIcon(), func() {
 			if !sameIdentity(state.licensee, sessionFingerprint) {
-				dialog.ShowError(errors.New("you don't hold an active license to revoke"), window)
+				showErrorDialog(errors.New("you don't hold an active license to revoke"), window)
 				return
 			}
 			validatePassphraseDialog(window, "Confirm Revoke",
@@ -3035,7 +3173,7 @@ func Run() {
 				func(passphrase string) {
 					if err := callSIP721Method(collectionEntry.Text, "revoke_license",
 						map[string]string{"token_id": tokenIDEntry.Text}, nil); err != nil {
-						dialog.ShowError(err, window)
+						showErrorDialog(err, window)
 						return
 					}
 					dialog.ShowInformation("Revoked", "License revoked.", window)
@@ -3196,7 +3334,7 @@ func Run() {
 				passphrase, _, _, _, _, _, err := seed.GenerateKeys()
 				if err != nil {
 					fyne.Do(func() {
-						dialog.ShowError(fmt.Errorf("failed to generate passphrase: %w", err), window)
+						showErrorDialog(fmt.Errorf("failed to generate passphrase: %w", err), window)
 						progBar.Hide()
 						progLabel.Hide()
 						generateBtn.Enable()
@@ -3207,7 +3345,7 @@ func Run() {
 
 				if len(passphrase) < 8 {
 					fyne.Do(func() {
-						dialog.ShowError(fmt.Errorf("generated passphrase is too short (%d chars), need at least 8", len(passphrase)), window)
+						showErrorDialog(fmt.Errorf("generated passphrase is too short (%d chars), need at least 8", len(passphrase)), window)
 						progBar.Hide()
 						progLabel.Hide()
 						generateBtn.Enable()
@@ -3221,7 +3359,7 @@ func Run() {
 				kp, err := keys.GenerateKeyPairWithOrg(passphrase, chosenOrg)
 				if err != nil {
 					fyne.Do(func() {
-						dialog.ShowError(err, window)
+						showErrorDialog(err, window)
 						progBar.Hide()
 						progLabel.Hide()
 						generateBtn.Enable()
@@ -3381,7 +3519,7 @@ func Run() {
 							return
 						}
 						if err := passEntry.Validate(); err != nil {
-							dialog.ShowError(err, window)
+							showErrorDialog(err, window)
 							return
 						}
 						kp, _, err := keys.LoadKeyFromDisk(passEntry.Text)
@@ -3390,7 +3528,7 @@ func Run() {
 							if strings.Contains(err.Error(), "decryption") || strings.Contains(err.Error(), "passphrase") {
 								errorMsg = "Wrong passphrase. Please try again."
 							}
-							dialog.ShowError(errors.New(errorMsg), window)
+							showErrorDialog(errors.New(errorMsg), window)
 							publicFingerprint = ""
 							sessionRawFingerprint = ""
 							showWelcomeScreen()
@@ -3577,7 +3715,7 @@ func Run() {
 					return
 				}
 				if err := passEntry.Validate(); err != nil {
-					dialog.ShowError(err, window)
+					showErrorDialog(err, window)
 					return
 				}
 				kp, _, err := keys.LoadKeyFromDisk(passEntry.Text)
@@ -3586,7 +3724,7 @@ func Run() {
 					if strings.Contains(err.Error(), "decryption") || strings.Contains(err.Error(), "passphrase") {
 						errorMsg = "Wrong passphrase. Please try again."
 					}
-					dialog.ShowError(errors.New(errorMsg), window)
+					showErrorDialog(errors.New(errorMsg), window)
 					publicFingerprint = ""
 					sessionRawFingerprint = ""
 					showWelcomeScreen()

@@ -346,6 +346,28 @@ func getMapKeys(m map[string]interface{}) []string {
 	return keys
 }
 
+// showErrorDialog is a drop-in replacement for Fyne's dialog.ShowError(err, window).
+//
+// ★ FIX: dialog.ShowError sizes its dialog (and, transitively, the whole
+// window — Fyne grows a window to satisfy its content's MinSize) to fit its
+// message on as few lines as Fyne's default label can manage. RPC/decryption
+// errors here can carry long unbroken strings (full node error payloads,
+// hex hashes, file paths), so a single long error was enough to force the
+// main window wider every time it fired — and it never shrank back after.
+// This wraps the message in a fixed-width, height-capped scroll area instead,
+// so the dialog (and window) size no longer depends on message length; long
+// text wraps and scrolls internally rather than stretching the layout.
+func showErrorDialog(err error, window fyne.Window) {
+	if err == nil {
+		return
+	}
+	msgLabel := widget.NewLabel(err.Error())
+	msgLabel.Wrapping = fyne.TextWrapWord
+	scroll := container.NewScroll(msgLabel)
+	scroll.SetMinSize(fyne.NewSize(420, 100))
+	dialog.NewCustom("Error", "OK", scroll, window).Show()
+}
+
 // validatePassphraseDialog shows a dialog to validate passphrase using keys.LoadKeyFromDisk
 func validatePassphraseDialog(window fyne.Window, title, message string, onSuccess func(passphrase string)) {
 	passEntry := widget.NewPasswordEntry()
@@ -364,14 +386,14 @@ func validatePassphraseDialog(window fyne.Window, title, message string, onSucce
 			return
 		}
 		if passEntry.Text == "" {
-			dialog.ShowError(errors.New("passphrase cannot be empty"), window)
+			showErrorDialog(errors.New("passphrase cannot be empty"), window)
 			return
 		}
 
 		// Use existing keys.LoadKeyFromDisk to validate
 		kp, _, err := keys.LoadKeyFromDisk(passEntry.Text)
 		if err != nil {
-			dialog.ShowError(errors.New("incorrect passphrase — please try again"), window)
+			showErrorDialog(errors.New("incorrect passphrase — please try again"), window)
 			return
 		}
 
@@ -540,7 +562,7 @@ func transferStatusDialogWorker(dlg *dialog.CustomDialog, inner *fyne.Container,
 		statusTitle.Color = colInfo
 		statusSub.Text = "Broadcast to network — awaiting block inclusion…"
 		statusSub.Color = colMuted
-		txidVal.Text = txID
+		txidVal.Text = truncMiddle(txID, 12)
 		txidVal.Color = colText
 		progress.SetValue(0.5)
 		liveStatus.Text = fmt.Sprintf("Polling for confirmation (txid: %s…)", txID[:min(12, len(txID))])
@@ -652,7 +674,14 @@ type MintJob struct {
 	// StatusText is the small inline status line already on the Sign
 	// screen itself (kept in sync so it still reflects the final result
 	// after the dialog is closed, same as before the refactor).
-	StatusText *canvas.Text
+	//
+	// widget.Label, not canvas.Text: this field carries composite
+	// messages that embed tx hashes/CIDs/anchor ids, which can run long.
+	// canvas.Text cannot wrap at any width, so a long message here was
+	// forcing the whole window wider. Label wraps within whatever width
+	// its container gives it, and uses Importance (Success/Warning) for
+	// color instead of an arbitrary Color field.
+	StatusText *widget.Label
 
 	// ResetDropZone clears the Sign screen's drop-zone widgets once the
 	// job finishes (success or the non-fatal "mint skipped" path).
@@ -1051,7 +1080,7 @@ func mintStatusDialogWorker(job MintJob, f mintStatusFields) {
 	metadataURI := gatewayBase + "/ipfs/" + cid
 
 	fyne.Do(func() {
-		f.cidVal.Text = cid
+		f.cidVal.Text = truncMiddle(cid, 12)
 		f.cidVal.Color = colText
 		if ipfsWarn != nil {
 			f.cidVal.Color = colWarn
@@ -1088,7 +1117,7 @@ func mintStatusDialogWorker(job MintJob, f mintStatusFields) {
 			log.Printf("[INFO] Mint Data: metadata JSON uploaded, tokenURI=%s", tokenURI)
 		}
 		fyne.Do(func() {
-			f.tokenURIVal.Text = tokenURI
+			f.tokenURIVal.Text = truncMiddle(tokenURI, 18)
 			f.tokenURIVal.Color = colText
 			if metaWarn != nil {
 				f.tokenURIVal.Color = colWarn
@@ -1160,7 +1189,7 @@ func mintStatusDialogWorker(job MintJob, f mintStatusFields) {
 
 			addActivity(fmt.Sprintf("Signed document (NFT mint skipped): %s", fileBase))
 			job.StatusText.Text = "✓  Document signed — signature embedded (NFT mint skipped)"
-			job.StatusText.Color = colAccent
+			job.StatusText.Importance = widget.SuccessImportance
 			job.StatusText.Refresh()
 
 			f.inner.Add(spacer(12))
@@ -1295,7 +1324,7 @@ func mintStatusDialogWorker(job MintJob, f mintStatusFields) {
 				f.progress.SetValue(0.9)
 
 				job.StatusText.Text = fmt.Sprintf("⚠  Mint deferred — collection mint %s still pending; anchor will follow automatically", bgCollTxID[:min(12, len(bgCollTxID))])
-				job.StatusText.Color = colWarn
+				job.StatusText.Importance = widget.WarningImportance
 				job.StatusText.Refresh()
 
 				f.inner.Add(spacer(12))
@@ -1330,9 +1359,9 @@ func mintStatusDialogWorker(job MintJob, f mintStatusFields) {
 	}
 
 	fyne.Do(func() {
-		f.txidVal.Text = txID
+		f.txidVal.Text = truncMiddle(txID, 12)
 		f.txidVal.Color = colText
-		f.anchorVal.Text = anchorPath
+		f.anchorVal.Text = truncMiddle(anchorPath, 12)
 		f.anchorVal.Color = colText
 		if mintFeeNSPX != nil {
 			f.feeVal.Text = sign.FormatMintFeeNSPX(meta.MintFeeNSPX)
@@ -1358,7 +1387,7 @@ func mintStatusDialogWorker(job MintJob, f mintStatusFields) {
 			log.Printf("[ERROR] Mint Data: NFT anchor failed for %s: %v", fileBase, anchorErr)
 			addActivity(fmt.Sprintf("Signed document: %s (NFT anchor failed: %v)", fileBase, anchorErr))
 			job.StatusText.Text = "✓  Document signed, but NFT anchor failed: " + anchorErr.Error()
-			job.StatusText.Color = colWarn
+			job.StatusText.Importance = widget.WarningImportance
 			job.StatusText.Refresh()
 
 			f.inner.Add(spacer(12))
@@ -1472,10 +1501,17 @@ func mintStatusDialogWorker(job MintJob, f mintStatusFields) {
 		addActivity(fmt.Sprintf("Signed & minted NFT: %s (tx=%s, cid=%s, height=%d, anchor=%s%s%s)", fileBase, txID, cid, blockHeight, anchorPath, anchorSuffix, marketSuffix))
 		marketLine := ""
 		if mintRes.Receipt.ContractAddress != "" {
-			marketLine = fmt.Sprintf("\ntoken: #%d in %s", mintRes.Receipt.TokenID, mintRes.Receipt.ContractAddress)
+			marketLine = fmt.Sprintf(" · token #%d in %s", mintRes.Receipt.TokenID, truncMiddle(mintRes.Receipt.ContractAddress, 10))
 		}
-		job.StatusText.Text = fmt.Sprintf("✓  Signed & minted NFT%s. txid=%s\ncid=%s\nheight=%d\nAnchor: %s%s", anchorSuffix, txID, cid, blockHeight, anchorPath, marketLine)
-		job.StatusText.Color = colAccent
+		// job.StatusText is now a wrapping widget.Label (see the MintJob
+		// struct comment), so this no longer needs to be squeezed onto one
+		// line — real line breaks work, and overflow within a line wraps
+		// instead of stretching the window. Hashes are still truncated
+		// because a full 64-char hex string is noise nobody reads, not
+		// because it would break anything if it weren't.
+		job.StatusText.Text = fmt.Sprintf("✓  Signed & minted NFT%s\ntx: %s   cid: %s\nheight: %d   anchor: %s%s",
+			anchorSuffix, truncMiddle(txID, 14), truncMiddle(cid, 14), blockHeight, truncMiddle(anchorPath, 14), marketLine)
+		job.StatusText.Importance = widget.SuccessImportance
 		job.StatusText.Refresh()
 
 		f.inner.Add(spacer(12))
@@ -1867,33 +1903,33 @@ func BuildMintScreen(window fyne.Window, client *WalletClient) fyne.CanvasObject
 
 	verifyOnChainBtn.OnTapped = func() {
 		if lastTxID == "" {
-			dialog.ShowError(fmt.Errorf("no anchored txid available"), window)
+			showErrorDialog(fmt.Errorf("no anchored txid available"), window)
 			return
 		}
 		resultData, err := rpc.CallRPC(client.nodeAddr, "gettransaction", []interface{}{lastTxID}, 60)
 		if err != nil {
-			dialog.ShowError(fmt.Errorf("gettransaction rpc: %w", err), window)
+			showErrorDialog(fmt.Errorf("gettransaction rpc: %w", err), window)
 			return
 		}
 		if len(resultData) == 0 || string(resultData) == "null" {
-			dialog.ShowError(fmt.Errorf("empty gettransaction response"), window)
+			showErrorDialog(fmt.Errorf("empty gettransaction response"), window)
 			return
 		}
 		var tx types.Transaction
 		if err := json.Unmarshal(resultData, &tx); err != nil {
-			dialog.ShowError(fmt.Errorf("parse gettransaction: %w", err), window)
+			showErrorDialog(fmt.Errorf("parse gettransaction: %w", err), window)
 			return
 		}
 
 		if len(tx.ReturnData) == 0 {
-			dialog.ShowError(fmt.Errorf("transaction has empty return_data"), window)
+			showErrorDialog(fmt.Errorf("transaction has empty return_data"), window)
 			return
 		}
 
 		anchorTag, err := mint.DeserializeAnchorTag(tx.ReturnData)
 		_ = anchorTag
 		if err != nil {
-			dialog.ShowError(fmt.Errorf("deserialize anchor tag: %w", err), window)
+			showErrorDialog(fmt.Errorf("deserialize anchor tag: %w", err), window)
 			return
 		}
 
@@ -1921,26 +1957,26 @@ func BuildMintScreen(window fyne.Window, client *WalletClient) fyne.CanvasObject
 
 	signBtn := widget.NewButton("Sign", func() {
 		if selectedPath == "" {
-			dialog.ShowError(fmt.Errorf("choose a file first"), window)
+			showErrorDialog(fmt.Errorf("choose a file first"), window)
 			return
 		}
 		if sessionPassphrase == "" {
-			dialog.ShowError(fmt.Errorf("not logged in"), window)
+			showErrorDialog(fmt.Errorf("not logged in"), window)
 			return
 		}
 		payload, err := os.ReadFile(selectedPath)
 		if err != nil {
-			dialog.ShowError(fmt.Errorf("read file: %w", err), window)
+			showErrorDialog(fmt.Errorf("read file: %w", err), window)
 			return
 		}
 		subject := subjectEntry.Text
 		if subject == "" {
-			dialog.ShowError(fmt.Errorf("subject required"), window)
+			showErrorDialog(fmt.Errorf("subject required"), window)
 			return
 		}
 		res, err := mint.Mint(payload, subject, sessionPassphrase, string(keys.OrgSPIF), "", "")
 		if err != nil {
-			dialog.ShowError(fmt.Errorf("mint: %w", err), window)
+			showErrorDialog(fmt.Errorf("mint: %w", err), window)
 			return
 		}
 		lastReceipt = res
@@ -1958,12 +1994,12 @@ func BuildMintScreen(window fyne.Window, client *WalletClient) fyne.CanvasObject
 
 	anchorBtn.OnTapped = func() {
 		if lastReceipt == nil {
-			dialog.ShowError(fmt.Errorf("sign a receipt first"), window)
+			showErrorDialog(fmt.Errorf("sign a receipt first"), window)
 			return
 		}
 		txID, anchorPath, _, _, err := client.AnchorMintReceipt(lastReceipt.Receipt)
 		if err != nil {
-			dialog.ShowError(fmt.Errorf("anchor: %w", err), window)
+			showErrorDialog(fmt.Errorf("anchor: %w", err), window)
 			return
 		}
 		statusLabel.SetText(fmt.Sprintf("Anchored on-chain. txid=%s\nAnchor saved to: %s", txID, anchorPath))
@@ -2032,19 +2068,19 @@ func BuildMintScreen(window fyne.Window, client *WalletClient) fyne.CanvasObject
 
 	verifyBtn := widget.NewButton("Verify", func() {
 		if verifyReceiptPath == "" {
-			dialog.ShowError(fmt.Errorf("choose a receipt file"), window)
+			showErrorDialog(fmt.Errorf("choose a receipt file"), window)
 			return
 		}
 		receipt, err := mint.LoadReceipt(verifyReceiptPath)
 		if err != nil {
-			dialog.ShowError(fmt.Errorf("load receipt: %w", err), window)
+			showErrorDialog(fmt.Errorf("load receipt: %w", err), window)
 			return
 		}
 		var payload []byte
 		if verifyPayloadPath != "" {
 			payload, err = os.ReadFile(verifyPayloadPath)
 			if err != nil {
-				dialog.ShowError(fmt.Errorf("read payload: %w", err), window)
+				showErrorDialog(fmt.Errorf("read payload: %w", err), window)
 				return
 			}
 		}

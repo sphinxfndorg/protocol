@@ -34,6 +34,26 @@ var (
 	colBorder2   = color.RGBA{255, 255, 255, 33}
 )
 
+// truncMiddle shortens a long hash-like string (tx id, CID, anchor
+// filename, tokenURI) for display by keeping a few characters at each end
+// and eliding the middle with "…".
+//
+// ★ WHY THIS EXISTS: canvas.Text — used throughout this file for status
+// lines, info-row values, and activity entries — never wraps, at any text
+// size, in any container. Its rendered (and therefore MinSize) width grows
+// directly with string length, with no ceiling. Fyne enforces a window's
+// size against its content's MinSize, so a single full-length hash assigned
+// to a canvas.Text is enough to force the whole window wider — and it does
+// not shrink back afterward. Any hash/id/URI headed for a canvas.Text
+// should be passed through this first. (Plain widget.Label values can wrap
+// instead, via TextWrapWord, and don't need this.)
+func truncMiddle(s string, keepEach int) string {
+	if len(s) <= keepEach*2+1 {
+		return s
+	}
+	return s[:keepEach] + "…" + s[len(s)-keepEach:]
+}
+
 // formatSPXAmount renders an SPX amount (already converted from nSPX) as a
 // comma-grouped, human-readable string.
 //

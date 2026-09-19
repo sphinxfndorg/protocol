@@ -66,6 +66,34 @@ func (d *DB) IterateEntriesWithPrefixReverse(prefix string, fn func(key string, 
 	return iter.Error()
 }
 
+// IterateEntriesWithPrefix calls fn for every key/value whose key starts
+// with prefix, in ascending key order, and stops early when fn returns
+// false. For a key prefix whose trailing components are fixed-width and
+// big-endian — such as rawdb's H:<height> canonical pointers — that turns
+// "walk a height range in order, stop when past the bound" into a single
+// bounded scan instead of a point lookup per height.
+//
+// The value slice passed to fn is only valid for the duration of the call;
+// copy it if it must outlive the callback. iter.Error() is checked after
+// the loop, so a mid-scan failure is reported rather than looking like the
+// end of the range.
+func (d *DB) IterateEntriesWithPrefix(prefix string, fn func(key string, value []byte) bool) error {
+	ldb, err := d.rawDB()
+	if err != nil {
+		return err
+	}
+
+	iter := ldb.NewIterator(util.BytesPrefix([]byte(prefix)), nil)
+	defer iter.Release()
+
+	for ok := iter.First(); ok; ok = iter.Next() {
+		if !fn(string(iter.Key()), iter.Value()) {
+			break
+		}
+	}
+	return iter.Error()
+}
+
 // ListKeysWithPrefix returns every key whose byte representation starts with
 // the given prefix, in lexicographic order.
 //

@@ -213,6 +213,11 @@ func TestSelfHealBackfillsRawdb(t *testing.T) {
 	// Store blocks normally.
 	_ = h.storeBlocks(3)
 
+	// Force a checkpoint so block_index.json exists for this test to read.
+	if err := h.store.saveBlockIndex(); err != nil {
+		t.Fatalf("saveBlockIndex before self-heal test: %v", err)
+	}
+
 	// Read the index to find block 2's hash.
 	indexFile := filepath.Join(h.store.indexDir, "block_index.json")
 	data, err := os.ReadFile(indexFile)
@@ -422,6 +427,10 @@ func TestTransactionLookupSurvivesCrashBetweenStores(t *testing.T) {
 	}
 
 	// Simulate crash: remove JSON file and in-memory index, but rawdb remains.
+	// Force a checkpoint first so block_index.json exists to remove.
+	if err := h.store.saveBlockIndex(); err != nil {
+		t.Fatalf("saveBlockIndex before crash simulation: %v", err)
+	}
 	jsonFile := filepath.Join(h.store.blocksDir, h.store.sanitizeFilename(block3.GetHash())+".json")
 	if err := os.Remove(jsonFile); err != nil {
 		t.Fatalf("remove JSON file: %v", err)

@@ -137,19 +137,31 @@ func (l *Logger) emit(lv Level, msg string) {
 	l.r.Log(l.format(lv, msg))
 }
 
+// emitf is the single emit path for the formatted level methods: it checks
+// the level BEFORE formatting, so a suppressed log costs one integer
+// comparison instead of a full fmt.Sprintf (plus the argument evaluation
+// that formatting forces). Hot paths that log per operation — a leveldb
+// read, a per-peer message — are the reason this ordering matters.
+func (l *Logger) emitf(lv Level, format string, args ...interface{}) {
+	if lv < l.minLevel {
+		return
+	}
+	l.emit(lv, fmt.Sprintf(format, args...))
+}
+
 func (l *Logger) Trace(format string, args ...interface{}) {
-	l.emit(TRACE, fmt.Sprintf(format, args...))
+	l.emitf(TRACE, format, args...)
 }
 func (l *Logger) Debug(format string, args ...interface{}) {
-	l.emit(DEBUG, fmt.Sprintf(format, args...))
+	l.emitf(DEBUG, format, args...)
 }
-func (l *Logger) Info(format string, args ...interface{}) { l.emit(INFO, fmt.Sprintf(format, args...)) }
+func (l *Logger) Info(format string, args ...interface{}) { l.emitf(INFO, format, args...) }
 func (l *Logger) Success(format string, args ...interface{}) {
-	l.emit(SUCCESS, fmt.Sprintf(format, args...))
+	l.emitf(SUCCESS, format, args...)
 }
-func (l *Logger) Warn(format string, args ...interface{}) { l.emit(WARN, fmt.Sprintf(format, args...)) }
+func (l *Logger) Warn(format string, args ...interface{}) { l.emitf(WARN, format, args...) }
 func (l *Logger) Error(format string, args ...interface{}) {
-	l.emit(ERROR, fmt.Sprintf(format, args...))
+	l.emitf(ERROR, format, args...)
 }
 
 // Fatal logs at FATAL level, restores the terminal (cursor, live region),
@@ -197,6 +209,11 @@ func (ll *LimitedLogger) allow() (suppressed int, ok bool) {
 }
 
 func (ll *LimitedLogger) log(lv Level, format string, args ...interface{}) {
+	// Check the level before taking the limiter's mutex or formatting:
+	// a suppressed log should not touch shared state.
+	if lv < ll.l.minLevel {
+		return
+	}
 	n, ok := ll.allow()
 	if !ok {
 		return

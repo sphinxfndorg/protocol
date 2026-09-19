@@ -14,6 +14,14 @@ var defaultLogger *Logger
 
 func init() {
 	defaultLogger = NewLogger(Default())
+
+	// Every non-terminal package (rawdb, sync, mempool, ...) logs through
+	// this package-level logger. Left at NewLogger's TRACE default it would
+	// print per-operation DEBUG lines — one for every LevelDB read, write
+	// and delete — to stdout at full volume, each behind the renderer's
+	// global lock. INFO is the same level NewTerminalLogger picks; use
+	// SetLevel to lower it again when debugging.
+	SetLevel(INFO)
 }
 
 // Standard package-level logging functions using the default renderer.

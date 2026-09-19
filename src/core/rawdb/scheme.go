@@ -24,6 +24,7 @@ const (
 	txBodyPrefix       = "txb:"
 	addressTxPrefix    = "addrtx:"
 	receiptPrefix      = "rcpt:"
+	bloomPrefix        = "bloom:"
 	headBlockKey       = "head:block"
 	headHeaderKey      = "head:header"
 	genesisHashKey     = "genesis:hash"
@@ -68,6 +69,11 @@ func heightLookupKey(hash string) string { return heightLookupPrefix + hash }
 func txLookupKey(txID string) string     { return txLookupPrefix + txID }
 func txBodyKey(txID string) string       { return txBodyPrefix + txID }
 func receiptKey(hash string) string      { return receiptPrefix + hash }
+
+// bloomKey holds a block's 256-byte LogsBloom filter in its raw wire format,
+// so reading it for a membership test needs no header decode and no
+// BloomFilter allocation.
+func bloomKey(hash string) string { return bloomPrefix + hash }
 
 // addressTxKey is the exact key for one (address, blockHeight, txIndex)
 // tuple. The trailing ':' after the address terminates it, so a prefix scan

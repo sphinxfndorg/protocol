@@ -26,11 +26,17 @@ func writeBlockBatch(batch *database.WriteBatch, block *types.Block) error {
 	}
 	height := block.GetHeight()
 
-	headerJSON, err := json.Marshal(block.Header)
+	headerJSON, err := json.Marshal(storedHeaderCopy(block.Header))
 	if err != nil {
 		return fmt.Errorf("rawdb: marshal header %s: %w", hash, err)
 	}
 	batch.Put(headerKey(hash), headerJSON)
+
+	// The 256-byte filter goes under its own key in raw wire format rather
+	// than base64-encoded inside the header JSON.
+	if len(block.Header.LogsBloom) > 0 {
+		batch.Put(bloomKey(hash), block.Header.LogsBloom)
+	}
 
 	bodyJSON, err := json.Marshal(&block.Body)
 	if err != nil {
@@ -117,6 +123,7 @@ func DeleteBlock(db *database.DB, hash string) error {
 
 	batch := db.NewWriteBatch()
 	batch.Delete(headerKey(hash))
+	batch.Delete(bloomKey(hash))
 	batch.Delete(bodyKey(hash))
 	batch.Delete(canonicalKey(height))
 	batch.Delete(heightLookupKey(hash))

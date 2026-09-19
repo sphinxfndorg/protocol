@@ -13,28 +13,42 @@ import (
 // Sender, Receiver, ToContract (when set), and the transaction ID
 // itself. Uses bloom.DefaultConfig() so every node builds and hashes
 // bit-for-bit identical filters.
+//
+// Keys are deduped before hashing: a block repeats the same addresses
+// heavily (miner, fee recipient, hot contracts) and the filter does not
+// record how many times a key was added, so hashing a duplicate is pure
+// waste. Duplicates set the same bits, so the output is identical to
+// adding every field of every transaction individually.
 func BuildBlockBloomFilter(body *BlockBody) *bloom.BloomFilter {
 	bf := bloom.NewDefault()
 	if body == nil {
 		return bf
 	}
+
+	seen := make(map[string]struct{}, len(body.TxsList)*2)
+	keys := make([]string, 0, len(body.TxsList)*4)
+	add := func(key string) {
+		if key == "" {
+			return
+		}
+		if _, dup := seen[key]; dup {
+			return
+		}
+		seen[key] = struct{}{}
+		keys = append(keys, key)
+	}
+
 	for _, tx := range body.TxsList {
 		if tx == nil {
 			continue
 		}
-		if tx.ID != "" {
-			bf.Add([]byte(tx.ID))
-		}
-		if tx.Sender != "" {
-			bf.Add([]byte(tx.Sender))
-		}
-		if tx.Receiver != "" {
-			bf.Add([]byte(tx.Receiver))
-		}
-		if tx.ToContract != "" {
-			bf.Add([]byte(tx.ToContract))
-		}
+		add(tx.ID)
+		add(tx.Sender)
+		add(tx.Receiver)
+		add(tx.ToContract)
 	}
+
+	bf.AddStrings(keys)
 	return bf
 }
 

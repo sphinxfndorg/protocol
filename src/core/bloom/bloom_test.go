@@ -4,7 +4,10 @@
 // go/src/core/bloom/bloom_test.go
 package bloom
 
-import "testing"
+import (
+	"bytes"
+	"testing"
+)
 
 func TestNewDefault(t *testing.T) {
 	bf := NewDefault()
@@ -139,6 +142,81 @@ func TestConcurrentAddContains(t *testing.T) {
 		bf.Contains([]byte{byte(i)})
 	}
 	<-done
+}
+
+func TestAddStringsMatchesAdd(t *testing.T) {
+	keys := []string{"xAlice", "xBob", "tx-0001", "xContract123", "xAlice"}
+
+	one := NewDefault()
+	for _, k := range keys {
+		one.Add([]byte(k))
+	}
+
+	bulk := NewDefault()
+	bulk.AddStrings(keys)
+
+	if !bytes.Equal(one.Bytes(), bulk.Bytes()) {
+		t.Fatal("AddStrings produced different bytes than one Add per key")
+	}
+}
+
+func TestAddStringsNoFalseNegatives(t *testing.T) {
+	keys := []string{"xAlice", "xBob", "tx-0001", "", "xContract123"}
+
+	bf := NewDefault()
+	bf.AddStrings(keys)
+
+	for _, k := range keys {
+		if !bf.Contains([]byte(k)) {
+			t.Fatalf("key %q missing after AddStrings", k)
+		}
+	}
+}
+
+func TestAddStringsEmptyIsNoOp(t *testing.T) {
+	bf := NewDefault()
+	bf.AddStrings(nil)
+	bf.AddStrings([]string{})
+
+	if got := bf.CountBits(); got != 0 {
+		t.Fatalf("CountBits() = %d, want 0", got)
+	}
+}
+
+func TestAddStringsDoesNotAllocate(t *testing.T) {
+	bf := NewDefault()
+	keys := []string{"xAlice", "xBob", "tx-0001"}
+
+	if allocs := testing.AllocsPerRun(100, func() {
+		bf.AddStrings(keys)
+	}); allocs != 0 {
+		t.Fatalf("AddStrings allocated %.1f objects/op, want 0", allocs)
+	}
+}
+
+func TestConcurrentAddStringsContains(t *testing.T) {
+	bf := NewDefault()
+	keys := make([]string, 0, 1000)
+	for i := 0; i < 1000; i++ {
+		keys = append(keys, string(rune(i)))
+	}
+
+	done := make(chan struct{})
+	go func() {
+		bf.AddStrings(keys)
+		close(done)
+	}()
+
+	for i := 0; i < 1000; i++ {
+		bf.Contains([]byte(string(rune(i))))
+	}
+	<-done
+
+	for _, k := range keys {
+		if !bf.Contains([]byte(k)) {
+			t.Fatalf("key %q missing after concurrent AddStrings", k)
+		}
+	}
 }
 
 func TestContainsRawMatchesContains(t *testing.T) {

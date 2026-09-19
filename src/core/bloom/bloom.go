@@ -36,7 +36,26 @@ func NewDefault() *BloomFilter {
 func (bf *BloomFilter) Add(key []byte) {
 	bf.mu.Lock()
 	defer bf.mu.Unlock()
-	for _, pos := range positions(key, bf.cfg.Bits, bf.cfg.K) {
+	bf.addLocked(key)
+}
+
+// AddStrings inserts every key, taking the write lock once and reusing a
+// single scratch buffer for all k-position computations instead of
+// locking (and allocating) once per key. Calling it with keys that are
+// also added via Add is equivalent to adding them twice: the filter's
+// bits, and therefore its bytes, are identical.
+func (bf *BloomFilter) AddStrings(keys []string) {
+	bf.mu.Lock()
+	defer bf.mu.Unlock()
+	for _, key := range keys {
+		bf.addLocked([]byte(key))
+	}
+}
+
+// addLocked is the shared insertion core. The caller must hold bf.mu.
+func (bf *BloomFilter) addLocked(key []byte) {
+	var scratch [maxInlineK]int
+	for _, pos := range positionsInto(key, bf.cfg.Bits, bf.cfg.K, scratch[:0]) {
 		bf.bits.SetBit(pos)
 	}
 }

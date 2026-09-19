@@ -63,6 +63,20 @@ func BenchmarkBytes(b *testing.B) {
 	}
 }
 
+// BenchmarkAddStrings is the block-build path: one lock and one scratch
+// buffer for every key in a block.
+func BenchmarkAddStrings(b *testing.B) {
+	keys := make([]string, 200)
+	for i := range keys {
+		keys[i] = fmt.Sprintf("sphinx-address-%d", i)
+	}
+	bf := NewDefault()
+	b.ReportAllocs()
+	for b.Loop() {
+		bf.AddStrings(keys)
+	}
+}
+
 // BenchmarkContainsRaw is the header-only chain-scan path: membership
 // against wire bytes, no BloomFilter, no copy, no allocation.
 func BenchmarkContainsRaw(b *testing.B) {

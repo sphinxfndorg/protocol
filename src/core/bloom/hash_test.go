@@ -114,3 +114,68 @@ func BenchmarkPositions(b *testing.B) {
 		_ = positions(key, BloomBits, HashFunctions)
 	}
 }
+
+func TestPositionsIntoMatchesPositions(t *testing.T) {
+	keys := [][]byte{
+		[]byte(""),
+		[]byte("xAlice"),
+		[]byte("tx-0003"),
+		make([]byte, 128),
+	}
+	for _, key := range keys {
+		want := positions(key, BloomBits, HashFunctions)
+
+		var scratch [maxInlineK]int
+		got := positionsInto(key, BloomBits, HashFunctions, scratch[:0])
+
+		if len(got) != len(want) {
+			t.Fatalf("key %q: got %d positions, want %d", key, len(got), len(want))
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("key %q: position %d = %d, want %d", key, i, got[i], want[i])
+			}
+		}
+	}
+}
+
+func TestPositionsIntoReusesBuffer(t *testing.T) {
+	buf := make([]int, 0, maxInlineK)
+
+	first := positionsInto([]byte("xAlice"), BloomBits, HashFunctions, buf)
+	second := positionsInto([]byte("xBob"), BloomBits, HashFunctions, buf)
+
+	if &first[0] != &second[0] {
+		t.Fatal("positionsInto did not reuse the caller's buffer")
+	}
+}
+
+func TestPositionsIntoAllocatesOnlyWhenBufferTooSmall(t *testing.T) {
+	tooSmall := make([]int, 0, 2)
+	got := positionsInto([]byte("xAlice"), BloomBits, HashFunctions, tooSmall)
+	if len(got) != HashFunctions {
+		t.Fatalf("got %d positions, want %d", len(got), HashFunctions)
+	}
+	if &got[0] == &tooSmall[:cap(tooSmall)][0] {
+		t.Fatal("positionsInto must allocate when the buffer is too small")
+	}
+}
+
+func TestPositionsIntoZeroK(t *testing.T) {
+	var scratch [maxInlineK]int
+	if got := positionsInto([]byte("xAlice"), BloomBits, 0, scratch[:0]); len(got) != 0 {
+		t.Fatalf("k=0 returned %v, want empty", got)
+	}
+}
+
+func TestPositionsIntoDoesNotAllocateWithStackBuffer(t *testing.T) {
+	key := []byte("xAlice")
+
+	allocs := testing.AllocsPerRun(100, func() {
+		var scratch [maxInlineK]int
+		_ = positionsInto(key, BloomBits, HashFunctions, scratch[:0])
+	})
+	if allocs != 0 {
+		t.Fatalf("positionsInto allocated %.1f objects/op with a stack buffer, want 0", allocs)
+	}
+}

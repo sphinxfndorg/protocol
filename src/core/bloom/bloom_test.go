@@ -140,3 +140,101 @@ func TestConcurrentAddContains(t *testing.T) {
 	}
 	<-done
 }
+
+func TestContainsRawMatchesContains(t *testing.T) {
+	bf := NewDefault()
+	keys := []string{"xAlice", "xBob", "tx-0001", ""}
+	for _, k := range keys {
+		bf.Add([]byte(k))
+	}
+	raw := bf.Bytes()
+	cfg := bf.Config()
+
+	for _, k := range append(keys, "xMallory", "tx-9999") {
+		want := bf.Contains([]byte(k))
+		if got := ContainsRaw(raw, cfg, []byte(k)); got != want {
+			t.Fatalf("ContainsRaw(%q) = %v, Contains says %v", k, got, want)
+		}
+	}
+}
+
+func TestContainsRawCustomKAboveInlineBuffer(t *testing.T) {
+	// k > maxInlineK forces positionsInto onto the heap; the result must
+	// still agree with the allocating path.
+	cfg, err := NewConfig(1024, maxInlineK+5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bf, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bf.Add([]byte("xAlice"))
+
+	for _, k := range []string{"xAlice", "xMallory"} {
+		want := bf.Contains([]byte(k))
+		if got := ContainsRaw(bf.Bytes(), cfg, []byte(k)); got != want {
+			t.Fatalf("ContainsRaw(%q) = %v with k=%d, Contains says %v", k, got, cfg.K, want)
+		}
+	}
+}
+
+func TestContainsRawEmptyFilter(t *testing.T) {
+	if ContainsRaw(NewDefault().Bytes(), DefaultConfig(), []byte("anything")) {
+		t.Fatal("empty filter must not report a match")
+	}
+}
+
+func TestContainsRawRejectsBadLength(t *testing.T) {
+	for _, raw := range [][]byte{nil, {}, make([]byte, BloomBytes-1), make([]byte, BloomBytes+1)} {
+		if ContainsRaw(raw, DefaultConfig(), []byte("xAlice")) {
+			t.Fatalf("raw of length %d must report false", len(raw))
+		}
+	}
+}
+
+func TestContainsRawRejectsInvalidConfig(t *testing.T) {
+	raw := make([]byte, 64)
+	cfgs := []Config{
+		{Bits: 0, K: 3},
+		{Bits: -8, K: 3},
+		{Bits: 7, K: 3},
+		{Bits: 64, K: 0},
+		{Bits: 64, K: -1},
+	}
+	for _, cfg := range cfgs {
+		if ContainsRaw(raw, cfg, []byte("xAlice")) {
+			t.Fatalf("invalid config %+v must report false", cfg)
+		}
+	}
+}
+
+func TestContainsRawDoesNotMutateRaw(t *testing.T) {
+	bf := NewDefault()
+	bf.Add([]byte("xAlice"))
+	raw := bf.Bytes()
+
+	before := make([]byte, len(raw))
+	copy(before, raw)
+
+	ContainsRaw(raw, DefaultConfig(), []byte("xAlice"))
+	ContainsRaw(raw, DefaultConfig(), []byte("xMallory"))
+
+	for i := range before {
+		if raw[i] != before[i] {
+			t.Fatalf("byte %d changed: %x -> %x", i, before[i], raw[i])
+		}
+	}
+}
+
+func TestContainsRawDoesNotAllocate(t *testing.T) {
+	raw := NewDefault().Bytes()
+	cfg := DefaultConfig()
+	key := []byte("xAlice")
+
+	if allocs := testing.AllocsPerRun(100, func() {
+		ContainsRaw(raw, cfg, key)
+	}); allocs != 0 {
+		t.Fatalf("ContainsRaw allocated %.1f objects/op, want 0", allocs)
+	}
+}

@@ -62,6 +62,34 @@ func digestPair(key []byte) (h1, h2 uint64) {
 	return h1, h2
 }
 
+// maxInlineK is the largest k that positionsInto serves from a
+// caller-provided stack buffer without allocating. DefaultConfig() uses
+// HashFunctions (3), so the consensus path never allocates; a larger
+// custom k simply falls back to the heap.
+const maxInlineK = 8
+
+// positionsInto is the non-allocating core of positions: it writes the k
+// derived bit positions for key into buf and returns the used slice,
+// reusing buf whenever it has the capacity.
+func positionsInto(key []byte, bits, k int, buf []int) []int {
+	h1, h2 := digestPair(key)
+
+	if cap(buf) < k {
+		buf = make([]int, k)
+	}
+	result := buf[:k]
+	m := uint64(bits)
+	for i := 0; i < k; i++ {
+		// uint64 addition wraps on overflow (defined behavior in Go),
+		// which is harmless here — we immediately reduce mod m and only
+		// care about the resulting value's distribution, not its
+		// pre-modulo magnitude.
+		combined := h1 + uint64(i)*h2
+		result[i] = int(combined % m)
+	}
+	return result
+}
+
 // positions returns k deterministic bit indices in the range [0, bits)
 // for the given key, using the double-hashing construction above. The
 // same key always yields the same k positions for a given (bits, k)
@@ -73,17 +101,5 @@ func digestPair(key []byte) (h1, h2 uint64) {
 // does not re-validate them, since bloom.go guarantees a BloomFilter can
 // only be constructed from a valid Config.
 func positions(key []byte, bits, k int) []int {
-	h1, h2 := digestPair(key)
-
-	result := make([]int, k)
-	m := uint64(bits)
-	for i := 0; i < k; i++ {
-		// uint64 addition wraps on overflow (defined behavior in Go),
-		// which is harmless here — we immediately reduce mod m and only
-		// care about the resulting value's distribution, not its
-		// pre-modulo magnitude.
-		combined := h1 + uint64(i)*h2
-		result[i] = int(combined % m)
-	}
-	return result
+	return positionsInto(key, bits, k, nil)
 }

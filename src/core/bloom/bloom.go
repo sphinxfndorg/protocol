@@ -54,6 +54,35 @@ func (bf *BloomFilter) Contains(key []byte) bool {
 	return true
 }
 
+// ContainsRaw reports whether key may be present in a filter held in its
+// raw wire format (a 2048-bit / 256-byte blob such as
+// BlockHeader.LogsBloom), without decoding it into a BloomFilter: no copy,
+// no allocation and no lock. A false result is certain; a true result may
+// be a false positive.
+//
+// raw must be exactly cfg.Bytes() long. Anything else — including a
+// zero-length LogsBloom from a header predating the field — reports
+// false, so a malformed filter can never yield a false positive.
+func ContainsRaw(raw []byte, cfg Config, key []byte) bool {
+	if err := cfg.Validate(); err != nil {
+		return false
+	}
+	if len(raw) != cfg.Bytes() {
+		return false
+	}
+
+	// newBitsetFromBytes only wraps raw; it neither copies nor escapes.
+	bs := newBitsetFromBytes(raw)
+
+	var scratch [maxInlineK]int
+	for _, pos := range positionsInto(key, cfg.Bits, cfg.K, scratch[:0]) {
+		if !bs.GetBit(pos) {
+			return false
+		}
+	}
+	return true
+}
+
 // Merge OR-combines other into bf. Both filters must share the same
 // Config; a mismatched Config is a no-op, since merging filters built
 // with different bit sizes or hash counts is meaningless.

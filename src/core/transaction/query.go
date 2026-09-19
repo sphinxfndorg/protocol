@@ -4,32 +4,28 @@
 // go/src/core/transaction/bloomquery.go
 package types
 
+import (
+	"github.com/sphinxfndorg/protocol/src/core/bloom"
+)
+
 // MayContainAddress reports whether this header's Bloom filter might
 // include addr. A false result is certain; a true result must still be
 // verified against the actual block body (BlockContainsAddress) before
 // being trusted, since Bloom filters can false-positive.
 func (h *BlockHeader) MayContainAddress(addr string) bool {
-	if h == nil || len(h.LogsBloom) == 0 {
+	if h == nil {
 		return false
 	}
-	bf, err := h.DecodeBloomFilter()
-	if err != nil {
-		return false
-	}
-	return bf.Contains([]byte(addr))
+	return bloom.ContainsRaw(h.LogsBloom, bloom.DefaultConfig(), []byte(addr))
 }
 
 // MayContainTxID reports whether this header's Bloom filter might
 // include txID. Same false-positive caveat as MayContainAddress.
 func (h *BlockHeader) MayContainTxID(txID string) bool {
-	if h == nil || len(h.LogsBloom) == 0 {
+	if h == nil {
 		return false
 	}
-	bf, err := h.DecodeBloomFilter()
-	if err != nil {
-		return false
-	}
-	return bf.Contains([]byte(txID))
+	return bloom.ContainsRaw(h.LogsBloom, bloom.DefaultConfig(), []byte(txID))
 }
 
 // BlockContainsAddress does the definitive, non-probabilistic check:

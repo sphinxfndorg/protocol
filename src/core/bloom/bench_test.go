@@ -62,3 +62,20 @@ func BenchmarkBytes(b *testing.B) {
 		_ = bf.Bytes()
 	}
 }
+
+// BenchmarkContainsRaw is the header-only chain-scan path: membership
+// against wire bytes, no BloomFilter, no copy, no allocation.
+func BenchmarkContainsRaw(b *testing.B) {
+	bf := NewDefault()
+	for i := 0; i < 200; i++ {
+		bf.Add([]byte(fmt.Sprintf("addr-%d", i)))
+	}
+	raw := bf.Bytes()
+	cfg := bf.Config()
+	key := []byte("addr-7")
+
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = ContainsRaw(raw, cfg, key)
+	}
+}

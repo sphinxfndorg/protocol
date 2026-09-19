@@ -59,12 +59,21 @@ func (s *Storage) GetIndexDir() string {
 	return s.indexDir
 }
 
-// GetTransaction returns a transaction by ID. It first tries the O(1)
-// rawdb tx-lookup index; if that misses (db not attached, or the tx
-// predates the rawdb rollout on this node), it falls back to the original
-// full-chain scan so nothing regresses for un-migrated data.
+// GetTransaction returns a transaction by ID. It tries, in order:
+//
+//  1. the transaction's own payload key — O(1), a couple of hundred bytes;
+//  2. the tx-lookup entry plus the block it points at — O(1) lookup, but it
+//     unmarshals the block's whole body to reach one transaction;
+//  3. the original full-chain scan.
+//
+// The later paths exist for data written before those keys were introduced,
+// so an un-migrated node resolves exactly what it did before.
 func (s *Storage) GetTransaction(txID string) (*types.Transaction, error) {
 	if s.db != nil {
+		if tx, err := rawdb.ReadTxPayload(s.db, txID); err == nil && tx != nil {
+			return tx, nil
+		}
+
 		if entry, err := rawdb.ReadTxLookupEntry(s.db, txID); err == nil {
 			if block, err := rawdb.ReadBlock(s.db, entry.BlockHash); err == nil {
 				if entry.Index >= 0 && entry.Index < len(block.Body.TxsList) {

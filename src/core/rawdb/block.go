@@ -13,9 +13,9 @@ import (
 )
 
 // writeBlockBatch populates batch with all entries for block (header, body,
-// canonical pointer, height lookup, tx lookups, address→tx index). Shared
-// by WriteBlock and any caller that holds its own batch (e.g. StoreBlock
-// integrating receipts).
+// canonical pointer, height lookup, tx lookups, per-transaction payloads,
+// address→tx index). Shared by WriteBlock and any caller that holds its own
+// batch (e.g. StoreBlock integrating receipts).
 func writeBlockBatch(batch *database.WriteBatch, block *types.Block) error {
 	if block == nil || block.Header == nil {
 		return fmt.Errorf("rawdb: nil block or header")
@@ -58,14 +58,19 @@ func writeBlockBatch(batch *database.WriteBatch, block *types.Block) error {
 		return fmt.Errorf("rawdb: address index for block %s: %w", hash, err)
 	}
 
+	// Per-transaction payloads: O(1) by-ID lookup that does not read the body.
+	if err := WriteTxPayloads(batch, block); err != nil {
+		return fmt.Errorf("rawdb: tx payloads for block %s: %w", hash, err)
+	}
+
 	return nil
 }
 
 // WriteBlock stores header, body, canonical height→hash, reverse
-// hash→height lookup, tx lookup entries, and address→tx index entries
-// in a single atomic LevelDB batch. A crash mid-write can never leave
-// a header with no matching body, or a canonical pointer to a block
-// that was never persisted.
+// hash→height lookup, tx lookup entries, per-transaction payloads, and
+// address→tx index entries in a single atomic LevelDB batch. A crash
+// mid-write can never leave a header with no matching body, or a canonical
+// pointer to a block that was never persisted.
 func WriteBlock(db *database.DB, block *types.Block) error {
 	if block == nil || block.Header == nil {
 		return fmt.Errorf("rawdb: nil block or header")
@@ -101,7 +106,8 @@ func ReadBlock(db *database.DB, hash string) (*types.Block, error) {
 }
 
 // DeleteBlock removes header, body, canonical pointer, height lookup, tx
-// lookups, and address→tx entries for the block at hash, atomically.
+// lookups, per-transaction payloads, and address→tx entries for the block
+// at hash, atomically.
 func DeleteBlock(db *database.DB, hash string) error {
 	block, err := ReadBlock(db, hash)
 	if err != nil {
@@ -120,6 +126,7 @@ func DeleteBlock(db *database.DB, hash string) error {
 		}
 		batch.Delete(txLookupKey(tx.ID))
 	}
+	DeleteTxPayloads(batch, block)
 	DeleteAddressTxIndex(batch, block)
 
 	if err := batch.Commit(); err != nil {

@@ -22,6 +22,63 @@ type TxLookupEntry struct {
 	Index       int    `json:"index"` // position within BlockBody.TxsList
 }
 
+// WriteTxPayloads stores each transaction's own JSON under "txb:<txID>".
+//
+// The lookup entry alone can only point at a block, so serving one
+// transaction from it means unmarshalling the block's entire body (tens of
+// KB for a full block). A transaction's own record is a couple of hundred
+// bytes, so this makes a by-ID read one small Get instead of a whole-block
+// read. Called from WriteBlock, in the same atomic batch as the body.
+func WriteTxPayloads(batch *database.WriteBatch, block *types.Block) error {
+	for _, tx := range block.Body.TxsList {
+		if tx == nil || tx.ID == "" {
+			continue
+		}
+		data, err := json.Marshal(tx)
+		if err != nil {
+			return fmt.Errorf("rawdb: marshal tx payload %s: %w", tx.ID, err)
+		}
+		batch.Put(txBodyKey(tx.ID), data)
+	}
+	return nil
+}
+
+// DeleteTxPayloads removes the payload written for every transaction in
+// block. Mirrors WriteTxPayloads so a delete can never leave a payload
+// behind for a transaction the block index no longer knows about.
+func DeleteTxPayloads(batch *database.WriteBatch, block *types.Block) {
+	for _, tx := range block.Body.TxsList {
+		if tx == nil || tx.ID == "" {
+			continue
+		}
+		batch.Delete(txBodyKey(tx.ID))
+	}
+}
+
+// ReadTxPayload returns the transaction stored under its own key. A miss
+// means this node has no payload for that ID: a chain written before
+// payloads existed, or one whose body has since been pruned. Callers fall
+// back to the block-based lookup in that case.
+func ReadTxPayload(db *database.DB, txID string) (*types.Transaction, error) {
+	if txID == "" {
+		return nil, fmt.Errorf("rawdb: empty transaction ID")
+	}
+
+	data, err := db.GetQuiet(txBodyKey(txID))
+	if err != nil {
+		if errors.Is(err, database.ErrNotFound) {
+			return nil, fmt.Errorf("%w: tx payload %s", ErrNotFound, txID)
+		}
+		return nil, fmt.Errorf("rawdb: read tx payload %s: %w", txID, err)
+	}
+
+	var tx types.Transaction
+	if err := json.Unmarshal(data, &tx); err != nil {
+		return nil, fmt.Errorf("rawdb: corrupt tx payload %s: %w", txID, err)
+	}
+	return &tx, nil
+}
+
 // WriteTxLookupEntries writes one entry per non-nil transaction in block,
 // atomically. Called internally by WriteBlock; also exposed standalone for
 // backfilling or reindexing a chain that predates this package.

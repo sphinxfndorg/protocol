@@ -21,6 +21,7 @@ const (
 	canonicalPrefix    = "H:"
 	heightLookupPrefix = "h:"
 	txLookupPrefix     = "tx:"
+	txBodyPrefix       = "txb:"
 	addressTxPrefix    = "addrtx:"
 	receiptPrefix      = "rcpt:"
 	headBlockKey       = "head:block"
@@ -65,6 +66,7 @@ func bodyKey(hash string) string         { return bodyPrefix + hash }
 func canonicalKey(height uint64) string  { return canonicalPrefix + encodeHeight(height) }
 func heightLookupKey(hash string) string { return heightLookupPrefix + hash }
 func txLookupKey(txID string) string     { return txLookupPrefix + txID }
+func txBodyKey(txID string) string       { return txBodyPrefix + txID }
 func receiptKey(hash string) string      { return receiptPrefix + hash }
 
 // addressTxKey is the exact key for one (address, blockHeight, txIndex)

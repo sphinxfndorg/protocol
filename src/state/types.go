@@ -100,6 +100,12 @@ type Storage struct {
 	bestBlockHash string
 	totalBlocks   uint64
 
+	// storesSinceCheckpoint counts StoreBlock calls since block_index.json
+	// was last written. The file is a periodic checkpoint of the in-memory
+	// index (rawdb's h: lookups are the durable copy), so it is not rewritten
+	// on every block. Guarded by mu.
+	storesSinceCheckpoint int
+
 	// TPS Monitoring
 	tpsMetrics *TPSMetrics
 	tpsConfig  *TPSConfig

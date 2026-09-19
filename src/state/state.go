@@ -1605,9 +1605,15 @@ func (s *Storage) StoreBlock(block *types.Block) error {
 			height, blockHash, s.totalBlocks, block.Header.TxsRoot)
 	}
 
-	// Persist updated indices
-	if err := s.saveBlockIndex(); err != nil {
-		return fmt.Errorf("failed to save block index: %w", err)
+	// Persist updated indices. block_index.json is a periodic checkpoint,
+	// not the source of truth — rawdb's h: lookups, written atomically with
+	// each block above, are — so rewriting the whole map on every block is
+	// avoided. Every block is still durable in rawdb, and Close checkpoints.
+	s.storesSinceCheckpoint++
+	if s.storesSinceCheckpoint >= blockIndexCheckpointEvery {
+		if err := s.saveBlockIndex(); err != nil {
+			return fmt.Errorf("failed to save block index: %w", err)
+		}
 	}
 	if err := s.saveChainState(); err != nil {
 		return fmt.Errorf("failed to save chain state: %w", err)
@@ -2771,7 +2777,15 @@ func isHexEncodedGenesis(s string) bool {
 	return s[:16] == "47454e455349535f"
 }
 
+// blockIndexCheckpointEvery bounds how many StoreBlock calls may pass before
+// block_index.json is rewritten. The file is only a checkpoint of the
+// in-memory index — rawdb's h: lookups are the durable copy and
+// loadBlockIndex rebuilds from them — so a stale file cannot lose blocks,
+// and rewriting the whole map on every block is pure overhead.
+const blockIndexCheckpointEvery = 1000
+
 func (s *Storage) saveBlockIndex() error {
+	s.storesSinceCheckpoint = 0
 	indexFile := filepath.Join(s.indexDir, "block_index.json")
 
 	// Create a simplified index for persistence
@@ -2793,37 +2807,63 @@ func (s *Storage) saveBlockIndex() error {
 	return os.WriteFile(indexFile, data, 0644)
 }
 
-// FIXED loadBlockIndex method
+// loadBlockIndex populates the in-memory blockIndex/heightIndex.
+//
+// The set of blocks comes from rawdb's h:<hash> -> height lookups when a db
+// handle is attached: they are written in the same atomic batch as each
+// header, so they are the durable, complete index, and rebuilding from them
+// means a missing or stale block_index.json checkpoint can no longer hide
+// blocks. block_index.json — now written periodically rather than once per
+// block — is used only as a fallback when rawdb has no entries: a chain
+// written before rawdb, or no db handle yet, as during NewStorage.
 func (s *Storage) loadBlockIndex() error {
 	indexFile := filepath.Join(s.indexDir, "block_index.json")
 
-	// Check if index file exists
-	if _, err := os.Stat(indexFile); os.IsNotExist(err) {
-		logger.Info("No block index file found, starting fresh")
-		return nil // No index file yet
+	heights := make(map[string]uint64)
+	fromRawdb := false
+	if s.db != nil {
+		pairs, err := rawdb.ReadHeightLookups(s.db)
+		if err != nil {
+			logger.Warn("loadBlockIndex: reading rawdb height lookups: %v", err)
+		} else if len(pairs) > 0 {
+			heights = pairs
+			fromRawdb = true
+		}
 	}
 
-	data, err := os.ReadFile(indexFile)
-	if err != nil {
-		return fmt.Errorf("failed to read block index: %w", err)
-	}
-
-	var index struct {
-		Blocks map[string]uint64 `json:"blocks"`
-	}
-	if err := json.Unmarshal(data, &index); err != nil {
-		return fmt.Errorf("failed to unmarshal block index: %w", err)
-	}
-
-	// Load blocks into memory index - but don't fail if some blocks can't be loaded
-	loadedCount := 0
-	for hash, height := range index.Blocks {
-		// Skip invalid entries
-		if hash == "" {
-			logger.Warn("Warning: Skipping block with empty hash")
-			continue
+	if !fromRawdb {
+		// Check if index file exists
+		if _, err := os.Stat(indexFile); os.IsNotExist(err) {
+			logger.Info("No block index file found, starting fresh")
+			return nil // No index file yet
 		}
 
+		data, err := os.ReadFile(indexFile)
+		if err != nil {
+			return fmt.Errorf("failed to read block index: %w", err)
+		}
+
+		var index struct {
+			Blocks map[string]uint64 `json:"blocks"`
+		}
+		if err := json.Unmarshal(data, &index); err != nil {
+			return fmt.Errorf("failed to unmarshal block index: %w", err)
+		}
+		for hash, height := range index.Blocks {
+			// Skip invalid entries
+			if hash == "" {
+				logger.Warn("Warning: Skipping block with empty hash")
+				continue
+			}
+			heights[hash] = height
+		}
+	}
+
+	// Load blocks into memory index - but don't fail if some blocks can't be
+	// loaded: a block file may be gone even though rawdb still knows the
+	// block, and rawdb is what GetTransaction resolves through.
+	loadedCount := 0
+	for hash, height := range heights {
 		block, err := s.loadBlockFromDisk(hash)
 		if err != nil {
 			logger.Warn("Warning: Could not load block %s at height %d: %v", hash, height, err)
@@ -2855,10 +2895,13 @@ func (s *Storage) loadBlockIndex() error {
 		}
 	}
 
-	logger.Info("Loaded block index: %d blocks (from %d entries)", loadedCount, len(index.Blocks))
+	logger.Info("Loaded block index: %d blocks (from %d entries, rawdb=%v)", loadedCount, len(heights), fromRawdb)
 
-	// If no blocks were loaded but index exists, reset state
-	if loadedCount == 0 && len(index.Blocks) > 0 {
+	// A JSON checkpoint whose blocks are all gone is corrupt; drop it so the
+	// next checkpoint is clean. Rawdb-sourced entries are not treated this
+	// way: an unloadable body there means a missing block file, not a bad
+	// index, and the rawdb lookups must survive to serve transactions.
+	if !fromRawdb && loadedCount == 0 && len(heights) > 0 {
 		logger.Warn("Warning: Block index exists but no blocks could be loaded, resetting index")
 		// Reset the corrupted index
 		s.blockIndex = make(map[string]*types.Block)

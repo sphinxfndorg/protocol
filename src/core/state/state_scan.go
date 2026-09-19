@@ -97,30 +97,13 @@ func (d *DB) IterateEntriesWithPrefix(prefix string, fn func(key string, value [
 // ListKeysWithPrefix returns every key whose byte representation starts with
 // the given prefix, in lexicographic order.
 //
-// LevelDBInterface intentionally does not expose NewIterator (it is not part
-// of the common read/write contract).  We type-assert to reach the concrete
-// *leveldb.DB stored at construction time.  Both paths that NewLevelDB uses
-// (direct open and RecoverFile) store a *leveldb.DB; LevelDBAdapter wraps one
-// too.  Any other implementation returns an empty list rather than panicking.
+// The DB-wide lock is not held for the scan: rawDB unwraps the handle and
+// goleveldb's iterators are safe for concurrent use, so a long listing does
+// not block writers. A missing or non-iterable handle yields no keys rather
+// than an error, which is what callers probing an optional keyspace expect.
 func (d *DB) ListKeysWithPrefix(prefix string) ([]string, error) {
-	d.mutex.RLock()
-	defer d.mutex.RUnlock()
-
-	if d.db == nil {
-		return nil, nil
-	}
-
-	// Unwrap to the concrete *leveldb.DB.
-	var ldb *leveldb.DB
-	switch v := d.db.(type) {
-	case *leveldb.DB:
-		ldb = v
-	case *LevelDBAdapter:
-		// LevelDBAdapter.db is the *leveldb.DB field defined in types.go
-		v.mu.RLock()
-		ldb = v.db
-		v.mu.RUnlock()
-	default:
+	ldb, err := d.rawDB()
+	if err != nil {
 		return nil, nil
 	}
 
@@ -134,4 +117,39 @@ func (d *DB) ListKeysWithPrefix(prefix string) ([]string, error) {
 		keys = append(keys, string(k))
 	}
 	return keys, iter.Error()
+}
+
+// ListEntriesWithPrefix returns up to limit key/value pairs whose key starts
+// with prefix, in ascending key order; limit <= 0 returns every pair, as
+// ListKeysWithPrefix does. Keys and values are copied out of the iterator,
+// so the result stays valid after it is released.
+//
+// Unlike ListKeysWithPrefix this reports a failure to reach the database,
+// because a bounded read of a known keyspace has no sensible empty result to
+// fall back on: "zero entries" and "could not look" must not be the same
+// answer.
+func (d *DB) ListEntriesWithPrefix(prefix string, limit int) ([]string, [][]byte, error) {
+	ldb, err := d.rawDB()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var (
+		keys   []string
+		values [][]byte
+	)
+	iter := ldb.NewIterator(util.BytesPrefix([]byte(prefix)), nil)
+	defer iter.Release()
+
+	for iter.Next() {
+		keys = append(keys, string(append([]byte(nil), iter.Key()...)))
+		values = append(values, append([]byte(nil), iter.Value()...))
+		if limit > 0 && len(keys) >= limit {
+			break
+		}
+	}
+	if err := iter.Error(); err != nil {
+		return nil, nil, err
+	}
+	return keys, values, nil
 }

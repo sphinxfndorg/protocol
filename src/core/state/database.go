@@ -5,6 +5,7 @@
 package database
 
 import (
+	stderrors "errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,6 +17,13 @@ import (
 	"github.com/syndtr/goleveldb/leveldb/errors"
 	"github.com/syndtr/goleveldb/leveldb/opt"
 )
+
+// ErrNotFound is returned by GetQuiet (unwrapped) when the requested key
+// does not exist. It lets a caller that expects misses — probing for an
+// optional record, or scanning a key range where most keys are absent —
+// tell "absent" apart from "the database failed", which the logging Get
+// conflates into a formatted error string.
+var ErrNotFound = stderrors.New("database: key not found")
 
 // WriteBatch represents a batch of pending writes that can be applied atomically
 type WriteBatch struct {
@@ -225,12 +233,15 @@ func (d *DB) Put(key string, value []byte) error {
 	return nil
 }
 
-// Get retrieves a value by key from the database.
-// Parameters:
-//   - key: String key to retrieve
+// GetQuiet retrieves a value by key without emitting any log line, so a
+// caller that probes for optional records — or loops over a key range where
+// most keys are absent — does not pay for a formatted warning, and the
+// renderer's global lock behind it, on every miss.
 //
-// Returns: Value as byte slice and error if retrieval fails
-func (d *DB) Get(key string) ([]byte, error) {
+// A missing key returns ErrNotFound unwrapped; any other failure returns a
+// distinct wrapped error, so callers can tell the two apart with
+// errors.Is(err, ErrNotFound).
+func (d *DB) GetQuiet(key string) ([]byte, error) {
 	// Acquire read lock for concurrent read access
 	d.mutex.RLock()
 	defer d.mutex.RUnlock()
@@ -243,15 +254,36 @@ func (d *DB) Get(key string) ([]byte, error) {
 	// Attempt to retrieve value for key
 	data, err := d.db.Get([]byte(key), nil)
 	if err != nil {
-		// Handle specific error cases
+		// Handle the not-found case separately: it is an expected outcome
+		// for a probing caller, not a failure worth reporting.
 		if err == errors.ErrNotFound {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("failed to get key %s from LevelDB: %w", key, err)
+	}
+
+	return data, nil
+}
+
+// Get retrieves a value by key from the database, logging the outcome.
+// Prefer GetQuiet on any path where a miss is expected.
+// Parameters:
+//   - key: String key to retrieve
+//
+// Returns: Value as byte slice and error if retrieval fails
+func (d *DB) Get(key string) ([]byte, error) {
+	data, err := d.GetQuiet(key)
+	if err != nil {
+		if err == ErrNotFound {
 			// Key doesn't exist in database
 			logger.Warn("Key %s not found in LevelDB", key)
-			return nil, fmt.Errorf("key %s not found in LevelDB", key)
+			// Keep the historical message text, and wrap ErrNotFound so
+			// callers can branch on the cause instead of the string.
+			return nil, fmt.Errorf("key %s not found in LevelDB: %w", key, ErrNotFound)
 		}
 		// Other error occurred
 		logger.Error("Failed to get key %s from LevelDB: %s", key, err.Error())
-		return nil, fmt.Errorf("failed to get key %s from LevelDB: %w", key, err)
+		return nil, err
 	}
 
 	// Successfully retrieved value
@@ -286,12 +318,13 @@ func (d *DB) Delete(key string) error {
 	return nil
 }
 
-// Has checks if a key exists in the database.
-// Parameters:
-//   - key: String key to check
+// hasValue reports whether key exists, without logging anything. A missing
+// key is (false, nil) — absence is not an error — while an underlying
+// failure is returned as an error for the caller to decide about.
 //
-// Returns: Boolean indicating existence and error if check fails
-func (d *DB) Has(key string) (bool, error) {
+// It uses LevelDB's own Has rather than Get, so an existence check does not
+// read and copy the value.
+func (d *DB) hasValue(key string) (bool, error) {
 	// Acquire read lock for concurrent read access
 	d.mutex.RLock()
 	defer d.mutex.RUnlock()
@@ -301,19 +334,28 @@ func (d *DB) Has(key string) (bool, error) {
 		return false, fmt.Errorf("LevelDB is closed")
 	}
 
-	// Attempt to get key to check existence
-	_, err := d.db.Get([]byte(key), nil)
+	ok, err := d.db.Has([]byte(key), nil)
 	if err != nil {
-		// Handle specific error cases
-		if err == errors.ErrNotFound {
-			// Key doesn't exist, return false (not an error)
-			return false, nil
-		}
-		// Other error occurred during check
-		logger.Error("Failed to check key %s in LevelDB: %s", key, err.Error())
 		return false, fmt.Errorf("failed to check key %s in LevelDB: %w", key, err)
 	}
 
+	return ok, nil
+}
+
+// Has checks if a key exists in the database. An absent key is (false, nil)
+// and is never logged; only a real failure is.
+// Parameters:
+//   - key: String key to check
+//
+// Returns: Boolean indicating existence and error if check fails
+func (d *DB) Has(key string) (bool, error) {
+	ok, err := d.hasValue(key)
+	if err != nil {
+		// Other error occurred during check
+		logger.Error("Failed to check key %s in LevelDB: %s", key, err.Error())
+		return false, err
+	}
+
 	// Key exists in database
-	return true, nil
+	return ok, nil
 }

@@ -6,6 +6,7 @@ package rawdb
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	database "github.com/sphinxfndorg/protocol/src/core/state"
@@ -32,11 +33,17 @@ func WriteHeader(db *database.DB, h *types.BlockHeader) error {
 }
 
 // ReadHeader looks up a header by hash. Returns an error wrapping
-// ErrNotFound if the key does not exist, distinct from a corrupt-JSON error.
+// ErrNotFound if the key does not exist, distinct from a corrupt-JSON error
+// and from a genuine read failure.
 func ReadHeader(db *database.DB, hash string) (*types.BlockHeader, error) {
-	data, err := db.Get(headerKey(hash))
+	data, err := db.GetQuiet(headerKey(hash))
 	if err != nil {
-		return nil, fmt.Errorf("%w: header %s", ErrNotFound, hash)
+		// A missing header is an expected outcome (probing, backfill
+		// checks, pruning); only real failures are reported as such.
+		if errors.Is(err, database.ErrNotFound) {
+			return nil, fmt.Errorf("%w: header %s", ErrNotFound, hash)
+		}
+		return nil, fmt.Errorf("rawdb: read header %s: %w", hash, err)
 	}
 	var h types.BlockHeader
 	if err := json.Unmarshal(data, &h); err != nil {

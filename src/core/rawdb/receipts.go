@@ -6,6 +6,7 @@ package rawdb
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	database "github.com/sphinxfndorg/protocol/src/core/state"
@@ -70,9 +71,12 @@ func WriteReceipts(batch *database.WriteBatch, hash string, height uint64, txs [
 
 // ReadReceipt looks up a single receipt by tx ID.
 func ReadReceipt(db *database.DB, txID string) (*TxReceipt, error) {
-	data, err := db.Get(receiptKey(txID))
+	data, err := db.GetQuiet(receiptKey(txID))
 	if err != nil {
-		return nil, fmt.Errorf("%w: receipt for tx %s", ErrNotFound, txID)
+		if errors.Is(err, database.ErrNotFound) {
+			return nil, fmt.Errorf("%w: receipt for tx %s", ErrNotFound, txID)
+		}
+		return nil, fmt.Errorf("rawdb: read receipt for tx %s: %w", txID, err)
 	}
 	var r TxReceipt
 	if err := json.Unmarshal(data, &r); err != nil {

@@ -6,6 +6,7 @@ package rawdb
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	database "github.com/sphinxfndorg/protocol/src/core/state"
@@ -50,9 +51,14 @@ func WriteTxLookupEntries(db *database.DB, block *types.Block) error {
 }
 
 func ReadTxLookupEntry(db *database.DB, txID string) (*TxLookupEntry, error) {
-	data, err := db.Get(txLookupKey(txID))
+	// Quietly: this is the first thing every transaction lookup tries, and
+	// an uncommitted or unknown tx is a miss, not a problem to report.
+	data, err := db.GetQuiet(txLookupKey(txID))
 	if err != nil {
-		return nil, fmt.Errorf("%w: tx %s", ErrNotFound, txID)
+		if errors.Is(err, database.ErrNotFound) {
+			return nil, fmt.Errorf("%w: tx %s", ErrNotFound, txID)
+		}
+		return nil, fmt.Errorf("rawdb: read tx lookup entry %s: %w", txID, err)
 	}
 	var entry TxLookupEntry
 	if err := json.Unmarshal(data, &entry); err != nil {

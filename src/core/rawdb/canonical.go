@@ -5,6 +5,7 @@
 package rawdb
 
 import (
+	"errors"
 	"fmt"
 
 	database "github.com/sphinxfndorg/protocol/src/core/state"
@@ -23,17 +24,25 @@ func WriteCanonicalHash(db *database.DB, height uint64, hash string) error {
 }
 
 func ReadCanonicalHash(db *database.DB, height uint64) (string, error) {
-	data, err := db.Get(canonicalKey(height))
+	data, err := db.GetQuiet(canonicalKey(height))
 	if err != nil {
-		return "", fmt.Errorf("%w: canonical hash at height %d", ErrNotFound, height)
+		// Range scans and pruning walk every height, so an absent one is
+		// routine rather than an error worth logging.
+		if errors.Is(err, database.ErrNotFound) {
+			return "", fmt.Errorf("%w: canonical hash at height %d", ErrNotFound, height)
+		}
+		return "", fmt.Errorf("rawdb: read canonical hash at height %d: %w", height, err)
 	}
 	return string(data), nil
 }
 
 func ReadHeightByHash(db *database.DB, hash string) (uint64, error) {
-	data, err := db.Get(heightLookupKey(hash))
+	data, err := db.GetQuiet(heightLookupKey(hash))
 	if err != nil {
-		return 0, fmt.Errorf("%w: height for hash %s", ErrNotFound, hash)
+		if errors.Is(err, database.ErrNotFound) {
+			return 0, fmt.Errorf("%w: height for hash %s", ErrNotFound, hash)
+		}
+		return 0, fmt.Errorf("rawdb: read height for hash %s: %w", hash, err)
 	}
 	return decodeHeight(string(data))
 }
@@ -46,9 +55,12 @@ func WriteHeadBlockHash(db *database.DB, hash string) error {
 }
 
 func ReadHeadBlockHash(db *database.DB) (string, error) {
-	data, err := db.Get(headBlockKey)
+	data, err := db.GetQuiet(headBlockKey)
 	if err != nil {
-		return "", fmt.Errorf("%w: head block hash", ErrNotFound)
+		if errors.Is(err, database.ErrNotFound) {
+			return "", fmt.Errorf("%w: head block hash", ErrNotFound)
+		}
+		return "", fmt.Errorf("rawdb: read head block hash: %w", err)
 	}
 	return string(data), nil
 }
@@ -61,9 +73,12 @@ func WriteHeadHeaderHash(db *database.DB, hash string) error {
 }
 
 func ReadHeadHeaderHash(db *database.DB) (string, error) {
-	data, err := db.Get(headHeaderKey)
+	data, err := db.GetQuiet(headHeaderKey)
 	if err != nil {
-		return "", fmt.Errorf("%w: head header hash", ErrNotFound)
+		if errors.Is(err, database.ErrNotFound) {
+			return "", fmt.Errorf("%w: head header hash", ErrNotFound)
+		}
+		return "", fmt.Errorf("rawdb: read head header hash: %w", err)
 	}
 	return string(data), nil
 }
@@ -98,9 +113,12 @@ func ForceWriteGenesisHash(db *database.DB, hash string) error {
 }
 
 func ReadGenesisHash(db *database.DB) (string, error) {
-	data, err := db.Get(genesisHashKey)
+	data, err := db.GetQuiet(genesisHashKey)
 	if err != nil {
-		return "", fmt.Errorf("%w: genesis hash", ErrNotFound)
+		if errors.Is(err, database.ErrNotFound) {
+			return "", fmt.Errorf("%w: genesis hash", ErrNotFound)
+		}
+		return "", fmt.Errorf("rawdb: read genesis hash: %w", err)
 	}
 	return string(data), nil
 }

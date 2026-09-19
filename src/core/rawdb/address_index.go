@@ -78,9 +78,9 @@ func ReadAddressTxHistory(db *database.DB, address string) ([]AddressTxEntry, er
 	}
 	entries := make([]AddressTxEntry, 0, len(keys))
 	for _, k := range keys {
-		data, err := db.Get(k)
+		data, err := db.GetQuiet(k)
 		if err != nil {
-			continue // skip corrupt entries rather than aborting
+			continue // skip vanished or unreadable entries rather than aborting
 		}
 		var entry AddressTxEntry
 		if err := json.Unmarshal(data, &entry); err != nil {

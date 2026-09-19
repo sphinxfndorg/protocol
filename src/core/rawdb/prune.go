@@ -5,6 +5,7 @@
 package rawdb
 
 import (
+	"errors"
 	"fmt"
 
 	database "github.com/sphinxfndorg/protocol/src/core/state"
@@ -33,11 +34,16 @@ func PruneBodies(db *database.DB, pruneHeight uint64) (int, error) {
 
 	for height := uint64(0); height <= pruneHeight; height++ {
 		canonKey := canonicalKey(height)
-		hashData, err := db.Get(canonKey)
+		hashData, err := db.GetQuiet(canonKey)
 		if err != nil {
 			// No canonical entry at this height — either genesis not yet
-			// stored or gap. Skip silently.
-			continue
+			// stored or gap. Skip silently: this loop walks every height up
+			// to pruneHeight, most of which have nothing to prune. A real
+			// read failure is not a miss and must not be swallowed.
+			if errors.Is(err, database.ErrNotFound) {
+				continue
+			}
+			return pruned, fmt.Errorf("PruneBodies: Get(%s): %w", canonKey, err)
 		}
 		hash := string(hashData)
 		if hash == "" {

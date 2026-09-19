@@ -6,6 +6,7 @@ package rawdb
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	database "github.com/sphinxfndorg/protocol/src/core/state"
@@ -30,9 +31,12 @@ func WriteBody(db *database.DB, hash string, b *types.BlockBody) error {
 }
 
 func ReadBody(db *database.DB, hash string) (*types.BlockBody, error) {
-	data, err := db.Get(bodyKey(hash))
+	data, err := db.GetQuiet(bodyKey(hash))
 	if err != nil {
-		return nil, fmt.Errorf("%w: body %s", ErrNotFound, hash)
+		if errors.Is(err, database.ErrNotFound) {
+			return nil, fmt.Errorf("%w: body %s", ErrNotFound, hash)
+		}
+		return nil, fmt.Errorf("rawdb: read body %s: %w", hash, err)
 	}
 	var body types.BlockBody
 	if err := json.Unmarshal(data, &body); err != nil {

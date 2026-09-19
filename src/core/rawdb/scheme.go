@@ -50,10 +50,38 @@ func decodeHeight(s string) (uint64, error) {
 	return binary.BigEndian.Uint64(buf), nil
 }
 
+// encodeIndex returns the fixed-width, hex-encoded big-endian
+// representation of a transaction's position within its block, used as the
+// final component of an address→tx key so that keys for one address sort by
+// height and then by position within the block.
+func encodeIndex(index int) string {
+	buf := make([]byte, 4)
+	binary.BigEndian.PutUint32(buf, uint32(index))
+	return hex.EncodeToString(buf)
+}
+
 func headerKey(hash string) string       { return headerPrefix + hash }
 func bodyKey(hash string) string         { return bodyPrefix + hash }
 func canonicalKey(height uint64) string  { return canonicalPrefix + encodeHeight(height) }
 func heightLookupKey(hash string) string { return heightLookupPrefix + hash }
 func txLookupKey(txID string) string     { return txLookupPrefix + txID }
-func addressTxKey(addr string) string    { return addressTxPrefix + addr }
 func receiptKey(hash string) string      { return receiptPrefix + hash }
+
+// addressTxKey is the exact key for one (address, blockHeight, txIndex)
+// tuple. The trailing ':' after the address terminates it, so a prefix scan
+// for "xAlice" cannot also match "xAlice2", and the fixed-width components
+// make lexicographic order match height/index order.
+func addressTxKey(addr string, height uint64, index int) string {
+	return addressTxScanPrefix(addr) + encodeHeight(height) + ":" + encodeIndex(index)
+}
+
+// addressTxKeySuffixLen is the fixed length of the height:index portion of
+// an address→tx key: 16 hex chars of height, the ':' separator, and 8 hex
+// chars of index.
+const addressTxKeySuffixLen = 16 + 1 + 8
+
+// addressTxScanPrefix is the exact scan prefix for one address's history.
+// Iterating it in reverse yields that address's most recent activity first.
+func addressTxScanPrefix(addr string) string {
+	return addressTxPrefix + addr + ":"
+}

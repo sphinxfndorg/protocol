@@ -13,30 +13,35 @@ import (
 )
 
 // AddressTxEntry records a single transaction involving an address.
-// The index stores one entry per (address, blockHeight, txIndex) tuple so
-// that GetTransactionHistory can resolve history in O(N) where N is the
-// number of relevant transactions, not O(chain height).
 //
-// Key format: "addrtx:<address>"
-// Value: JSON array of AddressTxEntry, ordered by blockHeight ascending.
-// The index is append-only within each batch write; on read the entries
-// are already sorted by construction.
+// One entry is stored per (address, blockHeight, txIndex), under a key that
+// carries all three; the value repeats only what the key does not:
+//
+//	Key:   "addrtx:<address>:<8-byte hex height>:<4-byte hex txIndex>"
+//	Value: {"tx_id":...,"sender":...,"receiver":...}
+//
+// The trailing ':' after the address terminates it, and the fixed-width
+// big-endian components make lexicographic key order match height/index
+// order — so a reverse, limited scan returns an address's most recent
+// activity without reading whole blocks or sorting anything.
 type AddressTxEntry struct {
-	BlockHash   string `json:"block_hash"`
-	BlockHeight uint64 `json:"block_height"`
-	TxIndex     int    `json:"tx_index"` // position within BlockBody.TxsList
-	TxID        string `json:"tx_id"`    // transaction ID for direct lookup
-	Sender      string `json:"sender"`
-	Receiver    string `json:"receiver"`
+	TxID     string `json:"tx_id"`
+	Sender   string `json:"sender"`
+	Receiver string `json:"receiver"`
 }
 
-// addressTxPrefix is defined in scheme.go.
+// addressTxPrefix and the key builders are defined in scheme.go.
+
+// addressable reports whether addr is worth indexing. An empty address
+// would otherwise create a single "addrtx::" key shared by every such
+// transaction in the chain.
+func addressable(addr string) bool { return addr != "" }
 
 // WriteAddressTxIndex writes address→tx index entries for every
-// transaction in the block. Each unique sender and receiver gets an
-// entry. Called from WriteBlock (part of the same atomic batch).
+// transaction in the block, for both its sender and its receiver. Called
+// from WriteBlock, so the entries land in the same atomic batch as the
+// header and body.
 func WriteAddressTxIndex(batch *database.WriteBatch, block *types.Block) error {
-	hash := block.GetHash()
 	height := block.GetHeight()
 
 	for i, tx := range block.Body.TxsList {
@@ -44,64 +49,75 @@ func WriteAddressTxIndex(batch *database.WriteBatch, block *types.Block) error {
 			continue
 		}
 		entry := AddressTxEntry{
-			BlockHash:   hash,
-			BlockHeight: height,
-			TxIndex:     i,
-			TxID:        tx.ID,
-			Sender:      tx.Sender,
-			Receiver:    tx.Receiver,
+			TxID:     tx.ID,
+			Sender:   tx.Sender,
+			Receiver: tx.Receiver,
 		}
 		data, err := json.Marshal(entry)
 		if err != nil {
 			return fmt.Errorf("rawdb: marshal addrtx entry for tx %s: %w", tx.ID, err)
 		}
-		batch.Put(addressTxKey(tx.Sender), data)
-		if tx.Receiver != "" && tx.Receiver != tx.Sender {
-			batch.Put(addressTxKey(tx.Receiver), data)
+		if addressable(tx.Sender) {
+			batch.Put(addressTxKey(tx.Sender, height, i), data)
+		}
+		if addressable(tx.Receiver) && tx.Receiver != tx.Sender {
+			batch.Put(addressTxKey(tx.Receiver, height, i), data)
 		}
 	}
 	return nil
 }
 
-// ReadAddressTxHistory returns all address→tx entries for the given
-// address. These entries are returned unsorted (they were inserted in
-// block order, so iteration happens to be chronological, but callers
-// should not rely on that for correctness).
+// ReadAddressTxHistory returns up to limit of address's indexed
+// transactions, newest first. limit <= 0 returns every entry.
 //
-// The function does NOT take the caller's limit as a parameter; filtering
-// by limit is the caller's responsibility. This design keeps the storage
-// layer simple — a single scan of the prefix range.
-func ReadAddressTxHistory(db *database.DB, address string) ([]AddressTxEntry, error) {
-	keys, err := db.ListKeysWithPrefix(addressTxPrefix + address)
-	if err != nil {
-		return nil, fmt.Errorf("rawdb: list addrtx keys for %s: %w", address, err)
+// The scan is a single bounded reverse iteration over the address's key
+// prefix, so it costs the number of entries actually returned rather than
+// the length of the chain. Corrupt entries are skipped rather than aborting
+// the whole read; a failure of the underlying scan is returned.
+func ReadAddressTxHistory(db *database.DB, address string, limit int) ([]AddressTxEntry, error) {
+	if !addressable(address) {
+		return nil, fmt.Errorf("rawdb: empty address")
 	}
-	entries := make([]AddressTxEntry, 0, len(keys))
-	for _, k := range keys {
-		data, err := db.GetQuiet(k)
-		if err != nil {
-			continue // skip vanished or unreadable entries rather than aborting
+
+	prefix := addressTxScanPrefix(address)
+	entries := make([]AddressTxEntry, 0, 16)
+	err := db.IterateEntriesWithPrefixReverse(prefix, func(key string, value []byte) bool {
+		// Trust only keys of the exact shape this writer produces. A key
+		// left by an older, address-only layout can fall inside this range
+		// (e.g. "addrtx:xAlice:something" for an address containing ':'),
+		// and its value must not be served as history.
+		if len(key) != len(prefix)+addressTxKeySuffixLen {
+			return true
 		}
 		var entry AddressTxEntry
-		if err := json.Unmarshal(data, &entry); err != nil {
-			continue // skip corrupt entries
+		if err := json.Unmarshal(value, &entry); err != nil {
+			return true // skip corrupt entries, keep scanning
 		}
 		entries = append(entries, entry)
+		return limit <= 0 || len(entries) < limit
+	})
+	if err != nil {
+		return nil, fmt.Errorf("rawdb: read addrtx history for %s: %w", address, err)
 	}
 	return entries, nil
 }
 
-// DeleteAddressTxIndex removes all address→tx index entries for every
-// transaction in the block. Called from DeleteBlock (part of the same
-// atomic batch).
+// DeleteAddressTxIndex removes every address→tx index entry written for
+// block's transactions. It must reconstruct the identical keys
+// WriteAddressTxIndex wrote — including the block height and each
+// transaction's position — or it would leave orphans behind.
 func DeleteAddressTxIndex(batch *database.WriteBatch, block *types.Block) {
-	for _, tx := range block.Body.TxsList {
+	height := block.GetHeight()
+
+	for i, tx := range block.Body.TxsList {
 		if tx == nil {
 			continue
 		}
-		batch.Delete(addressTxKey(tx.Sender))
-		if tx.Receiver != "" && tx.Receiver != tx.Sender {
-			batch.Delete(addressTxKey(tx.Receiver))
+		if addressable(tx.Sender) {
+			batch.Delete(addressTxKey(tx.Sender, height, i))
+		}
+		if addressable(tx.Receiver) && tx.Receiver != tx.Sender {
+			batch.Delete(addressTxKey(tx.Receiver, height, i))
 		}
 	}
 }

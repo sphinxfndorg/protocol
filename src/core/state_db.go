@@ -14,6 +14,7 @@ import (
 
 	"github.com/sphinxfndorg/protocol/src/common"
 	logger "github.com/sphinxfndorg/protocol/src/console"
+	"github.com/sphinxfndorg/protocol/src/core/rawdb"
 	database "github.com/sphinxfndorg/protocol/src/core/state"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
 	"github.com/sphinxfndorg/protocol/src/pool"
@@ -466,7 +467,17 @@ func (s *StateDB) GetBalanceResult(address string) (*pool.BalanceResult, error) 
 	return result, nil
 }
 
-// GetTransactionHistory returns recent transactions involving the given address.
+// GetTransactionHistory returns recent transactions involving the given
+// address, newest first, capped at limit.
+//
+// It reads the rawdb address→tx index, which is a single bounded reverse
+// scan over that address's entries — so the cost is the number of
+// transactions returned, not the length of the chain, and activity older
+// than the old 1000-block window is no longer silently missing.
+//
+// Nodes whose chain predates the index fall back to the original bounded
+// in-memory block scan, so an un-backfilled node returns exactly what it
+// did before.
 func (s *StateDB) GetTransactionHistory(address string, limit int) ([]*types.Transaction, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -485,35 +496,32 @@ func (s *StateDB) GetTransactionHistory(address string, limit int) ([]*types.Tra
 		return txs, nil
 	}
 
-	// Search blocks from newest to oldest
-	height := s.blockchain.GetBlockCount()
-	blocksScanned := uint64(0)
-	maxBlocksToScan := uint64(1000)
-
-	for height > 0 && len(txs) < limit && blocksScanned < maxBlocksToScan {
-		block := s.blockchain.GetBlockByNumber(height)
-		if block == nil {
-			height--
-			continue
+	// Indexed path.
+	if s.db != nil {
+		entries, err := rawdb.ReadAddressTxHistory(s.db, address, limit)
+		if err != nil {
+			logger.Debug("GetTransactionHistory(%s): address index unavailable: %v",
+				shortAddress(address), err)
 		}
-
-		for i := len(block.Body.TxsList) - 1; i >= 0; i-- {
-			tx := block.Body.TxsList[i]
-			if tx == nil {
+		for _, entry := range entries {
+			if len(txs) >= limit {
+				break
+			}
+			if txMap[entry.TxID] {
 				continue
 			}
-			if tx.Sender == address || tx.Receiver == address {
-				if !txMap[tx.ID] {
-					txMap[tx.ID] = true
-					txs = append(txs, tx)
-					if len(txs) >= limit {
-						break
-					}
-				}
+			tx, err := s.blockchain.storage.GetTransaction(entry.TxID)
+			if err != nil || tx == nil {
+				continue // index entry for a block that has since been pruned
 			}
+			txMap[entry.TxID] = true
+			txs = append(txs, tx)
 		}
-		height--
-		blocksScanned++
+	}
+
+	// Fallback path, only when the index yielded nothing.
+	if len(txs) == 0 {
+		txs = s.scanRecentBlocksForAddress(address, limit, txMap)
 	}
 
 	// Check mempool for pending transactions
@@ -537,9 +545,61 @@ func (s *StateDB) GetTransactionHistory(address string, limit int) ([]*types.Tra
 	})
 
 	logger.Debug("GetTransactionHistory(%s): found %d transactions",
-		address[:16]+"...", len(txs))
+		shortAddress(address), len(txs))
 
 	return txs, nil
+}
+
+// scanRecentBlocksForAddress is the pre-index history lookup: walk the most
+// recent maxBlocksToScan blocks newest-first, collecting non-nil
+// transactions that reference address as sender or receiver. Kept as the
+// fallback for nodes whose address index has not been backfilled.
+func (s *StateDB) scanRecentBlocksForAddress(address string, limit int, seen map[string]bool) []*types.Transaction {
+	const maxBlocksToScan = uint64(1000)
+
+	var txs []*types.Transaction
+	height := s.blockchain.GetBlockCount()
+	blocksScanned := uint64(0)
+
+	for height > 0 && len(txs) < limit && blocksScanned < maxBlocksToScan {
+		block := s.blockchain.GetBlockByNumber(height)
+		height--
+		if block == nil {
+			continue
+		}
+		blocksScanned++
+
+		for i := len(block.Body.TxsList) - 1; i >= 0; i-- {
+			tx := block.Body.TxsList[i]
+			if tx == nil {
+				continue
+			}
+			if tx.Sender != address && tx.Receiver != address {
+				continue
+			}
+			if seen[tx.ID] {
+				continue
+			}
+			seen[tx.ID] = true
+			txs = append(txs, tx)
+			if len(txs) >= limit {
+				break
+			}
+		}
+	}
+	return txs
+}
+
+// shortAddress trims an address for logging. It tolerates addresses shorter
+// than the trim width: the previous inline address[:16] panicked on any
+// address under 16 characters, which is every short/test-style address
+// passed in over RPC.
+func shortAddress(address string) string {
+	const keep = 16
+	if len(address) <= keep {
+		return address
+	}
+	return address[:keep] + "..."
 }
 
 // ============================================================================

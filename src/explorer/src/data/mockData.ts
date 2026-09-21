@@ -223,6 +223,7 @@ export function initializeBlockchain() {
         amountNspx: (parseFloat(amount) * 100000000).toFixed(0),
         nonce: isSystem ? 0 : wallets[senderIdx].nonce++,
         timestamp: blockTime,
+        timestampIso: new Date(blockTime * 1000).toISOString(),
         blockHeight: height,
         gasLimit: 85000,
         gasPrice: 15,
@@ -234,7 +235,15 @@ export function initializeBlockchain() {
         merkleRoot: 'mr_' + genHex(32),
         hasFullAuth: true,
         signatureScheme: 'SPHINCS+-128s',
-        returnData: isSystem ? 'Sphinx block reward & quantum signature validation' : (Math.random() > 0.7 ? 'OP_RETURN: Quantum-Proof Token Swap' : undefined)
+        returnData: isSystem ? 'Sphinx block reward & quantum signature validation' : (Math.random() > 0.7 ? 'OP_RETURN: Quantum-Proof Token Swap' : undefined),
+        blockHash: blockHash,
+        confirmations: height === 0 ? 0 : 1,
+        feeSpx: (0.001275).toFixed(8),
+        feeNspx: '1275000000',
+        proof: 'proof_' + genHex(64),
+        gasUsed: 85000,
+        burnedThisTxSpx: '0',
+        burnedThisTxNspx: '0',
       };
 
       // Apply balances
@@ -254,8 +263,9 @@ export function initializeBlockchain() {
       hash: blockHash,
       parentHash: prevHash,
       timestamp: blockTime,
+      timestampIso: new Date(blockTime * 1000).toISOString(),
       difficulty: '8.45T (SPHINCS+ validated)',
-      nonce: 'pq_nonce_' + genHex(16),
+      nonce: i,
       gasLimit: 25000000,
       gasUsed: blockTxs.reduce((acc, tx) => acc + tx.gasLimit, 0),
       proposer,
@@ -264,7 +274,22 @@ export function initializeBlockchain() {
       chainWeight: (i * 240 + 10000).toString(),
       commitStatus: i === 0 ? 'pending' : (i < 3 ? 'committed' : 'finalized'),
       txCount,
-      signatureScheme: signatureScheme as any
+      signatureScheme: signatureScheme as any,
+      version: 1,
+      unclesHash: '0x' + '0'.repeat(64),
+      sigValid: true,
+      attestationCount: 3,
+      confirmations: i,
+      age: `${i * 15}s ago`,
+      ageSec: i * 15,
+      burnedThisBlockSpx: '0.25',
+      burnedThisBlockNspx: '250000000000000000',
+      burnedBeforeNspx: (BigInt(i) * BigInt('250000000000000000')).toString(),
+      blockRewardSpx: '12.5',
+      blockRewardNspx: '12500000000',
+      extraData: '0x',
+      miner: proposer,
+      gasPrice: '1000000000'
     };
 
     blocks.unshift(block);
@@ -285,6 +310,7 @@ export function initializeBlockchain() {
       amountNspx: (parseFloat(amount) * 100000000).toFixed(0),
       nonce: wallets[senderIdx].nonce++,
       timestamp: now - Math.floor(Math.random() * 5),
+      timestampIso: new Date((now - Math.floor(Math.random() * 5)) * 1000).toISOString(),
       blockHeight: -1,
       gasLimit: 85000,
       gasPrice: 16,
@@ -296,7 +322,11 @@ export function initializeBlockchain() {
       merkleRoot: 'mr_' + genHex(32),
       hasFullAuth: true,
       signatureScheme: 'SPHINCS+-128s',
-      returnData: Math.random() > 0.5 ? 'OP_RETURN: Safe Vault Transfer' : undefined
+      returnData: Math.random() > 0.5 ? 'OP_RETURN: Safe Vault Transfer' : undefined,
+      blockHash: '',
+      confirmations: 0,
+      feeSpx: '0.00136000',
+      feeNspx: '1360000'
     });
   }
 
@@ -319,7 +349,16 @@ export function initializeBlockchain() {
     chainId: 'sphinx-post-quantum-1',
     symbol: 'SPX',
     genesisHash: '0x_genesis_' + genHex(48),
-    syncMode: 'Fully Audited (SPHINCS+ Hash Signature Verified)'
+    syncMode: 'Fully Audited (SPHINCS+ Hash Signature Verified)',
+    burnAddress: 'DEAD 262C 098D 17D0 D99F 315C D9B7 C4D9 AEDA 685A 65FD 8630 DEFD CE21 F984 60B1 FA30',
+    burnedSpx: '37.5',
+    burnedNspx: '37500019956267073340',
+    circulatingSpx: '1240004251.31',
+    circulatingNspx: '1240004251318805729249514187',
+    totalSupplySpx: '1240004288.81',
+    totalSupplyNspx: '1240004288318805729249514187',
+    maxSupplySpx: '500000000',
+    burnPercent: 0.000003
   };
 }
 
@@ -363,6 +402,7 @@ export function mineNewBlock() {
     amountNspx: '1250000000',
     nonce: 0,
     timestamp: now,
+    timestampIso: new Date(now * 1000).toISOString(),
     blockHeight: nextHeight,
     gasLimit: 85000,
     gasPrice: 0,
@@ -374,7 +414,14 @@ export function mineNewBlock() {
     merkleRoot: 'mr_cb_' + genHex(32),
     hasFullAuth: true,
     signatureScheme: 'SPHINCS+-128s',
-    returnData: 'SPHINCS+ Coinbase block reward to validator node'
+    returnData: 'SPHINCS+ Coinbase block reward to validator node',
+    blockHash: blockHash,
+    confirmations: 0,
+    feeSpx: '0.00000000',
+    feeNspx: '0',
+    gasUsed: 85000,
+    burnedThisTxSpx: '0',
+    burnedThisTxNspx: '0'
   };
 
   blockTxs.unshift(coinbaseTx);
@@ -397,8 +444,9 @@ export function mineNewBlock() {
     hash: blockHash,
     parentHash,
     timestamp: now,
+    timestampIso: new Date(now * 1000).toISOString(),
     difficulty: '8.48T (SPHINCS+ validated)',
-    nonce: 'pq_nonce_' + genHex(16),
+    nonce: nextHeight,
     gasLimit: 25000000,
     gasUsed: blockTxs.reduce((acc, tx) => acc + tx.gasLimit, 0),
     proposer,
@@ -407,7 +455,18 @@ export function mineNewBlock() {
     chainWeight: (parseInt(blocks[0].chainWeight) + 240).toString(),
     commitStatus: 'pending',
     txCount: blockTxs.length,
-    signatureScheme: 'SPHINCS+-128s'
+    signatureScheme: 'SPHINCS+-128s',
+    version: 1,
+    unclesHash: '0x' + '0'.repeat(64),
+    sigValid: true,
+    attestationCount: 0,
+    confirmations: 0,
+    age: 'Just now',
+    ageSec: 0,
+    burnedThisBlockSpx: '0',
+    burnedThisBlockNspx: '0',
+    blockRewardSpx: rewardAmount,
+    blockRewardNspx: '1250000000'
   };
 
   // Update previous block commit statuses
@@ -435,6 +494,7 @@ export function mineNewBlock() {
       amountNspx: (parseFloat(amount) * 100000000).toFixed(0),
       nonce: wallets[senderIdx].nonce++,
       timestamp: now,
+      timestampIso: new Date(now * 1000).toISOString(),
       blockHeight: -1,
       gasLimit: 85000,
       gasPrice: 15,
@@ -446,7 +506,11 @@ export function mineNewBlock() {
       merkleRoot: 'mr_' + genHex(32),
       hasFullAuth: true,
       signatureScheme: 'SPHINCS+-128s',
-      returnData: Math.random() > 0.6 ? 'OP_RETURN: Encrypted Quantum Vault Seed' : undefined
+      returnData: Math.random() > 0.6 ? 'OP_RETURN: Encrypted Quantum Vault Seed' : undefined,
+      blockHash: '',
+      confirmations: 0,
+      feeSpx: '0.00127500',
+      feeNspx: '1275000'
     });
   }
 

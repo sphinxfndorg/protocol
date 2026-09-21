@@ -4,8 +4,8 @@
  */
 
 import { Transaction } from '../types';
-import { ArrowLeft, Copy, Clock, Database, Tag, Shield, FileCode, CheckCircle, HelpCircle } from 'lucide-react';
-import { formatTimeAgo } from '../utils/formatters';
+import { ArrowLeft, Copy, Clock, Database, Tag, Shield, FileCode, CheckCircle, HelpCircle, Flame } from 'lucide-react';
+import { formatTimeAgo, formatSPX, formatConfirmations } from '../utils/formatters';
 
 interface TxDetailProps {
   tx: Transaction;
@@ -204,6 +204,47 @@ export default function TxDetail({
             </div>
           </div>
 
+          {/* Coin & fee economics: what the sender paid, what was consumed as
+              gas, and what share was permanently burned to the DEAD address. */}
+          <div className="bg-slate-900/30 border border-white/5 rounded-2xl p-6 backdrop-blur-md space-y-3">
+            <h3 className="text-xs font-semibold text-slate-500 uppercase tracking-widest font-mono flex items-center gap-2">
+              <Flame className="w-3.5 h-3.5 text-brand-red" />
+              Coin Economics
+            </h3>
+            <div className="grid grid-cols-2 gap-2 text-xs font-mono">
+              <div className="bg-slate-950 border border-white/5 rounded-lg p-2.5">
+                <span className="text-[10px] text-slate-500 block mb-0.5">FEE PAID</span>
+                <span className="text-white font-bold">{formatSPX(tx.feeSpx)}</span>
+              </div>
+              <div className="bg-slate-950 border border-white/5 rounded-lg p-2.5">
+                <span className="text-[10px] text-slate-500 block mb-0.5">GAS USED</span>
+                <span className="text-white font-bold">
+                  {tx.gasUsed !== undefined ? tx.gasUsed.toLocaleString() : '—'}
+                </span>
+              </div>
+              <div className="bg-slate-950 border border-white/5 rounded-lg p-2.5">
+                <span className="text-[10px] text-slate-500 block mb-0.5">GAS LIMIT</span>
+                <span className="text-slate-300 font-bold">{tx.gasLimit.toLocaleString()}</span>
+              </div>
+              <div className="bg-slate-950 border border-brand-red/10 rounded-lg p-2.5">
+                <span className="text-[10px] text-slate-500 block mb-0.5">BURNED</span>
+                <span className="text-brand-red font-bold">{formatSPX(tx.burnedThisTxSpx || '0')}</span>
+              </div>
+            </div>
+            <div className="text-slate-500 font-mono text-[10px] flex justify-between border-t border-white/5 pt-3">
+              <span>Confirmation</span>
+              <span className="text-slate-300">{formatConfirmations(tx.confirmations)}</span>
+            </div>
+            {tx.blockHash && (
+              <button
+                onClick={() => onSelectBlock(tx.blockHeight)}
+                className="text-[10px] font-mono text-brand-cyan hover:text-white transition cursor-pointer text-left"
+              >
+                Included in block #{tx.blockHeight.toLocaleString()} →
+              </button>
+            )}
+          </div>
+
           {/* Secure PQ Attestation seal */}
           <div className="bg-brand-cyan/5 border border-brand-cyan/20 rounded-2xl p-6 backdrop-blur-md space-y-3">
             <div className="flex items-center gap-2">
@@ -340,14 +381,19 @@ export default function TxDetail({
       </div>
 
       {/* 4. OP_RETURN Custom Data Block */}
-      {tx.returnData && (
+      {(tx.returnData || tx.returnDataText) && (
         <div className="bg-slate-900/30 border border-white/5 rounded-2xl p-6 backdrop-blur-md">
-          <h2 className="text-base font-semibold text-white flex items-center gap-2 mb-4">
-            <FileCode className="w-4 h-4 text-brand-cyan" />
-            OP_RETURN Mapped Data (Decoded ASCII)
-          </h2>
-          <div className="bg-slate-950 border border-white/5 rounded-xl p-4 font-mono text-xs text-brand-cyan">
-            {tx.returnData}
+          <div className="flex items-center justify-between gap-3 mb-4">
+            <h2 className="text-base font-semibold text-white flex items-center gap-2">
+              <FileCode className="w-4 h-4 text-brand-cyan" />
+              OP_RETURN Mapped Data
+            </h2>
+            <span className="text-[10px] font-mono uppercase text-slate-500 border border-white/5 rounded px-2 py-0.5">
+              {tx.returnDataKind || 'memo'}
+            </span>
+          </div>
+          <div className="bg-slate-950 border border-white/5 rounded-xl p-4 font-mono text-xs text-brand-cyan break-all whitespace-pre-wrap max-h-64 overflow-y-auto scrollbar-thin">
+            {tx.returnDataText || tx.returnData}
           </div>
         </div>
       )}

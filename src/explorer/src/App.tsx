@@ -27,6 +27,10 @@ export default function App() {
   // Global blockchain state
   const [stats, setStats] = useState<NetworkStats | null>(null);
   const [blocks, setBlocks] = useState<Block[]>([]);
+  // Full detail payloads (header + body + attestations) keyed by height, so a
+  // block page can render burn totals, the reward split and its transactions
+  // without re-fetching on every navigation.
+  const [blockDetails, setBlockDetails] = useState<Record<number, api.BlockDetailPayload>>({});
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [mempool, setMempool] = useState<Transaction[]>([]);
   const [validators, setValidators] = useState<Validator[]>([]);
@@ -70,43 +74,22 @@ export default function App() {
       // Collect all transactions: start with mempool txs, then add block txs
       const allTxs: Transaction[] = [...mempoolData];
 
-      // For richer data, fetch the first 5 recent blocks with full detail (includes txs)
+      // For richer data, fetch recent blocks with full detail through the API
+      // layer (which maps burn totals, the coinbase reward split, gas, and the
+      // decoded OP_RETURN payload alongside the full body + attestations). The
+      // resulting payloads are cached so opening a block does not re-fetch.
       const recentBlocks = blocksData.slice(0, 5);
+      const details: Record<number, api.BlockDetailPayload> = {};
       for (const block of recentBlocks) {
-        // fetchBlockByHeight for the backend's /api/v1/explorer/block/:height
-        // which includes the full transaction list in the response
-        const blockDetail = await fetch(`/api/v1/explorer/block/${block.height}`)
-          .then(r => r.json())
-          .catch(() => null);
-        if (blockDetail && blockDetail.transactions) {
-          blockDetail.transactions.forEach((tx: any) => {
-            allTxs.push({
-              txid: tx.txid || '',
-              status: 'success' as const,
-              sender: tx.sender || '',
-              receiver: tx.receiver || '',
-              amountSpx: tx.amount_spx || '0',
-              amountNspx: tx.amount_nspx || '0',
-              nonce: tx.nonce || 0,
-              timestamp: tx.timestamp || blockDetail.header?.timestamp || 0,
-              blockHeight: block.height,
-              gasLimit: Number(blockDetail.header?.gas_limit) || 0,
-              gasPrice: 0,
-              gasFeeSpx: tx.amount_spx || '0',
-              chainId: 'sphinx-post-quantum-1',
-              isSystemTx: tx.is_system_tx || false,
-              signature: tx.signature || '',
-              publicKey: tx.public_key || '',
-              merkleRoot: tx.merkle_root || '',
-              hasFullAuth: tx.has_full_auth || false,
-              signatureScheme: 'SPHINCS+-128s' as const,
-            });
-          });
-        }
+        const detail = await api.fetchBlockDetail(block.height);
+        if (!detail) continue;
+        details[block.height] = detail;
+        detail.transactions.forEach((tx) => allTxs.push(tx));
       }
 
       setStats(statsData);
       setBlocks(blocksData);
+      setBlockDetails(details);
       setMempool(mempoolData);
       setValidators(validatorsData);
       setWallets(walletsData);
@@ -139,6 +122,31 @@ export default function App() {
     }, 1000);
     return () => clearInterval(interval);
   }, []);
+
+  // Load the full detail payload for a block the moment it is selected. Recent
+  // blocks are already cached by fetchAllData; older blocks (and deep links)
+  // resolve here so burn totals, the reward split and the transaction body are
+  // always available on the block page.
+  useEffect(() => {
+    if (selectedBlockHeight === null) return;
+    if (blockDetails[selectedBlockHeight]) return;
+
+    let cancelled = false;
+    (async () => {
+      const detail = await api.fetchBlockDetail(selectedBlockHeight);
+      if (cancelled || !detail) return;
+      setBlockDetails(prev => ({ ...prev, [selectedBlockHeight]: detail }));
+      setTransactions(prev => {
+        const known = new Set(prev.map(t => t.txid));
+        const additions = detail.transactions.filter(t => !known.has(t.txid));
+        return additions.length > 0 ? [...prev, ...additions] : prev;
+      });
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedBlockHeight, blockDetails]);
 
   // Perform search query resolution via backend
   const handleSearch = async (query: string) => {
@@ -299,15 +307,25 @@ export default function App() {
         <div id="explorer-core">
           
           {/* A. Subviews rendering (Blocks / Txs / Addresses details) */}
-          {selectedBlockHeight !== null && (
-            <BlockDetail
-              block={blocks.find(b => b.height === selectedBlockHeight) || blocks[0]}
-              blockTxs={transactions.filter(t => t.blockHeight === selectedBlockHeight)}
-              onBack={clearDetailViews}
-              onSelectTx={setSelectedTxId}
-              onSelectAddress={setSelectedAddress}
-            />
-          )}
+          {selectedBlockHeight !== null && (() => {
+            const detail = blockDetails[selectedBlockHeight];
+            const block = detail?.block
+              || blocks.find(b => b.height === selectedBlockHeight)
+              || blocks[0];
+            if (!block) return null;
+            const blockTxs = detail?.transactions
+              ?? transactions.filter(t => t.blockHeight === selectedBlockHeight);
+            return (
+              <BlockDetail
+                block={block}
+                blockTxs={blockTxs}
+                attestations={detail?.attestations ?? []}
+                onBack={clearDetailViews}
+                onSelectTx={setSelectedTxId}
+                onSelectAddress={setSelectedAddress}
+              />
+            );
+          })()}
 
           {selectedTxId !== null && (
             <TxDetail
@@ -380,12 +398,41 @@ export default function App() {
                             {block.signatureScheme}
                           </span>
                         </div>
-                        <div className="text-xs font-mono text-slate-500 truncate mb-3">
+                        <div className="text-xs font-mono text-slate-500 truncate mb-2">
                           {block.hash}
+                        </div>
+                        {/* Header commitments: an operator scanning the list needs the
+                            previous-block link, the tx Merkle root and the nonce
+                            without opening every block. */}
+                        <div className="space-y-1 text-[10px] font-mono text-slate-500 mb-3">
+                          <div className="flex justify-between gap-2">
+                            <span className="text-slate-600">Parent</span>
+                            <span className="text-slate-400 truncate">{formatHash(block.parentHash, 10)}</span>
+                          </div>
+                          <div className="flex justify-between gap-2">
+                            <span className="text-slate-600">Tx Root</span>
+                            <span className="text-slate-400 truncate">{formatHash(block.txsRoot, 10)}</span>
+                          </div>
+                          <div className="flex justify-between gap-2">
+                            <span className="text-slate-600">Nonce</span>
+                            <span className="text-slate-400">{block.nonce.toLocaleString()}</span>
+                          </div>
+                          <div className="flex justify-between gap-2">
+                            <span className="text-slate-600">Time</span>
+                            <span className="text-slate-400">
+                              {block.timestampIso || new Date(block.timestamp * 1000).toISOString()}
+                            </span>
+                          </div>
                         </div>
                         <div className="flex justify-between items-center text-[11px] text-slate-400 font-mono border-t border-white/5 pt-3">
                           <span>{block.txCount} txs packed</span>
                           <span>Gas: {block.gasLimit > 0 ? ((block.gasUsed / block.gasLimit) * 100).toFixed(0) : 0}%</span>
+                        </div>
+                        <div className="flex justify-between items-center text-[11px] font-mono border-t border-white/5 pt-2 mt-2">
+                          <span className="text-slate-600">Burned</span>
+                          <span className={block.burnedThisBlockSpx && parseFloat(block.burnedThisBlockSpx) > 0 ? 'text-brand-red' : 'text-slate-600'}>
+                            {block.burnedThisBlockSpx ? `${parseFloat(block.burnedThisBlockSpx).toFixed(6)} SPX` : '—'}
+                          </span>
                         </div>
                       </button>
                     ))}

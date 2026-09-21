@@ -504,6 +504,16 @@ func (jm *JournalManager) IsInProgress() bool {
 	return jm.inProgress
 }
 
+// JournalDir returns the journal directory holding per-block atomic-commit
+// journals (tx_<hashprefix>.json). The path is exposed so read-only consumers
+// (e.g. the explorer API) can surface the human-auditable burn totals each
+// journal records without going through the write path.
+func (jm *JournalManager) JournalDir() string {
+	jm.mu.Lock()
+	defer jm.mu.Unlock()
+	return jm.journalDir
+}
+
 // GetStateChanges returns the state changes recorded so far
 func (jm *JournalManager) GetStateChanges() []StateChangeJournal {
 	jm.mu.Lock()

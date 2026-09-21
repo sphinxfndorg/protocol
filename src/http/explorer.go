@@ -6,9 +6,14 @@
 package http
 
 import (
+	"bytes"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"math/big"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -16,7 +21,10 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/sphinxfndorg/protocol/src/common"
 	"github.com/sphinxfndorg/protocol/src/core"
+	"github.com/sphinxfndorg/protocol/src/core/rawdb"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
+	denom "github.com/sphinxfndorg/protocol/src/params/denom"
+	"github.com/sphinxfndorg/protocol/src/policy"
 )
 
 // registerExplorerRoutes adds all block explorer API endpoints to the Gin router.
@@ -156,6 +164,23 @@ func (s *Server) handleExplorerStats(c *gin.Context) {
 		"active_wallets":       0,
 		"wallets_with_balance": 0,
 	}
+
+	// burnStats is the supply/burn panel the dashboard reads. It is populated
+	// only when state is readable; the shape is defined up front so clients can
+	// bind to the keys unconditionally instead of guarding every access.
+	burnStats := gin.H{
+		"address":           common.DefaultBurnAddress,
+		"burned_nspx":       "0",
+		"burned_spx":        "0",
+		"circulating_nspx":  "0",
+		"circulating_spx":   "0",
+		"total_supply_nspx": "0",
+		"total_supply_spx":  "0",
+		"max_supply_spx":    core.GetMaxSupplySPX().String(),
+		"max_supply_nspx":   core.GetMaxSupplyNSPX().String(),
+		"burn_percent":      0.0,
+	}
+
 	stateDB, err := bc.NewStateDB()
 	if err == nil {
 		if sdb, ok := stateDB.(*core.StateDB); ok {
@@ -176,20 +201,40 @@ func (s *Server) handleExplorerStats(c *gin.Context) {
 			// Burn accounting: read the canonical DEAD address balance, which
 			// is the single auditable source of burned supply (fee burns +
 			// block-reward burns + manual user burns). Circulating = total - burned.
-			denomSPX := big.NewInt(1e18)
 			burnedNSPX, err := sdb.GetBalance(common.CanonicalAddress(common.DefaultBurnAddress))
 			if err != nil || burnedNSPX == nil {
 				burnedNSPX = big.NewInt(0)
 			}
 			totalSupplyNSPX := sdb.GetTotalSupply()
+			if totalSupplyNSPX == nil {
+				totalSupplyNSPX = big.NewInt(0)
+			}
 			circulatingNSPX := new(big.Int).Sub(totalSupplyNSPX, burnedNSPX)
 			if circulatingNSPX.Sign() < 0 {
 				circulatingNSPX = big.NewInt(0)
 			}
+
+			burnPercent := 0.0
+			if totalSupplyNSPX.Sign() > 0 {
+				ratio, _ := new(big.Float).Quo(
+					new(big.Float).SetInt(burnedNSPX),
+					new(big.Float).SetInt(totalSupplyNSPX),
+				).Float64()
+				burnPercent = ratio * 100
+			}
+
 			walletStats["burned_nspx"] = burnedNSPX.String()
-			walletStats["burned_spx"] = new(big.Float).Quo(new(big.Float).SetInt(burnedNSPX), new(big.Float).SetInt(denomSPX)).Text('f', 18)
+			walletStats["burned_spx"] = nspxToSPXString(burnedNSPX)
 			walletStats["circulating_nspx"] = circulatingNSPX.String()
-			walletStats["circulating_spx"] = new(big.Float).Quo(new(big.Float).SetInt(circulatingNSPX), new(big.Float).SetInt(denomSPX)).Text('f', 18)
+			walletStats["circulating_spx"] = nspxToSPXString(circulatingNSPX)
+
+			burnStats["burned_nspx"] = burnedNSPX.String()
+			burnStats["burned_spx"] = nspxToSPXString(burnedNSPX)
+			burnStats["circulating_nspx"] = circulatingNSPX.String()
+			burnStats["circulating_spx"] = nspxToSPXString(circulatingNSPX)
+			burnStats["total_supply_nspx"] = totalSupplyNSPX.String()
+			burnStats["total_supply_spx"] = nspxToSPXString(totalSupplyNSPX)
+			burnStats["burn_percent"] = burnPercent
 		}
 		stateDB.Close()
 	}
@@ -220,11 +265,9 @@ func (s *Server) handleExplorerStats(c *gin.Context) {
 		"current_time_iso": time.Now().UTC().Format(time.RFC3339),
 		// Burn accounting — DEAD address balance is the single auditable burn
 		// total across fee burns, block-reward burns, and manual user burns.
-		"burn": gin.H{
-			"address":          common.DefaultBurnAddress,
-			"total_supply_nspx": walletStats["total_supply_nspx"],
-			"total_supply_spx":  walletStats["total_supply_spx"],
-		},
+		// The full panel (burned / circulating / supply cap) is emitted so the
+		// explorer never has to derive supply figures client-side.
+		"burn": burnStats,
 	})
 }
 
@@ -276,7 +319,11 @@ func (s *Server) handleExplorerBlocks(c *gin.Context) {
 		if block == nil {
 			continue
 		}
-		blocks = append(blocks, formatBlockSummary(block))
+		summary := formatBlockSummary(bc, block)
+		// Confirmation depth is chain-relative: the formatter only sees one
+		// block, so the list handler stamps it from the chain tip.
+		summary["confirmations"] = confirmationsForHeight(blockCount, block.GetHeight())
+		blocks = append(blocks, summary)
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -312,7 +359,9 @@ func (s *Server) handleExplorerBlockByHeight(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, formatBlockDetail(block))
+	detail := formatBlockDetail(bc, block)
+	stampBlockConfirmations(detail, bc.GetBlockCount())
+	c.JSON(http.StatusOK, detail)
 }
 
 // ============================================================================
@@ -342,7 +391,9 @@ func (s *Server) handleExplorerBlockByHash(c *gin.Context) {
 	// Convert to types.Block via helper
 	if helper, ok := block.(*core.BlockHelper); ok {
 		if underlying, ok := helper.GetUnderlyingBlock().(*types.Block); ok {
-			c.JSON(http.StatusOK, formatBlockDetail(underlying))
+			detail := formatBlockDetail(bc, underlying)
+			stampBlockConfirmations(detail, bc.GetBlockCount())
+			c.JSON(http.StatusOK, detail)
 			return
 		}
 	}
@@ -371,6 +422,8 @@ func (s *Server) handleExplorerTransaction(c *gin.Context) {
 	tx, err := bc.GetTransactionByIDString(txid)
 	status := "success"
 	blockHeight := uint64(0)
+	blockHash := ""
+	haveBlockRef := false
 
 	if err != nil || tx == nil {
 		// Check mempool (pending)
@@ -399,61 +452,63 @@ func (s *Server) handleExplorerTransaction(c *gin.Context) {
 			return
 		}
 	} else {
-		// Find which block contains this transaction
-		blockCount := bc.GetBlockCount()
-		for h := blockCount; h > 0; h-- {
-			block := bc.GetBlockByNumber(h - 1)
-			if block == nil {
-				continue
-			}
-			for _, btx := range block.Body.TxsList {
-				if btx != nil && btx.ID == txid {
-					blockHeight = block.GetHeight()
-					break
-				}
-			}
-			if blockHeight > 0 {
-				break
-			}
+		// Resolve the committing block through the tx-lookup index (O(1) when
+		// present) rather than walking every block on the chain. GetTxBlockInfo
+		// falls back to a full scan for chains that predate the index, so
+		// un-migrated nodes keep working. When neither path resolves the block,
+		// the response reports no block reference — and therefore no
+		// confirmations — instead of inventing genesis as the container.
+		if hash, height, cerr := bc.GetTxConfirmation(txid); cerr == nil {
+			blockHash = hash
+			blockHeight = height
+			haveBlockRef = true
 		}
 	}
 
-	// Build response
-	amountSPX := "0"
-	if tx.Amount != nil {
-		amountSPX = new(big.Float).Quo(
-			new(big.Float).SetInt(tx.Amount),
-			new(big.Float).SetFloat64(1e18),
-		).Text('f', 18)
+	// Confirmations are counted from the chain tip down to the committing block;
+	// pending (mempool) transactions have none yet.
+	confirmations := uint64(0)
+	if status == "success" && haveBlockRef {
+		confirmations = confirmationsForHeight(bc.GetBlockCount(), blockHeight)
 	}
 
-	gasFee := "0"
-	if tx.GasPrice != nil && tx.GasLimit != nil {
-		fee := new(big.Int).Mul(tx.GasPrice, tx.GasLimit)
-		gasFee = new(big.Float).Quo(
-			new(big.Float).SetInt(fee),
-			new(big.Float).SetFloat64(1e18),
-		).Text('f', 18)
-	}
+	// Build response
+	amountSPX := nspxToSPXString(tx.Amount)
+	fee := txFeeNSPX(tx)
+	gasFee := nspxToSPXString(fee)
+	burned := txBurnNSPX(bc, tx)
 
 	response := gin.H{
-		"txid":            tx.ID,
-		"hash":            tx.Hash(),
-		"status":          status,
-		"sender":          tx.Sender,
-		"receiver":        tx.Receiver,
-		"amount_nspx":     bigIntString(tx.Amount),
-		"amount_spx":      amountSPX,
-		"gas_limit":       bigIntString(tx.GasLimit),
-		"gas_price":       bigIntString(tx.GasPrice),
-		"gas_fee_spx":     gasFee,
-		"nonce":           tx.Nonce,
-		"timestamp":       tx.Timestamp,
-		"timestamp_iso":   time.Unix(tx.Timestamp, 0).UTC().Format(time.RFC3339),
+		"txid":          tx.ID,
+		"hash":          tx.Hash(),
+		"status":        status,
+		"sender":        tx.Sender,
+		"receiver":      tx.Receiver,
+		"amount_nspx":   bigIntString(tx.Amount),
+		"amount_spx":    amountSPX,
+		"gas_limit":     bigIntString(tx.GasLimit),
+		"gas_price":     bigIntString(tx.GasPrice),
+		"gas_used":      txReceiptGasUsed(bc, tx.ID, tx),
+		"gas_fee_spx":   gasFee,
+		"fee_nspx":      bigIntString(fee),
+		"burned_this_tx_nspx": burned.String(),
+		"burned_this_tx_spx":  nspxToSPXString(burned),
+		"nonce":         tx.Nonce,
+		"timestamp":     tx.Timestamp,
+		"timestamp_iso": time.Unix(tx.Timestamp, 0).UTC().Format(time.RFC3339),
+		"age":           fmtDuration(time.Since(time.Unix(tx.Timestamp, 0))),
+		"age_sec":       time.Since(time.Unix(tx.Timestamp, 0)).Seconds(),
+		// Confirmation provenance: which block committed this transaction and
+		// how deep it now is. Clients render "included in block N" and the
+		// confirmation count straight from these fields.
 		"block_height":    blockHeight,
+		"block_hash":      blockHash,
+		"confirmations":   confirmations,
 		"chain_id":        tx.ChainID,
 		"is_system_tx":    tx.IsSystemTransaction(),
 		"has_full_auth":   tx.HasFullAuthBundle(),
+		"to_contract":     tx.ToContract,
+		"is_contract_tx":  tx.HasContractPayload(),
 		"signature":       fmt.Sprintf("%x", tx.Signature),
 		"public_key":      fmt.Sprintf("%x", tx.PublicKey),
 		"signature_hash":  fmt.Sprintf("%x", tx.SignatureHash),
@@ -462,6 +517,10 @@ func (s *Server) handleExplorerTransaction(c *gin.Context) {
 		"proof":           fmt.Sprintf("%x", tx.Proof),
 		"has_return_data": len(tx.ReturnData) > 0,
 		"return_data":     fmt.Sprintf("%x", tx.ReturnData),
+	}
+	if len(tx.ReturnData) > 0 {
+		response["return_data_text"] = decodeReturnData(tx.ReturnData)
+		response["return_data_kind"] = returnDataKind(tx.ReturnData)
 	}
 
 	if len(tx.Data) > 0 {
@@ -530,13 +589,7 @@ func (s *Server) handleExplorerAddress(c *gin.Context) {
 	}
 
 	// Format balance
-	balanceSPX := "0"
-	if balance != nil {
-		balanceSPX = new(big.Float).Quo(
-			new(big.Float).SetInt(balance),
-			new(big.Float).SetFloat64(1e18),
-		).Text('f', 18)
-	}
+	balanceSPX := nspxToSPXString(balance)
 
 	// Address type
 	addrType := "Legacy"
@@ -545,19 +598,14 @@ func (s *Server) handleExplorerAddress(c *gin.Context) {
 	}
 
 	// Format transactions
+	blockCount := bc.GetBlockCount()
 	txList := make([]gin.H, 0)
 	for _, tx := range txs {
 		if tx == nil {
 			continue
 		}
 		dir := "out"
-		amount := "0"
-		if tx.Amount != nil {
-			amount = new(big.Float).Quo(
-				new(big.Float).SetInt(tx.Amount),
-				new(big.Float).SetFloat64(1e18),
-			).Text('f', 18)
-		}
+		amount := nspxToSPXString(tx.Amount)
 		if tx.Receiver == normalized {
 			dir = "in"
 		}
@@ -571,15 +619,35 @@ func (s *Server) handleExplorerAddress(c *gin.Context) {
 			}
 		}
 
+		// Per-row block provenance. An address history that lists amounts but
+		// not the committing block (or its depth) cannot answer the first
+		// question anyone asks of it: "is this confirmed?".
+		txBlockHash := ""
+		txBlockHeight := uint64(0)
+		txConfirmations := uint64(0)
+		if txStatus == "success" {
+			if hash, height, cerr := bc.GetTxConfirmation(tx.ID); cerr == nil {
+				txBlockHash, txBlockHeight = hash, height
+				txConfirmations = confirmationsForHeight(blockCount, height)
+			}
+		}
+
 		txList = append(txList, gin.H{
-			"txid":       tx.ID,
-			"direction":  dir,
-			"amount_spx": amount,
-			"timestamp":  tx.Timestamp,
-			"age":        time.Since(time.Unix(tx.Timestamp, 0)).String(),
-			"status":     txStatus,
-			"sender":     tx.Sender,
-			"receiver":   tx.Receiver,
+			"txid":          tx.ID,
+			"direction":     dir,
+			"amount_spx":    amount,
+			"amount_nspx":   bigIntString(tx.Amount),
+			"fee_spx":       nspxToSPXString(txFeeNSPX(tx)),
+			"fee_nspx":      bigIntString(txFeeNSPX(tx)),
+			"nonce":         tx.Nonce,
+			"timestamp":     tx.Timestamp,
+			"age":           fmtDuration(time.Since(time.Unix(tx.Timestamp, 0))),
+			"status":        txStatus,
+			"sender":        tx.Sender,
+			"receiver":      tx.Receiver,
+			"block_height":  txBlockHeight,
+			"block_hash":    txBlockHash,
+			"confirmations": txConfirmations,
 		})
 	}
 
@@ -588,18 +656,9 @@ func (s *Server) handleExplorerAddress(c *gin.Context) {
 	}
 	if balanceResult != nil {
 		balances = gin.H{
-			"confirmed": new(big.Float).Quo(
-				new(big.Float).SetInt(balanceResult.Confirmed),
-				new(big.Float).SetFloat64(1e18),
-			).Text('f', 18),
-			"pending": new(big.Float).Quo(
-				new(big.Float).SetInt(balanceResult.Pending),
-				new(big.Float).SetFloat64(1e18),
-			).Text('f', 18),
-			"unlocked": new(big.Float).Quo(
-				new(big.Float).SetInt(balanceResult.Unlocked),
-				new(big.Float).SetFloat64(1e18),
-			).Text('f', 18),
+			"confirmed": nspxToSPXString(balanceResult.Confirmed),
+			"pending":   nspxToSPXString(balanceResult.Pending),
+			"unlocked":  nspxToSPXString(balanceResult.Unlocked),
 		}
 	}
 
@@ -959,8 +1018,214 @@ func (s *Server) handleExplorerValidatorDetail(c *gin.Context) {
 // Helper Functions
 // ============================================================================
 
+// nSPXPerSPX is the canonical denomination multiplier (denom.SPX = 1e18), i.e.
+// the number of nSPX in one whole SPX. Sourced from the protocol constants so a
+// future denomination change cannot silently desync the explorer's figures from
+// consensus accounting.
+var nSPXPerSPX = big.NewInt(int64(denom.SPX))
+
+// nspxToSPXString renders an nSPX amount as a fixed-precision SPX string.
+// Returns "0" for nil/zero so callers can emit the field unconditionally.
+func nspxToSPXString(amount *big.Int) string {
+	if amount == nil || amount.Sign() == 0 {
+		return "0"
+	}
+	return new(big.Float).Quo(
+		new(big.Float).SetInt(amount),
+		new(big.Float).SetInt(nSPXPerSPX),
+	).Text('f', 18)
+}
+
+func txFeeNSPX(tx *types.Transaction) *big.Int {
+	if tx == nil {
+		return nil
+	}
+	return tx.GetGasFee()
+}
+
+// txBurnNSPX returns the deterministic protocol-burn slice of a transaction's
+// gas fee in nSPX: floor(gasFee * BurnFeeBPS / 10000) per the fee-allocation
+// schedule the executor applies (see executor.applyTransactions). A manual
+// transfer whose receiver is the DEAD burn address burns the full amount on
+// top of any fee burn. Returns zero (never nil) so API payloads can emit the
+// burn fields unconditionally.
+func txBurnNSPX(bc *core.Blockchain, tx *types.Transaction) *big.Int {
+	burned := big.NewInt(0)
+	if tx == nil {
+		return burned
+	}
+	if bc != nil {
+		fee := txFeeNSPX(tx)
+		if fee != nil && fee.Sign() > 0 {
+			if dist := bc.ActivePolicy().DistributeFees(fee); dist != nil && dist.Burned != nil {
+				burned.Add(burned, dist.Burned)
+			}
+		}
+	}
+	if tx.Amount != nil && tx.Amount.Sign() > 0 && common.IsBurnAddress(tx.Receiver) {
+		burned.Add(burned, tx.Amount)
+	}
+	return burned
+}
+
+// txGasUsed quotes the deterministic gas units charged for a transaction from
+// the policy schedule (base + per-ReturnData-byte). Receipts store the same
+// number at write time (rawdb.WriteReceipts), but the explorer serves this
+// computed fallback as well so blocks whose receipts predate receipt writes —
+// or whose receipt is simply missing — still show gas instead of zero.
+func txGasUsed(bc *core.Blockchain, tx *types.Transaction) uint64 {
+	if tx == nil {
+		return 0
+	}
+	pol := policy.GetDefaultPolicyParams()
+	if bc != nil {
+		pol = bc.ActivePolicy()
+	}
+	if pol == nil {
+		return 0
+	}
+	return pol.QuoteTransactionGas(uint64(len(tx.ReturnData))).GasLimit.Uint64()
+}
+
+// txReceiptGasUsed returns the stored per-transaction gas from the receipt
+// index when present (the write-time figure rawdb.WriteReceipts computed),
+// falling back to the deterministic policy quote otherwise.
+func txReceiptGasUsed(bc *core.Blockchain, txID string, tx *types.Transaction) uint64 {
+	if bc != nil {
+		if st := bc.GetStorage(); st != nil {
+			if db, err := st.GetDB(); err == nil && db != nil {
+				if rcpt, err := rawdb.ReadReceipt(db, txID); err == nil && rcpt != nil {
+					return rcpt.GasUsed
+				}
+			}
+		}
+	}
+	return txGasUsed(bc, tx)
+}
+
+// decodeReturnData renders OP_RETURN bytes for the explorer: printable ASCII
+// (memos, anchor JSON, vault seeds) as text, anything else as hex. Mirrors the
+// canonical Transaction.GetReturnDataAsString so the API and storage agree.
+func decodeReturnData(data []byte) string {
+	if len(data) == 0 {
+		return ""
+	}
+	for _, b := range data {
+		if b < 32 || b > 126 {
+			return hex.EncodeToString(data)
+		}
+	}
+	return string(data)
+}
+
+// returnDataKind classifies OP_RETURN content so the UI can label it: a mint
+// anchor tag, some other JSON payload, or a plain-text memo.
+func returnDataKind(data []byte) string {
+	if len(data) == 0 {
+		return ""
+	}
+	if core.IsMintAnchor(data) {
+		return "mint_anchor"
+	}
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) >= 2 && trimmed[0] == '{' && trimmed[len(trimmed)-1] == '}' {
+		var js map[string]any
+		if json.Unmarshal(trimmed, &js) == nil {
+			return "json"
+		}
+	}
+	return "memo"
+}
+
+// blockBurnTotals reads this block's burn accounting from its atomic-commit
+// journal (tx_<hashprefix>.json): how much nSPX the block burned, and what the
+// DEAD-address total was before the block ran. Journals are written for every
+// committed block and kept for diagnostics, so historical blocks keep their
+// totals. Returns empty strings when no journal exists for the block.
+func blockBurnTotals(blockHash string) (burnedThis, burnedBefore string) {
+	jm := core.GetJournalManager()
+	if jm == nil {
+		return "", ""
+	}
+	dir := jm.JournalDir()
+	if dir == "" || len(blockHash) < 16 {
+		return "", ""
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, fmt.Sprintf("tx_%s.json", blockHash[:16])))
+	if err != nil {
+		return "", ""
+	}
+	var journal struct {
+		BurnedThisBlockNSPX string `json:"burned_this_block_nspx"`
+		BurnedBeforeNSPX    string `json:"burned_before_nspx"`
+	}
+	if err := json.Unmarshal(raw, &journal); err != nil {
+		return "", ""
+	}
+	return journal.BurnedThisBlockNSPX, journal.BurnedBeforeNSPX
+}
+
+// blockRewardSplit returns this block's policy block-reward total and its
+// deterministic miner/burned split. Genesis (height 0) funds the vault rather
+// than minting a proposer reward, so it reports zeros.
+func blockRewardSplit(bc *core.Blockchain, height uint64) (total, miner, burned *big.Int) {
+	zero := big.NewInt(0)
+	if bc == nil || height == 0 {
+		return zero, big.NewInt(0), big.NewInt(0)
+	}
+	total = bc.PolicyBlockReward()
+	if total == nil {
+		total = big.NewInt(0)
+	}
+	split := bc.ActivePolicy().SplitBlockReward(total)
+	if split == nil {
+		return total, big.NewInt(0), big.NewInt(0)
+	}
+	return split.Total, split.Miner, split.Burned
+}
+
+// confirmationsForHeight returns how many blocks confirm the block at the given
+// zero-indexed height: the block itself plus every descendant, i.e.
+// blockCount - height. blockCount is the total number of blocks on the chain
+// (heights 0..blockCount-1), so genesis on a 5-block chain reports 5.
+func confirmationsForHeight(blockCount, height uint64) uint64 {
+	if blockCount == 0 || height >= blockCount {
+		return 0
+	}
+	return blockCount - height
+}
+
+// stampBlockConfirmations writes the confirmation count into a block payload
+// and, when present, into each transaction row it contains. Block payloads have
+// no access to chain height (the formatters only see one block), so the count
+// is applied by the handlers that already know the chain tip.
+func stampBlockConfirmations(detail gin.H, blockCount uint64) {
+	if detail == nil {
+		return
+	}
+	height, ok := detail["height"].(uint64)
+	if !ok {
+		if h, ok := detail["block_height"].(uint64); ok {
+			height = h
+		} else {
+			return
+		}
+	}
+	confirmations := confirmationsForHeight(blockCount, height)
+	detail["confirmations"] = confirmations
+
+	txs, ok := detail["transactions"].([]gin.H)
+	if !ok {
+		return
+	}
+	for _, row := range txs {
+		row["block_height"] = height
+		row["confirmations"] = confirmations
+	}
+}
+
 // formatBlockSummary returns a summary of a block for list views.
-func formatBlockSummary(block *types.Block) gin.H {
+func formatBlockSummary(bc *core.Blockchain, block *types.Block) gin.H {
 	if block == nil {
 		return gin.H{}
 	}
@@ -968,49 +1233,90 @@ func formatBlockSummary(block *types.Block) gin.H {
 	txCount := len(block.Body.TxsList)
 	age := time.Since(time.Unix(block.Header.Timestamp, 0))
 
-	return gin.H{
+	// Every hash is emitted as hex and every optional *big.Int is nil-checked:
+	// a block loaded from disk may carry a zero-value header, and the explorer
+	// must render a partial block rather than panic on it.
+	hash := block.GetHash()
+	burnedThis, burnedBefore := blockBurnTotals(hash)
+	rewardTotal, rewardMiner, rewardBurned := blockRewardSplit(bc, block.GetHeight())
+	summary := gin.H{
 		"height":     block.GetHeight(),
-		"hash":       block.GetHash(),
+		"hash":       hash,
 		"prev_hash":  block.GetPrevHash(),
 		"timestamp":  block.Header.Timestamp,
 		"age":        fmtDuration(age),
 		"age_sec":    age.Seconds(),
 		"tx_count":   txCount,
-		"difficulty": block.Header.Difficulty.String(),
+		"difficulty": bigIntString(block.Header.Difficulty),
 		"nonce":      block.Header.Nonce,
-		"gas_used":   block.Header.GasUsed.String(),
-		"gas_limit":  block.Header.GasLimit.String(),
+		"gas_used":   bigIntString(block.Header.GasUsed),
+		"gas_limit":  bigIntString(block.Header.GasLimit),
 		"proposer":   block.Header.ProposerID,
+		"version":    block.Header.Version,
+		// Merkle commitments and the previous-block link are what make a block
+		// independently auditable, so they are in the list payload too — not
+		// only in the detail payload.
+		"txs_root":          fmt.Sprintf("%x", block.Header.TxsRoot),
+		"state_root":        fmt.Sprintf("%x", block.Header.StateRoot),
+		"uncles_hash":       fmt.Sprintf("%x", block.Header.UnclesHash),
+		"commit_status":     block.Header.CommitStatus,
+		"sig_valid":         block.Header.SigValid,
+		"chain_weight":      bigIntString(block.Header.ChainWeight),
+		"attestation_count": len(block.Body.Attestations),
+		// Burned coins live at the provably-unspendable DEAD address; the
+		// journal totals below are the per-block auditable source for "how
+		// many coins were burned in this block". Empty when no journal exists
+		// for the block (e.g. genesis imports or pruned journal dirs).
+		"burned_this_block_nspx": burnedThis,
+		"burned_this_block_spx":  nspxToSPXString(parseNSPX(burnedThis)),
+		"burned_before_nspx":     burnedBefore,
+		// The coinbase reward is deterministic policy issuance (total split
+		// into miner + burned slices), so a block card can show it without a
+		// separate reward lookup.
+		"block_reward_nspx":        bigIntString(rewardTotal),
+		"block_reward_spx":         nspxToSPXString(rewardTotal),
+		"block_reward_miner_nspx":  bigIntString(rewardMiner),
+		"block_reward_burned_nspx": bigIntString(rewardBurned),
 	}
+	return summary
 }
 
 // formatBlockDetail returns full block details for the detail view.
-func formatBlockDetail(block *types.Block) gin.H {
+func formatBlockDetail(bc *core.Blockchain, block *types.Block) gin.H {
 	if block == nil {
 		return gin.H{}
 	}
 
-	summary := formatBlockSummary(block)
+	summary := formatBlockSummary(bc, block)
 	txList := make([]gin.H, 0)
 
 	for _, tx := range block.Body.TxsList {
 		if tx == nil {
 			continue
 		}
-		amountSPX := "0"
-		if tx.Amount != nil {
-			amountSPX = new(big.Float).Quo(
-				new(big.Float).SetInt(tx.Amount),
-				new(big.Float).SetFloat64(1e18),
-			).Text('f', 6)
-		}
+		amountSPX := nspxToSPXString(tx.Amount)
+		fee := txFeeNSPX(tx)
+		burned := txBurnNSPX(bc, tx)
 		txSummary := gin.H{
-			"txid":       tx.ID,
-			"sender":     tx.Sender,
-			"receiver":   tx.Receiver,
-			"amount_spx": amountSPX,
-			"nonce":      tx.Nonce,
-			"timestamp":  tx.Timestamp,
+			"txid":           tx.ID,
+			"sender":         tx.Sender,
+			"receiver":       tx.Receiver,
+			"amount_spx":     amountSPX,
+			"amount_nspx":    bigIntString(tx.Amount),
+			"nonce":          tx.Nonce,
+			"timestamp":      tx.Timestamp,
+			"timestamp_iso":  time.Unix(tx.Timestamp, 0).UTC().Format(time.RFC3339),
+			"is_system_tx":   tx.IsSystemTransaction(),
+			"has_full_auth":  tx.HasFullAuthBundle(),
+			"gas_limit":      bigIntString(tx.GasLimit),
+			"gas_price":      bigIntString(tx.GasPrice),
+			"gas_used":       txReceiptGasUsed(bc, tx.ID, tx),
+			"fee_spx":        nspxToSPXString(fee),
+			"fee_nspx":       bigIntString(fee),
+			"burned_this_tx_nspx": burned.String(),
+			"burned_this_tx_spx":  nspxToSPXString(burned),
+			"to_contract":    tx.ToContract,
+			"is_contract_tx": tx.HasContractPayload(),
 		}
 		// ReturnData is where mint anchors live: core.ValidateAnchorData
 		// parses the AnchorTag out of it, and its CID field is the only
@@ -1030,6 +1336,8 @@ func formatBlockDetail(block *types.Block) gin.H {
 		txSummary["has_return_data"] = len(tx.ReturnData) > 0
 		if len(tx.ReturnData) > 0 {
 			txSummary["return_data"] = fmt.Sprintf("%x", tx.ReturnData)
+			txSummary["return_data_text"] = decodeReturnData(tx.ReturnData)
+			txSummary["return_data_kind"] = returnDataKind(tx.ReturnData)
 		}
 		txList = append(txList, txSummary)
 	}
@@ -1040,13 +1348,7 @@ func formatBlockDetail(block *types.Block) gin.H {
 		if att == nil {
 			continue
 		}
-		stakeSPX := "0"
-		if att.Stake != nil {
-			stakeSPX = new(big.Float).Quo(
-				new(big.Float).SetInt(att.Stake),
-				new(big.Float).SetFloat64(1e18),
-			).Text('f', 2)
-		}
+		stakeSPX := nspxToSPXString(att.Stake)
 		attList = append(attList, gin.H{
 			"validator_id": att.ValidatorID,
 			"block_hash":   att.BlockHash,
@@ -1063,19 +1365,22 @@ func formatBlockDetail(block *types.Block) gin.H {
 			"timestamp_iso": time.Unix(block.Header.Timestamp, 0).UTC().Format(time.RFC3339),
 			"parent_hash":   fmt.Sprintf("%x", block.Header.ParentHash),
 			"hash":          block.GetHash(),
-			"difficulty":    block.Header.Difficulty.String(),
+			"difficulty":    bigIntString(block.Header.Difficulty),
 			"nonce":         block.Header.Nonce,
 			"txs_root":      fmt.Sprintf("%x", block.Header.TxsRoot),
 			"state_root":    fmt.Sprintf("%x", block.Header.StateRoot),
-			"gas_limit":     block.Header.GasLimit.String(),
-			"gas_used":      block.Header.GasUsed.String(),
+			"uncles_hash":   fmt.Sprintf("%x", block.Header.UnclesHash),
+			"gas_limit":     bigIntString(block.Header.GasLimit),
+			"gas_used":      bigIntString(block.Header.GasUsed),
 			"extra_data":    fmt.Sprintf("%x", block.Header.ExtraData),
 			"miner":         fmt.Sprintf("%x", block.Header.Miner),
 			"logs_bloom":    fmt.Sprintf("%x", block.Header.LogsBloom),
 			"proposer":      block.Header.ProposerID,
-			"commit_status": block.Header.CommitStatus,
 			"sig_valid":     block.Header.SigValid,
-			"chain_weight":  block.Header.ChainWeight.String(),
+			"commit_status": block.Header.CommitStatus,
+			"chain_weight":  bigIntString(block.Header.ChainWeight),
+			"age":           summary["age"],
+			"age_sec":       summary["age_sec"],
 		},
 		"tx_count":     len(txList),
 		"transactions": txList,
@@ -1091,6 +1396,18 @@ func formatBlockDetail(block *types.Block) gin.H {
 	}
 
 	return detail
+}
+
+// parseNSPX parses a decimal nSPX string, returning zero on empty/garbage so
+// display conversions never fail on a missing journal total.
+func parseNSPX(s string) *big.Int {
+	if s == "" {
+		return big.NewInt(0)
+	}
+	if v, ok := new(big.Int).SetString(s, 10); ok {
+		return v
+	}
+	return big.NewInt(0)
 }
 
 func bigIntString(value *big.Int) string {

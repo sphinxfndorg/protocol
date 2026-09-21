@@ -106,6 +106,60 @@ export function formatTimeAgo(timestamp: number): string {
   return `${Math.floor(diff / 86400)}d ago`;
 }
 
+/**
+ * Renders a unix timestamp as an absolute UTC date-time. The explorer shows
+ * relative ages for scanning and absolute times for auditing; both come from
+ * the same block header timestamp.
+ */
+export function formatFullTimestamp(timestamp: number): string {
+  if (!timestamp) return '—';
+  return new Date(timestamp * 1000).toISOString().replace('T', ' ').replace('.000Z', ' UTC');
+}
+
+/**
+ * Formats a confirmation depth. Zero confirmations means the transaction is
+ * still pending in the mempool, which is materially different from "1
+ * confirmation" and must not be rendered as such.
+ */
+export function formatConfirmations(confirmations: number): string {
+  if (!confirmations || confirmations <= 0) return 'Unconfirmed';
+  if (confirmations === 1) return '1 confirmation';
+  return `${confirmations.toLocaleString()} confirmations`;
+}
+
+/**
+ * Renders an SPX amount with enough precision to show the smallest unit (1
+ * nSPX = 1e-18 SPX) without collapsing small values to "0", which is what
+ * parseFloat().toFixed(4) does to fee-sized amounts.
+ */
+export function formatSPXAmount(amount: string | number): string {
+  const n = typeof amount === 'string' ? parseFloat(amount) : amount;
+  if (!Number.isFinite(n) || n === 0) return '0 SPX';
+
+  const abs = Math.abs(n);
+  if (abs >= 1000000) return `${(n / 1000000).toLocaleString(undefined, { maximumFractionDigits: 4 })}M SPX`;
+  if (abs >= 1) return `${n.toLocaleString(undefined, { maximumFractionDigits: 8 })} SPX`;
+  if (abs >= 1e-9) return `${n.toFixed(12)} SPX`;
+  // Sub-nSPX-scale values keep 18 decimals: this is the nSPX floor.
+  return `${n.toFixed(18)} SPX`;
+}
+
+/** Renders an nSPX integer string as a grouped decimal number of nSPX. */
+export function formatNSPX(amount: string): string {
+  if (!amount) return '0 nSPX';
+  try {
+    return `${BigInt(amount).toLocaleString()} nSPX`;
+  } catch {
+    return `${amount} nSPX`;
+  }
+}
+
+/** Renders a block height as a clickable-looking label, e.g. "#1,204". */
+export function formatHeight(height: number): string {
+  if (height === undefined || height === null) return '—';
+  return `#${height.toLocaleString()}`;
+}
+
 export function formatHash(hash: string, len: number = 8): string {
   if (!hash) return '';
   if (hash.length <= len * 2 + 3) return hash;

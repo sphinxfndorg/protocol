@@ -11,8 +11,8 @@
 export function formatSPIFAddress(addr: string): string {
   if (!addr) return '';
 
-  // If already in SPIF format with spaces, return as-is
-  if (addr.startsWith('SPIF ')) return addr;
+  // If already in SPIF/DEAD format with spaces, return as-is
+  if (addr.startsWith('SPIF ') || addr.startsWith('DEAD ')) return addr;
 
   // If starts with 'spif1_' (old mock format), return as-is for backward compat
   if (addr.startsWith('spif1_')) return addr;
@@ -32,6 +32,51 @@ export function formatSPIFAddress(addr: string): string {
   }
   return 'SPIF ' + groups.join(' ');
 }
+
+/**
+ * Formats a raw hex address (40 or 64 chars) into DEAD burn display format:
+ * "DEAD XXXX XXXX XXXX ..." (groups of 4 hex characters).
+ * DEAD addresses are provably-unspendable burn addresses derived from real
+ * SPHINCS+ keys whose private material was destroyed in a burn ceremony.
+ */
+export function formatDEADAddress(addr: string): string {
+  if (!addr) return '';
+
+  if (addr.startsWith('DEAD ')) return addr;
+
+  let raw = addr.replace(/\s+/g, '').replace(/-/g, '');
+  if (/^dead/i.test(raw)) raw = raw.slice(4);
+  else if (/^spif/i.test(raw)) raw = raw.slice(4);
+  raw = raw.toLowerCase();
+
+  if (!/^[0-9a-f]+$/.test(raw)) return addr;
+  if (raw.length !== 40 && raw.length !== 64) return addr;
+
+  const groups: string[] = [];
+  for (let i = 0; i < raw.length; i += 4) {
+    groups.push(raw.substring(i, i + 4).toUpperCase());
+  }
+  return 'DEAD ' + groups.join(' ');
+}
+
+/**
+ * Reports whether an address is a DEAD burn address (receive-only).
+ */
+export function isBurnAddress(addr: string): boolean {
+  if (!addr) return false;
+  const t = addr.trim();
+  if (/^dead[\s-]/i.test(t)) return true;
+  // Canonical raw hex of the protocol default burn address also counts.
+  const raw = t.replace(/\s+/g, '').replace(/-/g, '').toUpperCase();
+  const stripped = raw.replace(/^(SPIF|DEAD)/, '');
+  return (
+    stripped === '262C098D17D0D99F315CD9B7C4D9AEDA685A65FD8630DEFDCE21F98460B1FA30'
+  );
+}
+
+/** The protocol default burn address (provably unspendable). */
+export const DEFAULT_BURN_ADDRESS =
+  'DEAD 262C 098D 17D0 D99F 315C D9B7 C4D9 AEDA 685A 65FD 8630 DEFD CE21 F984 60B1 FA30';
 
 /**
  * Strips "SPIF" prefix, spaces, and hyphens from a SPIF address,
@@ -65,8 +110,8 @@ export function formatHash(hash: string, len: number = 8): string {
   if (!hash) return '';
   if (hash.length <= len * 2 + 3) return hash;
 
-  // For SPIF addresses, format them first then truncate
-  if (hash.startsWith('SPIF ')) {
+  // For SPIF/DEAD addresses, format them first then truncate
+  if (hash.startsWith('SPIF ') || hash.startsWith('DEAD ')) {
     return `${hash.substring(0, len + 5)}...${hash.substring(hash.length - len)}`;
   }
   return `${hash.substring(0, len)}...${hash.substring(hash.length - len)}`;

@@ -42,13 +42,37 @@ type Config struct {
 	DisableIPFS    bool
 	HTTPClient     *http.Client
 	Timeout        time.Duration
+
+	// Remote pinning service — the DURABLE tier. A local kubo daemon at
+	// 127.0.0.1:5001 only serves the content while that daemon stays online
+	// and is reachable by peers, so it is not durable storage on its own.
+	// When PinningServiceToken is set, every pin is additionally mirrored to
+	// the service (currently Pinata), so retrievability no longer depends on
+	// the user's machine. See pin.go for the outcome/durability model.
+	PinningServiceURL   string // e.g. "https://api.pinata.cloud"
+	PinningServiceToken string // Bearer token (Pinata JWT)
+
+	// PublicGatewayURL is the NEUTRAL third-party gateway used only to answer
+	// "can someone other than me fetch this?" (CheckRetrievability). It must
+	// be independent of this machine and of the user's own daemon, which is
+	// exactly why it is separate from GatewayBaseURL — a success here is the
+	// only evidence that a pin is durable.
+	//
+	// Overridable via SPHINX_IPFS_PUBLIC_GATEWAY for networks where the
+	// default is blocked.
+	PublicGatewayURL string
 }
 
 // DefaultConfig uses localhost defaults, overridable through environment:
 //
-//	SPHINX_IPFS_ADDR     → IPFS HTTP API address (default "http://127.0.0.1:5001")
-//	SPHINX_IPFS_GATEWAY  → IPFS gateway base URL  (default "http://127.0.0.1:8080")
-//	SPHINX_IPFS_DISABLE  → "true" to use the offline fallback CID mode
+//	SPHINX_IPFS_ADDR            → IPFS HTTP API address (default "http://127.0.0.1:5001")
+//	SPHINX_IPFS_GATEWAY         → IPFS gateway base URL  (default "http://127.0.0.1:8080")
+//	SPHINX_IPFS_DISABLE         → "true" to use the offline fallback CID mode
+//	SPHINX_IPFS_PINNING_SERVICE → remote pinning service API (default "https://api.pinata.cloud"
+//	                              when a token is set; currently Pinata)
+//	SPHINX_IPFS_PINNING_TOKEN   → Bearer token for the pinning service (Pinata JWT). When
+//	                              set, pins are mirrored there so they survive this machine
+//	                              going offline.
 //
 // IPFS is a separate daemon from the Sphinx node. If you run the daemon on a
 // non-default host/port (or behind a tunnel), export SPHINX_IPFS_ADDR so the
@@ -56,10 +80,11 @@ type Config struct {
 // 127.0.0.1:5001.
 func DefaultConfig() Config {
 	cfg := Config{
-		IPFSAddr:       "http://127.0.0.1:5001",
-		GatewayBaseURL: "http://127.0.0.1:8080",
-		DisableIPFS:    false,
-		Timeout:        30 * time.Second,
+		IPFSAddr:         "http://127.0.0.1:5001",
+		GatewayBaseURL:   "http://127.0.0.1:8080",
+		DisableIPFS:      false,
+		Timeout:          30 * time.Second,
+		PublicGatewayURL: defaultPublicGatewayURL,
 	}
 	if v := strings.TrimSpace(os.Getenv("SPHINX_IPFS_ADDR")); v != "" {
 		cfg.IPFSAddr = v
@@ -70,6 +95,15 @@ func DefaultConfig() Config {
 	if v := strings.TrimSpace(os.Getenv("SPHINX_IPFS_DISABLE")); v != "" && strings.EqualFold(v, "true") {
 		cfg.DisableIPFS = true
 	}
+	if v := strings.TrimSpace(os.Getenv("SPHINX_IPFS_PINNING_SERVICE")); v != "" {
+		cfg.PinningServiceURL = v
+	}
+	if v := strings.TrimSpace(os.Getenv("SPHINX_IPFS_PINNING_TOKEN")); v != "" {
+		cfg.PinningServiceToken = v
+	}
+	if v := strings.TrimSpace(os.Getenv("SPHINX_IPFS_PUBLIC_GATEWAY")); v != "" {
+		cfg.PublicGatewayURL = v
+	}
 	return cfg
 }
 
@@ -78,12 +112,19 @@ func DefaultConfig() Config {
 // when you don't have a local IPFS daemon running.
 func PublicGatewayConfig() Config {
 	return Config{
-		IPFSAddr:       "",
-		GatewayBaseURL: "https://ipfs.io",
-		DisableIPFS:    false,
-		Timeout:        60 * time.Second,
+		IPFSAddr:         "",
+		GatewayBaseURL:   defaultPublicGatewayURL,
+		DisableIPFS:      false,
+		Timeout:          60 * time.Second,
+		PublicGatewayURL: defaultPublicGatewayURL,
 	}
 }
+
+// defaultPublicGatewayURL is the neutral third-party gateway used to answer
+// "can someone other than me fetch this?" (Config.PublicGatewayURL). It is
+// deliberately independent of the wallet's own daemon: a fetch served by this
+// machine says nothing about durability.
+const defaultPublicGatewayURL = "https://ipfs.io"
 
 // NFTMetadata represents the standard ERC-721 / OpenSea metadata schema.
 // This is what gets stored on IPFS and referenced by the CID.
@@ -141,6 +182,12 @@ func NewClient(cfg Config) *Client {
 	// ("http://127.0.0.1.5001") parses as a bare hostname and silently dials
 	// the wrong target. Rewrite the trailing numeric label as the port.
 	cfg.IPFSAddr = normalizeIPFSAddr(cfg.IPFSAddr)
+	// A token with no explicit service URL means "Pinata": defaulting here
+	// (rather than in the pin path) keeps every caller — GUI, CLI, tests —
+	// consistent about which backend a token selects.
+	if strings.TrimSpace(cfg.PinningServiceToken) != "" && strings.TrimSpace(cfg.PinningServiceURL) == "" {
+		cfg.PinningServiceURL = defaultPinataAPI
+	}
 	return &Client{cfg: cfg, httpClient: cli}
 }
 
@@ -196,6 +243,17 @@ func (c *Client) AddBytesToIPFS(data []byte, filename string) (cid string, err e
 	q := u.Query()
 	// Use wrap-with-directory=false so response is predictable.
 	q.Set("wrap-with-directory", "false")
+	// ★ CID VERSION IS PINNED TO 1 ON PURPOSE. The CID string is what gets
+	// committed on-chain (AnchorTag.CID + cid_hash_hex), and it is also what
+	// a remote pinning service returns for the same bytes. kubo defaults to
+	// CIDv0 ("Qm…") while Pinata/nft.storage/web3.storage hand back CIDv1
+	// ("bafy…"), so the same payload would end up with two DIFFERENT
+	// identifiers depending on which backend accepted it — the durable copy
+	// would then sit under a CID the on-chain anchor never commits to.
+	// Forcing CIDv1 on every backend keeps exactly one canonical identifier
+	// per payload, which is what makes "local first, then pinning service"
+	// verifiable. See PinOutcome in pin.go.
+	q.Set("cid-version", "1")
 	// Only stream; pin is handled by default daemon config.
 	u.RawQuery = q.Encode()
 
@@ -277,27 +335,31 @@ func DecodeHexStorageValue(hexStr string) ([]byte, error) {
 	return b, nil
 }
 
-// AddBytesToIPFSWithFallback uploads data to a real IPFS node and returns the
-// CID. When the IPFS API is unreachable or misconfigured — for example no
-// daemon listening on cfg.IPFSAddr, or a daemon that is not a kubo node — it
-// returns a deterministic content-addressed fallback identifier
-// ("sha256-" + hex(sha256(data))) instead of failing, mirroring the CLI
-// mint's "continuing without CID" behaviour.
+// AddBytesToIPFSWithFallback is the legacy resilient pin.
 //
-// The returned error is non-nil exactly when the fallback was used, so
-// callers can log it as a warning and finish the operation (signing, mint
-// receipt, on-chain anchor) with a stable, locally verifiable commitment.
-// With DisableIPFS=true this simply returns the fallback with no error.
+// Deprecated: it returns a plausible-looking spxhash- CID when nothing was
+// uploaded, so a caller could not distinguish "pinned" from "never left this
+// machine" — the root cause of mints that silently committed un-retrievable
+// data. Use PinPayload instead, which reports durability explicitly and never
+// invents a CID for a failed upload.
+//
+// Retained only for backward compatibility, and still behaves exactly as
+// documented before: the deterministic fallback CID with a nil error in
+// explicit offline mode (DisableIPFS), and the fallback CID plus a warning when
+// an upload was attempted and failed. The fallback CID is a local content hash,
+// NOT a retrievable IPFS CID.
 func (c *Client) AddBytesToIPFSWithFallback(data []byte, filename string) (string, error) {
 	if len(data) == 0 {
 		return "", errors.New("empty payload")
 	}
-	seed, err := c.AddBytesToIPFS(data, filename)
-	if err == nil {
+	if c.cfg.DisableIPFS {
+		return fallbackCIDFor(data), nil
+	}
+	if seed, err := c.AddBytesToIPFS(data, filename); err == nil {
 		return seed, nil
 	}
-	fallbackCID := "spxhash-" + hex.EncodeToString(common.SpxHash(data))
-	return fallbackCID, fmt.Errorf("ipfs upload failed (%v) — using deterministic fallback CID %s", err, fallbackCID)
+	fallbackCID := fallbackCIDFor(data)
+	return fallbackCID, fmt.Errorf("ipfs upload failed — using deterministic local content hash %s (this is NOT a retrievable CID; use PinPayload for durability-aware pinning)", fallbackCID)
 }
 
 // GetBytesFromIPFS retrieves raw bytes by CID from the gateway.

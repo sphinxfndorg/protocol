@@ -233,8 +233,9 @@ func IsValidFingerprintFormat(fp string) bool {
 		return true
 	}
 
-	// Fall back to SPIF.
+	// Fall back to SPIF/DEAD.
 	clean = strings.TrimPrefix(clean, common.SPIFPrefix)
+	clean = strings.TrimPrefix(clean, common.DEADPrefix)
 	if len(clean) < 64 || len(clean) > 72 {
 		log.Printf("[WARN] IsValidFingerprintFormat: invalid length: %d (expected 64-72)", len(clean))
 		return false
@@ -287,8 +288,9 @@ func FormatFingerprintForDisplay(fp string) string {
 		return result
 	}
 
-	// SPIF fallback.
+	// SPIF/DEAD fallback.
 	clean = strings.TrimPrefix(clean, common.SPIFPrefix)
+	clean = strings.TrimPrefix(clean, common.DEADPrefix)
 	var result strings.Builder
 	for i := 0; i < len(clean) && i < 64; i += 4 {
 		end := i + 4
@@ -321,11 +323,12 @@ func VerifyFingerprintChecksum(addr string) bool {
 		return true
 	}
 
-	// SPIF format.
+	// SPIF/DEAD format.
 	clean := strings.ReplaceAll(addr, " ", "")
 	clean = strings.ReplaceAll(clean, "-", "")
 	clean = strings.ToUpper(clean)
 	clean = strings.TrimPrefix(clean, common.SPIFPrefix)
+	clean = strings.TrimPrefix(clean, common.DEADPrefix)
 
 	b, err := hex.DecodeString(clean)
 	if err != nil {

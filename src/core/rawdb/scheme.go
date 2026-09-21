@@ -1,7 +1,7 @@
 // Copyright (c) 2024-present Sphinx Core Dev
-// MIT License https://opensource.org/license/mit
+// MIT License https://opensource.org/licenses/mit
 
-// go/src/core/rawdb/schema.go
+// go/src/core/rawdb/scheme.go
 package rawdb
 
 import (
@@ -15,6 +15,19 @@ import (
 // strings by hand. None of these collide with the existing `acct:`,
 // `supply:total`, `supply:genesis`, `supply:rewards` keys used by StateDB;
 // same LevelDB instance, disjoint namespaces.
+//
+// Prefix-termination audit (R8 item 4): address→tx keys use a trailing ':'
+// after the address (see addressTxPrefix + addr + ":") so a prefix scan for
+// one address cannot match another whose name is an extension of it. The
+// hash-based keys (hdr:, bdy:, H:, h:, bloom:) are safe without a terminator
+// because block hashes are fixed-width 64-hex-char strings. The tx:, txb:,
+// and rcpt: prefixes use arbitrary-length tx IDs with no terminator; no
+// prefix-scan caller exists for any of these three namespaces today
+// (ReadReceipt/ReadTxPayload/tx-lookup are all exact Gets by full tx ID),
+// so this is a theoretical concern with no current impact — confirmed
+// 2026-09-19 during the R8 receipts wiring. If tx IDs ever become
+// arbitrary-length AND a prefix scan is needed on tx:, txb:, or rcpt:,
+// apply the same terminator treatment as addrtx: before doing so.
 const (
 	headerPrefix       = "hdr:"
 	bodyPrefix         = "bdy:"
@@ -68,7 +81,7 @@ func canonicalKey(height uint64) string  { return canonicalPrefix + encodeHeight
 func heightLookupKey(hash string) string { return heightLookupPrefix + hash }
 func txLookupKey(txID string) string     { return txLookupPrefix + txID }
 func txBodyKey(txID string) string       { return txBodyPrefix + txID }
-func receiptKey(hash string) string      { return receiptPrefix + hash }
+func receiptKey(txID string) string      { return receiptPrefix + txID }
 
 // bloomKey holds a block's 256-byte LogsBloom filter in its raw wire format,
 // so reading it for a membership test needs no header decode and no

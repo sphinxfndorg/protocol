@@ -22,6 +22,7 @@ import (
 	keyUtils "github.com/sphinxfndorg/protocol/src/accounts/key/utils"
 	"github.com/sphinxfndorg/protocol/src/common"
 	logger "github.com/sphinxfndorg/protocol/src/console"
+	"github.com/sphinxfndorg/protocol/src/core/wallet/burn"
 	keys "github.com/sphinxfndorg/protocol/src/usi/core/key"
 )
 
@@ -171,6 +172,9 @@ func InitWallet(cfg WalletConfig) (*WalletInfo, error) {
 	logger.Info("To use this wallet with the node:")
 	logger.Info("  sphinx-cli send-tx --from %s --to <RECIPIENT> --amount <AMOUNT> --key %s", spifAddress, keyFilePath)
 	logger.Info("  sphinx-cli node --reward-address=%s", spifAddress)
+	logger.Info("")
+	logger.Info("To burn coins, send them to the protocol burn address:")
+	logger.Info("  %s", common.DefaultBurnAddress)
 
 	return &WalletInfo{
 		Address:        spifAddress,
@@ -182,6 +186,19 @@ func InitWallet(cfg WalletConfig) (*WalletInfo, error) {
 		KeyFile:        keyFilePath,
 		CreatedAt:      time.Now().UTC().Format(time.RFC3339),
 	}, nil
+}
+
+// BurnAddressCeremony runs a fresh one-time burn ceremony and returns the
+// public result (DEAD address + public key). Nothing is written to disk; the
+// private key material is destroyed inside the ceremony.
+func BurnAddressCeremony() (*burn.BurnAddressInfo, error) {
+	return burn.GenerateBurnAddress()
+}
+
+// DefaultBurnAddress returns the protocol's default, hardcoded burn address
+// (provably unspendable — see common.DefaultBurnAddress).
+func DefaultBurnAddress() string {
+	return common.DefaultBurnAddress
 }
 
 // ListWallets lists all wallets in the wallet directory

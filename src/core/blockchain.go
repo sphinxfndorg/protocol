@@ -22,6 +22,7 @@ import (
 	"github.com/sphinxfndorg/protocol/src/pool"
 
 	logger "github.com/sphinxfndorg/protocol/src/console"
+	"github.com/sphinxfndorg/protocol/src/contracts"
 	svm "github.com/sphinxfndorg/protocol/src/core/kernel/opcodes"
 	"github.com/sphinxfndorg/protocol/src/core/kernel/vm"
 	sign "github.com/sphinxfndorg/protocol/src/core/sthincs/sign/backend"
@@ -855,6 +856,35 @@ func (bc *Blockchain) StoreChainState(nodes []*storage.NodeInfo) error {
 		FinalStates:         finalStates,                                         // Finalized consensus signatures
 	}
 
+	// Populate burn accounting from the live state DB. The DEAD address balance
+	// is the single auditable burn total (fee burns + block-reward burns +
+	// manual user burns). Circulating = total supply - burned.
+	if stateDB, err := bc.NewStateDB(); err == nil {
+		defer stateDB.Close()
+		if sdb, ok := stateDB.(*StateDB); ok {
+			burnedNSPX, err := sdb.GetBalance(common.CanonicalAddress(common.DefaultBurnAddress))
+			if err != nil || burnedNSPX == nil {
+				burnedNSPX = big.NewInt(0)
+			}
+			totalSupply := sdb.GetTotalSupply()
+			circulatingNSPX := new(big.Int).Sub(totalSupply, burnedNSPX)
+			if circulatingNSPX.Sign() < 0 {
+				circulatingNSPX = big.NewInt(0)
+			}
+			policy := bc.ActivePolicy()
+			chainState.BurnState = &storage.BurnState{
+				BurnAddress:         common.DefaultBurnAddress,
+				BurnedNSPX:          burnedNSPX.String(),
+				BurnedSPX:           new(big.Float).Quo(new(big.Float).SetInt(burnedNSPX), new(big.Float).SetInt(big.NewInt(1e18))).Text('f', 18),
+				CirculatingNSPX:     circulatingNSPX.String(),
+				CirculatingSPX:      new(big.Float).Quo(new(big.Float).SetInt(circulatingNSPX), new(big.Float).SetInt(big.NewInt(1e18))).Text('f', 18),
+				FeeBurnBPS:          policy.BurnFeeBPS,
+				BlockRewardBurnBPS: policy.BlockRewardBurnBPS,
+				UpdatedAt:           common.GetTimeService().GetCurrentTimeInfo().ISOUTC,
+			}
+		}
+	}
+
 	// Get working TPS metrics from blockchain's tpsMonitor
 	// Get working TPS metrics from blockchain's tpsMonitor
 	logger.Info("Retrieving TPS metrics from blockchain tpsMonitor...")
@@ -1153,6 +1183,45 @@ func (bc *Blockchain) VerifyState() error {
 	}
 
 	return fmt.Errorf("could not verify chain state: missing genesis hash")
+}
+
+// GetTransactionEvents returns the events emitted by a confirmed transaction,
+// read from contract storage (see recordEvents in contract_runtime.go). For a
+// nonexistent txid the error matches GetTransactionByIDString's not-found
+// behavior; an existing tx that emitted no events returns an empty slice
+// (never nil) with no error.
+func (bc *Blockchain) GetTransactionEvents(txID string) ([]contracts.ContractEvent, error) {
+	tx, err := bc.GetTransactionByIDString(txID)
+	if err != nil {
+		return nil, err
+	}
+	events := []contracts.ContractEvent{}
+	var contractAddr string
+	if tx.ToContract != "" {
+		contractAddr = tx.ToContract
+	} else if len(tx.Code) > 0 {
+		contractAddr = contracts.ContractAddress(tx.Sender, tx.Nonce, tx.Code)
+	}
+	if contractAddr == "" {
+		return events, nil
+	}
+	state, err := bc.newStateDB()
+	if err != nil {
+		return nil, err
+	}
+	store := newContractStore(state)
+	for i := 0; ; i++ {
+		key := fmt.Sprintf("event:%s:%020d:%04d", tx.Sender, tx.Nonce, i)
+		raw, err := store.GetContractStorage(contractAddr, key)
+		if err != nil || len(raw) == 0 {
+			break
+		}
+		var evt contracts.ContractEvent
+		if json.Unmarshal(raw, &evt) == nil {
+			events = append(events, evt)
+		}
+	}
+	return events, nil
 }
 
 // GetChainInfo returns formatted chain information with actual genesis hash

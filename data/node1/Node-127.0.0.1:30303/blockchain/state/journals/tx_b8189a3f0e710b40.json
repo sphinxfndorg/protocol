@@ -1,0 +1,56 @@
+{
+  "block_hash": "b8189a3f0e710b406f85bb6da0e5e304b457f89ead86050d0d01769d85099f64",
+  "block_height": 41,
+  "phase": "committed",
+  "state_changes": [
+    {
+      "address": "SPIF F6F6 66A0 F07B B9F1 B9C3 6C0B C497 DEF7 89AC A6B4 A756 4F88 A627 7FCB BFD9 09F8",
+      "previous_balance": "28999999999762300000000000",
+      "previous_nonce": 2
+    },
+    {
+      "address": "Node-127.0.0.1:30304",
+      "previous_balance": "61750000000000000000",
+      "previous_nonce": 0
+    },
+    {
+      "address": "system:staking-fee-pool",
+      "previous_balance": "736073433194379553203",
+      "previous_nonce": 0
+    },
+    {
+      "address": "system:treasury-fee-pool",
+      "previous_balance": "184018367212344888307",
+      "previous_nonce": 0
+    },
+    {
+      "address": "SPIF 262C 098D 17D0 D99F 315C D9B7 C4D9 AEDA 685A 65FD 8630 DEFD CE21 F984 60B1 FA30",
+      "previous_balance": "10000011885000000000",
+      "previous_nonce": 0
+    },
+    {
+      "address": "SPIF F6F6 66A0 F07B B9F1 B9C3 6C0B C497 DEF7 89AC A6B4 A756 4F88 A627 7FCB BFD9 09F8",
+      "previous_balance": "28999999999701375000000000",
+      "previous_nonce": 2
+    },
+    {
+      "address": "Node-127.0.0.1:30304",
+      "previous_balance": "61750036555000000000",
+      "previous_nonce": 0
+    },
+    {
+      "address": "SPIF 262C 098D 17D0 D99F 315C D9B7 C4D9 AEDA 685A 65FD 8630 DEFD CE21 F984 60B1 FA30",
+      "previous_balance": "10000014931250000000",
+      "previous_nonce": 0
+    }
+  ],
+  "committed": true,
+  "previous_tip_hash": "e2f4fa6c42e28d503c4b588f81df3446e57247f64a3b52dd08840ca65c1f893c",
+  "previous_tip_height": 40,
+  "started_at": "2026-09-22T02:58:09.860031+07:00",
+  "committed_at": "2026-09-22T02:58:12.477959+07:00",
+  "block_file_written": true,
+  "index_updated": true,
+  "burned_this_block_nspx": "250003046250000000",
+  "burned_before_nspx": "10000011885000000000"
+}

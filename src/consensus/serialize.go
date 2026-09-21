@@ -37,14 +37,13 @@ func (sm *SignedMessage) Serialize() ([]byte, error) {
 
 	// Write merkle root hash (32 bytes)
 	if sm.MerkleRoot != nil && sm.MerkleRoot.Hash != nil {
-		rootBytes := sm.MerkleRoot.Hash.Bytes()
-		if len(rootBytes) < 32 {
-			padded := make([]byte, 32)
-			copy(padded, rootBytes)
-			buf.Write(padded)
-		} else {
-			buf.Write(rootBytes[:32])
-		}
+		// Fixed 32-byte big-endian encoding. NOTE: (*uint256.Int).Bytes()
+		// strips leading zero bytes (minimal-length), and the old code here
+		// additionally right-padded with copy(padded, rootBytes), which both
+		// dropped a leading 0x00 AND shifted the value. Bytes32() preserves
+		// leading zeros in the correct (left-padded, big-endian) position.
+		b := sm.MerkleRoot.Hash.Bytes32()
+		buf.Write(b[:])
 	} else {
 		buf.Write(make([]byte, 32))
 	}

@@ -131,7 +131,7 @@ Minting is a gated, paid operation governed by the consensus policy (`src/policy
 
 ### IPFS dependency for minted data
 
-Minting anchors the signed data to **IPFS** so a verifier can fetch the pinned payload by CID. IPFS is a **separate daemon** from the Sphinx node — running the chain nodes does not start IPFS. Start a Kubo daemon (or IPFS Desktop) and leave it listening on the default API port:
+Minting pins the signed data to **IPFS** so a verifier can fetch the payload by CID. IPFS is a **separate daemon** from the Sphinx node — running the chain nodes does not start IPFS. Start a Kubo daemon (or IPFS Desktop) and leave it listening on the default API port:
 
 ```bash
 ipfs init        # once per machine
@@ -143,14 +143,60 @@ If your daemon runs on another host/port, override it before launching the walle
 ```bash
 export SPHINX_IPFS_ADDR="http://127.0.0.1:5001"
 export SPHINX_IPFS_GATEWAY="http://127.0.0.1:8080"
-export SPHINX_IPFS_DISABLE="true"   # optional: always use offline fallback CIDs
 ```
 
-If the IPFS API is unreachable, **the mint still succeeds**: the wallet stores a deterministic local fallback CID (`sha256-<hex>`), signs, mints the receipt, and anchors it on-chain, and the UI shows a warning. The commitment remains locally verifiable; you can later pin the payload to IPFS by its CID once a daemon is running.
+#### A local daemon is NOT durable storage
+
+Your own daemon only serves content while it is online and reachable by peers. For minted data to stay retrievable independently of your machine, mirror every pin to a remote pinning service (currently **Pinata**):
+
+```bash
+export SPHINX_IPFS_PINNING_SERVICE="https://api.pinata.cloud"   # optional; assumed if a token is set
+export SPHINX_IPFS_PINNING_TOKEN="<your-pinata-jwt>"
+```
+
+With a token set, each mint pins to the local daemon first, then mirrors to the service, and only reports **remote-pinned** when both agree on the same CID. Every backend is asked for **CIDv1** so one payload has exactly one canonical identifier — the CID is what gets committed on-chain, so a CIDv0/CIDv1 mismatch would leave the durable copy unreachable under the anchored identifier.
+
+#### What happens when nothing can be uploaded
+
+**The mint stops before signing.** If no IPFS backend accepts the file, the wallet aborts with a red banner naming the fix, and your file is left untouched — nothing is signed and nothing is anchored. This is deliberate: the anchor commits to a content hash, and signing first would leave a file that can never be re-minted.
+
+To intentionally mint with **no upload at all**, opt in explicitly:
+
+```bash
+export SPHINX_IPFS_DISABLE="true"   # record a local content hash (spxhash-<hex>) instead of a CID
+```
+
+In that mode the mint proceeds, but `spxhash-<hex>` is a **local content hash, not a retrievable IPFS CID** — no node can serve it. The UI says so plainly, and `sphinx ipfs verify` reports `NEVER UPLOADED` rather than a generic fetch failure. This is an offline-only mode; anyone you share the token with will not be able to fetch the data.
+
+#### Which file is pinned
+
+The bytes pinned to IPFS (and committed by the on-chain anchor and the mint receipt's `PayloadHash`) are the **clean, pre-signature** file. The signature cannot be part of the bytes it signs, so the final on-disk file differs from the pinned copy by the signature container it gains. Both hashes are recorded in the document metadata so this expected difference is visible rather than looking like corruption:
+
+- `ipfs_payload_hash` — the pinned bytes (= the receipt's `PayloadHash`)
+- `file_hash` — the signed on-disk file (what Verify re-hashes)
 
 ### Verify Data
 
-The Verify Data screen checks a file against its `.usimeta` sidecar metadata. It reports whether the signature is valid and displays signer information when available.
+The Verify Data screen checks a file's embedded signature and reports what the file itself records about its mint.
+
+**Signature assurance is a three-state result, not a boolean.** The screen never collapses the middle state into a plain "valid":
+
+| Result | Meaning |
+|---|---|
+| `AUTHENTICATED` | The signature verifies **and** the signer's key is registered and active in the key directory. This is the only result that proves *who* signed. |
+| `INTEGRITY ONLY` | The signature is self-consistent and the content is unchanged, but the signer's identity could **not** be confirmed against the directory (offline, or not registered). This is tamper-evidence, not proof of authorship. |
+| `INVALID` | The signature does not verify, the file was modified, or the signer's key is not accepted. |
+
+**Payload retrievability** is reported as a separate verdict (`REPLICATED` / `LOCAL ONLY` / `NOT REACHABLE` / `NEVER UPLOADED`), using the same vocabulary as `sphinx ipfs verify`. The check uses HTTP range requests, so it probes availability without downloading the payload.
+
+**Backend-recorded provenance** is displayed from the document's own metadata — the same on-chain block the signer embedded into every container (PDF properties, XMP, PNG iTXt, JPEG APP1, Office custom.xml, or the binary footer) at mint time:
+
+- Mint ID, anchor transaction, confirming block height and hash, transaction nonce
+- Mint price (exact nSPX, as carried by the anchor transaction)
+- Marketplace token binding, and the embedded economics (resale royalty, licence fee, payout recipient)
+- IPFS CID, plus both payload hashes
+
+These are shown exactly as recorded. Re-checking them against the chain is what `sphinx ipfs verify` does. Note the two hash rows differ by design: **Pinned Payload Hash** covers the clean bytes uploaded to IPFS, while **Signed File Hash** covers the signed file on disk.
 
 ### My Keys
 

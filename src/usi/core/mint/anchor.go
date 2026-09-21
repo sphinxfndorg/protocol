@@ -69,6 +69,43 @@ func validateSIP721AnchorFields(tokenID uint64, tokenURI, contract string) error
 	return nil
 }
 
+// spifAnchorAddress renders a SPIF address in the canonical grouped display
+// form ("SPIF F6F6 66A0 …") for anchor output. Anchors are human-readable
+// provenance artifacts (the anchor_<mintid>.json sidecar and the on-chain
+// ReturnData) — every address in them must look like every other SPIF address
+// on the protocol, not a bare 40/64-char hex blob. The receipt may carry any
+// accepted rendering (raw hex from the mint broadcast path, the grouped form
+// from a collection contract address); NormalizeSPIFAddress inside
+// FormatSPIFAddress collapses them all into one grouped uppercase form.
+// Non-address values (empty, system ids) pass through unchanged.
+func spifAnchorAddress(addr string) string {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return ""
+	}
+	if formatted, err := common.FormatSPIFAddress(addr); err == nil {
+		return formatted
+	}
+	return addr
+}
+
+// sameSPIFAddress compares two address renderings for identity. Both sides are
+// collapsed through common.NormalizeSPIFAddress, which accepts the grouped
+// display form, bare raw hex, mixed case, and the legacy "SPIF"+lowercase form
+// alike; when either side is not a parseable SPIF address it falls back to a
+// trimmed, case-insensitive comparison so empty/system values still behave.
+func sameSPIFAddress(a, b string) bool {
+	if strings.TrimSpace(a) == "" || strings.TrimSpace(b) == "" {
+		return strings.TrimSpace(a) == strings.TrimSpace(b)
+	}
+	rawA, errA := common.NormalizeSPIFAddress(a)
+	rawB, errB := common.NormalizeSPIFAddress(b)
+	if errA == nil && errB == nil {
+		return rawA == rawB
+	}
+	return strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b))
+}
+
 // BuildAnchorData produces the bytes to place in a transaction's ReturnData.
 // The tag includes the CID plus its sha256 commitment (cid_hash_hex) so the
 // node can verify the anchor actually commits to the pinned content — see
@@ -96,10 +133,10 @@ func BuildAnchorData(r *MintReceipt) ([]byte, error) {
 		CIDHashHex:       core.CIDHashHexFor(r.CID),
 		TokenID:          r.TokenID,
 		TokenURI:         r.TokenURI,
-		Contract:         r.ContractAddress,
+		Contract:         spifAnchorAddress(r.ContractAddress),
 		RoyaltyBPS:       r.RoyaltyBPS,
 		UsageFeeNSPX:     r.UsageFeeNSPX,
-		RoyaltyRecipient: r.RoyaltyRecipient,
+		RoyaltyRecipient: spifAnchorAddress(r.RoyaltyRecipient),
 	}
 	out, err := json.Marshal(tag)
 	if err != nil {
@@ -138,7 +175,7 @@ func VerifyAnchor(r *MintReceipt, anchorData []byte) (bool, error) {
 		if tag.TokenURI != r.TokenURI {
 			return false, errors.New("token_uri mismatch between anchor and receipt")
 		}
-		if tag.Contract != r.ContractAddress {
+		if !sameSPIFAddress(tag.Contract, r.ContractAddress) {
 			return false, errors.New("contract mismatch between anchor and receipt")
 		}
 	}
@@ -186,10 +223,10 @@ func BuildAnchorTag(r *MintReceipt) (*AnchorTag, error) {
 		CIDHashHex:       core.CIDHashHexFor(r.CID),
 		TokenID:          r.TokenID,
 		TokenURI:         r.TokenURI,
-		Contract:         r.ContractAddress,
+		Contract:         spifAnchorAddress(r.ContractAddress),
 		RoyaltyBPS:       r.RoyaltyBPS,
 		UsageFeeNSPX:     r.UsageFeeNSPX,
-		RoyaltyRecipient: r.RoyaltyRecipient,
+		RoyaltyRecipient: spifAnchorAddress(r.RoyaltyRecipient),
 	}, nil
 }
 
@@ -251,7 +288,7 @@ func VerifyAnchorWithTag(r *MintReceipt, tag *AnchorTag) (bool, error) {
 		if tag.TokenURI != r.TokenURI {
 			return false, errors.New("token_uri mismatch between anchor and receipt")
 		}
-		if tag.Contract != r.ContractAddress {
+		if !sameSPIFAddress(tag.Contract, r.ContractAddress) {
 			return false, errors.New("contract mismatch between anchor and receipt")
 		}
 	}
@@ -273,7 +310,7 @@ func verifyAnchorTerms(r *MintReceipt, tag *AnchorTag) error {
 	if strings.TrimSpace(tag.UsageFeeNSPX) != strings.TrimSpace(r.UsageFeeNSPX) {
 		return errors.New("usage_fee_nspx mismatch between anchor and receipt")
 	}
-	if strings.TrimSpace(tag.RoyaltyRecipient) != strings.TrimSpace(r.RoyaltyRecipient) {
+	if !sameSPIFAddress(tag.RoyaltyRecipient, r.RoyaltyRecipient) {
 		return errors.New("royalty_recipient mismatch between anchor and receipt")
 	}
 	return nil

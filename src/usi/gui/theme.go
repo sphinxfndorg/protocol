@@ -109,6 +109,42 @@ func formatNSPXAmount(nspx *big.Int) string {
 	return formatSPXAmount(new(big.Float).Quo(new(big.Float).SetInt(nspx), big.NewFloat(1e18)))
 }
 
+// gasPriceUnitLabel is the unit tag rendered beside every gas price this
+// wallet displays. It deliberately matches the CLI's --gas-price unit
+// ("Gas price in gSPX", default 1) and the policy schedule, so both surfaces
+// describe the same number in the same unit.
+const gasPriceUnitLabel = "gSPX/gas"
+
+// nSPXPerGSPX is the number of nSPX in one gSPX (Giga SPX) — the unit gas
+// prices are denominated in. core/params.go defines this denomination
+// ("gSPX": 1e9) and the policy's MinimumGasPrice is exactly one of them.
+var nSPXPerGSPX = new(big.Float).SetPrec(256).SetInt64(1_000_000_000)
+
+// formatGasPriceAmount renders an nSPX-denominated gas price in gSPX — the
+// unit the gas schedule actually quotes prices in.
+//
+// ★ WHY THIS EXISTS: gas prices are NOT SPX-denominated. The policy minimum
+// is 1,000,000,000 nSPX = 1 gSPX = 10^-9 SPX (see policy.NewPolicyParameters
+// and core/params.go's "gSPX": 1e9 denomination). Rendering that through
+// formatSPXAmount — which prints at most six decimal places — rounds the
+// minimum, and every priority tier derived from it (2x = 2e-9, 5x = 5e-9),
+// to a flat "0", so the Send screen's fee line read "0 SPX/gas" no matter
+// which tier was selected. Dividing by 10^9 instead keeps the value in its
+// own unit, where the minimum reads "1", Medium "2" and High "5".
+//
+// Fractional prices (mint anchors raise the gas price until the gas fee
+// reaches the policy mint fee, so it is not always a whole gSPX) keep their
+// integer grouping and up to six decimals rather than being rounded away.
+func formatGasPriceAmount(gasPriceNSPX *big.Int) string {
+	if gasPriceNSPX == nil {
+		return "0"
+	}
+	return formatSPXAmount(new(big.Float).SetPrec(256).Quo(
+		new(big.Float).SetPrec(256).SetInt(gasPriceNSPX),
+		nSPXPerGSPX,
+	))
+}
+
 // =========================================================================
 // UI HELPER COMPONENTS
 // =========================================================================

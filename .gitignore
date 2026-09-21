@@ -42,4 +42,5 @@ Thumbs.db
 /cmd
 /wallet
 /src/core/data/
+/src/state/data/
 *.bak

@@ -417,6 +417,8 @@ func (h *JSONRPCHandler) registerMethods() {
 
 	h.methods["deploycontract"] = h.deployContract
 	h.methods["callcontract"] = h.callContract
+
+	h.methods["gettransactionevents"] = h.getTransactionEvents
 }
 
 func (h *JSONRPCHandler) getContract(params interface{}) (interface{}, error) {
@@ -1187,7 +1189,47 @@ func (h *JSONRPCHandler) getTransactionReceipt(params interface{}) (interface{},
 	if reason, exists := h.server.blockchain.GetTransactionError(txID); exists {
 		response["invalid_reason"] = reason
 	}
+
+	// Enrich with events: Blockchain.GetTransactionEvents owns contract
+	// resolution and storage reads; the receipt only renders the result.
+	// Native/empty txs and unresolvable txids all produce an empty array
+	// (never null).
+	events, err := h.server.blockchain.GetTransactionEvents(txID)
+	if err != nil {
+		events = []contracts.ContractEvent{}
+	}
+	response["events"] = events
 	return response, nil
+}
+
+// getTransactionEvents returns the events emitted by a confirmed transaction.
+// For a nonexistent txid the error matches GetTransactionByIDString's
+// not-found behavior; an existing tx that emitted no events returns an empty
+// array with no error.
+func (h *JSONRPCHandler) getTransactionEvents(params interface{}) (interface{}, error) {
+	var paramsArray []string
+	if err := h.parseParams(params, &paramsArray); err != nil {
+		return nil, err
+	}
+	if len(paramsArray) < 1 {
+		return nil, errors.New("missing transaction ID parameter")
+	}
+	txID := paramsArray[0]
+
+	if h.server.blockchain == nil {
+		return nil, errors.New("blockchain not initialized")
+	}
+
+	// Fail for nonexistent txid (GetTransactionByIDString returns error, via
+	// Blockchain.GetTransactionEvents).
+	events, err := h.server.blockchain.GetTransactionEvents(txID)
+	if err != nil {
+		return nil, err
+	}
+	if events == nil {
+		events = []contracts.ContractEvent{}
+	}
+	return events, nil
 }
 
 // ping responds to health checks

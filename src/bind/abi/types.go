@@ -8,7 +8,10 @@
 // SDKs from hand-rolling incompatible payloads.
 package abi
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 const SIP20 = "sip20"
 const SIP721 = "sip721"
@@ -22,6 +25,11 @@ type Argument struct {
 type Method struct {
 	Name   string     `json:"name"`
 	Inputs []Argument `json:"inputs"`
+	// ReadOnly marks a method the node can answer from committed state through
+	// contracts.Call (owner_of, balance_of, info, ...). abi.Call refuses
+	// anything not marked read-only: the remote Store it reads through cannot
+	// write, so a write method would "succeed" locally while changing nothing.
+	ReadOnly bool `json:"read_only,omitempty"`
 }
 
 type Contract struct {
@@ -36,8 +44,8 @@ var SIP20ABI = Contract{
 	Methods: []Method{
 		{Name: "mint", Inputs: []Argument{{Name: "to", Type: "address", Required: true}, {Name: "amount", Type: "uint256", Required: true}}},
 		{Name: "transfer", Inputs: []Argument{{Name: "to", Type: "address", Required: true}, {Name: "amount", Type: "uint256", Required: true}}},
-		{Name: "balance_of", Inputs: []Argument{{Name: "owner", Type: "address", Required: false}}},
-		{Name: "info"},
+		{Name: "balance_of", Inputs: []Argument{{Name: "owner", Type: "address", Required: false}}, ReadOnly: true},
+		{Name: "info", ReadOnly: true},
 	},
 }
 
@@ -53,17 +61,17 @@ var SIP721ABI = Contract{
 			{Name: "royalty_bps", Type: "uint64", Required: false}, {Name: "usage_fee", Type: "string", Required: false}, {Name: "royalty_recipient", Type: "address", Required: false}}},
 		{Name: "transfer_from", Inputs: []Argument{{Name: "from", Type: "address", Required: true}, {Name: "to", Type: "address", Required: true}, {Name: "token_id", Type: "uint64", Required: true}}},
 		{Name: "approve", Inputs: []Argument{{Name: "to", Type: "address", Required: true}, {Name: "token_id", Type: "uint64", Required: true}}},
-		{Name: "owner_of", Inputs: []Argument{{Name: "token_id", Type: "uint64", Required: true}}},
-		{Name: "token_uri", Inputs: []Argument{{Name: "token_id", Type: "uint64", Required: true}}},
-		{Name: "token_id_of_mint", Inputs: []Argument{{Name: "mint_id", Type: "string", Required: true}}},
+		{Name: "owner_of", Inputs: []Argument{{Name: "token_id", Type: "uint64", Required: true}}, ReadOnly: true},
+		{Name: "token_uri", Inputs: []Argument{{Name: "token_id", Type: "uint64", Required: true}}, ReadOnly: true},
+		{Name: "token_id_of_mint", Inputs: []Argument{{Name: "mint_id", Type: "string", Required: true}}, ReadOnly: true},
 		{Name: "purchase_license", Inputs: []Argument{{Name: "token_id", Type: "uint64", Required: true}, {Name: "licensee", Type: "address", Required: false}}},
 		{Name: "revoke_license", Inputs: []Argument{{Name: "token_id", Type: "uint64", Required: true}}},
-		{Name: "terms_of", Inputs: []Argument{{Name: "token_id", Type: "uint64", Required: true}}},
+		{Name: "terms_of", Inputs: []Argument{{Name: "token_id", Type: "uint64", Required: true}}, ReadOnly: true},
 		{Name: "list", Inputs: []Argument{{Name: "token_id", Type: "uint64", Required: true}, {Name: "price", Type: "string", Required: true}}},
 		{Name: "buy", Inputs: []Argument{{Name: "token_id", Type: "uint64", Required: true}}},
 		{Name: "cancel", Inputs: []Argument{{Name: "token_id", Type: "uint64", Required: true}}},
-		{Name: "listing_of", Inputs: []Argument{{Name: "token_id", Type: "uint64", Required: true}}},
-		{Name: "info"},
+		{Name: "listing_of", Inputs: []Argument{{Name: "token_id", Type: "uint64", Required: true}}, ReadOnly: true},
+		{Name: "info", ReadOnly: true},
 	},
 }
 
@@ -74,4 +82,11 @@ func (c Contract) Method(name string) (Method, error) {
 		}
 	}
 	return Method{}, fmt.Errorf("ABI method %q is not defined for %s", name, c.Name)
+}
+
+// IsReadOnly reports whether name is a method the node can answer from
+// committed state. Unknown methods are not read-only.
+func (c Contract) IsReadOnly(name string) bool {
+	method, err := c.Method(strings.ToLower(strings.TrimSpace(name)))
+	return err == nil && method.ReadOnly
 }

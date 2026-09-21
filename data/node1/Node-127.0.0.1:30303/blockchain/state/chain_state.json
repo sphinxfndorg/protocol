@@ -1,0 +1,3248 @@
+{
+  "chain_identification": {
+    "timestamp": "2026-09-22T03:15:08+07:00",
+    "chain_parameters": {
+      "bip44_type": 1,
+      "chain_id": 73310,
+      "chain_name": "Sphinx Devnet",
+      "default_port": 32309,
+      "genesis_hash": "GENESIS_9a0a5a65b87b32be4e8e6963b49102ca1ffd39155d47e9f322a0ad44c0f78e1f",
+      "genesis_time": "2026-07-15T19:33:18Z",
+      "magic_number": 1397770328,
+      "symbol": "SPX",
+      "version": "1.0.0"
+    },
+    "token_info": {
+      "ledger_name": "Sphinx Devnet"
+    },
+    "network_info": {
+      "network_name": "Sphinx Devnet",
+      "protocol": "SPX/1.0.0"
+    }
+  },
+  "nodes": [
+    {
+      "node_id": "Node-127.0.0.1:30303",
+      "node_name": "Node-127.0.0.1:30303",
+      "node_address": "127.0.0.1:30303",
+      "chain_info": {
+        "bip44_coin_type": 1,
+        "blocks_height": 150,
+        "chain_id": 73310,
+        "chain_name": "Sphinx Devnet",
+        "current_height": 150,
+        "default_port": 32309,
+        "genesis_hash": "GENESIS_9a0a5a65b87b32be4e8e6963b49102ca1ffd39155d47e9f322a0ad44c0f78e1f",
+        "genesis_time": "2026-07-15T19:33:18Z",
+        "last_updated": "2026-09-22T03:15:08+07:00",
+        "latest_block": "44964a4a69dc2367741c9de5e7f33a5b28d7059f77ea02a9df2e6088817ae48c",
+        "ledger_name": "Sphinx Devnet",
+        "magic_number": "0x53504858",
+        "network": "Sphinx Devnet",
+        "symbol": "SPX",
+        "total_txs": 17,
+        "tps_average": 0.022516556291390728,
+        "tps_current": 0.07755668999973438,
+        "version": "1.0.0"
+      },
+      "block_height": 150,
+      "block_hash": "44964a4a69dc2367741c9de5e7f33a5b28d7059f77ea02a9df2e6088817ae48c",
+      "merkle_root": "5a6c2e9e730d5cb534e7f28c883ca7b604794c691f72398f3001be48cfef12bf",
+      "timestamp": "2026-09-22T03:15:08+07:00"
+    }
+  ],
+  "storage_state": {
+    "best_block_hash": "44964a4a69dc2367741c9de5e7f33a5b28d7059f77ea02a9df2e6088817ae48c",
+    "total_blocks": 151,
+    "blocks_dir": "data/node1/Node-127.0.0.1:30303/blockchain/blocks",
+    "index_dir": "data/node1/Node-127.0.0.1:30303/blockchain/index",
+    "state_dir": "data/node1/Node-127.0.0.1:30303/blockchain/state"
+  },
+  "basic_chain_state": {
+    "best_block_hash": "44964a4a69dc2367741c9de5e7f33a5b28d7059f77ea02a9df2e6088817ae48c",
+    "total_blocks": 151,
+    "last_updated": "2026-09-22T03:15:08+07:00"
+  },
+  "block_size_metrics": {
+    "total_blocks": 151,
+    "average_size_bytes": 243,
+    "min_size_bytes": 80,
+    "max_size_bytes": 6193,
+    "total_size_bytes": 36732,
+    "size_stats": [
+      {
+        "height": 0,
+        "hash": "GENESIS_9a0a5a65b87b32be4e8e6963b49102ca1ffd39155d47e9f322a0ad44c0f78e1f",
+        "size_bytes": 2165,
+        "size_mb": 0.0020647048950195312,
+        "transaction_count": 9,
+        "timestamp": "2026-07-15T19:33:18Z"
+      },
+      {
+        "height": 1,
+        "hash": "8290c57cda98c9de06492edb66eac8ce50f495e0513a20b7ecc607a7150c30e0",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:33:19Z"
+      },
+      {
+        "height": 2,
+        "hash": "c65ab073606071b33295fb45aa8783f5bc3c56ef7cbfc10019644a69ce062ec4",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:33:20Z"
+      },
+      {
+        "height": 3,
+        "hash": "791be089669cecbfc7d39df8ee8a1d9a5c3d38cf879f5162633c8296860978a0",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:33:21Z"
+      },
+      {
+        "height": 4,
+        "hash": "5d4281e8b82a782c6540ec228b15a986680eea83d94fe57d8a6f169561dfe8cf",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:33:22Z"
+      },
+      {
+        "height": 5,
+        "hash": "ae9aa17ebf4fe7c6a6a0943b0fc2eaf378add9fa2e3bdd6f9b2a184aea9449bc",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:33:23Z"
+      },
+      {
+        "height": 6,
+        "hash": "a0fa91d010bd120f648abdebf705b368c141544501f5ce1163bf273e29ec8499",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:33:24Z"
+      },
+      {
+        "height": 7,
+        "hash": "83feb19ae597fc2cf6ea4a14fa4e826746534586686496ee8eb5dcdc87328e41",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:33:25Z"
+      },
+      {
+        "height": 8,
+        "hash": "6ee379395f871e4730e4e21d932e66c9ffe9e81ca38951f55bda216201f7e5f7",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:33:26Z"
+      },
+      {
+        "height": 9,
+        "hash": "c4b07dda60fbd0e21c3bf9f878645af0225855ef1c3f05bd5ac99c28756629e8",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:33:27Z"
+      },
+      {
+        "height": 10,
+        "hash": "0e0bfcf1c080bc1e9b1854a01208acffe21604d507c226854c2d6dcf6cb0e199",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:33:28Z"
+      },
+      {
+        "height": 11,
+        "hash": "68d6345b53ef98ecf62c4553e31f8ab550077ce3aba95a46a3ac370e488034b8",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:33:29Z"
+      },
+      {
+        "height": 12,
+        "hash": "4b00225e04f289fbf3ff807444d289610192ddef18b6b64d4651188aa1180621",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:33:30Z"
+      },
+      {
+        "height": 13,
+        "hash": "243d606b235f8b9fe2a96412802761c458700123740d63c6f6ab389bea9279bc",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:33:31Z"
+      },
+      {
+        "height": 14,
+        "hash": "506b832bab9094c0a38d69873d129b3ee15894d978f882d29f50894e2cbd7571",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:33:32Z"
+      },
+      {
+        "height": 15,
+        "hash": "7382f250e010ce046c32f131159f9dca9a13a23e91bee12bc90729145d9c1259",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:33:33Z"
+      },
+      {
+        "height": 16,
+        "hash": "7be21c9e4e3b6861bbf91d0048fa5b70899ae574bd66f16249977d7c1f112e34",
+        "size_bytes": 5412,
+        "size_mb": 0.005161285400390625,
+        "transaction_count": 1,
+        "timestamp": "2026-07-15T19:33:34Z"
+      },
+      {
+        "height": 17,
+        "hash": "0d3b79bba0c35902c19f1161c53d92d65fe890ff4c77a7d00c376fce74559905",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:33:35Z"
+      },
+      {
+        "height": 18,
+        "hash": "5ec9b291e7e0b55491c08394cd78f86d2c9625fe8562d61292d316617fadce26",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:33:36Z"
+      },
+      {
+        "height": 19,
+        "hash": "1ffd3a2fc1755847a7a4fc48ab0ef64ada829e1bc62626fcd248e0583b7143e4",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:33:37Z"
+      },
+      {
+        "height": 20,
+        "hash": "9a80e7d3213e0b11171bc0e29387cc942af89e5a07a03c702cb9c3afe02c81d4",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:33:38Z"
+      },
+      {
+        "height": 21,
+        "hash": "dd3aacacb1b80411a5138e22fe1a451fde45263b996ead3adac2dcfd9fde847c",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:33:39Z"
+      },
+      {
+        "height": 22,
+        "hash": "f48314e620dbd5a21d98e0bfed45a2e112bb1cfcfa0d482938bdcb88eaf3006f",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:33:40Z"
+      },
+      {
+        "height": 23,
+        "hash": "edee426f4694099044bfe478d327df77e7cdefb6786608778280522d77ed5bed",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:33:41Z"
+      },
+      {
+        "height": 24,
+        "hash": "e59673e28cad08c56f69760cde18d90b840db0538b2b9902581c36386216e351",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:33:42Z"
+      },
+      {
+        "height": 25,
+        "hash": "ca49cf32e4afc297e95c75488f621e26927706be1e3d5a610133eb141001842e",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:33:43Z"
+      },
+      {
+        "height": 26,
+        "hash": "123b3a21a2b7607d86ebdbb643f2629cc4d2357d6cd69fb64132c8e2f009cb23",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:33:44Z"
+      },
+      {
+        "height": 27,
+        "hash": "9adc3e6d5d819898979f34030b776101da370b3c36d7e344caf5508f8aef6a6c",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:33:45Z"
+      },
+      {
+        "height": 28,
+        "hash": "871ea824139e5e1675074de17484ca1c217951421ad85dfcb2eac67eb4b216e2",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:33:46Z"
+      },
+      {
+        "height": 29,
+        "hash": "5027827dc390b6bac72326cc727480c36ead4a9ffba04d00f4bb1b6726a48753",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:33:47Z"
+      },
+      {
+        "height": 30,
+        "hash": "01828614e0629be0ec41b34097cd630fddac1c9a22c2518bcb6094f58946071c",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:33:48Z"
+      },
+      {
+        "height": 31,
+        "hash": "5c9c19fb330bddf2b9f0462a4c6dc5bcddb6dc9ed949168b5b6900d16fdf19d7",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:33:49Z"
+      },
+      {
+        "height": 32,
+        "hash": "a54963279a28ef5c6bb76deff4e1dc0507972fb2616d3ca8511415d4223ddbc8",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:33:50Z"
+      },
+      {
+        "height": 33,
+        "hash": "b04788bb3b1c67e6c39fbe9228b5c65914b3ef82f5823a214660c8a208ec5a7e",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:33:51Z"
+      },
+      {
+        "height": 34,
+        "hash": "fc998b4f8fde3293b9cd3df3d31a303824556f666fbf2ac4df4ca9f8e8b85861",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:33:52Z"
+      },
+      {
+        "height": 35,
+        "hash": "1ebcb20426050676bd6bfefac1b5a83979e5660f499191d418d2f4cada81db1c",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:33:53Z"
+      },
+      {
+        "height": 36,
+        "hash": "1566e879690329c428c4c13b4223793462308eb290eea7311ea76070c28ff09e",
+        "size_bytes": 5473,
+        "size_mb": 0.005219459533691406,
+        "transaction_count": 1,
+        "timestamp": "2026-07-15T19:33:54Z"
+      },
+      {
+        "height": 37,
+        "hash": "076dd214593039da9ca950ac3078e589cd280d7e8e93926ea9ee05cf62a38e51",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:33:55Z"
+      },
+      {
+        "height": 38,
+        "hash": "62ac8829a477090c7af7de1234417b5e9bdd51d97edb7dff2b05d278aea6e000",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:33:56Z"
+      },
+      {
+        "height": 39,
+        "hash": "1176b348e78fa0759ed8715b90e1c2745786a0f120609e4fc0b278f2c91cea5f",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:33:57Z"
+      },
+      {
+        "height": 40,
+        "hash": "e2f4fa6c42e28d503c4b588f81df3446e57247f64a3b52dd08840ca65c1f893c",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:33:58Z"
+      },
+      {
+        "height": 41,
+        "hash": "b8189a3f0e710b406f85bb6da0e5e304b457f89ead86050d0d01769d85099f64",
+        "size_bytes": 5809,
+        "size_mb": 0.005539894104003906,
+        "transaction_count": 1,
+        "timestamp": "2026-07-15T19:33:59Z"
+      },
+      {
+        "height": 42,
+        "hash": "d988b591ad7bfc7d0d9bc3b82a573ea2a61b91317b9631a3c0baf12457391dcd",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:00Z"
+      },
+      {
+        "height": 43,
+        "hash": "b1d03184e44d4282ad2721995c2f4b06003107c7932cb178560ccfd6b7e5121c",
+        "size_bytes": 6193,
+        "size_mb": 0.005906105041503906,
+        "transaction_count": 1,
+        "timestamp": "2026-07-15T19:34:01Z"
+      },
+      {
+        "height": 44,
+        "hash": "acfa9158e7049275e5bf6adac97eaa07e0de510c56139955dac4372b1b74fc07",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:02Z"
+      },
+      {
+        "height": 45,
+        "hash": "37046255331f53a471b53d04355ce7961ef55887550d8c9100f7591b1108c775",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:03Z"
+      },
+      {
+        "height": 46,
+        "hash": "e9f5359c5f63ccf0c1f1e77120433dcd0561113ccb98b2c7ba8f0f94307a4967",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:04Z"
+      },
+      {
+        "height": 47,
+        "hash": "87a4a9af090470b86de6e7ddeda7df1475a10b748d5feecefe78c985204891ce",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:05Z"
+      },
+      {
+        "height": 48,
+        "hash": "97bc605dc0b75452b7ca8b7ba91771fe36ab878a9ce136e048c0af4ba6a4e95e",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:06Z"
+      },
+      {
+        "height": 49,
+        "hash": "6105a00b4b75b1fad20927a4a0eb389272faf1d887afd4d35f5963127cb618da",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:07Z"
+      },
+      {
+        "height": 50,
+        "hash": "cecdb6c44def2aa2fb8f37fd97c9eca369cb20157c73681802db919badf3b885",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:08Z"
+      },
+      {
+        "height": 51,
+        "hash": "c96f780fbf4a9716b0bfa40dba978002343d89d8e0170df9b407a3ba956a73b5",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:09Z"
+      },
+      {
+        "height": 52,
+        "hash": "f112fdc38b8ebb4cb3a4b3faadd7e33e89f66d349e8111dd7a6ffdf359d402b6",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:10Z"
+      },
+      {
+        "height": 53,
+        "hash": "2d2b6f156fe53aca240462f2267feec31e0e7493607ee3f23bbaea4239187a57",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:11Z"
+      },
+      {
+        "height": 54,
+        "hash": "346bc075c5accf50ad5e466495e526e84b6ec8e198e61606cf3b43dabc6c41f5",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:12Z"
+      },
+      {
+        "height": 55,
+        "hash": "9dadf5d06c8ec32f841e901f16c638e7d8347f948af0ee1fe5fa9a492c356a35",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:13Z"
+      },
+      {
+        "height": 56,
+        "hash": "3255c557d3f0c625f9c88b1f2405c196fc77f8e2caa98d29bee137abf486b30f",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:14Z"
+      },
+      {
+        "height": 57,
+        "hash": "5f4e9198d6a45e7c5ee974b6e6a06a00f3a8bf48ed0179041c6c403735d75f30",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:15Z"
+      },
+      {
+        "height": 58,
+        "hash": "8de663a8fbd3bf136db6a489f557f385321a51004e9ee1d0a1b85ce55796120f",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:16Z"
+      },
+      {
+        "height": 59,
+        "hash": "5b93e64711c8376aa725812af9ba8fb7163f3065730354a988efe1e4dff53baa",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:17Z"
+      },
+      {
+        "height": 60,
+        "hash": "7b45309806379d0a2bb835d6a6e812d44c048c4e8b8e67960fa45d10547916d5",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:18Z"
+      },
+      {
+        "height": 61,
+        "hash": "18d7a2a05de6cef62709b72b2aec265201f6395e3cc925cf6ddc4b3b30250fee",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:19Z"
+      },
+      {
+        "height": 62,
+        "hash": "075069df445278bfb512e3ae74919845d547b00269db6d0027bc1a2859e1b4da",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:20Z"
+      },
+      {
+        "height": 63,
+        "hash": "90ee7186b1a90d27b6ef9d06c305ea17f89dba72750c522e09df5c195edb85df",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:21Z"
+      },
+      {
+        "height": 64,
+        "hash": "d2dbb9a662cff6aad823aeef83acb9c896e32e919af3a237632330fce8752b1e",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:22Z"
+      },
+      {
+        "height": 65,
+        "hash": "b59c94460b23f2cce076a7e150bbcb4c4dd3fbb443b75f02806a2d1c65aeee8b",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:23Z"
+      },
+      {
+        "height": 66,
+        "hash": "59b7d95c3817d98bf074cb160ac36dd9613b7679199cec478ad1b9302d4c2c13",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:24Z"
+      },
+      {
+        "height": 67,
+        "hash": "8ba05e10d29ca3c83aad7be3e495ba49369381585f5f87f445b84de1c31fabe0",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:25Z"
+      },
+      {
+        "height": 68,
+        "hash": "3c8720c7be10ad8177d9dc8066f483c4c8c7677d147dbaba534afa264f6c3b47",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:26Z"
+      },
+      {
+        "height": 69,
+        "hash": "64bb744a94049c06fcb4c1d2e888a263748f358fd4d53ca654cb43aeca672cd3",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:27Z"
+      },
+      {
+        "height": 70,
+        "hash": "720c3a49b185e2b9c1720803f901547d5a16d1653b10e57574bb1fb7de0bb939",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:28Z"
+      },
+      {
+        "height": 71,
+        "hash": "7add0eacf18f2d113dd5f52aaa50da8f1324e31e88df8095321d0298eabef338",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:29Z"
+      },
+      {
+        "height": 72,
+        "hash": "8cd45c3b60f624811fa1b5411ab974c568c2ac346783ab065835338dcde2a8fe",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:30Z"
+      },
+      {
+        "height": 73,
+        "hash": "b502e33a6520305fd3c920db866be81e65fe77380e3c5508d74a41eb93b1758b",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:31Z"
+      },
+      {
+        "height": 74,
+        "hash": "bba486044c89bb6a7ec839382e6a14ed8b30a4b78594ec461261617fe88e9c7d",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:32Z"
+      },
+      {
+        "height": 75,
+        "hash": "2350d96490cdead0a2b0c3425f362cbfa95b45a2fada110ddbb1a67e3064b857",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:33Z"
+      },
+      {
+        "height": 76,
+        "hash": "3e1eca7fe71dcf4109e75626b11573e9eab75edb72a45dd12ba0f62b3454fdd3",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:34Z"
+      },
+      {
+        "height": 77,
+        "hash": "bc44a4774363a0a958a54059c5dbb60416c8b94946771a306d3ecbf66b2ddc60",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:35Z"
+      },
+      {
+        "height": 78,
+        "hash": "216e5063e61543667f2b796c89050686d9332c54a0d66282786a72beb456d23c",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:36Z"
+      },
+      {
+        "height": 79,
+        "hash": "3c8248e0867d807253259bde08038626f964f1993d43eea89fa6c6f0152eb8e3",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:37Z"
+      },
+      {
+        "height": 80,
+        "hash": "9becad5bf6a691b1f7b48bbae43572a340168d6fd29b8304572d4e741534a4e9",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:38Z"
+      },
+      {
+        "height": 81,
+        "hash": "ba178b478a7c0171dee7caa8b14b009ebbd7c329f84e2066034dae55ca231c95",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:39Z"
+      },
+      {
+        "height": 82,
+        "hash": "6e99becdffd4768d1dcb3981f9816ec6523aa02e5a0cc5855eab1aef91aac9b1",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:40Z"
+      },
+      {
+        "height": 83,
+        "hash": "f38625121155c8e962995d10bde8237b591abd414cb9f965f6516d1457506e69",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:41Z"
+      },
+      {
+        "height": 84,
+        "hash": "e494be938e61a6fcae69b94bf4cc2aaa1d9096f041cef5001cd1a356b49be013",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:42Z"
+      },
+      {
+        "height": 85,
+        "hash": "f9d3a5ca57dc1e81f219b19d0669156c6b43f4f96161e5e65c35db8a3f3264d1",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:43Z"
+      },
+      {
+        "height": 86,
+        "hash": "a2dfa6aa16a29a7f0ae3e960711b4fc2c1261045e9c824e91b6c49da318fdd0d",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:44Z"
+      },
+      {
+        "height": 87,
+        "hash": "61b16a4ba5ee64d5e5f1ac1679b11ddba83a74fd44048b878b1ef63ccb1e26c3",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:45Z"
+      },
+      {
+        "height": 88,
+        "hash": "b1c62d7d002fb8842bbd5acb163974d65b4169f5f081ee160e53600038300c45",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:46Z"
+      },
+      {
+        "height": 89,
+        "hash": "94ed29711b5f5a9286e61af63ea077212cf23155b92241a4c521efbeaa0fbb0c",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:47Z"
+      },
+      {
+        "height": 90,
+        "hash": "ec21c9303fcb867f5f4dc719297cdebc8073dc647f2370e98dfd2bd08c4c63db",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:48Z"
+      },
+      {
+        "height": 91,
+        "hash": "4ab0445a114374ea2e7294d5dcc36baec94d0799b97ec4d7851f0ebde5890427",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:49Z"
+      },
+      {
+        "height": 92,
+        "hash": "69c8468bce88244f8b5b9da8991255e00d1b790096f805355f4668205526f89a",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:50Z"
+      },
+      {
+        "height": 93,
+        "hash": "d39ee5c7dde225b9e0d242a7e73137a0b7dd6ec1cb696e3f975ff82a7917371a",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:51Z"
+      },
+      {
+        "height": 94,
+        "hash": "76b367a32190977deb95cbaed8cce83470014e8c8ecb70fc2487a71b83e9ac4a",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:52Z"
+      },
+      {
+        "height": 95,
+        "hash": "b18e82546eb7ff20bbf120f4974a486115695eb8678d7fcc51aa3b772e1f46cd",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:53Z"
+      },
+      {
+        "height": 96,
+        "hash": "bb95ce0cb4909f84a81d3b54e4bd393900aa9af82f514567b27d1341317aa3a4",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:54Z"
+      },
+      {
+        "height": 97,
+        "hash": "43fd386a60e6c6a061a0077d08c0ed3e60a70bcc785fa7c63c4458045de3f198",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:55Z"
+      },
+      {
+        "height": 98,
+        "hash": "f5f5849d40c8c9d7fb864cb10e3b6e031acf41ca3c06055d0e44d7d9670be6af",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:56Z"
+      },
+      {
+        "height": 99,
+        "hash": "1505f04028b974821facd5cd4e26b7f0b8594376ce8f296ccd8d0d9c697a0547",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:57Z"
+      },
+      {
+        "height": 100,
+        "hash": "92b39cf69f731c8b7f689dd4c07b90e5311c7e07d833f38ec6f2837c5900105e",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:58Z"
+      },
+      {
+        "height": 101,
+        "hash": "c5b21172bcbfadcb5b94c12dcfd06264dc37f35db98cd3e012a24f66532ee835",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:34:59Z"
+      },
+      {
+        "height": 102,
+        "hash": "3d955814f2a59ed6c584a008b6555c1d5b75d451bc4c685fa81943e1074fcf39",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:35:00Z"
+      },
+      {
+        "height": 103,
+        "hash": "6cd5a881ab93fd6f453b7245cd010a6e31ad28f641e77f8bd5556868b52bec96",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:35:01Z"
+      },
+      {
+        "height": 104,
+        "hash": "5259d0bc303d3a8a3394c3de307ced9b5c667705067cff34c50de558ca51aca4",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:35:02Z"
+      },
+      {
+        "height": 105,
+        "hash": "7a667059feed3931bcfbe5ce4189e889e7fb12830da526deacf6524ce646f0cc",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:35:03Z"
+      },
+      {
+        "height": 106,
+        "hash": "7960af8edcd67c7d43aa01de9d9dc3a0af8bda4fa6b8143fe6e9ded96b1ed693",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:35:04Z"
+      },
+      {
+        "height": 107,
+        "hash": "e218b1c878ceca15bb1a726acd4b3efcc2eb4e432d756117671c6f79ce2fa4c8",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:35:05Z"
+      },
+      {
+        "height": 108,
+        "hash": "436ff8065aff8ee3f060688155fb7e8269c8eba3abaaa1bbf4f69f2b42f8b151",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:35:06Z"
+      },
+      {
+        "height": 109,
+        "hash": "143446bec561e02b83350312c40af16fb968372b0b541c75c9270a1f0ebfeb29",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:35:07Z"
+      },
+      {
+        "height": 110,
+        "hash": "45304e4850b4365c501b1909d7ead0c131734b3e56bdd35e9defd7df48d9d465",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:35:08Z"
+      },
+      {
+        "height": 111,
+        "hash": "23e2023697e373887ef740e2ef7a7049adabe3499455a10a2cae5030f79e7b6c",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:35:09Z"
+      },
+      {
+        "height": 112,
+        "hash": "e1dbe10c6f6ef8afa2e41bbd0fdf8a4a18b18cbddb5d49d1ef42707b9cb3cef3",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:35:10Z"
+      },
+      {
+        "height": 113,
+        "hash": "be812f0c5be9b28a8d9d04110790b395c21083381173408b6191750026d097e0",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:35:11Z"
+      },
+      {
+        "height": 114,
+        "hash": "9933320137e887c5122e7f6897150aaec16d76981c5ad1c28f92b13c8b5975eb",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:35:12Z"
+      },
+      {
+        "height": 115,
+        "hash": "1b0b558b3243449b93ddc3cdb39d238d33a8503cd74e9f3738515d95d91d5a65",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:35:13Z"
+      },
+      {
+        "height": 116,
+        "hash": "0d8b4e5ee382b2bda64dacd787c1c3395b0cffa477bdfdb4043e08d6b2401b6a",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:35:14Z"
+      },
+      {
+        "height": 117,
+        "hash": "8450257538ac9e8119dda6ac05bd40d32aacc2a02476bca803139a25fc7ecbf5",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:35:15Z"
+      },
+      {
+        "height": 118,
+        "hash": "d090ed64b3209b7dc20f1e5993e0677b7b05503ea067094e6c586a832d6aaa4a",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:35:16Z"
+      },
+      {
+        "height": 119,
+        "hash": "41a062ecec2f1e07d4fd80bdb4ab981d820a3ed120490722b95c40879ff0dc88",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:35:17Z"
+      },
+      {
+        "height": 120,
+        "hash": "76ba6f4c8cb6bfd0e49874d3acd27379ecfa15d11148267ddd93500ac080058d",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:35:18Z"
+      },
+      {
+        "height": 121,
+        "hash": "7800c13d526766cb3d7cc71f9ac58a0e14027efbf4fdcbd2dd0199bc86a19bcb",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:35:19Z"
+      },
+      {
+        "height": 122,
+        "hash": "a059f1c175f3baa36dfe5dd8bb39e2b874da6744e4e0f9dd76129f1c893da718",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:35:20Z"
+      },
+      {
+        "height": 123,
+        "hash": "8b78bd31133a51c5784b8e8dd4455a98a23e0a5812a42125a16b5d15eb2debf2",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:35:21Z"
+      },
+      {
+        "height": 124,
+        "hash": "1bd70e4a373bb8b2cfd6a35f0de3309d246690efa60310bdc533c332a2596a0c",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:35:22Z"
+      },
+      {
+        "height": 125,
+        "hash": "c38c907743d2994a85756711d6e449575bad607e02c94ca8608bea312ed60be1",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:35:23Z"
+      },
+      {
+        "height": 126,
+        "hash": "658d785cf90c547175891ccf3c70c086e1f9c3af5d5602069454da065f8cd1cc",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:35:24Z"
+      },
+      {
+        "height": 127,
+        "hash": "7ee6266e5f9adc0e8e405a57ac9bfe51cb58e42f306ef41000a40ab5e226b6a3",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:35:25Z"
+      },
+      {
+        "height": 128,
+        "hash": "6baf13881354b781d6b599fb102b720e7d5b62515449b0af2926e229025964c3",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:35:26Z"
+      },
+      {
+        "height": 129,
+        "hash": "9f492fb51e6ab5ed46706a62aa78a8335e58079c15f91af21c5d4fe09e1d9994",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:35:27Z"
+      },
+      {
+        "height": 130,
+        "hash": "bda4b8e9ba515bb3b0bf81240a70a27dc29fe8df8ac99f5939d2579ab1c44d3b",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:35:28Z"
+      },
+      {
+        "height": 131,
+        "hash": "6961f5aad99ec6e9aab5dc83e1047c535020a0c3d8b5187e5c1721dd8600f091",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:35:29Z"
+      },
+      {
+        "height": 132,
+        "hash": "53d1a68ae22b6631848e678520fa98f21491f79bf3bea2919af45ef655d0a064",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:35:30Z"
+      },
+      {
+        "height": 133,
+        "hash": "8d87b7e929ec9aa114f36f5520ab034515799e370891ddcb2a6f01b228b6cdf1",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:35:31Z"
+      },
+      {
+        "height": 134,
+        "hash": "fad8350120fe0c5115842348c27ec7faa35ad27c48ddee7ce46b1808bfc96a44",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:35:32Z"
+      },
+      {
+        "height": 135,
+        "hash": "645847dedb270c0f740590e2b40c0c156ae2d2ccc9ffdb6cf32e659c85730653",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:35:33Z"
+      },
+      {
+        "height": 136,
+        "hash": "116318c23ae42e84ba2123874edcd866afce1b8f8b4bd0c1296276b49a7c53b8",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:35:34Z"
+      },
+      {
+        "height": 137,
+        "hash": "b559d901c0da6d5d8ffe671d6a3940f5c07ccf405502a81577418237ee09a8b1",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:35:35Z"
+      },
+      {
+        "height": 138,
+        "hash": "6bdda6771286fbbad5884b6c037f66df3d43a46fd755713fe30808ed87995d87",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:35:36Z"
+      },
+      {
+        "height": 139,
+        "hash": "2fa139e21c9592c82adbf10ee9cb64630a5c846779f4fabddb53ac5cdf41ed4a",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:35:37Z"
+      },
+      {
+        "height": 140,
+        "hash": "8787c19cd7759d0d52357098d893724d5d2d7f641a7d24c0931f18d3dc745c8f",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:35:38Z"
+      },
+      {
+        "height": 141,
+        "hash": "45f85606b03fa75ee1db5e2788f8938f0c9312dfcb30421b2e1a7bc8473468bd",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:35:39Z"
+      },
+      {
+        "height": 142,
+        "hash": "9227a317ce10496d844ec17ea3fb7461ad5551bb1098a911de3458d68b5656b0",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:35:40Z"
+      },
+      {
+        "height": 143,
+        "hash": "ad00715399721cd083a4b9b4689d7cdf475e816bb26c7b3fcf7bc773135d843f",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:35:41Z"
+      },
+      {
+        "height": 144,
+        "hash": "6545a011216169b430d21d103e9fb8395f00741287ed79eafe4f5d97400ef213",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:35:42Z"
+      },
+      {
+        "height": 145,
+        "hash": "4258abae5fa0ad816d2a420e0e911ba08c00f602f9fa4ab50ddf20b393e972f7",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:35:43Z"
+      },
+      {
+        "height": 146,
+        "hash": "1e2d8c3f48e8b89376b52da052f368ef7c2deab1c2713a5056813d36c8a1c9f0",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:35:44Z"
+      },
+      {
+        "height": 147,
+        "hash": "3e4e936e569c988fd873f69150ee16d040f521db5fe39bed2710fd7fdf12cddb",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:35:45Z"
+      },
+      {
+        "height": 148,
+        "hash": "ee04d5d9e5089f9d8b297fc4b9e08a371c6ab60dab69f69adea00978f2b7397e",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:35:46Z"
+      },
+      {
+        "height": 149,
+        "hash": "b47bb4dbe60bc9789c4469354e728f29109b094828a43a96bdb8265e48a0cdee",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:35:47Z"
+      },
+      {
+        "height": 150,
+        "hash": "44964a4a69dc2367741c9de5e7f33a5b28d7059f77ea02a9df2e6088817ae48c",
+        "size_bytes": 80,
+        "size_mb": 0.0000762939453125,
+        "transaction_count": 0,
+        "timestamp": "2026-07-15T19:35:48Z"
+      }
+    ],
+    "calculation_time": "2026-09-22T03:15:08+07:00",
+    "average_size_mb": 0.00023174285888671875,
+    "min_size_mb": 0.0000762939453125,
+    "max_size_mb": 0.005906105041503906,
+    "total_size_mb": 0.035030364990234375
+  },
+  "tps_metrics": {
+    "current_tps": 0.07755668999973438,
+    "average_tps": 0.022516556291390728,
+    "peak_tps": 1.8,
+    "total_transactions": 17,
+    "blocks_processed": 151,
+    "last_updated": "2026-09-22T03:15:08.769486+07:00",
+    "current_window_count": 0,
+    "window_start_time": "2026-09-22T02:58:14.639546+07:00",
+    "window_duration_seconds": 5,
+    "tps_history": [
+      {
+        "timestamp": "2026-09-22T02:52:57.670933+07:00",
+        "tps": 1.8
+      },
+      {
+        "timestamp": "2026-09-22T02:53:12.134397+07:00",
+        "tps": 0,
+        "block_height": 1
+      },
+      {
+        "timestamp": "2026-09-22T02:53:21.792491+07:00",
+        "tps": 0,
+        "block_height": 2
+      },
+      {
+        "timestamp": "2026-09-22T02:53:32.102847+07:00",
+        "tps": 0,
+        "block_height": 3
+      },
+      {
+        "timestamp": "2026-09-22T02:53:41.848275+07:00",
+        "tps": 0,
+        "block_height": 4
+      },
+      {
+        "timestamp": "2026-09-22T02:53:55.02063+07:00",
+        "tps": 0,
+        "block_height": 5
+      },
+      {
+        "timestamp": "2026-09-22T02:54:03.805998+07:00",
+        "tps": 0,
+        "block_height": 6
+      },
+      {
+        "timestamp": "2026-09-22T02:54:11.544004+07:00",
+        "tps": 0,
+        "block_height": 7
+      },
+      {
+        "timestamp": "2026-09-22T02:54:18.100759+07:00",
+        "tps": 0,
+        "block_height": 8
+      },
+      {
+        "timestamp": "2026-09-22T02:54:25.451526+07:00",
+        "tps": 0,
+        "block_height": 9
+      },
+      {
+        "timestamp": "2026-09-22T02:54:33.732593+07:00",
+        "tps": 0,
+        "block_height": 10
+      },
+      {
+        "timestamp": "2026-09-22T02:54:38.370417+07:00",
+        "tps": 0,
+        "block_height": 11
+      },
+      {
+        "timestamp": "2026-09-22T02:54:46.343321+07:00",
+        "tps": 0,
+        "block_height": 12
+      },
+      {
+        "timestamp": "2026-09-22T02:54:50.701765+07:00",
+        "tps": 0,
+        "block_height": 13
+      },
+      {
+        "timestamp": "2026-09-22T02:54:56.160119+07:00",
+        "tps": 0,
+        "block_height": 14
+      },
+      {
+        "timestamp": "2026-09-22T02:55:03.680117+07:00",
+        "tps": 0,
+        "block_height": 15
+      },
+      {
+        "timestamp": "2026-09-22T02:55:11.443647+07:00",
+        "tps": 1,
+        "block_height": 16
+      },
+      {
+        "timestamp": "2026-09-22T02:55:16.338137+07:00",
+        "tps": 0,
+        "block_height": 17
+      },
+      {
+        "timestamp": "2026-09-22T02:55:24.025785+07:00",
+        "tps": 0,
+        "block_height": 18
+      },
+      {
+        "timestamp": "2026-09-22T02:55:31.039305+07:00",
+        "tps": 0,
+        "block_height": 19
+      },
+      {
+        "timestamp": "2026-09-22T02:55:38.197822+07:00",
+        "tps": 0,
+        "block_height": 20
+      },
+      {
+        "timestamp": "2026-09-22T02:55:46.178827+07:00",
+        "tps": 0,
+        "block_height": 21
+      },
+      {
+        "timestamp": "2026-09-22T02:55:56.500163+07:00",
+        "tps": 0,
+        "block_height": 22
+      },
+      {
+        "timestamp": "2026-09-22T02:56:03.513716+07:00",
+        "tps": 0,
+        "block_height": 23
+      },
+      {
+        "timestamp": "2026-09-22T02:56:08.693694+07:00",
+        "tps": 0,
+        "block_height": 24
+      },
+      {
+        "timestamp": "2026-09-22T02:56:15.522366+07:00",
+        "tps": 0,
+        "block_height": 25
+      },
+      {
+        "timestamp": "2026-09-22T02:56:23.115134+07:00",
+        "tps": 0,
+        "block_height": 26
+      },
+      {
+        "timestamp": "2026-09-22T02:56:31.350423+07:00",
+        "tps": 0,
+        "block_height": 27
+      },
+      {
+        "timestamp": "2026-09-22T02:56:37.232015+07:00",
+        "tps": 0,
+        "block_height": 28
+      },
+      {
+        "timestamp": "2026-09-22T02:56:43.592719+07:00",
+        "tps": 0,
+        "block_height": 29
+      },
+      {
+        "timestamp": "2026-09-22T02:56:47.648706+07:00",
+        "tps": 0,
+        "block_height": 30
+      },
+      {
+        "timestamp": "2026-09-22T02:56:53.969193+07:00",
+        "tps": 0,
+        "block_height": 31
+      },
+      {
+        "timestamp": "2026-09-22T02:56:57.952334+07:00",
+        "tps": 0,
+        "block_height": 32
+      },
+      {
+        "timestamp": "2026-09-22T02:57:03.915434+07:00",
+        "tps": 0,
+        "block_height": 33
+      },
+      {
+        "timestamp": "2026-09-22T02:57:11.085294+07:00",
+        "tps": 0,
+        "block_height": 34
+      },
+      {
+        "timestamp": "2026-09-22T02:57:18.168252+07:00",
+        "tps": 0,
+        "block_height": 35
+      },
+      {
+        "timestamp": "2026-09-22T02:57:27.167444+07:00",
+        "tps": 1,
+        "block_height": 36
+      },
+      {
+        "timestamp": "2026-09-22T02:57:36.527305+07:00",
+        "tps": 0,
+        "block_height": 37
+      },
+      {
+        "timestamp": "2026-09-22T02:57:44.420271+07:00",
+        "tps": 0,
+        "block_height": 38
+      },
+      {
+        "timestamp": "2026-09-22T02:57:54.319782+07:00",
+        "tps": 0,
+        "block_height": 39
+      },
+      {
+        "timestamp": "2026-09-22T02:58:03.146444+07:00",
+        "tps": 0,
+        "block_height": 40
+      },
+      {
+        "timestamp": "2026-09-22T02:58:12.47845+07:00",
+        "tps": 1,
+        "block_height": 41
+      },
+      {
+        "timestamp": "2026-09-22T02:58:21.213549+07:00",
+        "tps": 0,
+        "block_height": 42
+      },
+      {
+        "timestamp": "2026-09-22T02:58:30.493635+07:00",
+        "tps": 1,
+        "block_height": 43
+      },
+      {
+        "timestamp": "2026-09-22T02:58:39.518195+07:00",
+        "tps": 0,
+        "block_height": 44
+      },
+      {
+        "timestamp": "2026-09-22T02:58:47.443549+07:00",
+        "tps": 0,
+        "block_height": 45
+      },
+      {
+        "timestamp": "2026-09-22T02:58:56.675401+07:00",
+        "tps": 0,
+        "block_height": 46
+      },
+      {
+        "timestamp": "2026-09-22T02:59:07.353579+07:00",
+        "tps": 0,
+        "block_height": 47
+      },
+      {
+        "timestamp": "2026-09-22T02:59:10.190479+07:00",
+        "tps": 0,
+        "block_height": 48
+      },
+      {
+        "timestamp": "2026-09-22T02:59:21.163539+07:00",
+        "tps": 0,
+        "block_height": 49
+      },
+      {
+        "timestamp": "2026-09-22T02:59:35.472356+07:00",
+        "tps": 0,
+        "block_height": 50
+      },
+      {
+        "timestamp": "2026-09-22T02:59:41.692809+07:00",
+        "tps": 0,
+        "block_height": 51
+      },
+      {
+        "timestamp": "2026-09-22T02:59:52.386181+07:00",
+        "tps": 0,
+        "block_height": 52
+      },
+      {
+        "timestamp": "2026-09-22T03:00:04.682496+07:00",
+        "tps": 0,
+        "block_height": 53
+      },
+      {
+        "timestamp": "2026-09-22T03:00:13.133972+07:00",
+        "tps": 0,
+        "block_height": 54
+      },
+      {
+        "timestamp": "2026-09-22T03:00:18.782277+07:00",
+        "tps": 0,
+        "block_height": 55
+      },
+      {
+        "timestamp": "2026-09-22T03:00:27.282225+07:00",
+        "tps": 0,
+        "block_height": 56
+      },
+      {
+        "timestamp": "2026-09-22T03:00:36.830507+07:00",
+        "tps": 0,
+        "block_height": 57
+      },
+      {
+        "timestamp": "2026-09-22T03:00:42.031832+07:00",
+        "tps": 0,
+        "block_height": 58
+      },
+      {
+        "timestamp": "2026-09-22T03:00:49.530891+07:00",
+        "tps": 0,
+        "block_height": 59
+      },
+      {
+        "timestamp": "2026-09-22T03:00:59.132389+07:00",
+        "tps": 0,
+        "block_height": 60
+      },
+      {
+        "timestamp": "2026-09-22T03:01:04.430171+07:00",
+        "tps": 0,
+        "block_height": 61
+      },
+      {
+        "timestamp": "2026-09-22T03:01:13.630764+07:00",
+        "tps": 0,
+        "block_height": 62
+      },
+      {
+        "timestamp": "2026-09-22T03:01:21.181387+07:00",
+        "tps": 0,
+        "block_height": 63
+      },
+      {
+        "timestamp": "2026-09-22T03:01:26.780577+07:00",
+        "tps": 0,
+        "block_height": 64
+      },
+      {
+        "timestamp": "2026-09-22T03:01:35.881673+07:00",
+        "tps": 0,
+        "block_height": 65
+      },
+      {
+        "timestamp": "2026-09-22T03:01:43.481744+07:00",
+        "tps": 0,
+        "block_height": 66
+      },
+      {
+        "timestamp": "2026-09-22T03:01:52.130329+07:00",
+        "tps": 0,
+        "block_height": 67
+      },
+      {
+        "timestamp": "2026-09-22T03:01:55.630107+07:00",
+        "tps": 0,
+        "block_height": 68
+      },
+      {
+        "timestamp": "2026-09-22T03:02:04.979367+07:00",
+        "tps": 0,
+        "block_height": 69
+      },
+      {
+        "timestamp": "2026-09-22T03:02:12.530748+07:00",
+        "tps": 0,
+        "block_height": 70
+      },
+      {
+        "timestamp": "2026-09-22T03:02:22.829742+07:00",
+        "tps": 0,
+        "block_height": 71
+      },
+      {
+        "timestamp": "2026-09-22T03:02:34.780856+07:00",
+        "tps": 0,
+        "block_height": 72
+      },
+      {
+        "timestamp": "2026-09-22T03:02:41.779447+07:00",
+        "tps": 0,
+        "block_height": 73
+      },
+      {
+        "timestamp": "2026-09-22T03:02:45.980128+07:00",
+        "tps": 0,
+        "block_height": 74
+      },
+      {
+        "timestamp": "2026-09-22T03:02:54.879108+07:00",
+        "tps": 0,
+        "block_height": 75
+      },
+      {
+        "timestamp": "2026-09-22T03:03:01.18149+07:00",
+        "tps": 0,
+        "block_height": 76
+      },
+      {
+        "timestamp": "2026-09-22T03:03:08.029316+07:00",
+        "tps": 0,
+        "block_height": 77
+      },
+      {
+        "timestamp": "2026-09-22T03:03:13.579195+07:00",
+        "tps": 0,
+        "block_height": 78
+      },
+      {
+        "timestamp": "2026-09-22T03:03:20.828863+07:00",
+        "tps": 0,
+        "block_height": 79
+      },
+      {
+        "timestamp": "2026-09-22T03:03:30.886883+07:00",
+        "tps": 0,
+        "block_height": 80
+      },
+      {
+        "timestamp": "2026-09-22T03:03:36.961634+07:00",
+        "tps": 0,
+        "block_height": 81
+      },
+      {
+        "timestamp": "2026-09-22T03:03:42.402057+07:00",
+        "tps": 0,
+        "block_height": 82
+      },
+      {
+        "timestamp": "2026-09-22T03:03:49.801704+07:00",
+        "tps": 0,
+        "block_height": 83
+      },
+      {
+        "timestamp": "2026-09-22T03:04:02.900056+07:00",
+        "tps": 0,
+        "block_height": 84
+      },
+      {
+        "timestamp": "2026-09-22T03:04:10.189844+07:00",
+        "tps": 0,
+        "block_height": 85
+      },
+      {
+        "timestamp": "2026-09-22T03:04:15.487643+07:00",
+        "tps": 0,
+        "block_height": 86
+      },
+      {
+        "timestamp": "2026-09-22T03:04:23.326083+07:00",
+        "tps": 0,
+        "block_height": 87
+      },
+      {
+        "timestamp": "2026-09-22T03:04:31.764644+07:00",
+        "tps": 0,
+        "block_height": 88
+      },
+      {
+        "timestamp": "2026-09-22T03:04:37.051779+07:00",
+        "tps": 0,
+        "block_height": 89
+      },
+      {
+        "timestamp": "2026-09-22T03:04:44.257159+07:00",
+        "tps": 0,
+        "block_height": 90
+      },
+      {
+        "timestamp": "2026-09-22T03:04:51.939451+07:00",
+        "tps": 0,
+        "block_height": 91
+      },
+      {
+        "timestamp": "2026-09-22T03:04:57.307798+07:00",
+        "tps": 0,
+        "block_height": 92
+      },
+      {
+        "timestamp": "2026-09-22T03:05:05.998564+07:00",
+        "tps": 0,
+        "block_height": 93
+      },
+      {
+        "timestamp": "2026-09-22T03:05:10.854285+07:00",
+        "tps": 0,
+        "block_height": 94
+      },
+      {
+        "timestamp": "2026-09-22T03:05:19.148789+07:00",
+        "tps": 0,
+        "block_height": 95
+      },
+      {
+        "timestamp": "2026-09-22T03:05:30.345871+07:00",
+        "tps": 0,
+        "block_height": 96
+      },
+      {
+        "timestamp": "2026-09-22T03:05:33.383615+07:00",
+        "tps": 0,
+        "block_height": 97
+      },
+      {
+        "timestamp": "2026-09-22T03:05:42.39769+07:00",
+        "tps": 0,
+        "block_height": 98
+      },
+      {
+        "timestamp": "2026-09-22T03:05:54.146408+07:00",
+        "tps": 0,
+        "block_height": 99
+      },
+      {
+        "timestamp": "2026-09-22T03:06:07.983584+07:00",
+        "tps": 0,
+        "block_height": 100
+      },
+      {
+        "timestamp": "2026-09-22T03:06:17.180766+07:00",
+        "tps": 0,
+        "block_height": 101
+      },
+      {
+        "timestamp": "2026-09-22T03:06:27.785682+07:00",
+        "tps": 0,
+        "block_height": 102
+      },
+      {
+        "timestamp": "2026-09-22T03:06:36.83042+07:00",
+        "tps": 0,
+        "block_height": 103
+      },
+      {
+        "timestamp": "2026-09-22T03:06:43.550323+07:00",
+        "tps": 0,
+        "block_height": 104
+      },
+      {
+        "timestamp": "2026-09-22T03:06:50.629179+07:00",
+        "tps": 0,
+        "block_height": 105
+      },
+      {
+        "timestamp": "2026-09-22T03:06:58.536868+07:00",
+        "tps": 0,
+        "block_height": 106
+      },
+      {
+        "timestamp": "2026-09-22T03:07:03.603378+07:00",
+        "tps": 0,
+        "block_height": 107
+      },
+      {
+        "timestamp": "2026-09-22T03:07:11.870809+07:00",
+        "tps": 0,
+        "block_height": 108
+      },
+      {
+        "timestamp": "2026-09-22T03:07:16.087484+07:00",
+        "tps": 0,
+        "block_height": 109
+      },
+      {
+        "timestamp": "2026-09-22T03:07:24.721539+07:00",
+        "tps": 0,
+        "block_height": 110
+      },
+      {
+        "timestamp": "2026-09-22T03:07:32.009143+07:00",
+        "tps": 0,
+        "block_height": 111
+      },
+      {
+        "timestamp": "2026-09-22T03:07:36.207059+07:00",
+        "tps": 0,
+        "block_height": 112
+      },
+      {
+        "timestamp": "2026-09-22T03:07:43.536915+07:00",
+        "tps": 0,
+        "block_height": 113
+      },
+      {
+        "timestamp": "2026-09-22T03:07:46.498934+07:00",
+        "tps": 0,
+        "block_height": 114
+      },
+      {
+        "timestamp": "2026-09-22T03:07:55.076716+07:00",
+        "tps": 0,
+        "block_height": 115
+      },
+      {
+        "timestamp": "2026-09-22T03:08:04.196206+07:00",
+        "tps": 0,
+        "block_height": 116
+      },
+      {
+        "timestamp": "2026-09-22T03:08:11.836016+07:00",
+        "tps": 0,
+        "block_height": 117
+      },
+      {
+        "timestamp": "2026-09-22T03:08:18.328688+07:00",
+        "tps": 0,
+        "block_height": 118
+      },
+      {
+        "timestamp": "2026-09-22T03:08:31.428945+07:00",
+        "tps": 0,
+        "block_height": 119
+      },
+      {
+        "timestamp": "2026-09-22T03:08:34.679219+07:00",
+        "tps": 0,
+        "block_height": 120
+      },
+      {
+        "timestamp": "2026-09-22T03:08:43.727506+07:00",
+        "tps": 0,
+        "block_height": 121
+      },
+      {
+        "timestamp": "2026-09-22T03:08:51.527355+07:00",
+        "tps": 0,
+        "block_height": 122
+      },
+      {
+        "timestamp": "2026-09-22T03:09:04.679347+07:00",
+        "tps": 0,
+        "block_height": 123
+      },
+      {
+        "timestamp": "2026-09-22T03:09:09.377861+07:00",
+        "tps": 0,
+        "block_height": 124
+      },
+      {
+        "timestamp": "2026-09-22T03:09:19.129794+07:00",
+        "tps": 0,
+        "block_height": 125
+      },
+      {
+        "timestamp": "2026-09-22T03:09:28.326596+07:00",
+        "tps": 0,
+        "block_height": 126
+      },
+      {
+        "timestamp": "2026-09-22T03:09:41.87689+07:00",
+        "tps": 0,
+        "block_height": 127
+      },
+      {
+        "timestamp": "2026-09-22T03:09:46.828276+07:00",
+        "tps": 0,
+        "block_height": 128
+      },
+      {
+        "timestamp": "2026-09-22T03:09:56.077255+07:00",
+        "tps": 0,
+        "block_height": 129
+      },
+      {
+        "timestamp": "2026-09-22T03:10:02.329203+07:00",
+        "tps": 0,
+        "block_height": 130
+      },
+      {
+        "timestamp": "2026-09-22T03:10:10.83554+07:00",
+        "tps": 0,
+        "block_height": 131
+      },
+      {
+        "timestamp": "2026-09-22T03:10:24.888185+07:00",
+        "tps": 0,
+        "block_height": 132
+      },
+      {
+        "timestamp": "2026-09-22T03:10:38.879768+07:00",
+        "tps": 0,
+        "block_height": 133
+      },
+      {
+        "timestamp": "2026-09-22T03:10:48.038093+07:00",
+        "tps": 0,
+        "block_height": 134
+      },
+      {
+        "timestamp": "2026-09-22T03:11:05.778769+07:00",
+        "tps": 0,
+        "block_height": 135
+      },
+      {
+        "timestamp": "2026-09-22T03:11:22.083617+07:00",
+        "tps": 0,
+        "block_height": 136
+      },
+      {
+        "timestamp": "2026-09-22T03:11:42.118177+07:00",
+        "tps": 0,
+        "block_height": 137
+      },
+      {
+        "timestamp": "2026-09-22T03:11:54.463967+07:00",
+        "tps": 0,
+        "block_height": 138
+      },
+      {
+        "timestamp": "2026-09-22T03:12:13.931633+07:00",
+        "tps": 0,
+        "block_height": 139
+      },
+      {
+        "timestamp": "2026-09-22T03:12:24.572231+07:00",
+        "tps": 0,
+        "block_height": 140
+      },
+      {
+        "timestamp": "2026-09-22T03:12:47.831767+07:00",
+        "tps": 0,
+        "block_height": 141
+      },
+      {
+        "timestamp": "2026-09-22T03:13:03.233228+07:00",
+        "tps": 0,
+        "block_height": 142
+      },
+      {
+        "timestamp": "2026-09-22T03:13:12.286167+07:00",
+        "tps": 0,
+        "block_height": 143
+      },
+      {
+        "timestamp": "2026-09-22T03:13:30.421277+07:00",
+        "tps": 0,
+        "block_height": 144
+      },
+      {
+        "timestamp": "2026-09-22T03:13:41.812912+07:00",
+        "tps": 0,
+        "block_height": 145
+      },
+      {
+        "timestamp": "2026-09-22T03:14:05.859788+07:00",
+        "tps": 0,
+        "block_height": 146
+      },
+      {
+        "timestamp": "2026-09-22T03:14:20.66211+07:00",
+        "tps": 0,
+        "block_height": 147
+      },
+      {
+        "timestamp": "2026-09-22T03:14:40.855556+07:00",
+        "tps": 0,
+        "block_height": 148
+      },
+      {
+        "timestamp": "2026-09-22T03:14:57.110877+07:00",
+        "tps": 0,
+        "block_height": 149
+      },
+      {
+        "timestamp": "2026-09-22T03:15:08.762869+07:00",
+        "tps": 0,
+        "block_height": 150
+      }
+    ],
+    "transactions_per_block": [
+      {
+        "block_height": 0,
+        "block_hash": "GENESIS_9a0a5a65b87b32be4e8e6963b49102ca1ffd39155d47e9f322a0ad44c0f78e1f",
+        "tx_count": 9,
+        "block_time": "2026-07-16T02:33:18+07:00",
+        "block_size_bytes": 2165
+      },
+      {
+        "block_height": 1,
+        "block_hash": "8290c57cda98c9de06492edb66eac8ce50f495e0513a20b7ecc607a7150c30e0",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:33:19+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 2,
+        "block_hash": "c65ab073606071b33295fb45aa8783f5bc3c56ef7cbfc10019644a69ce062ec4",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:33:20+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 3,
+        "block_hash": "791be089669cecbfc7d39df8ee8a1d9a5c3d38cf879f5162633c8296860978a0",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:33:21+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 4,
+        "block_hash": "5d4281e8b82a782c6540ec228b15a986680eea83d94fe57d8a6f169561dfe8cf",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:33:22+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 5,
+        "block_hash": "ae9aa17ebf4fe7c6a6a0943b0fc2eaf378add9fa2e3bdd6f9b2a184aea9449bc",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:33:23+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 6,
+        "block_hash": "a0fa91d010bd120f648abdebf705b368c141544501f5ce1163bf273e29ec8499",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:33:24+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 7,
+        "block_hash": "83feb19ae597fc2cf6ea4a14fa4e826746534586686496ee8eb5dcdc87328e41",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:33:25+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 8,
+        "block_hash": "6ee379395f871e4730e4e21d932e66c9ffe9e81ca38951f55bda216201f7e5f7",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:33:26+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 9,
+        "block_hash": "c4b07dda60fbd0e21c3bf9f878645af0225855ef1c3f05bd5ac99c28756629e8",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:33:27+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 10,
+        "block_hash": "0e0bfcf1c080bc1e9b1854a01208acffe21604d507c226854c2d6dcf6cb0e199",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:33:28+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 11,
+        "block_hash": "68d6345b53ef98ecf62c4553e31f8ab550077ce3aba95a46a3ac370e488034b8",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:33:29+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 12,
+        "block_hash": "4b00225e04f289fbf3ff807444d289610192ddef18b6b64d4651188aa1180621",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:33:30+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 13,
+        "block_hash": "243d606b235f8b9fe2a96412802761c458700123740d63c6f6ab389bea9279bc",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:33:31+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 14,
+        "block_hash": "506b832bab9094c0a38d69873d129b3ee15894d978f882d29f50894e2cbd7571",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:33:32+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 15,
+        "block_hash": "7382f250e010ce046c32f131159f9dca9a13a23e91bee12bc90729145d9c1259",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:33:33+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 16,
+        "block_hash": "7be21c9e4e3b6861bbf91d0048fa5b70899ae574bd66f16249977d7c1f112e34",
+        "tx_count": 1,
+        "block_time": "2026-07-16T02:33:34+07:00",
+        "block_size_bytes": 5412
+      },
+      {
+        "block_height": 17,
+        "block_hash": "0d3b79bba0c35902c19f1161c53d92d65fe890ff4c77a7d00c376fce74559905",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:33:35+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 18,
+        "block_hash": "5ec9b291e7e0b55491c08394cd78f86d2c9625fe8562d61292d316617fadce26",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:33:36+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 19,
+        "block_hash": "1ffd3a2fc1755847a7a4fc48ab0ef64ada829e1bc62626fcd248e0583b7143e4",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:33:37+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 20,
+        "block_hash": "9a80e7d3213e0b11171bc0e29387cc942af89e5a07a03c702cb9c3afe02c81d4",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:33:38+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 21,
+        "block_hash": "dd3aacacb1b80411a5138e22fe1a451fde45263b996ead3adac2dcfd9fde847c",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:33:39+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 22,
+        "block_hash": "f48314e620dbd5a21d98e0bfed45a2e112bb1cfcfa0d482938bdcb88eaf3006f",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:33:40+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 23,
+        "block_hash": "edee426f4694099044bfe478d327df77e7cdefb6786608778280522d77ed5bed",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:33:41+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 24,
+        "block_hash": "e59673e28cad08c56f69760cde18d90b840db0538b2b9902581c36386216e351",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:33:42+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 25,
+        "block_hash": "ca49cf32e4afc297e95c75488f621e26927706be1e3d5a610133eb141001842e",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:33:43+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 26,
+        "block_hash": "123b3a21a2b7607d86ebdbb643f2629cc4d2357d6cd69fb64132c8e2f009cb23",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:33:44+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 27,
+        "block_hash": "9adc3e6d5d819898979f34030b776101da370b3c36d7e344caf5508f8aef6a6c",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:33:45+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 28,
+        "block_hash": "871ea824139e5e1675074de17484ca1c217951421ad85dfcb2eac67eb4b216e2",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:33:46+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 29,
+        "block_hash": "5027827dc390b6bac72326cc727480c36ead4a9ffba04d00f4bb1b6726a48753",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:33:47+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 30,
+        "block_hash": "01828614e0629be0ec41b34097cd630fddac1c9a22c2518bcb6094f58946071c",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:33:48+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 31,
+        "block_hash": "5c9c19fb330bddf2b9f0462a4c6dc5bcddb6dc9ed949168b5b6900d16fdf19d7",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:33:49+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 32,
+        "block_hash": "a54963279a28ef5c6bb76deff4e1dc0507972fb2616d3ca8511415d4223ddbc8",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:33:50+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 33,
+        "block_hash": "b04788bb3b1c67e6c39fbe9228b5c65914b3ef82f5823a214660c8a208ec5a7e",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:33:51+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 34,
+        "block_hash": "fc998b4f8fde3293b9cd3df3d31a303824556f666fbf2ac4df4ca9f8e8b85861",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:33:52+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 35,
+        "block_hash": "1ebcb20426050676bd6bfefac1b5a83979e5660f499191d418d2f4cada81db1c",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:33:53+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 36,
+        "block_hash": "1566e879690329c428c4c13b4223793462308eb290eea7311ea76070c28ff09e",
+        "tx_count": 1,
+        "block_time": "2026-07-16T02:33:54+07:00",
+        "block_size_bytes": 5473
+      },
+      {
+        "block_height": 37,
+        "block_hash": "076dd214593039da9ca950ac3078e589cd280d7e8e93926ea9ee05cf62a38e51",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:33:55+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 38,
+        "block_hash": "62ac8829a477090c7af7de1234417b5e9bdd51d97edb7dff2b05d278aea6e000",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:33:56+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 39,
+        "block_hash": "1176b348e78fa0759ed8715b90e1c2745786a0f120609e4fc0b278f2c91cea5f",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:33:57+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 40,
+        "block_hash": "e2f4fa6c42e28d503c4b588f81df3446e57247f64a3b52dd08840ca65c1f893c",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:33:58+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 41,
+        "block_hash": "b8189a3f0e710b406f85bb6da0e5e304b457f89ead86050d0d01769d85099f64",
+        "tx_count": 1,
+        "block_time": "2026-07-16T02:33:59+07:00",
+        "block_size_bytes": 5809
+      },
+      {
+        "block_height": 42,
+        "block_hash": "d988b591ad7bfc7d0d9bc3b82a573ea2a61b91317b9631a3c0baf12457391dcd",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:00+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 43,
+        "block_hash": "b1d03184e44d4282ad2721995c2f4b06003107c7932cb178560ccfd6b7e5121c",
+        "tx_count": 1,
+        "block_time": "2026-07-16T02:34:01+07:00",
+        "block_size_bytes": 6193
+      },
+      {
+        "block_height": 44,
+        "block_hash": "acfa9158e7049275e5bf6adac97eaa07e0de510c56139955dac4372b1b74fc07",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:02+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 45,
+        "block_hash": "37046255331f53a471b53d04355ce7961ef55887550d8c9100f7591b1108c775",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:03+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 46,
+        "block_hash": "e9f5359c5f63ccf0c1f1e77120433dcd0561113ccb98b2c7ba8f0f94307a4967",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:04+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 47,
+        "block_hash": "87a4a9af090470b86de6e7ddeda7df1475a10b748d5feecefe78c985204891ce",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:05+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 48,
+        "block_hash": "97bc605dc0b75452b7ca8b7ba91771fe36ab878a9ce136e048c0af4ba6a4e95e",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:06+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 49,
+        "block_hash": "6105a00b4b75b1fad20927a4a0eb389272faf1d887afd4d35f5963127cb618da",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:07+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 50,
+        "block_hash": "cecdb6c44def2aa2fb8f37fd97c9eca369cb20157c73681802db919badf3b885",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:08+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 51,
+        "block_hash": "c96f780fbf4a9716b0bfa40dba978002343d89d8e0170df9b407a3ba956a73b5",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:09+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 52,
+        "block_hash": "f112fdc38b8ebb4cb3a4b3faadd7e33e89f66d349e8111dd7a6ffdf359d402b6",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:10+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 53,
+        "block_hash": "2d2b6f156fe53aca240462f2267feec31e0e7493607ee3f23bbaea4239187a57",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:11+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 54,
+        "block_hash": "346bc075c5accf50ad5e466495e526e84b6ec8e198e61606cf3b43dabc6c41f5",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:12+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 55,
+        "block_hash": "9dadf5d06c8ec32f841e901f16c638e7d8347f948af0ee1fe5fa9a492c356a35",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:13+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 56,
+        "block_hash": "3255c557d3f0c625f9c88b1f2405c196fc77f8e2caa98d29bee137abf486b30f",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:14+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 57,
+        "block_hash": "5f4e9198d6a45e7c5ee974b6e6a06a00f3a8bf48ed0179041c6c403735d75f30",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:15+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 58,
+        "block_hash": "8de663a8fbd3bf136db6a489f557f385321a51004e9ee1d0a1b85ce55796120f",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:16+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 59,
+        "block_hash": "5b93e64711c8376aa725812af9ba8fb7163f3065730354a988efe1e4dff53baa",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:17+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 60,
+        "block_hash": "7b45309806379d0a2bb835d6a6e812d44c048c4e8b8e67960fa45d10547916d5",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:18+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 61,
+        "block_hash": "18d7a2a05de6cef62709b72b2aec265201f6395e3cc925cf6ddc4b3b30250fee",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:19+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 62,
+        "block_hash": "075069df445278bfb512e3ae74919845d547b00269db6d0027bc1a2859e1b4da",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:20+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 63,
+        "block_hash": "90ee7186b1a90d27b6ef9d06c305ea17f89dba72750c522e09df5c195edb85df",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:21+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 64,
+        "block_hash": "d2dbb9a662cff6aad823aeef83acb9c896e32e919af3a237632330fce8752b1e",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:22+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 65,
+        "block_hash": "b59c94460b23f2cce076a7e150bbcb4c4dd3fbb443b75f02806a2d1c65aeee8b",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:23+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 66,
+        "block_hash": "59b7d95c3817d98bf074cb160ac36dd9613b7679199cec478ad1b9302d4c2c13",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:24+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 67,
+        "block_hash": "8ba05e10d29ca3c83aad7be3e495ba49369381585f5f87f445b84de1c31fabe0",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:25+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 68,
+        "block_hash": "3c8720c7be10ad8177d9dc8066f483c4c8c7677d147dbaba534afa264f6c3b47",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:26+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 69,
+        "block_hash": "64bb744a94049c06fcb4c1d2e888a263748f358fd4d53ca654cb43aeca672cd3",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:27+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 70,
+        "block_hash": "720c3a49b185e2b9c1720803f901547d5a16d1653b10e57574bb1fb7de0bb939",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:28+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 71,
+        "block_hash": "7add0eacf18f2d113dd5f52aaa50da8f1324e31e88df8095321d0298eabef338",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:29+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 72,
+        "block_hash": "8cd45c3b60f624811fa1b5411ab974c568c2ac346783ab065835338dcde2a8fe",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:30+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 73,
+        "block_hash": "b502e33a6520305fd3c920db866be81e65fe77380e3c5508d74a41eb93b1758b",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:31+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 74,
+        "block_hash": "bba486044c89bb6a7ec839382e6a14ed8b30a4b78594ec461261617fe88e9c7d",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:32+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 75,
+        "block_hash": "2350d96490cdead0a2b0c3425f362cbfa95b45a2fada110ddbb1a67e3064b857",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:33+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 76,
+        "block_hash": "3e1eca7fe71dcf4109e75626b11573e9eab75edb72a45dd12ba0f62b3454fdd3",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:34+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 77,
+        "block_hash": "bc44a4774363a0a958a54059c5dbb60416c8b94946771a306d3ecbf66b2ddc60",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:35+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 78,
+        "block_hash": "216e5063e61543667f2b796c89050686d9332c54a0d66282786a72beb456d23c",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:36+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 79,
+        "block_hash": "3c8248e0867d807253259bde08038626f964f1993d43eea89fa6c6f0152eb8e3",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:37+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 80,
+        "block_hash": "9becad5bf6a691b1f7b48bbae43572a340168d6fd29b8304572d4e741534a4e9",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:38+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 81,
+        "block_hash": "ba178b478a7c0171dee7caa8b14b009ebbd7c329f84e2066034dae55ca231c95",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:39+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 82,
+        "block_hash": "6e99becdffd4768d1dcb3981f9816ec6523aa02e5a0cc5855eab1aef91aac9b1",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:40+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 83,
+        "block_hash": "f38625121155c8e962995d10bde8237b591abd414cb9f965f6516d1457506e69",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:41+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 84,
+        "block_hash": "e494be938e61a6fcae69b94bf4cc2aaa1d9096f041cef5001cd1a356b49be013",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:42+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 85,
+        "block_hash": "f9d3a5ca57dc1e81f219b19d0669156c6b43f4f96161e5e65c35db8a3f3264d1",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:43+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 86,
+        "block_hash": "a2dfa6aa16a29a7f0ae3e960711b4fc2c1261045e9c824e91b6c49da318fdd0d",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:44+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 87,
+        "block_hash": "61b16a4ba5ee64d5e5f1ac1679b11ddba83a74fd44048b878b1ef63ccb1e26c3",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:45+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 88,
+        "block_hash": "b1c62d7d002fb8842bbd5acb163974d65b4169f5f081ee160e53600038300c45",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:46+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 89,
+        "block_hash": "94ed29711b5f5a9286e61af63ea077212cf23155b92241a4c521efbeaa0fbb0c",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:47+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 90,
+        "block_hash": "ec21c9303fcb867f5f4dc719297cdebc8073dc647f2370e98dfd2bd08c4c63db",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:48+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 91,
+        "block_hash": "4ab0445a114374ea2e7294d5dcc36baec94d0799b97ec4d7851f0ebde5890427",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:49+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 92,
+        "block_hash": "69c8468bce88244f8b5b9da8991255e00d1b790096f805355f4668205526f89a",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:50+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 93,
+        "block_hash": "d39ee5c7dde225b9e0d242a7e73137a0b7dd6ec1cb696e3f975ff82a7917371a",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:51+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 94,
+        "block_hash": "76b367a32190977deb95cbaed8cce83470014e8c8ecb70fc2487a71b83e9ac4a",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:52+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 95,
+        "block_hash": "b18e82546eb7ff20bbf120f4974a486115695eb8678d7fcc51aa3b772e1f46cd",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:53+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 96,
+        "block_hash": "bb95ce0cb4909f84a81d3b54e4bd393900aa9af82f514567b27d1341317aa3a4",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:54+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 97,
+        "block_hash": "43fd386a60e6c6a061a0077d08c0ed3e60a70bcc785fa7c63c4458045de3f198",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:55+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 98,
+        "block_hash": "f5f5849d40c8c9d7fb864cb10e3b6e031acf41ca3c06055d0e44d7d9670be6af",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:56+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 99,
+        "block_hash": "1505f04028b974821facd5cd4e26b7f0b8594376ce8f296ccd8d0d9c697a0547",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:57+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 100,
+        "block_hash": "92b39cf69f731c8b7f689dd4c07b90e5311c7e07d833f38ec6f2837c5900105e",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:58+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 101,
+        "block_hash": "c5b21172bcbfadcb5b94c12dcfd06264dc37f35db98cd3e012a24f66532ee835",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:34:59+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 102,
+        "block_hash": "3d955814f2a59ed6c584a008b6555c1d5b75d451bc4c685fa81943e1074fcf39",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:35:00+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 103,
+        "block_hash": "6cd5a881ab93fd6f453b7245cd010a6e31ad28f641e77f8bd5556868b52bec96",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:35:01+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 104,
+        "block_hash": "5259d0bc303d3a8a3394c3de307ced9b5c667705067cff34c50de558ca51aca4",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:35:02+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 105,
+        "block_hash": "7a667059feed3931bcfbe5ce4189e889e7fb12830da526deacf6524ce646f0cc",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:35:03+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 106,
+        "block_hash": "7960af8edcd67c7d43aa01de9d9dc3a0af8bda4fa6b8143fe6e9ded96b1ed693",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:35:04+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 107,
+        "block_hash": "e218b1c878ceca15bb1a726acd4b3efcc2eb4e432d756117671c6f79ce2fa4c8",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:35:05+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 108,
+        "block_hash": "436ff8065aff8ee3f060688155fb7e8269c8eba3abaaa1bbf4f69f2b42f8b151",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:35:06+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 109,
+        "block_hash": "143446bec561e02b83350312c40af16fb968372b0b541c75c9270a1f0ebfeb29",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:35:07+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 110,
+        "block_hash": "45304e4850b4365c501b1909d7ead0c131734b3e56bdd35e9defd7df48d9d465",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:35:08+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 111,
+        "block_hash": "23e2023697e373887ef740e2ef7a7049adabe3499455a10a2cae5030f79e7b6c",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:35:09+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 112,
+        "block_hash": "e1dbe10c6f6ef8afa2e41bbd0fdf8a4a18b18cbddb5d49d1ef42707b9cb3cef3",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:35:10+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 113,
+        "block_hash": "be812f0c5be9b28a8d9d04110790b395c21083381173408b6191750026d097e0",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:35:11+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 114,
+        "block_hash": "9933320137e887c5122e7f6897150aaec16d76981c5ad1c28f92b13c8b5975eb",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:35:12+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 115,
+        "block_hash": "1b0b558b3243449b93ddc3cdb39d238d33a8503cd74e9f3738515d95d91d5a65",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:35:13+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 116,
+        "block_hash": "0d8b4e5ee382b2bda64dacd787c1c3395b0cffa477bdfdb4043e08d6b2401b6a",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:35:14+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 117,
+        "block_hash": "8450257538ac9e8119dda6ac05bd40d32aacc2a02476bca803139a25fc7ecbf5",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:35:15+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 118,
+        "block_hash": "d090ed64b3209b7dc20f1e5993e0677b7b05503ea067094e6c586a832d6aaa4a",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:35:16+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 119,
+        "block_hash": "41a062ecec2f1e07d4fd80bdb4ab981d820a3ed120490722b95c40879ff0dc88",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:35:17+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 120,
+        "block_hash": "76ba6f4c8cb6bfd0e49874d3acd27379ecfa15d11148267ddd93500ac080058d",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:35:18+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 121,
+        "block_hash": "7800c13d526766cb3d7cc71f9ac58a0e14027efbf4fdcbd2dd0199bc86a19bcb",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:35:19+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 122,
+        "block_hash": "a059f1c175f3baa36dfe5dd8bb39e2b874da6744e4e0f9dd76129f1c893da718",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:35:20+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 123,
+        "block_hash": "8b78bd31133a51c5784b8e8dd4455a98a23e0a5812a42125a16b5d15eb2debf2",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:35:21+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 124,
+        "block_hash": "1bd70e4a373bb8b2cfd6a35f0de3309d246690efa60310bdc533c332a2596a0c",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:35:22+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 125,
+        "block_hash": "c38c907743d2994a85756711d6e449575bad607e02c94ca8608bea312ed60be1",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:35:23+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 126,
+        "block_hash": "658d785cf90c547175891ccf3c70c086e1f9c3af5d5602069454da065f8cd1cc",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:35:24+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 127,
+        "block_hash": "7ee6266e5f9adc0e8e405a57ac9bfe51cb58e42f306ef41000a40ab5e226b6a3",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:35:25+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 128,
+        "block_hash": "6baf13881354b781d6b599fb102b720e7d5b62515449b0af2926e229025964c3",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:35:26+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 129,
+        "block_hash": "9f492fb51e6ab5ed46706a62aa78a8335e58079c15f91af21c5d4fe09e1d9994",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:35:27+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 130,
+        "block_hash": "bda4b8e9ba515bb3b0bf81240a70a27dc29fe8df8ac99f5939d2579ab1c44d3b",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:35:28+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 131,
+        "block_hash": "6961f5aad99ec6e9aab5dc83e1047c535020a0c3d8b5187e5c1721dd8600f091",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:35:29+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 132,
+        "block_hash": "53d1a68ae22b6631848e678520fa98f21491f79bf3bea2919af45ef655d0a064",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:35:30+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 133,
+        "block_hash": "8d87b7e929ec9aa114f36f5520ab034515799e370891ddcb2a6f01b228b6cdf1",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:35:31+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 134,
+        "block_hash": "fad8350120fe0c5115842348c27ec7faa35ad27c48ddee7ce46b1808bfc96a44",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:35:32+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 135,
+        "block_hash": "645847dedb270c0f740590e2b40c0c156ae2d2ccc9ffdb6cf32e659c85730653",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:35:33+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 136,
+        "block_hash": "116318c23ae42e84ba2123874edcd866afce1b8f8b4bd0c1296276b49a7c53b8",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:35:34+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 137,
+        "block_hash": "b559d901c0da6d5d8ffe671d6a3940f5c07ccf405502a81577418237ee09a8b1",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:35:35+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 138,
+        "block_hash": "6bdda6771286fbbad5884b6c037f66df3d43a46fd755713fe30808ed87995d87",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:35:36+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 139,
+        "block_hash": "2fa139e21c9592c82adbf10ee9cb64630a5c846779f4fabddb53ac5cdf41ed4a",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:35:37+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 140,
+        "block_hash": "8787c19cd7759d0d52357098d893724d5d2d7f641a7d24c0931f18d3dc745c8f",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:35:38+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 141,
+        "block_hash": "45f85606b03fa75ee1db5e2788f8938f0c9312dfcb30421b2e1a7bc8473468bd",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:35:39+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 142,
+        "block_hash": "9227a317ce10496d844ec17ea3fb7461ad5551bb1098a911de3458d68b5656b0",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:35:40+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 143,
+        "block_hash": "ad00715399721cd083a4b9b4689d7cdf475e816bb26c7b3fcf7bc773135d843f",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:35:41+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 144,
+        "block_hash": "6545a011216169b430d21d103e9fb8395f00741287ed79eafe4f5d97400ef213",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:35:42+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 145,
+        "block_hash": "4258abae5fa0ad816d2a420e0e911ba08c00f602f9fa4ab50ddf20b393e972f7",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:35:43+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 146,
+        "block_hash": "1e2d8c3f48e8b89376b52da052f368ef7c2deab1c2713a5056813d36c8a1c9f0",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:35:44+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 147,
+        "block_hash": "3e4e936e569c988fd873f69150ee16d040f521db5fe39bed2710fd7fdf12cddb",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:35:45+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 148,
+        "block_hash": "ee04d5d9e5089f9d8b297fc4b9e08a371c6ab60dab69f69adea00978f2b7397e",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:35:46+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 149,
+        "block_hash": "b47bb4dbe60bc9789c4469354e728f29109b094828a43a96bdb8265e48a0cdee",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:35:47+07:00",
+        "block_size_bytes": 80
+      },
+      {
+        "block_height": 150,
+        "block_hash": "44964a4a69dc2367741c9de5e7f33a5b28d7059f77ea02a9df2e6088817ae48c",
+        "tx_count": 0,
+        "block_time": "2026-07-16T02:35:48+07:00",
+        "block_size_bytes": 80
+      }
+    ],
+    "avg_transactions_per_block": 0.08609271523178808,
+    "max_transactions_per_block": 9,
+    "min_transactions_per_block": 0
+  },
+  "burn_state": {
+    "burn_address": "DEAD 262C 098D 17D0 D99F 315C D9B7 C4D9 AEDA 685A 65FD 8630 DEFD CE21 F984 60B1 FA30",
+    "burned_nspx": "37500019956267073340",
+    "burned_spx": "37.500019956267073340",
+    "circulating_nspx": "1240004251318805729249514187",
+    "circulating_spx": "1240004251.318805729249514187",
+    "fee_burn_bps": 500,
+    "block_reward_burn_bps": 500,
+    "updated_at": "2026-09-21T20:15:08Z"
+  },
+  "timestamp": "2026-09-22T03:15:08+07:00",
+  "signature_validation": {
+    "total_signatures": 8,
+    "valid_signatures": 8,
+    "invalid_signatures": 0,
+    "validation_time": "2026-09-21T20:15:08Z"
+  },
+  "final_states": [
+    {
+      "block_hash": "b47bb4dbe60bc9789c4469354e728f29109b094828a43a96bdb8265e48a0cdee",
+      "block_height": 149,
+      "merkle_root": "5a6c2e9e730d5cb534e7f28c883ca7b604794c691f72398f3001be48cfef12bf",
+      "status": "proposed",
+      "signer_node_id": "Node-127.0.0.1:30303",
+      "signature": "000013001e3409da71caabd00d786f10edad73fbbaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937bbaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937bbaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937bbaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937bbaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937bbaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937bbaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937bbaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937bbaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937bbaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937bbaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937bbaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937bbaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937bbaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4688c53fe529eb7a1afd3abbe545907abaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907abaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a408ac731eb2be97c1cff38a5fb47927c4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907abaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a408ac731eb2be97c1cff38a5fb47927c4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907abaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a408ac731eb2be97c1cff38a5fb47927c4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b000000201b367e4b4e958dfe38db7ce4b169f7099fda8fe9d45d56c466c38deb9f75509100000008000000006ab1903700000010a83e69aeb01e9ac09be28443c4964376c0e85486fad7428a8043667b3ff938dcda3d960d3523be03f4ce3d4c1d28f4d50000002013bc6475f938f861ae3121ce53b1310079c5240c1c5d62a5ea7a73f31f55eda100000008d7e8da0e69020db0",
+      "message_type": "proposal",
+      "view": 144,
+      "valid": true,
+      "signature_status": "Valid",
+      "verification_time": "2026-09-22T03:15:08+07:00",
+      "timestamp": "2026-09-22T03:14:48+07:00"
+    },
+    {
+      "block_hash": "b47bb4dbe60bc9789c4469354e728f29109b094828a43a96bdb8265e48a0cdee",
+      "block_height": 149,
+      "merkle_root": "5a6c2e9e730d5cb534e7f28c883ca7b604794c691f72398f3001be48cfef12bf",
+      "status": "prepared",
+      "signer_node_id": "Node-127.0.0.1:30303",
+      "signature": "000013001e3409da71caabd00d786f10edad73fbbaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937bbaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937bbaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937bbaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937bbaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937bbaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937bbaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937bbaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937bbaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937bbaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937bbaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937bbaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937bbaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937bbaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4688c53fe529eb7a1afd3abbe545907abaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907abaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a408ac731eb2be97c1cff38a5fb47927c4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907abaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a408ac731eb2be97c1cff38a5fb47927c4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907abaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a408ac731eb2be97c1cff38a5fb47927c4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b000000201b367e4b4e958dfe38db7ce4b169f7099fda8fe9d45d56c466c38deb9f75509100000008000000006ab1903800000010228e5f7c71e2131b3f0e7ae207d570866617c6644cf716d7d0cb948fc59e9683b38617ed4e97fef8b3f644bca203446a0000002057d24489ed3b04ca8183e7aaccdbf2f4aca5f14738be2542f91a9a9315fe1a4500000008d7e8da0e69020db0",
+      "message_type": "prepare",
+      "view": 144,
+      "valid": true,
+      "signature_status": "Valid",
+      "verification_time": "2026-09-22T03:15:08+07:00",
+      "timestamp": "2026-09-22T03:14:50+07:00"
+    },
+    {
+      "block_hash": "b47bb4dbe60bc9789c4469354e728f29109b094828a43a96bdb8265e48a0cdee",
+      "block_height": 149,
+      "merkle_root": "5a6c2e9e730d5cb534e7f28c883ca7b604794c691f72398f3001be48cfef12bf",
+      "status": "prepared",
+      "signer_node_id": "Node-127.0.0.1:30304",
+      "signature": "000013000fc84ee41bf6e96fed86f237fd48bea397d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d54433076197d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d54433076197d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d54433076197d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d54433076197d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d54433076197d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d54433076197d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d54433076197d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d54433076197d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d54433076197d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d54433076197d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d54433076197d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d54433076197d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d54433076197d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b32046097d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b32046097d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b32046097d81e1cc5d3700fcf339e13e17d8e3297d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b32046097d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ef743093fd22cc3f68f026ca45300666ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b32046097d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b32046097d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ef743093fd22cc3f68f026ca45300666ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b32046097d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b32046097d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ef743093fd22cc3f68f026ca45300666ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d5443307610000002002b3da831347820d47ab355e929f5c4e1cefca1577f89802a21e4ae029686ef900000008000000006ab19038000000105a98be3a5cf116917be837a243e84185e63ad75ccec185f57dd5fb8f7701a29392b7b034d6721182ebe1caad47b7845300000020cfeaca4e499f451625eb174f7e875094b2d44fcbefa0f23cfffaf16dc3e6f98400000008d7e8da0e69020db0",
+      "message_type": "prepare",
+      "view": 144,
+      "valid": true,
+      "signature_status": "Valid",
+      "verification_time": "2026-09-22T03:15:08+07:00",
+      "timestamp": "2026-09-22T03:14:50+07:00"
+    },
+    {
+      "block_hash": "b47bb4dbe60bc9789c4469354e728f29109b094828a43a96bdb8265e48a0cdee",
+      "block_height": 149,
+      "merkle_root": "5a6c2e9e730d5cb534e7f28c883ca7b604794c691f72398f3001be48cfef12bf",
+      "status": "committed",
+      "signer_node_id": "Node-127.0.0.1:30303",
+      "signature": "committed_b47bb4dbe60bc978",
+      "message_type": "commit",
+      "view": 144,
+      "valid": true,
+      "signature_status": "Valid",
+      "verification_time": "2026-09-22T03:15:08+07:00",
+      "timestamp": "2026-09-22T03:14:57+07:00"
+    },
+    {
+      "block_hash": "b47bb4dbe60bc9789c4469354e728f29109b094828a43a96bdb8265e48a0cdee",
+      "block_height": 149,
+      "merkle_root": "5a6c2e9e730d5cb534e7f28c883ca7b604794c691f72398f3001be48cfef12bf",
+      "status": "committed",
+      "signer_node_id": "Node-127.0.0.1:30304",
+      "signature": "000013000fc84ee41bf6e96fed86f237fd48bea397d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d54433076197d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d54433076197d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d54433076197d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d54433076197d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d54433076197d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d54433076197d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d54433076197d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d54433076197d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d54433076197d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d54433076197d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d54433076197d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d54433076197d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d54433076197d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b32046097d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b32046097d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b32046097d81e1cc5d3700fcf339e13e17d8e3297d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b32046097d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ef743093fd22cc3f68f026ca45300666ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b32046097d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b32046097d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ef743093fd22cc3f68f026ca45300666ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b32046097d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b32046097d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ef743093fd22cc3f68f026ca45300666ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d5443307610000002002b3da831347820d47ab355e929f5c4e1cefca1577f89802a21e4ae029686ef900000008000000006ab1903a000000108862b12cd82c25e1be459fc06c3d8de0df675368c3ecc5a7dcc3df241e03676e048a857fb494aa94db61d4f2bd655a9100000020cb8123805b99757e9e249663004a4d9d1377e13929839e58f9abb212bb4a35e700000008d7e8da0e69020db0",
+      "message_type": "commit",
+      "view": 144,
+      "valid": true,
+      "signature_status": "Valid",
+      "verification_time": "2026-09-22T03:15:08+07:00",
+      "timestamp": "2026-09-22T03:14:57+07:00"
+    },
+    {
+      "block_hash": "44964a4a69dc2367741c9de5e7f33a5b28d7059f77ea02a9df2e6088817ae48c",
+      "block_height": 150,
+      "merkle_root": "5a6c2e9e730d5cb534e7f28c883ca7b604794c691f72398f3001be48cfef12bf",
+      "status": "prepared",
+      "signer_node_id": "Node-127.0.0.1:30303",
+      "signature": "000013001e3409da71caabd00d786f10edad73fbbaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937bbaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937bbaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937bbaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937bbaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937bbaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937bbaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937bbaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937bbaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937bbaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937bbaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937bbaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937bbaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937bbaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4688c53fe529eb7a1afd3abbe545907abaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907abaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a408ac731eb2be97c1cff38a5fb47927c4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907abaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a408ac731eb2be97c1cff38a5fb47927c4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907abaab3a99f57115f88a47dcbdf076b6c84688c53fe529eb7a1afd3abbe545907a4688c53fe529eb7a1afd3abbe545907a408ac731eb2be97c1cff38a5fb47927c4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b4189c63eea28e87b1dfc39bafa44937b000000201b367e4b4e958dfe38db7ce4b169f7099fda8fe9d45d56c466c38deb9f75509100000008000000006ab1904300000010afd04ae6df770fca35bfd0d2624b2874b4d51c0eb1fcf35237339fe798d8f999d4b9ac32905196b711503633d2280dff00000020d08ac64b7d2c0decddbab823a0c9ee133078df01cbc06dc346cf709e29d2a04e00000008d7e8da0e69020db0",
+      "message_type": "prepare",
+      "view": 145,
+      "valid": true,
+      "signature_status": "Valid",
+      "verification_time": "2026-09-22T03:15:08+07:00",
+      "timestamp": "2026-09-22T03:15:01+07:00"
+    },
+    {
+      "block_hash": "44964a4a69dc2367741c9de5e7f33a5b28d7059f77ea02a9df2e6088817ae48c",
+      "block_height": 150,
+      "merkle_root": "5a6c2e9e730d5cb534e7f28c883ca7b604794c691f72398f3001be48cfef12bf",
+      "status": "prepared",
+      "signer_node_id": "Node-127.0.0.1:30304",
+      "signature": "000013000fc84ee41bf6e96fed86f237fd48bea397d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d54433076197d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d54433076197d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d54433076197d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d54433076197d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d54433076197d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d54433076197d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d54433076197d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d54433076197d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d54433076197d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d54433076197d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d54433076197d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d54433076197d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d54433076197d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b32046097d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b32046097d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b32046097d81e1cc5d3700fcf339e13e17d8e3297d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b32046097d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ef743093fd22cc3f68f026ca45300666ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b32046097d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b32046097d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ef743093fd22cc3f68f026ca45300666ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b32046097d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b320460e976329df320ce396ef224d45b32046097d81e1cc5d3700fcf339e13e17d8e32e976329df320ce396ef224d45b320460ef743093fd22cc3f68f026ca45300666ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d544330761ee77319cfc21cd3869f327d5443307610000002002b3da831347820d47ab355e929f5c4e1cefca1577f89802a21e4ae029686ef900000008000000006ab1904300000010eabf5a1c112e984c1a470f2c38f07f7b3df7f6238cf4d42c33efb91cb68197a43c558f1d63f9304b1bbdd8c92ee17a1f00000020900e6493d14da825a2f53265ce3cb843ae89ab1db0e901569424f027eeefc84000000008d7e8da0e69020db0",
+      "message_type": "prepare",
+      "view": 145,
+      "valid": true,
+      "signature_status": "Valid",
+      "verification_time": "2026-09-22T03:15:08+07:00",
+      "timestamp": "2026-09-22T03:15:01+07:00"
+    },
+    {
+      "block_hash": "44964a4a69dc2367741c9de5e7f33a5b28d7059f77ea02a9df2e6088817ae48c",
+      "block_height": 150,
+      "merkle_root": "5a6c2e9e730d5cb534e7f28c883ca7b604794c691f72398f3001be48cfef12bf",
+      "status": "committed",
+      "signer_node_id": "Node-127.0.0.1:30303",
+      "signature": "committed_44964a4a69dc2367",
+      "message_type": "commit",
+      "view": 145,
+      "valid": true,
+      "signature_status": "Valid",
+      "verification_time": "2026-09-22T03:15:08+07:00",
+      "timestamp": "2026-09-22T03:15:08+07:00"
+    }
+  ]
+}

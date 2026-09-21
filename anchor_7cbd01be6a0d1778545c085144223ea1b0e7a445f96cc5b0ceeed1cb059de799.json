@@ -1,0 +1,15 @@
+{
+  "type": "mint_anchor",
+  "mint_id": "7cbd01be6a0d1778545c085144223ea1b0e7a445f96cc5b0ceeed1cb059de799",
+  "subject": "llg.png",
+  "cid": "bafybeihygd6nay2zhkg6lggj5wyri5dcuv3ranu3vcncid4joxrzuiqxoy",
+  "minter_public_key": "26ab03b69f62fb057ee47fbb2ef6d43922ae05b1976bf10e72e971b43ee7c62a",
+  "receipt_hash": "bf20a5329b3c9ce659e9baf30cffebc557a45e2d41850635eca8bcfa917ffe37",
+  "cid_hash_hex": "830feb2361d8eb206754c84633438905fbd9271f129c22f94609a9cd453ff67d",
+  "token_id": 1,
+  "token_uri": "ipfs://bafkreifm2lice4rwydntj3sjzkrbjwxscb7tyd6vegc52xtgc5jh62fbji",
+  "contract": "SPIF 3746 2540 30C0 64BD 91EC 3A6C 12BF 1FA7 184D 4D11 EF9C 149C E165 F836 EF0E B0E8",
+  "royalty_bps": 500,
+  "usage_fee_nspx": "1000000000000000000",
+  "royalty_recipient": "SPIF F6F6 66A0 F07B B9F1 B9C3 6C0B C497 DEF7 89AC A6B4 A756 4F88 A627 7FCB BFD9 09F8"
+}

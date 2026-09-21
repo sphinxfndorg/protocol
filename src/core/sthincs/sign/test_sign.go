@@ -333,7 +333,9 @@ func main() {
 	// Alice computes this and includes it in the wire payload.
 	// Charlie will recompute it from receivedSigBytes and verify.
 	signatureHash := common.SpxHash(sigBytes)
-	merkleRootHash := merkleRoot.Hash.Bytes()
+	// Fixed 32-byte encoding: .Hash.Bytes() is minimal-length and drops a
+	// leading 0x00 (~1/256 roots) — the exact 31-byte bug this demo guards.
+	merkleRootHash := hashtree.HashToBytes32(merkleRoot.Hash)
 
 	// Set captured variables for VM verification
 	vmCapturedTimestamp = timestamp

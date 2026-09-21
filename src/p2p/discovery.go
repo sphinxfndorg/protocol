@@ -358,7 +358,8 @@ func (s *Server) iterativeFindNode(targetID network.NodeID) {
 					// Both sender and receiver must use leaves = [merkleRootHash, commitment].
 					// sigTimestamp and sigNonce come from SignMessage (bound inside commitment).
 					proofData := append(sigTimestamp, append(sigNonce, dataBytes...)...)
-					proofLeaves := [][]byte{merkleRoot.Hash.Bytes(), commitment}
+					// Fixed 32-byte leaf: .Hash.Bytes() drops a leading 0x00.
+					proofLeaves := [][]byte{hashtree.HashToBytes32(merkleRoot.Hash), commitment}
 					proof, err := sigproof.GenerateSigProof(
 						[][]byte{proofData},
 						proofLeaves,

@@ -121,6 +121,9 @@ func GetKeyDir() string {
 // GenerateKeyPairWithOrg is the primary entry point for the registration flow.
 // The orgCode is persisted and used to format all future addresses.
 func GenerateKeyPairWithOrg(passphrase string, orgCode OrgCode) (*KeyPair, error) {
+	if orgCode == OrgDEAD {
+		return nil, fmt.Errorf("refusing to create a persistent DEAD key pair: DEAD addresses are burn-only, use burn.GenerateBurnAddress (src/core/wallet/burn) instead")
+	}
 	log.Printf("Generating SPHINCS+ keypair for org %q", orgCode)
 
 	if !IsValidOrgCode(string(orgCode)) {

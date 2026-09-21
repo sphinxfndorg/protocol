@@ -1,0 +1,26 @@
+{
+  "block_hash": "18d7a2a05de6cef62709b72b2aec265201f6395e3cc925cf6ddc4b3b30250fee",
+  "block_height": 61,
+  "phase": "committed",
+  "state_changes": [
+    {
+      "address": "Node-127.0.0.1:30305",
+      "previous_balance": "85500076920000000000",
+      "previous_nonce": 0
+    },
+    {
+      "address": "SPIF 262C 098D 17D0 D99F 315C D9B7 C4D9 AEDA 685A 65FD 8630 DEFD CE21 F984 60B1 FA30",
+      "previous_balance": "15000019956267073340",
+      "previous_nonce": 0
+    }
+  ],
+  "committed": true,
+  "previous_tip_hash": "7b45309806379d0a2bb835d6a6e812d44c048c4e8b8e67960fa45d10547916d5",
+  "previous_tip_height": 60,
+  "started_at": "2026-09-22T03:01:04.029907+07:00",
+  "committed_at": "2026-09-22T03:01:06.730047+07:00",
+  "block_file_written": true,
+  "index_updated": true,
+  "burned_this_block_nspx": "250000000000000000",
+  "burned_before_nspx": "15000019956267073340"
+}

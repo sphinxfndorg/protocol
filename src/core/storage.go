@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/sphinxfndorg/protocol/src/common"
 	logger "github.com/sphinxfndorg/protocol/src/console"
 )
 
@@ -92,6 +93,68 @@ func RecordStateChange(address string, prevBalance *big.Int, prevNonce uint64) {
 	if jm != nil {
 		jm.RecordStateChange(address, prevBalance, prevNonce)
 	}
+}
+
+// RecordBurn records a protocol burn credited to the DEAD address for the
+// currently-active commit journal. Must be called BEFORE the corresponding
+// AddBalance(DEAD) so the recorded "before" total is the pre-burn value that
+// rollback would restore. No-op when no journal is active.
+func RecordBurn(amount *big.Int) {
+	jm := GetJournalManager()
+	if jm != nil {
+		jm.RecordBurn(amount)
+	}
+}
+
+// RecordBurn accumulates amount into the active journal's burn accounting.
+//
+// The DEAD address's own balance change is already captured as an ordinary
+// StateChangeJournal entry (AddBalance records it), so rollback correctness
+// does not depend on this. What this adds is an explicit, human-auditable
+// "burned in this block / burned before this block" record so an operator
+// reading a journal (or a crash-recovery dump) can see protocol burn activity
+// without having to identify the DEAD address and sum its deltas by hand.
+func (jm *JournalManager) RecordBurn(amount *big.Int) {
+	if amount == nil || amount.Sign() <= 0 {
+		return
+	}
+	jm.mu.Lock()
+	defer jm.mu.Unlock()
+
+	if jm.activeTx == nil {
+		return
+	}
+
+	blockTotal := big.NewInt(0)
+	if jm.activeTx.BurnedThisBlockNSPX != "" {
+		if parsed, ok := new(big.Int).SetString(jm.activeTx.BurnedThisBlockNSPX, 10); ok {
+			blockTotal = parsed
+		}
+	}
+	if jm.activeTx.BurnedBeforeNSPX == "" && jm.bc != nil {
+		// First burn recorded in this block: snapshot the DEAD balance as it
+		// stands right now, i.e. before this burn (and before any earlier burn
+		// in this same block, since this branch runs only on the first call).
+		if bal, err := jm.bcBurnedBalance(); err == nil && bal != nil {
+			jm.activeTx.BurnedBeforeNSPX = bal.String()
+		}
+	}
+
+	jm.activeTx.BurnedThisBlockNSPX = new(big.Int).Add(blockTotal, amount).String()
+	jm.persistTx()
+}
+
+// bcBurnedBalance reads the current DEAD-address balance from state, or an
+// error when no blockchain/state handle is attached.
+func (jm *JournalManager) bcBurnedBalance() (*big.Int, error) {
+	if jm.bc == nil {
+		return nil, fmt.Errorf("no blockchain attached")
+	}
+	stateDB, err := jm.bc.newStateDB()
+	if err != nil {
+		return nil, err
+	}
+	return stateDB.GetBalance(common.CanonicalAddress(common.DefaultBurnAddress))
 }
 
 // RecordStateChange (alias) is the method form; delegates to the same hook.

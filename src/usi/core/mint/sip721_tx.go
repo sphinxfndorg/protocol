@@ -22,116 +22,71 @@
 package mint
 
 import (
-	"encoding/hex"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
-	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/sphinxfndorg/protocol/src/bind/abi"
 	"github.com/sphinxfndorg/protocol/src/core"
-	kbackend "github.com/sphinxfndorg/protocol/src/core/sthincs/key/backend"
-	sbackend "github.com/sphinxfndorg/protocol/src/core/sthincs/sign/backend"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
 	"github.com/sphinxfndorg/protocol/src/policy"
 	"github.com/sphinxfndorg/protocol/src/rpc"
-	keys "github.com/sphinxfndorg/protocol/src/usi/core/key"
 )
 
-// mintPendingNonceMu / mintPendingNonce guard the CLI's process-local nonce
-// reservations, keyed by "nodeAddr|sender" since the CLI is not tied to one
-// logged-in session. The CLI does not share process state with the GUI
-// wallet, so this is a separate copy of the same scheme gui/rpc.go uses —
-// the critical property here is that BOTH broadcasts of the MintAndAnchor
-// flow (the collection mint and its receipt anchor) go through this one
-// reservation, so the anchor consumes the NEXT nonce instead of re-reading
-// the same committed on-chain nonce before the collection mint's block has
-// committed and colliding in the mempool's accountNonceIndex.
-var (
-	mintPendingNonceMu sync.Mutex
-	mintPendingNonce   = map[string]uint64{} // "nodeAddr|sender" -> next unclaimed nonce
-)
+// Nonces is the process-wide nonce reservation table for every broadcast in
+// this flow. It is exported because the GUI wallet broadcasts from the same
+// process: one table means a SIP-721 collection mint, its receipt anchor, and
+// any GUI transaction in between all see each other's uncommitted claims,
+// instead of the GUI mirroring a second map into this package. The semantics
+// (getnonce outside the lock, never below the committed nonce, release only
+// when nothing later has claimed) live in abi.NonceReserver.
+var Nonces = abi.NewNonceReserver()
 
-// mintNonceKey builds the reservation-map key for a (node, sender) pair.
-func mintNonceKey(nodeAddr, sender string) string {
-	return nodeAddr + "|" + strings.TrimSpace(sender)
+// MintWaitOpts opts a broadcast into waiting for on-chain confirmation. The
+// zero value is off, so a caller that never sets it keeps the historical
+// broadcast-and-poll behavior. Wait is opt-in because it trades latency for
+// certainty: abi.WaitMined polls gettransactionreceipt until the tx is
+// committed or rejected. Timeout must be set (or left to
+// TokenIDConfirmTimeout) because an unknown txid is indistinguishable from a
+// pending one on this node, so an unbounded wait would poll forever.
+type MintWaitOpts struct {
+	Wait         bool
+	Timeout      time.Duration
+	PollInterval time.Duration
 }
 
-// reserveNextNonce mirrors gui/rpc.go's getCurrentNonce pending-nonce cache:
-// a SIP-721 collection mint immediately followed by its receipt anchor
-// (broadcastReceiptAnchor) would otherwise both read the same committed
-// on-chain nonce from getnonce and collide, since the collection mint's
-// block has not committed yet when the anchor is built.
-func reserveNextNonce(nodeAddr, rawSender string) (uint64, error) {
-	nonceData, err := rpc.CallRPC(nodeAddr, "getnonce", []interface{}{rawSender}, 60)
-	if err != nil {
-		return 0, fmt.Errorf("failed to get account nonce: %w", err)
+// waitForMined blocks until txID is committed or rejected, or the wait window
+// ends. A nil/disabled MintWaitOpts returns (nil, nil) without touching the
+// node, which is the default-off path.
+func waitForMined(nodeAddr, txID string, wait *MintWaitOpts) (*abi.TxReceipt, error) {
+	if wait == nil || !wait.Wait {
+		return nil, nil
 	}
-	var chainNonce uint64
-	if err := json.Unmarshal(nonceData, &chainNonce); err != nil {
-		return 0, fmt.Errorf("parse nonce response: %w", err)
+	timeout := wait.Timeout
+	if timeout <= 0 {
+		timeout = TokenIDConfirmTimeout
 	}
-
-	key := mintNonceKey(nodeAddr, rawSender)
-	mintPendingNonceMu.Lock()
-	defer mintPendingNonceMu.Unlock()
-	next := chainNonce
-	if reserved, ok := mintPendingNonce[key]; ok && reserved > next {
-		next = reserved
-	}
-	mintPendingNonce[key] = next + 1
-	return next, nil
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return abi.WaitMined(ctx, callOpts(nodeAddr), txID, wait.PollInterval)
 }
 
-// releaseNextNonce rolls back a reservation made by reserveNextNonce when the
-// transaction that was going to consume it was never actually broadcast.
-// Only rewinds when nothing has claimed a later nonce since.
-func releaseNextNonce(nodeAddr, rawSender string, nonce uint64) {
-	key := mintNonceKey(nodeAddr, rawSender)
-	mintPendingNonceMu.Lock()
-	defer mintPendingNonceMu.Unlock()
-	if mintPendingNonce[key] == nonce+1 {
-		mintPendingNonce[key] = nonce
+// mintWaitResult reports, for a wait that ended without confirmation, whether
+// the node terminally rejected the tx (so it will never commit and its nonce
+// reservation can be dropped) or whether it is still in flight (so the
+// reservation must be kept — the tx still owns that nonce).
+func mintWaitResult(txID string, receipt *abi.TxReceipt, err error) (terminal bool, message string) {
+	if err == nil {
+		return false, ""
 	}
-}
-
-// PeekReservedNonce reports the next unclaimed nonce this process reserved via
-// reserveNextNonce for (nodeAddr, sender), if any. Exported so the GUI wallet
-// (which keeps its own pending-nonce cache in gui/rpc.go but shares this
-// process when the mint worker runs there) can take the maximum of both
-// reservations instead of re-reading the same committed on-chain nonce.
-func PeekReservedNonce(nodeAddr, sender string) (uint64, bool) {
-	key := mintNonceKey(nodeAddr, sender)
-	mintPendingNonceMu.Lock()
-	defer mintPendingNonceMu.Unlock()
-	next, ok := mintPendingNonce[key]
-	return next, ok
-}
-
-// AdvanceReservation ensures the reservation for (nodeAddr, sender) is at
-// least next. Called by the GUI wallet after it claims a nonce through its
-// own cache so a later reserveNextNonce in this package sees it — covering
-// the reverse order (GUI broadcast first, collection mint second) that
-// reserveNextNonce alone cannot see, since this package cannot import the
-// GUI (gui already imports mint).
-func AdvanceReservation(nodeAddr, sender string, next uint64) {
-	key := mintNonceKey(nodeAddr, sender)
-	mintPendingNonceMu.Lock()
-	defer mintPendingNonceMu.Unlock()
-	if next > mintPendingNonce[key] {
-		mintPendingNonce[key] = next
+	if receipt != nil && strings.TrimSpace(receipt.InvalidReason) != "" {
+		return true, fmt.Sprintf("tx %s was REJECTED by the node and will never commit: %s", txID, receipt.InvalidReason)
 	}
-}
-
-// ReleaseReservation rolls back a GUI-side reservation previously pushed via
-// AdvanceReservation. Only rewinds when nothing has claimed a later nonce
-// since, mirroring releaseNextNonce.
-func ReleaseReservation(nodeAddr, sender string, nonce uint64) {
-	releaseNextNonce(nodeAddr, sender, nonce)
+	return false, fmt.Sprintf("tx %s is still in flight (unconfirmed) — do not re-broadcast it: %v", txID, err)
 }
 
 // BroadcastSIP721CollectionMint executes collection.mint(to, tokenURI, mintID)
@@ -147,7 +102,26 @@ func BroadcastSIP721CollectionMint(nodeAddr, collection, from, keyFile, to, toke
 // royalty_recipient) on-chain, freezing the token's embedded economics
 // (resale royalty + licensed-access fee + optional payout override) in
 // contract storage. All-zero terms behave exactly like the legacy mint.
+//
+// It does not wait for confirmation; use
+// BroadcastSIP721CollectionMintWithWait to opt into that.
 func BroadcastSIP721CollectionMintWithTerms(nodeAddr, collection, from, keyFile, to, tokenURI, mintID string, royaltyBPS uint64, usageFeeNSPX, royaltyRecipient string) (tokenID uint64, txID string, err error) {
+	return broadcastSIP721CollectionMintWithTerms(nodeAddr, collection, from, keyFile, to, tokenURI, mintID, royaltyBPS, usageFeeNSPX, royaltyRecipient, nil)
+}
+
+// BroadcastSIP721CollectionMintWithWait is
+// BroadcastSIP721CollectionMintWithTerms plus opt-in on-chain confirmation: a
+// non-nil enabled MintWaitOpts blocks until the mint transaction is committed
+// (or rejected, or the wait window ends) before the tokenId is read back. A nil
+// or disabled MintWaitOpts is exactly the existing behavior.
+func BroadcastSIP721CollectionMintWithWait(nodeAddr, collection, from, keyFile, to, tokenURI, mintID string, royaltyBPS uint64, usageFeeNSPX, royaltyRecipient string, wait *MintWaitOpts) (tokenID uint64, txID string, err error) {
+	return broadcastSIP721CollectionMintWithTerms(nodeAddr, collection, from, keyFile, to, tokenURI, mintID, royaltyBPS, usageFeeNSPX, royaltyRecipient, wait)
+}
+
+// broadcastSIP721CollectionMintWithTerms is the single collection-mint
+// implementation behind the exported wrappers, taking the wait config so the
+// default-off callers never pay for it.
+func broadcastSIP721CollectionMintWithTerms(nodeAddr, collection, from, keyFile, to, tokenURI, mintID string, royaltyBPS uint64, usageFeeNSPX, royaltyRecipient string, wait *MintWaitOpts) (tokenID uint64, txID string, err error) {
 	if strings.TrimSpace(nodeAddr) == "" {
 		return 0, "", errors.New("node address required")
 	}
@@ -182,44 +156,42 @@ func BroadcastSIP721CollectionMintWithTerms(nodeAddr, collection, from, keyFile,
 	// match — "invalid nonce: %d must equal %d"). Goes through the
 	// process-local reservation so a receipt anchor broadcast immediately
 	// afterwards consumes the NEXT nonce, not this same one.
-	nonce, err := reserveNextNonce(nodeAddr, rawFrom)
+	nonce, err := Nonces.Reserve(nodeRPC{}, nodeAddr, rawFrom)
 	if err != nil {
 		return 0, "", err
 	}
 
-	// Build the unsigned SIP-721 call (policy-quoted) via the canonical ABI.
-	// Terms ride along in the mint args and are frozen in contract storage when
-	// the block executes the call — the wallet cannot change them afterwards.
-	mintArgs := map[string]string{
-		"to":        to,
-		"token_uri": tokenURI,
-		"mint_id":   mintID,
-	}
-	if royaltyBPS > 0 {
-		mintArgs["royalty_bps"] = strconv.FormatUint(royaltyBPS, 10)
-	}
-	usageFeeNSPX = strings.TrimSpace(usageFeeNSPX)
-	if usageFeeNSPX != "" {
-		mintArgs["usage_fee"] = usageFeeNSPX
-	}
-	royaltyRecipient = strings.TrimSpace(royaltyRecipient)
-	if royaltyRecipient != "" {
-		mintArgs["royalty_recipient"] = royaltyRecipient
-	}
-	tx, err := abi.NewSIP721CallTx(abi.TxOptions{
-		ChainID: chainID,
-		Sender:  rawFrom,
-		Nonce:   nonce,
-	}, collection, "mint", mintArgs)
+	// Build -> sign -> encode -> broadcast in one call. The typed wrapper owns
+	// the calldata packing; abi.Transact owns the rest. Terms ride along in the
+	// mint args and are frozen in contract storage when the block executes the
+	// call — the wallet cannot change them afterwards.
+	txID, err = (abi.SIP721Contract{Address: collection}).Mint(
+		transactOpts(nodeAddr, keyFile, chainID, nonce),
+		rawFrom,
+		to,
+		abi.MintTerms{
+			TokenURI:         tokenURI,
+			MintID:           mintID,
+			RoyaltyBPS:       royaltyBPS,
+			UsageFeeNSPX:     usageFeeNSPX,
+			RoyaltyRecipient: royaltyRecipient,
+		},
+	)
 	if err != nil {
-		releaseNextNonce(nodeAddr, rawFrom, nonce)
-		return 0, "", fmt.Errorf("build sip721 mint call: %w", err)
+		Nonces.Release(nodeAddr, rawFrom, nonce)
+		return 0, "", fmt.Errorf("sip721 mint: %w", err)
 	}
 
-	txID, err = signAndBroadcastMintTx(nodeAddr, tx, keyFile)
-	if err != nil {
-		releaseNextNonce(nodeAddr, rawFrom, nonce)
-		return 0, "", err
+	// Opt-in confirmation wait: with wait disabled this is a no-op and the
+	// flow proceeds straight to the existing storage poll below.
+	if receipt, waitErr := waitForMined(nodeAddr, txID, wait); waitErr != nil {
+		terminal, message := mintWaitResult(txID, receipt, waitErr)
+		if terminal {
+			// The node rejected the tx: it will never commit, so its nonce
+			// reservation is free to be reused.
+			Nonces.Release(nodeAddr, rawFrom, nonce)
+		}
+		return 0, txID, fmt.Errorf("collection mint %s", message)
 	}
 
 	// The collection contract's mint only executes when the broadcast
@@ -327,15 +299,45 @@ func readSIP721TokenIDOfMint(nodeAddr, collection, mintID string) (uint64, error
 // transaction. It is used after a collection mint so the anchor uses the
 // NEXT account nonce — the mempool enforces an exact match and the collection
 // call already consumed the current one.
+// broadcastReceiptAnchorWithWait is broadcastReceiptAnchor plus opt-in
+// on-chain confirmation. A nil/disabled MintWaitOpts is exactly
+// broadcastReceiptAnchor. A rejected anchor releases its nonce reservation (the
+// tx can never commit); an anchor still in flight keeps it, because it still
+// owns that nonce.
+func broadcastReceiptAnchorWithWait(nodeAddr, from, keyFile string, anchorData []byte, wait *MintWaitOpts) (txID string, err error) {
+	rawFrom := strings.TrimSpace(from)
+	txID, nonce, err := broadcastReceiptAnchorWithNonce(nodeAddr, from, keyFile, anchorData)
+	if err != nil || txID == "" {
+		return txID, err
+	}
+	receipt, waitErr := waitForMined(nodeAddr, txID, wait)
+	if waitErr == nil {
+		return txID, nil
+	}
+	terminal, message := mintWaitResult(txID, receipt, waitErr)
+	if terminal {
+		Nonces.Release(nodeAddr, rawFrom, nonce)
+	}
+	return txID, fmt.Errorf("receipt anchor %s", message)
+}
+
 func broadcastReceiptAnchor(nodeAddr, from, keyFile string, anchorData []byte) (txID string, err error) {
+	txID, _, err = broadcastReceiptAnchorWithNonce(nodeAddr, from, keyFile, anchorData)
+	return txID, err
+}
+
+// broadcastReceiptAnchorWithNonce broadcasts the anchor and also reports the
+// nonce it reserved, so a caller that learns the anchor can never commit can
+// release that reservation.
+func broadcastReceiptAnchorWithNonce(nodeAddr, from, keyFile string, anchorData []byte) (txID string, nonce uint64, err error) {
 	if strings.TrimSpace(nodeAddr) == "" {
-		return "", errors.New("node address required")
+		return "", 0, errors.New("node address required")
 	}
 	if strings.TrimSpace(from) == "" {
-		return "", errors.New("sender address required")
+		return "", 0, errors.New("sender address required")
 	}
 	if strings.TrimSpace(keyFile) == "" {
-		return "", errors.New("key file required")
+		return "", 0, errors.New("key file required")
 	}
 	rawFrom := strings.TrimSpace(from)
 
@@ -350,9 +352,9 @@ func broadcastReceiptAnchor(nodeAddr, from, keyFile string, anchorData []byte) (
 	// consumed the previous nonce, but its block has not committed yet, so a
 	// raw getnonce here would return the SAME value and collide — the
 	// reservation advances past the collection mint's claim instead.
-	nonce, err := reserveNextNonce(nodeAddr, rawFrom)
+	nonce, err = Nonces.Reserve(nodeRPC{}, nodeAddr, rawFrom)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 
 	mintPolicy := policy.GetDefaultPolicyParams()
@@ -371,7 +373,7 @@ func broadcastReceiptAnchor(nodeAddr, from, keyFile string, anchorData []byte) (
 
 	gasQuote := mintPolicy.QuoteMintDataGas(uint64(len(anchorData)), uint64(len(anchorData)), mintPolicy.MintBaseHashes, mintPolicy.MintPinningMonths)
 
-	tx := &types.Transaction{
+	anchorTx := &types.Transaction{
 		ID:         "",
 		ChainID:    chainID,
 		Sender:     rawFrom,
@@ -384,98 +386,15 @@ func broadcastReceiptAnchor(nodeAddr, from, keyFile string, anchorData []byte) (
 		Signature:  []byte{},
 		ReturnData: anchorData,
 	}
-	tx.ID = tx.Hash()
+	anchorTx.ID = anchorTx.Hash()
 
-	txID, err = signAndBroadcastMintTx(nodeAddr, tx, keyFile)
+	tx, err := abi.Transact(transactOpts(nodeAddr, keyFile, chainID, nonce), anchorTx)
 	if err != nil {
-		releaseNextNonce(nodeAddr, rawFrom, nonce)
-		return "", fmt.Errorf("broadcast receipt anchor: %w", err)
+		Nonces.Release(nodeAddr, rawFrom, nonce)
+		return "", 0, fmt.Errorf("broadcast receipt anchor: %w", err)
 	}
-	return txID, nil
+	return tx, nonce, nil
 }
 
-// signAndBroadcastMintTx signs the contract-call transaction with the local
-// SPHINCS+ key and broadcasts it through sendrawtransaction. The transaction
-// is a normal consensus call: the node executes collection.mint during block
-// commit and rejects it if the caller is not the collection owner.
-func signAndBroadcastMintTx(nodeAddr string, tx *types.Transaction, keyFile string) (string, error) {
-	if tx == nil {
-		return "", errors.New("nil transaction")
-	}
-	// Load the local key and sign the canonical transaction auth bundle.
-	kp, skBytes, err := keys.LoadKeyFromDisk(keyFile)
-	if err != nil {
-		return "", fmt.Errorf("load key: %w", err)
-	}
-	defer func() {
-		for i := range skBytes {
-			skBytes[i] = 0
-		}
-	}()
-	tx.ID = tx.Hash()
-	if err := signTransactionLocallyInMint(tx, skBytes, kp.PublicKey); err != nil {
-		return "", fmt.Errorf("sign sip721 mint call: %w", err)
-	}
-
-	// Marshal and broadcast.
-	txData, err := json.Marshal(tx)
-	if err != nil {
-		return "", fmt.Errorf("marshal sip721 mint tx: %w", err)
-	}
-	resultData, err := rpc.CallRPC(nodeAddr, "sendrawtransaction", []interface{}{hex.EncodeToString(txData)}, 120)
-	if err != nil {
-		return "", fmt.Errorf("broadcast sip721 mint: %w", err)
-	}
-	var result struct {
-		TxID string `json:"txid"`
-	}
-	if err := json.Unmarshal(resultData, &result); err != nil || result.TxID == "" {
-		return "", errors.New("sip721 mint broadcast: no txid in response")
-	}
-	return result.TxID, nil
-}
-
-// signTransactionLocallyInMint signs a transaction using the node's canonical
-// SPHINCS+ transaction authentication path (STHINCSManager.SignTransactionAuth),
-// the same call cli/utils/client.go, core.SignTransaction and the USI wallet
-// use. It is kept in this package so MintAndAnchor's collection step carries
-// no dependency on the GUI.
-func signTransactionLocallyInMint(tx *types.Transaction, skBytes, pkBytes []byte) error {
-	if tx == nil {
-		return fmt.Errorf("nil transaction")
-	}
-	if tx.ID == "" {
-		tx.ID = tx.Hash()
-	}
-
-	km, err := kbackend.NewKeyManager()
-	if err != nil {
-		return fmt.Errorf("failed to initialize key manager: %w", err)
-	}
-	privateKey, publicKey, err := km.DeserializeKeyPair(skBytes, pkBytes)
-	if err != nil {
-		return fmt.Errorf("failed to deserialize key pair: %w", err)
-	}
-
-	sphincsParams := km.GetSPHINCSParameters()
-	if sphincsParams == nil || sphincsParams.Params == nil {
-		return fmt.Errorf("SPHINCS+ parameters not initialized")
-	}
-
-	signingMgr := sbackend.NewSTHINCSManager(nil, km, sphincsParams)
-	bundle, err := signingMgr.SignTransactionAuth([]byte(tx.ID), privateKey, publicKey)
-	if err != nil {
-		return fmt.Errorf("failed to sign transaction auth bundle: %w", err)
-	}
-
-	tx.Signature = bundle.Signature
-	tx.SignatureHash = bundle.SignatureHash
-	tx.PublicKey = bundle.PublicKey
-	tx.AuthTimestamp = bundle.Timestamp
-	tx.AuthNonce = bundle.Nonce
-	tx.MerkleRootHash = bundle.MerkleRootHash
-	tx.Commitment = bundle.Commitment
-	tx.Proof = bundle.Proof
-
-	return nil
-}
+// signTransactionLocallyInMint lives in transact.go alongside the abi.Signer
+// implementation that uses it.

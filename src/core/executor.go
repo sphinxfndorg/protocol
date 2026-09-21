@@ -223,6 +223,23 @@ func (bc *Blockchain) WriteChainCheckpoint() error {
 	vaultSPX := new(big.Int).Div(vaultBalance, big.NewInt(denom.SPX))
 	maxSPX := new(big.Int).Div(maxSupplyNSPX, big.NewInt(denom.SPX))
 
+	// Burn accounting: the DEAD address balance is the single auditable burn
+	// total (fee burns + block-reward burns + manual user burns). Circulating
+	// supply is the minted total minus that permanently unspendable balance.
+	burnedNSPX, err := stateDB.GetBalance(common.CanonicalAddress(common.DefaultBurnAddress))
+	if err != nil || burnedNSPX == nil {
+		burnedNSPX = big.NewInt(0)
+	}
+	burnedSPX := new(big.Int).Div(burnedNSPX, big.NewInt(denom.SPX))
+	circulatingNSPX := new(big.Int).Sub(totalSupply, burnedNSPX)
+	if circulatingNSPX.Sign() < 0 {
+		circulatingNSPX = big.NewInt(0)
+	}
+	circulatingSPX := new(big.Int).Div(circulatingNSPX, big.NewInt(denom.SPX))
+	policy := bc.ActivePolicy()
+	feeBurnBPS := policy.BurnFeeBPS
+	rewardBurnBPS := policy.BlockRewardBurnBPS
+
 	// Determine if distribution is complete
 	distributionComplete := vaultBalance.Sign() == 0
 	distributionStatus := "pending"
@@ -342,6 +359,24 @@ func (bc *Blockchain) WriteChainCheckpoint() error {
 			MintedSPX:  rewardsSPX.String(),
 		},
 
+		Burn: struct {
+			Address         string `json:"address"`
+			BurnedNSPX      string `json:"burned_nspx"`
+			BurnedSPX       string `json:"burned_spx"`
+			CirculatingNSPX string `json:"circulating_nspx"`
+			CirculatingSPX  string `json:"circulating_spx"`
+			FeeBurnBPS      uint64 `json:"fee_burn_bps"`
+			RewardBurnBPS   uint64 `json:"reward_burn_bps"`
+		}{
+			Address:         common.DefaultBurnAddress,
+			BurnedNSPX:      burnedNSPX.String(),
+			BurnedSPX:       burnedSPX.String(),
+			CirculatingNSPX: circulatingNSPX.String(),
+			CirculatingSPX:  circulatingSPX.String(),
+			FeeBurnBPS:      feeBurnBPS,
+			RewardBurnBPS:   rewardBurnBPS,
+		},
+
 		Distribution: struct {
 			Status            string `json:"status"`
 			TotalAllocations  int    `json:"total_allocations"`
@@ -381,6 +416,10 @@ func (bc *Blockchain) WriteChainCheckpoint() error {
 	logger.Info("   Remaining Supply:   %s SPX (%s nSPX)",
 		remainingSPX.String(), remainingSupplyNSPX.String())
 	logger.Info("   Vault Balance:      %s nSPX (%s SPX)", vaultBalance.String(), vaultSPX.String())
+	logger.Info("   Burned (DEAD):      %s SPX (%s nSPX) — fee %d bps + reward %d bps",
+		burnedSPX.String(), burnedNSPX.String(), feeBurnBPS, rewardBurnBPS)
+	logger.Info("   Circulating:        %s SPX (%s nSPX)",
+		circulatingSPX.String(), circulatingNSPX.String())
 	logger.Info("   Max Supply:         %s SPX", maxSPX.String())
 	logger.Info("   Distribution:       %s (allocations: %d)", distributionStatus, len(DefaultGenesisAllocations()))
 	logger.Info("   Checkpoint saved to: %s", checkpointPath)
@@ -463,6 +502,21 @@ func (bc *Blockchain) GetSupplyStatus() (map[string]interface{}, error) {
 	remainingSPX := new(big.Int).Div(remainingNSPX, big.NewInt(denom.SPX))
 	distributedSPX := new(big.Int).Div(distributedNSPX, big.NewInt(denom.SPX))
 
+	// Burned supply is the DEAD-address balance — the single auditable burn
+	// total across fee burns, block-reward burns, and manual user burns.
+	// Read it directly (not via GetBurnedBalance, which would reopen stateDB)
+	// so this stays a single consistent snapshot.
+	burnedNSPX, err := stateDB.GetBalance(common.CanonicalAddress(common.DefaultBurnAddress))
+	if err != nil || burnedNSPX == nil {
+		burnedNSPX = big.NewInt(0)
+	}
+	burnedSPX := new(big.Int).Div(burnedNSPX, big.NewInt(denom.SPX))
+	circulatingNSPX := new(big.Int).Sub(totalSupply, burnedNSPX)
+	if circulatingNSPX.Sign() < 0 {
+		circulatingNSPX = big.NewInt(0)
+	}
+	circulatingSPX := new(big.Int).Div(circulatingNSPX, big.NewInt(denom.SPX))
+
 	// Calculate percentages using the helper function
 	totalPct := calculateSupplyPercent(mintedSPX, maxSPX)
 	rewardPct := calculateSupplyPercent(rewardsSPX, maxSPX)
@@ -477,6 +531,11 @@ func (bc *Blockchain) GetSupplyStatus() (map[string]interface{}, error) {
 		"minted_nspx":              totalSupply.String(),
 		"remaining_supply_spx":     remainingSPX.String(),
 		"remaining_supply_nspx":    remainingNSPX.String(),
+		"burned_nspx":              burnedNSPX.String(),
+		"burned_spx":               burnedSPX.String(),
+		"circulating_nspx":         circulatingNSPX.String(),
+		"circulating_spx":          circulatingSPX.String(),
+		"burn_address":             common.DefaultBurnAddress,
 		"vault_balance_nspx":       vaultBalance.String(),
 		"distributed_spx":          distributedSPX.String(),
 		"distributed_nspx":         distributedNSPX.String(),
@@ -607,6 +666,9 @@ func (bc *Blockchain) applyTransactions(block *types.Block, stateDB *StateDB) er
 		if gasFee.Sign() > 0 {
 			// Fee amounts and their allocation are policy-defined. Core only
 			// applies the deterministic allocation to consensus-owned accounts.
+			// The burn slice relocates already-circulating nSPX to the
+			// protocol burn (DEAD) address so DEAD's balance is the single
+			// auditable source of burned supply (fees, slashing, rewards).
 			distribution := bc.ActivePolicy().DistributeFees(gasFee)
 			if distribution.Validators.Sign() > 0 {
 				gasAddr := TreasuryFeePoolAddress
@@ -623,7 +685,12 @@ func (bc *Blockchain) applyTransactions(block *types.Block, stateDB *StateDB) er
 			}
 			stateDB.AddBalance(StakingFeePoolAddress, distribution.Stakers)
 			stateDB.AddBalance(TreasuryFeePoolAddress, distribution.Treasury)
-			stateDB.DecrementTotalSupply(distribution.Burned)
+			if distribution.Burned.Sign() > 0 {
+				// Record the burn in the commit journal BEFORE crediting DEAD so
+				// the journal's "burned before" snapshot is the pre-burn total.
+				RecordBurn(distribution.Burned)
+				stateDB.AddBalance(common.CanonicalAddress(common.DefaultBurnAddress), distribution.Burned)
+			}
 		}
 
 		stateDB.IncrementNonce(tx.Sender)
@@ -696,8 +763,18 @@ func (bc *Blockchain) mintBlockReward(block *types.Block, stateDB *StateDB) {
 		rewardAddr = proposerID
 	}
 
-	// Apply reward to the reward address (SPIF address if mapped, else nodeID)
-	stateDB.AddBalance(rewardAddr, reward)
+	// Split the freshly minted reward: miner share to the proposer, burn
+	// share to the protocol burn (DEAD) address. IncrementTotalSupply runs
+	// exactly once for the full minted amount — both slices are already-minted
+	// value relocated via AddBalance, never decremented.
+	split := bc.ActivePolicy().SplitBlockReward(reward)
+	reward = split.Total
+	stateDB.AddBalance(rewardAddr, split.Miner)
+	if split.Burned.Sign() > 0 {
+		// Journal the burn before crediting DEAD (see RecordBurn).
+		RecordBurn(split.Burned)
+		stateDB.AddBalance(common.CanonicalAddress(common.DefaultBurnAddress), split.Burned)
+	}
 	stateDB.IncrementTotalSupply(reward)
 
 	// NEW: Track rewards minted separately
@@ -714,7 +791,7 @@ func (bc *Blockchain) mintBlockReward(block *types.Block, stateDB *StateDB) {
 	rewardsMinted := stateDB.GetRewardsMinted()
 	remainingNSPX := new(big.Int).Sub(maxSupplyNSPX, totalMinted)
 
-	logger.Info("SUCCESS REWARD: %.6f SPX → %s (block %d)", rewardSPX, proposerID, block.GetHeight())
+	logger.Info("SUCCESS REWARD: %.6f SPX → %s (block %d, miner=%s burned=%s nSPX)", rewardSPX, proposerID, block.GetHeight(), split.Miner.String(), split.Burned.String())
 	logger.Info("📊 SUPPLY: Total=%s nSPX, Genesis=%s nSPX, Rewards=%s nSPX, Remaining=%s nSPX",
 		totalMinted.String(), genesisSupply.String(), rewardsMinted.String(), remainingNSPX.String())
 }
@@ -1206,7 +1283,9 @@ func (bc *Blockchain) ValidatorRewardAddress(nodeID string) string {
 
 // SetValidatorRewardAddress registers a SPIF reward address for a validator.
 // Once set, block rewards and gas fees for this validator will be credited
-// to the SPIF address instead of the node ID.
+// to the SPIF address instead of the node ID. DEAD burn addresses are
+// rejected: routing a miner's own reward straight into the unspendable burn
+// address would silently destroy their payout and poison stake accounting.
 func (bc *Blockchain) SetValidatorRewardAddress(nodeID, spifAddr string) {
 	rewardMapMu.Lock()
 	defer rewardMapMu.Unlock()
@@ -1214,6 +1293,10 @@ func (bc *Blockchain) SetValidatorRewardAddress(nodeID, spifAddr string) {
 		bc.validatorRewardMap = make(map[string]string)
 	}
 	if spifAddr != "" && nodeID != "" {
+		if common.IsBurnAddress(spifAddr) {
+			logger.Warn("SetValidatorRewardAddress: refusing DEAD burn address %s for %s", spifAddr, nodeID)
+			return
+		}
 		bc.validatorRewardMap[nodeID] = spifAddr
 		logger.Info("SUCCESS Validator reward mapping: %s → %s", nodeID, spifAddr)
 	}

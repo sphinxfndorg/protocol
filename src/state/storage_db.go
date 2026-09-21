@@ -12,12 +12,25 @@ import (
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
 )
 
-// SetDB sets the main database handle (for blocks and transactions)
+// SetDB sets the main database handle (for blocks and transactions).
+//
+// Attaching the handle is what makes rawdb's h:<hash> -> height lookups
+// reachable, so the block index is (re)loaded here. NewStorage runs before
+// any handle exists, which means its own loadBlockIndex call can only consult
+// block_index.json; without this reload, a restart would rebuild the
+// in-memory index from that file alone — the stale, genesis-only case — and
+// never see the complete rawdb index it is supposed to prefer.
 func (s *Storage) SetDB(db *database.DB) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.db = db
 	logger.Info("Main DB handle attached to storage: %p", db)
+
+	// loadBlockIndex takes no lock of its own (it is called unguarded from
+	// NewStorage and from tests), so calling it here under s.mu is safe.
+	if err := s.loadBlockIndex(); err != nil {
+		logger.Warn("SetDB: reloading block index from rawdb: %v", err)
+	}
 }
 
 // GetDB returns the main database handle

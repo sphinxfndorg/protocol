@@ -159,7 +159,9 @@ func (s *Server) handleExplorerStats(c *gin.Context) {
 	stateDB, err := bc.NewStateDB()
 	if err == nil {
 		if sdb, ok := stateDB.(*core.StateDB); ok {
-			if ws, err := sdb.GetWalletStats(10); err == nil {
+			var ws *core.WalletStats
+			if w, err := sdb.GetWalletStats(10); err == nil {
+				ws = w
 				walletStats = gin.H{
 					"total_accounts":       ws.TotalAccounts,
 					"spif_addresses":       ws.SPIFAddresses,
@@ -170,6 +172,24 @@ func (s *Server) handleExplorerStats(c *gin.Context) {
 					"total_supply_spx":     ws.TotalSupplySPX,
 				}
 			}
+
+			// Burn accounting: read the canonical DEAD address balance, which
+			// is the single auditable source of burned supply (fee burns +
+			// block-reward burns + manual user burns). Circulating = total - burned.
+			denomSPX := big.NewInt(1e18)
+			burnedNSPX, err := sdb.GetBalance(common.CanonicalAddress(common.DefaultBurnAddress))
+			if err != nil || burnedNSPX == nil {
+				burnedNSPX = big.NewInt(0)
+			}
+			totalSupplyNSPX := sdb.GetTotalSupply()
+			circulatingNSPX := new(big.Int).Sub(totalSupplyNSPX, burnedNSPX)
+			if circulatingNSPX.Sign() < 0 {
+				circulatingNSPX = big.NewInt(0)
+			}
+			walletStats["burned_nspx"] = burnedNSPX.String()
+			walletStats["burned_spx"] = new(big.Float).Quo(new(big.Float).SetInt(burnedNSPX), new(big.Float).SetInt(denomSPX)).Text('f', 18)
+			walletStats["circulating_nspx"] = circulatingNSPX.String()
+			walletStats["circulating_spx"] = new(big.Float).Quo(new(big.Float).SetInt(circulatingNSPX), new(big.Float).SetInt(denomSPX)).Text('f', 18)
 		}
 		stateDB.Close()
 	}
@@ -198,6 +218,13 @@ func (s *Server) handleExplorerStats(c *gin.Context) {
 		"validators":       validatorStats,
 		"current_time":     time.Now().Unix(),
 		"current_time_iso": time.Now().UTC().Format(time.RFC3339),
+		// Burn accounting — DEAD address balance is the single auditable burn
+		// total across fee burns, block-reward burns, and manual user burns.
+		"burn": gin.H{
+			"address":          common.DefaultBurnAddress,
+			"total_supply_nspx": walletStats["total_supply_nspx"],
+			"total_supply_spx":  walletStats["total_supply_spx"],
+		},
 	})
 }
 
@@ -977,14 +1004,34 @@ func formatBlockDetail(block *types.Block) gin.H {
 				new(big.Float).SetFloat64(1e18),
 			).Text('f', 6)
 		}
-		txList = append(txList, gin.H{
+		txSummary := gin.H{
 			"txid":       tx.ID,
 			"sender":     tx.Sender,
 			"receiver":   tx.Receiver,
 			"amount_spx": amountSPX,
 			"nonce":      tx.Nonce,
 			"timestamp":  tx.Timestamp,
-		})
+		}
+		// ReturnData is where mint anchors live: core.ValidateAnchorData
+		// parses the AnchorTag out of it, and its CID field is the only
+		// on-chain record of what a mint pinned. The per-transaction endpoint
+		// (handleExplorerTransaction) already exposes it as hex with a
+		// has_return_data flag; this mirrors that convention so a caller can
+		// inspect a whole block without an extra request per transaction.
+		//
+		// Without this, answering a question like "how many anchors recorded a
+		// local-only (spxhash-) CID?" required an O(blocks + txs) walk, because
+		// block detail listed txids but not the payload that classifies them.
+		//
+		// Empty payloads are omitted rather than emitted as "": most
+		// transactions carry no ReturnData, and a per-block list would
+		// otherwise fill with empty keys. has_return_data is always present so
+		// an absent return_data is unambiguous.
+		txSummary["has_return_data"] = len(tx.ReturnData) > 0
+		if len(tx.ReturnData) > 0 {
+			txSummary["return_data"] = fmt.Sprintf("%x", tx.ReturnData)
+		}
+		txList = append(txList, txSummary)
 	}
 
 	// Attestations

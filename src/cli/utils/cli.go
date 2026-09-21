@@ -66,8 +66,16 @@ SUBCOMMANDS
   send-tx       Send a transaction from one address to another
   get-balance   Query the balance of an address
   watch-tx      Poll until a transaction is confirmed
-  ipfs          IPFS + on-chain NFT mint and verify
-  wallet        Manage ` + common.SPIFPrefix + ` wallets (init, list)
+  ipfs          IPFS + on-chain NFT mint, verify and repin
+                (note: a local IPFS daemon is NOT durable storage — it stops
+                 serving content when it goes offline. Set
+                 SPHINX_IPFS_PINNING_SERVICE and SPHINX_IPFS_PINNING_TOKEN to
+                 mirror every pin to a remote pinning service (Pinata) so
+                 retrievability does not depend on this machine. Use
+                 'ipfs repin' to re-pin a payload whose anchor recorded only a
+                 local content hash.)
+  wallet        Manage ` + common.SPIFPrefix + ` wallets (init, list, burn, send)
+              Burn coins: send SPX to ` + common.DEADPrefix + ` ` + common.DefaultBurnAddress + ` (provably unspendable)
 
 TOKENOMICS OVERVIEW
   Genesis Supply: 1,240,000,000 SPX (24.8% of 5B max supply)
@@ -518,7 +526,7 @@ func legacyExecute() error {
 // runWalletCmd handles the "wallet" subcommand
 func runWalletCmd(args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("wallet subcommand requires 'init' or 'list'")
+		return fmt.Errorf("wallet subcommand requires 'init', 'list', 'burn' or 'send'")
 	}
 
 	switch args[0] {
@@ -526,10 +534,12 @@ func runWalletCmd(args []string) error {
 		return runWalletInitCmd(args[1:])
 	case "list":
 		return runWalletListCmd(args[1:])
+	case "burn":
+		return runWalletBurnCmd(args[1:])
 	case "send":
 		return runWalletSendCmd(args[1:])
 	default:
-		return fmt.Errorf("unknown wallet subcommand %q — use 'init', 'list', or 'send'", args[0])
+		return fmt.Errorf("unknown wallet subcommand %q — use 'init', 'list', 'burn', or 'send'", args[0])
 	}
 }
 
@@ -570,6 +580,53 @@ func runWalletInitCmd(args []string) error {
 	fmt.Printf("  2. Send transactions: sphinx-cli send-tx --from %s --to <RECIPIENT> --amount <AMOUNT> --key %s\n", info.Address, info.KeyFile)
 	fmt.Printf("  3. Run a validator: sphinx-cli node --role=validator --reward-address=%s\n\n", info.Address)
 
+	return nil
+}
+
+// runWalletBurnCmd handles "wallet burn" — burn ceremony tooling.
+//
+//   - `wallet burn --show-default` prints the protocol's default,
+//     hardcoded burn address (no key material involved).
+//   - `wallet burn --new` runs a fresh one-time burn ceremony: a real
+//     SPHINCS+ key pair is generated with an ephemeral random passphrase that
+//     is wiped immediately, nothing is written to disk, and only the new DEAD
+//     address + public key are printed for the operator to record.
+func runWalletBurnCmd(args []string) error {
+	fs := flag.NewFlagSet("wallet burn", flag.ExitOnError)
+
+	showDefault := fs.Bool("show-default", false, "Print the protocol default burn address")
+	newCeremony := fs.Bool("new", false, "Run a fresh one-time burn ceremony (nothing is saved to disk)")
+
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	// Default: show the canonical burn address.
+	if !*newCeremony || *showDefault {
+		fmt.Printf("\nDefault burn address (provably unspendable):\n\n")
+		fmt.Printf("  Address:    %s\n", common.DefaultBurnAddress)
+		fmt.Printf("  Public Key: %s\n\n", common.DefaultBurnPublicKeyHex)
+		fmt.Printf("To burn coins, send SPX to that address:\n")
+		fmt.Printf("  sphinx-cli send-tx --from <YOUR_SPIF_ADDRESS> --to \"%s\" --amount <AMOUNT> --key <KEYFILE>\n\n", common.DefaultBurnAddress)
+		fmt.Printf("Note: DEAD addresses are receive-only — consensus rejects any\n")
+		fmt.Printf("transaction that tries to spend FROM a burn address.\n\n")
+		if !*newCeremony {
+			return nil
+		}
+	}
+
+	info, err := BurnAddressCeremony()
+	if err != nil {
+		return fmt.Errorf("burn ceremony failed: %w", err)
+	}
+
+	fmt.Printf("\nFresh burn ceremony complete (NOT saved — record these now):\n\n")
+	fmt.Printf("  Address:    %s\n", info.Address)
+	fmt.Printf("  Public Key: %s\n\n", info.PublicKeyHex)
+	fmt.Printf("The private key was destroyed: the random passphrase was wiped from\n")
+	fmt.Printf("memory and the encrypted blob was never written to disk. No one —\n")
+	fmt.Printf("including you — can ever spend from this address. To use it, send\n")
+	fmt.Printf("SPX to it like any other recipient.\n\n")
 	return nil
 }
 
@@ -752,10 +809,10 @@ func findKeyFileForAddress(dataDir, address string) (string, error) {
 	return "", fmt.Errorf("no key file found for address %s in %s", address, dataDir)
 }
 
-// runIPFSCmd handles the "ipfs" subcommand with mint/verify sub-subcommands.
+// runIPFSCmd handles the "ipfs" subcommand with mint/verify/repin sub-subcommands.
 func runIPFSCmd(args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("ipfs subcommand requires 'mint' or 'verify'")
+		return fmt.Errorf("ipfs subcommand requires 'mint', 'verify' or 'repin'")
 	}
 
 	switch args[0] {
@@ -763,8 +820,10 @@ func runIPFSCmd(args []string) error {
 		return runIPFSMintCmd(args[1:])
 	case "verify":
 		return runIPFSVerifyCmd(args[1:])
+	case "repin":
+		return runIPFSRepinCmd(args[1:])
 	default:
-		return fmt.Errorf("unknown ipfs subcommand %q — use 'mint' or 'verify'", args[0])
+		return fmt.Errorf("unknown ipfs subcommand %q — use 'mint', 'verify' or 'repin'", args[0])
 	}
 }
 
@@ -779,9 +838,9 @@ func runIPFSMintCmd(args []string) error {
 	imageURL := fs.String("image", "", "Image URL (IPFS URI or HTTP)")
 	externalURL := fs.String("external-url", "", "External URL for the NFT")
 	contentFile := fs.String("content-file", "", "Path to raw content file to upload")
-	ipfsAddr := fs.String("ipfs-addr", "http://127.0.0.1:5001", "IPFS API address")
-	gatewayURL := fs.String("gateway", "http://127.0.0.1:8080", "IPFS gateway base URL")
-	disableIPFS := fs.Bool("disable-ipfs", false, "Disable real IPFS and use fallback mode")
+	ipfsAddr := fs.String("ipfs-addr", "", "IPFS API address (default from SPHINX_IPFS_ADDR, else http://127.0.0.1:5001)")
+	gatewayURL := fs.String("gateway", "", "IPFS gateway base URL (default from SPHINX_IPFS_GATEWAY, else http://127.0.0.1:8080)")
+	disableIPFS := fs.Bool("disable-ipfs", false, "Explicitly mint with NO upload: records a local content hash (spxhash-…) instead of a retrievable IPFS CID. The mint is still anchored, but nobody can fetch the content — this is an opt-in, offline-only mode")
 	mintID := fs.String("mint-id", "", "Mint ID (auto-generated if empty)")
 	from := fs.String("from", "", "Sender address for the on-chain transaction (required)")
 	keyFile := fs.String("key", "", "Path to private key file for signing (required)")
@@ -836,7 +895,52 @@ func runIPFSMintCmd(args []string) error {
 	return err
 }
 
-// runIPFSVerifyCmd handles "ipfs verify" — verify a minted NFT on Sphinx + IPFS.
+// runIPFSRepinCmd handles "ipfs repin" — re-pin the payload behind an existing
+// anchor so media that only ever lived on the minter's disk stays retrievable
+// going forward (and report the per-anchor evidence an audit needs).
+func runIPFSRepinCmd(args []string) error {
+	fs := flag.NewFlagSet("ipfs repin", flag.ExitOnError)
+
+	rpcURL := fs.String("rpc", "http://127.0.0.1:8545", "Sphinx node JSON-RPC endpoint")
+	mintID := fs.String("mint-id", "", "Mint ID whose recorded commitment should be re-pinned")
+	txID := fs.String("txid", "", "Transaction ID (on-chain anchor) to re-pin — preferred, it reads the permanent record")
+	file := fs.String("file", "", "Path to the ORIGINAL payload file the mint committed to (required)")
+	ipfsAddr := fs.String("ipfs-addr", "", "IPFS API address (default from SPHINX_IPFS_ADDR, else http://127.0.0.1:5001)")
+	gatewayURL := fs.String("gateway", "", "IPFS gateway base URL (default from SPHINX_IPFS_GATEWAY, else http://127.0.0.1:8080)")
+	jsonOut := fs.Bool("json", false, "Emit the result as JSON (useful for audit collection)")
+
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *mintID == "" && *txID == "" {
+		return fmt.Errorf("either --mint-id or --txid is required")
+	}
+
+	result, err := RunRepin(RepinOptions{
+		RPCURL:         *rpcURL,
+		MintID:         *mintID,
+		TxID:           *txID,
+		File:           *file,
+		IPFSAddr:       *ipfsAddr,
+		GatewayBaseURL: *gatewayURL,
+	})
+	if err != nil {
+		return err
+	}
+	if *jsonOut && result != nil {
+		enc, encErr := json.MarshalIndent(result, "", "  ")
+		if encErr != nil {
+			return encErr
+		}
+		fmt.Printf("%s\n", enc)
+	}
+	// A refusal (mismatched file, failed pin) is reported inside the result;
+	// surface it as a non-zero exit so scripts cannot mistake it for success.
+	if result != nil && result.Error != "" {
+		return fmt.Errorf("%s", result.Error)
+	}
+	return nil
+}
 func runIPFSVerifyCmd(args []string) error {
 	fs := flag.NewFlagSet("ipfs verify", flag.ExitOnError)
 

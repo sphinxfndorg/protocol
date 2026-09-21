@@ -13,19 +13,18 @@ import (
 	"math/big"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
-	"sync"
 	"time"
 
+	"github.com/sphinxfndorg/protocol/src/bind/abi"
 	"github.com/sphinxfndorg/protocol/src/common"
+	"github.com/sphinxfndorg/protocol/src/contracts"
 	"github.com/sphinxfndorg/protocol/src/core"
-	key "github.com/sphinxfndorg/protocol/src/core/sthincs/key/backend"
-	sign "github.com/sphinxfndorg/protocol/src/core/sthincs/sign/backend"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
 	"github.com/sphinxfndorg/protocol/src/policy"
 	"github.com/sphinxfndorg/protocol/src/rpc"
 	"github.com/sphinxfndorg/protocol/src/storage"
-	keys "github.com/sphinxfndorg/protocol/src/usi/core/key"
 	"github.com/sphinxfndorg/protocol/src/usi/core/mint"
 )
 
@@ -291,188 +290,266 @@ func (c *WalletClient) GetHeaders(start uint64, count int) ([]types.BlockHeader,
 	return hdrs, nil
 }
 
-// pendingNonceMu / pendingNonce guard against a wallet-process-local nonce
-// race.
-var (
-	pendingNonceMu sync.Mutex
-	pendingNonce   = map[string]uint64{} // raw sender address -> next unclaimed nonce
-)
+// guiRPC adapts the wallet's rpc.CallRPC to abi.RPCClient, so the shared
+// abi.Transact path can reach the node without abi importing src/rpc.
+type guiRPC struct{}
 
-// getCurrentNonce gets the next nonce to use for `address` from the node.
+func (guiRPC) CallRPC(nodeAddr, method string, params interface{}, ttlSeconds uint16) (json.RawMessage, error) {
+	return rpc.CallRPC(nodeAddr, method, params, ttlSeconds)
+}
+
+// chainIDFor returns the network's EIP-155 chain id, falling back to the
+// Sphinx mainnet id when the chain header is unavailable.
+func chainIDFor() uint64 {
+	if chainHdr := core.GetSphinxChainHeader(); chainHdr != nil && chainHdr.ChainID != 0 {
+		return chainHdr.ChainID
+	}
+	return 7331
+}
+
+// transactOpts builds the shared abi.TransactOpts for one wallet broadcast. The
+// signer is mint.KeyFileSigner — the same abi.Signer the mint flow uses, so
+// there is one signing implementation — and a nil nonce means abi.Transact
+// claims it from the shared reservation (mint.Nonces) and gives it back if the
+// broadcast fails.
+func (c *WalletClient) transactOpts(chainID uint64, nonce *uint64) *abi.TransactOpts {
+	return &abi.TransactOpts{
+		Client:   guiRPC{},
+		Signer:   mint.KeyFileSigner{KeyFile: sessionPassphrase},
+		NodeAddr: c.nodeAddr,
+		ChainID:  chainID,
+		Nonce:    nonce,
+		Reserver: mint.Nonces,
+	}
+}
+
+// getCurrentNonce gets the next nonce to use for `address` by claiming it from
+// the shared process-wide reservation (abi.NonceReserver). One table is what
+// keeps a wallet action, a collection mint, and its receipt anchor — all in
+// this process — from claiming the same committed nonce before the first block
+// commits.
 func (c *WalletClient) getCurrentNonce(address string) (uint64, error) {
 	rawAddress, err := normaliseAddress(address)
 	if err != nil {
 		return 0, err
 	}
-	resultData, err := rpc.CallRPC(c.nodeAddr, "getnonce", []interface{}{rawAddress}, 60)
-	if err != nil {
-		return 0, err
-	}
-	var chainNonce uint64
-	if err := json.Unmarshal(resultData, &chainNonce); err != nil {
-		return 0, err
-	}
-
-	pendingNonceMu.Lock()
-	next := chainNonce
-	if reserved, ok := pendingNonce[rawAddress]; ok && reserved > next {
-		next = reserved
-	}
-	// ★ FIX: also account for reservations made by the mint package
-	// (BroadcastSIP721CollectionMintWithTerms / broadcastReceiptAnchor use
-	// their own reserveNextNonce cache in sip721_tx.go). Without this check,
-	// a mint-package broadcast that already claimed a nonce — but whose tx
-	// hasn't committed yet — is invisible to this cache: a GUI action right
-	// after it (e.g. Deploy New Collection) re-reads the same on-chain
-	// nonce and collides with the mempool's pending-aware
-	// accountNonceIndex, producing "invalid nonce: N must equal N+1".
-	// mint.PeekReservedNonce exists precisely to close this gap but was
-	// never actually called anywhere until now.
-	if mintReserved, ok := mint.PeekReservedNonce(c.nodeAddr, rawAddress); ok && mintReserved > next {
-		next = mintReserved
-	}
-	pendingNonce[rawAddress] = next + 1
-	pendingNonceMu.Unlock()
-
-	// Mirror this claim into the mint package's reservation so a SIP-721
-	// collection mint that follows this broadcast never re-reads the same
-	// committed on-chain nonce.
-	mint.AdvanceReservation(c.nodeAddr, rawAddress, next+1)
-
-	return next, nil
+	return mint.Nonces.Reserve(guiRPC{}, c.nodeAddr, rawAddress)
 }
 
-// releasePendingNonce rolls back a reservation made by getCurrentNonce when
-// the transaction that was going to consume it was never actually broadcast.
+// releasePendingNonce rolls a reservation back when the transaction that was
+// going to consume it was never broadcast. The address is normalised first so
+// the release targets the same key the claim did. Only rewinds when nothing
+// later has claimed the nonce.
 func (c *WalletClient) releasePendingNonce(address string, nonce uint64) {
-	mint.ReleaseReservation(c.nodeAddr, address, nonce)
-
 	rawAddress, err := normaliseAddress(address)
 	if err != nil {
 		return
 	}
-	pendingNonceMu.Lock()
-	defer pendingNonceMu.Unlock()
-	if pendingNonce[rawAddress] == nonce+1 {
-		pendingNonce[rawAddress] = nonce
+	mint.Nonces.Release(c.nodeAddr, rawAddress, nonce)
+}
+
+// TransferPriority is the user-visible send speed tier. Each tier maps to a
+// multiplier on the policy minimum gas price: the mempool's calculatePriority
+// awards ~1 point per 1 gSPX (capped at +100), so 1/2/5 gSPX sit in the cheap,
+// clearly-differentiated part of that curve rather than bunching near the cap.
+//
+// Copy is deliberately modest ("faster under congestion", never "fastest"): a
+// static multiplier cannot outbid a congested mempool it never observes, and
+// priority only matters under congestion in the first place.
+type TransferPriority int
+
+const (
+	PriorityStandard TransferPriority = iota // 1x minimum — cheapest
+	PriorityMedium                           // 2x — balanced
+	PriorityHigh                             // 5x — faster under congestion
+	PriorityCustom                           // user multiplier (>= 1x, see ValidateCustomMultiplier)
+)
+
+// GasPriceMultiplier returns the gas-price multiplier for a preset tier.
+// Custom has no fixed multiplier — use ValidateCustomMultiplier instead.
+func (p TransferPriority) GasPriceMultiplier() uint64 {
+	switch p {
+	case PriorityMedium:
+		return 2
+	case PriorityHigh:
+		return 5
+	default:
+		return 1
 	}
 }
 
-// advanceMintReservation pushes a GUI-side claim into the mint package's
-// reservation.
-func (c *WalletClient) advanceMintReservation(address string, next uint64) {
-	mint.AdvanceReservation(c.nodeAddr, address, next)
+// Label returns the user-facing tier name (no overpromising: "faster under
+// congestion", never "fastest" — a static multiplier cannot guarantee the top
+// of a mempool it never observes).
+func (p TransferPriority) Label() string {
+	switch p {
+	case PriorityMedium:
+		return "Medium (2x)"
+	case PriorityHigh:
+		return "High (5x — faster under congestion)"
+	case PriorityCustom:
+		return "Custom"
+	default:
+		return "Standard (1x)"
+	}
 }
 
-// SendTransaction sends funds to a recipient
-func (c *WalletClient) SendTransaction(toAddress string, amount *big.Int, memo string) (string, error) {
+// transferPriorityOptions is the ordered option list for the Send screen's
+// priority selector.
+var transferPriorityOptions = []string{
+	PriorityStandard.Label(),
+	PriorityMedium.Label(),
+	PriorityHigh.Label(),
+	PriorityCustom.Label(),
+}
+
+// priorityFromLabel maps a selector label back to its TransferPriority.
+// Unknown labels fall back to Standard so a stale selection can never
+// produce an unpriced transaction.
+func priorityFromLabel(label string) TransferPriority {
+	switch label {
+	case PriorityMedium.Label():
+		return PriorityMedium
+	case PriorityHigh.Label():
+		return PriorityHigh
+	case PriorityCustom.Label():
+		return PriorityCustom
+	default:
+		return PriorityStandard
+	}
+}
+
+// ValidateCustomMultiplier checks a user-supplied gas-price multiplier.
+// Below 1x the node would reject the tx (gas price < MinimumGasPrice), so it
+// is an error; above 100x is almost certainly a fat-finger, so it is allowed
+// but flagged with a warning the caller surfaces.
+func ValidateCustomMultiplier(mult uint64) (warn bool, err error) {
+	if mult < 1 {
+		return false, fmt.Errorf("custom multiplier must be at least 1x (the node rejects anything below the minimum gas price)")
+	}
+	if mult > 100 {
+		return true, nil
+	}
+	return false, nil
+}
+
+// QuoteTransferGas quotes a plain SPX transfer at the given priority tier:
+// the deterministic gas limit for the memo footprint, times the tier's gas
+// price. Custom uses the caller-validated multiplier (see
+// ValidateCustomMultiplier); every other tier uses its fixed multiplier.
+func QuoteTransferGas(memoLen int, priority TransferPriority, customMult uint64) *policy.GasQuote {
+	memoBytes := 0
+	if memoLen > 0 {
+		memoBytes = memoLen
+	}
+	base := policy.GetDefaultPolicyParams().QuoteTransactionGas(uint64(memoBytes))
+
+	mult := priority.GasPriceMultiplier()
+	if priority == PriorityCustom {
+		mult = customMult
+	}
+	if mult < 1 {
+		mult = 1
+	}
+	gasPrice := new(big.Int).Mul(base.GasPrice, new(big.Int).SetUint64(mult))
+	return &policy.GasQuote{
+		GasLimit: new(big.Int).Set(base.GasLimit),
+		GasPrice: gasPrice,
+		GasFee:   new(big.Int).Mul(base.GasLimit, gasPrice),
+	}
+}
+
+// priorityTierLabel renders the short tier tag shown in the Transfer Status
+// dialog (e.g. "High (5x)"). Custom shows its actual multiplier so the
+// recorded tier always matches what was paid.
+func priorityTierLabel(priority TransferPriority, customMult uint64) string {
+	if priority == PriorityCustom {
+		return fmt.Sprintf("Custom (%dx)", customMult)
+	}
+	return priority.Label()
+}
+
+// SendTransactionResult holds the result of a transaction send, including gas fee info.
+type SendTransactionResult struct {
+	TxID     string
+	GasLimit *big.Int
+	GasPrice *big.Int
+	GasFee   *big.Int
+}
+
+// SendTransactionWithPriority sends funds to a recipient at the given gas
+// price and returns the transaction ID along with gas fee details. A nil
+// gasPrice falls back to the policy minimum (Standard tier); callers must
+// never pass a price below it — the node rejects such transactions at
+// admission, so validate first (see ValidateCustomMultiplier).
+func (c *WalletClient) SendTransactionWithPriority(toAddress string, amount *big.Int, memo string, gasPrice *big.Int) (*SendTransactionResult, error) {
 	if sessionPassphrase == "" {
-		return "", errors.New("not logged in")
+		return nil, errors.New("not logged in")
 	}
 	if toAddress == "" {
-		return "", errors.New("recipient required")
+		return nil, errors.New("recipient required")
 	}
 	if amount == nil || amount.Sign() <= 0 {
-		return "", errors.New("invalid amount")
+		return nil, errors.New("invalid amount")
 	}
 
 	rawTo, err := normaliseAddress(toAddress)
 	if err != nil {
-		return "", fmt.Errorf("invalid recipient address: %w", err)
+		return nil, fmt.Errorf("invalid recipient address: %w", err)
 	}
 
 	rawSender, err := normaliseAddress(sessionFingerprint)
 	if err != nil {
-		return "", fmt.Errorf("invalid sender address: %w", err)
+		return nil, fmt.Errorf("invalid sender address: %w", err)
 	}
 
 	log.Printf("[WalletRPC] SendTransaction: sending %s to %s",
 		amount.String(), rawTo[:16]+"...")
 
-	kp, skBytes, err := keys.LoadKeyFromDisk(sessionPassphrase)
-	if err != nil {
-		return "", fmt.Errorf("failed to load key: %w", err)
-	}
-	defer func() {
-		for i := range skBytes {
-			skBytes[i] = 0
-		}
-	}()
-
-	var nonce uint64
-	if cachedNonce, err := c.getCurrentNonce(sessionFingerprint); err == nil {
-		nonce = cachedNonce
-		log.Printf("[WalletRPC] Using RPC nonce: %d", nonce)
-	} else {
-		return "", fmt.Errorf("failed to get account nonce from node: %w", err)
-	}
-
-	chainID := uint64(7331)
-	if chainHdr := core.GetSphinxChainHeader(); chainHdr != nil && chainHdr.ChainID != 0 {
-		chainID = chainHdr.ChainID
-	}
-
 	gasQuote := policy.GetDefaultPolicyParams().QuoteTransactionGas(uint64(len(memo)))
+	if gasPrice != nil && gasPrice.Sign() > 0 {
+		minPrice := policy.GetDefaultPolicyParams().MinimumGasPrice
+		if gasPrice.Cmp(minPrice) < 0 {
+			return nil, fmt.Errorf("gas price %s below node minimum %s — raise the priority tier", gasPrice.String(), minPrice.String())
+		}
+		gasQuote = &policy.GasQuote{
+			GasLimit: new(big.Int).Set(gasQuote.GasLimit),
+			GasPrice: new(big.Int).Set(gasPrice),
+			GasFee:   new(big.Int).Mul(gasQuote.GasLimit, gasPrice),
+		}
+	}
 
 	tx := &types.Transaction{
-		ID:         "",
-		ChainID:    chainID,
+		ChainID:    chainIDFor(),
 		Sender:     rawSender,
 		Receiver:   rawTo,
 		Amount:     amount,
 		GasLimit:   gasQuote.GasLimit,
 		GasPrice:   gasQuote.GasPrice,
-		Nonce:      nonce,
 		Timestamp:  time.Now().Unix(),
-		Signature:  []byte{},
 		ReturnData: []byte(memo),
 	}
-	tx.ID = tx.Hash()
-
-	if err := signTransactionLocally(tx, skBytes, kp.PublicKey); err != nil {
-		c.releasePendingNonce(sessionFingerprint, nonce)
-		return "", fmt.Errorf("failed to sign transaction: %w", err)
-	}
-
-	txData, err := json.Marshal(tx)
+	// abi.Transact applies the reserved nonce, derives the ID, signs, encodes
+	// and broadcasts — and gives the reservation back if any of that fails.
+	txid, err := abi.Transact(c.transactOpts(chainIDFor(), nil), tx)
 	if err != nil {
-		c.releasePendingNonce(sessionFingerprint, nonce)
-		return "", fmt.Errorf("failed to marshal transaction: %w", err)
-	}
-	rawTx := hex.EncodeToString(txData)
-
-	resultData, err := rpc.CallRPC(c.nodeAddr, "sendrawtransaction", []interface{}{rawTx}, 120)
-	if err != nil {
-		c.releasePendingNonce(sessionFingerprint, nonce)
-		return "", fmt.Errorf("RPC error: %w", err)
+		return nil, fmt.Errorf("send transaction: %w", err)
 	}
 
-	if len(resultData) == 0 || string(resultData) == "null" {
-		c.releasePendingNonce(sessionFingerprint, nonce)
-		return "", errors.New("empty response")
-	}
+	return &SendTransactionResult{
+		TxID:     txid,
+		GasLimit: gasQuote.GasLimit,
+		GasPrice: gasQuote.GasPrice,
+		GasFee:   gasQuote.GasFee,
+	}, nil
+}
 
-	var result struct {
-		TxID   string `json:"txid"`
-		Status string `json:"status"`
-		Error  string `json:"error"`
-	}
-	if err := json.Unmarshal(resultData, &result); err != nil {
-		c.releasePendingNonce(sessionFingerprint, nonce)
-		return "", fmt.Errorf("parse response: %w", err)
-	}
-
-	if result.Error != "" {
-		c.releasePendingNonce(sessionFingerprint, nonce)
-		return "", fmt.Errorf("tx rejected: %s", result.Error)
-	}
-
-	if strings.TrimSpace(result.TxID) == "" {
-		c.releasePendingNonce(sessionFingerprint, nonce)
-		return "", errors.New("node returned empty txid — transaction may have been rejected")
-	}
-
-	return result.TxID, nil
+// SendTransaction sends funds to a recipient at the policy minimum gas price
+// (Standard tier) and returns the transaction ID along with gas fee details.
+// Kept so existing callers keep compiling; new code should prefer
+// SendTransactionWithPriority.
+func (c *WalletClient) SendTransaction(toAddress string, amount *big.Int, memo string) (*SendTransactionResult, error) {
+	return c.SendTransactionWithPriority(toAddress, amount, memo, nil)
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -608,48 +685,6 @@ func (c *WalletClient) GetSIP721Listing(collection, tokenID string) (*SIP721List
 	return &SIP721Listing{Seller: listing.Seller, Price: price}, nil
 }
 
-// signTransactionLocally signs a transaction using the node's canonical
-// SPHINCS+ transaction authentication path.
-func signTransactionLocally(tx *types.Transaction, skBytes, pkBytes []byte) error {
-	if tx == nil {
-		return fmt.Errorf("nil transaction")
-	}
-	if tx.ID == "" {
-		tx.ID = tx.Hash()
-	}
-
-	km, err := key.NewKeyManager()
-	if err != nil {
-		return fmt.Errorf("failed to initialize key manager: %w", err)
-	}
-	privateKey, publicKey, err := km.DeserializeKeyPair(skBytes, pkBytes)
-	if err != nil {
-		return fmt.Errorf("failed to deserialize key pair: %w", err)
-	}
-
-	sphincsParams := km.GetSPHINCSParameters()
-	if sphincsParams == nil || sphincsParams.Params == nil {
-		return fmt.Errorf("SPHINCS+ parameters not initialized")
-	}
-
-	signingMgr := sign.NewSTHINCSManager(nil, km, sphincsParams)
-	bundle, err := signingMgr.SignTransactionAuth([]byte(tx.ID), privateKey, publicKey)
-	if err != nil {
-		return fmt.Errorf("failed to sign transaction auth bundle: %w", err)
-	}
-
-	tx.Signature = bundle.Signature
-	tx.SignatureHash = bundle.SignatureHash
-	tx.PublicKey = bundle.PublicKey
-	tx.AuthTimestamp = bundle.Timestamp
-	tx.AuthNonce = bundle.Nonce
-	tx.MerkleRootHash = bundle.MerkleRootHash
-	tx.Commitment = bundle.Commitment
-	tx.Proof = bundle.Proof
-
-	return nil
-}
-
 // GetTransactionHistory fetches recent transactions
 func (c *WalletClient) GetTransactionHistory(address string, limit int) ([]TransactionResponse, error) {
 	if address == "" {
@@ -752,40 +787,6 @@ func parseTransactionHistory(resultData []byte) ([]TransactionResponse, error) {
 	return txs, nil
 }
 
-// newSIP721CallTx is the GUI-local equivalent of abi.NewSIP721CallTx.
-func newSIP721CallTx(chainID uint64, sender string, nonce uint64, collection, method string, args map[string]string) (*types.Transaction, error) {
-	if sender == "" || collection == "" {
-		return nil, errors.New("sender and contract address are required")
-	}
-	method = strings.ToLower(strings.TrimSpace(method))
-	switch method {
-	case "mint", "transfer_from", "approve", "owner_of", "token_uri", "token_id_of_mint",
-		"purchase_license", "revoke_license", "terms_of", "list", "buy", "cancel", "listing_of", "info":
-	default:
-		return nil, fmt.Errorf("unsupported sip721 method: %s", method)
-	}
-	if args == nil {
-		args = map[string]string{}
-	}
-	callData, err := json.Marshal(map[string]interface{}{"method": method, "args": args})
-	if err != nil {
-		return nil, fmt.Errorf("encode sip721 call: %w", err)
-	}
-	p := policy.GetDefaultPolicyParams()
-	base := p.QuoteTransactionGas(0)
-	contractQuote := p.QuoteContractGas(false, 0, uint64(len(callData)), 0)
-	return &types.Transaction{
-		ChainID:    chainID,
-		Sender:     sender,
-		Amount:     big.NewInt(0),
-		Nonce:      nonce,
-		ToContract: collection,
-		CallData:   callData,
-		GasLimit:   new(big.Int).Add(base.GasLimit, contractQuote.GasLimit),
-		GasPrice:   new(big.Int).Set(base.GasPrice),
-	}, nil
-}
-
 // GetSIP721Terms reads a token's frozen terms + current licensee.
 func (c *WalletClient) GetSIP721Terms(collection, tokenID string) (*SIP721Terms, error) {
 	tokenID, err := formatTokenID(tokenID)
@@ -858,12 +859,13 @@ func (c *WalletClient) GetSIP721Owner(collection, tokenID string) (string, error
 	return string(payload), nil
 }
 
-// CallSIP721 builds, signs, and broadcasts a SIP-721 contract call.
+// CallSIP721 signs and broadcasts a SIP-721 contract call.
 //
-// ★ FIX: this path already claims a nonce via getCurrentNonce and injects it
-// into the tx (newSIP721CallTx takes the nonce as a parameter), and releases
-// on every failure path. No change needed here beyond what is already present
-// — included verbatim so the file is complete.
+// The two escrow-carrying marketplace methods (buy, purchase_license) dispatch
+// to the typed abi.SIP721Contract methods, which put amountNSPX on the
+// transaction as its exact value — the contract's runtime rejects any other
+// value. Every other method runs through the typed dispatcher with no value.
+// Nonce reservation, signing, encoding and broadcast belong to abi.Transact.
 func (c *WalletClient) CallSIP721(collection, method string, args map[string]string, amountNSPX *big.Int) (string, error) {
 	if sessionPassphrase == "" {
 		return "", errors.New("not logged in")
@@ -876,72 +878,27 @@ func (c *WalletClient) CallSIP721(collection, method string, args map[string]str
 	if err != nil {
 		return "", fmt.Errorf("invalid sender address: %w", err)
 	}
-	nonce, err := c.getCurrentNonce(sessionFingerprint)
-	if err != nil {
-		return "", fmt.Errorf("failed to get account nonce from node: %w", err)
-	}
-	chainID := uint64(7331)
-	if chainHdr := core.GetSphinxChainHeader(); chainHdr != nil && chainHdr.ChainID != 0 {
-		chainID = chainHdr.ChainID
-	}
-	unsignedTx, err := newSIP721CallTx(chainID, rawSender, nonce, collection, method, args)
-	if err != nil {
-		c.releasePendingNonce(sessionFingerprint, nonce)
-		return "", err
-	}
-	if amountNSPX != nil && amountNSPX.Sign() > 0 {
-		unsignedTx.Amount = new(big.Int).Set(amountNSPX)
-	}
-	unsignedTx.Timestamp = time.Now().Unix()
-	unsignedTx.ID = unsignedTx.Hash()
 
-	kp, skBytes, err := keys.LoadKeyFromDisk(sessionPassphrase)
-	if err != nil {
-		c.releasePendingNonce(sessionFingerprint, nonce)
-		return "", fmt.Errorf("failed to load key: %w", err)
-	}
-	defer func() {
-		for i := range skBytes {
-			skBytes[i] = 0
-			_ = i
+	method = strings.ToLower(strings.TrimSpace(method))
+	contract := abi.SIP721Contract{Address: collection}
+	opts := c.transactOpts(chainIDFor(), nil)
+
+	switch method {
+	case "buy", "purchase_license":
+		if amountNSPX == nil {
+			return "", fmt.Errorf("%s requires the exact escrow amount (nSPX)", method)
 		}
-	}()
-	if err := signTransactionLocally(unsignedTx, skBytes, kp.PublicKey); err != nil {
-		c.releasePendingNonce(sessionFingerprint, nonce)
-		return "", fmt.Errorf("failed to sign contract call: %w", err)
+		tokenID, err := strconv.ParseUint(strings.TrimSpace(args["token_id"]), 10, 64)
+		if err != nil {
+			return "", fmt.Errorf("%s: invalid token_id %q", method, args["token_id"])
+		}
+		if method == "buy" {
+			return contract.Buy(opts, rawSender, tokenID, amountNSPX.String())
+		}
+		return contract.PurchaseLicense(opts, rawSender, tokenID, args["licensee"], amountNSPX.String())
+	default:
+		return contract.Transact(opts, rawSender, method, args)
 	}
-	txData, err := json.Marshal(unsignedTx)
-	if err != nil {
-		c.releasePendingNonce(sessionFingerprint, nonce)
-		return "", fmt.Errorf("failed to marshal contract call: %w", err)
-	}
-	resultData, err := rpc.CallRPC(c.nodeAddr, "sendrawtransaction", []interface{}{hex.EncodeToString(txData)}, 120)
-	if err != nil {
-		c.releasePendingNonce(sessionFingerprint, nonce)
-		return "", fmt.Errorf("RPC error: %w", err)
-	}
-	if len(resultData) == 0 || string(resultData) == "null" {
-		c.releasePendingNonce(sessionFingerprint, nonce)
-		return "", errors.New("empty response")
-	}
-	var result struct {
-		TxID   string `json:"txid"`
-		Status string `json:"status"`
-		Error  string `json:"error"`
-	}
-	if err := json.Unmarshal(resultData, &result); err != nil {
-		c.releasePendingNonce(sessionFingerprint, nonce)
-		return "", fmt.Errorf("parse response: %w", err)
-	}
-	if result.Error != "" {
-		c.releasePendingNonce(sessionFingerprint, nonce)
-		return "", fmt.Errorf("tx rejected: %s", result.Error)
-	}
-	if strings.TrimSpace(result.TxID) == "" {
-		c.releasePendingNonce(sessionFingerprint, nonce)
-		return "", errors.New("node returned empty txid — transaction may have been rejected")
-	}
-	return result.TxID, nil
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -1047,24 +1004,6 @@ func (c *WalletClient) GetSIP721CollectionInfo(collection string) (*SIP721Collec
 	}, nil
 }
 
-// sip721DeploySpec mirrors contracts.DeploySpec's wire form.
-type sip721DeploySpec struct {
-	Runtime  string `json:"runtime"`
-	Standard string `json:"standard"`
-	Name     string `json:"name,omitempty"`
-	Symbol   string `json:"symbol,omitempty"`
-	Owner    string `json:"owner,omitempty"`
-}
-
-// sip721DeployGasLimit returns the policy gas limit for broadcasting a
-// deployment whose deploy-code is codeBytes long.
-func sip721DeployGasLimit(codeBytes uint64) *big.Int {
-	p := policy.GetDefaultPolicyParams()
-	base := p.QuoteTransactionGas(0)
-	contract := p.QuoteContractGas(true, codeBytes, 0, 0)
-	return new(big.Int).Add(base.GasLimit, contract.GasLimit)
-}
-
 // DeploySIP721Collection deploys an empty SIP-721 collection owned by the
 // logged-in identity and waits until its sip721:info record is readable.
 //
@@ -1095,18 +1034,13 @@ func (c *WalletClient) DeploySIP721Collection(name, symbol string) (string, stri
 		return "", "", fmt.Errorf("invalid sender address: %w", err)
 	}
 
-	codeJSON, err := json.Marshal(sip721DeploySpec{
-		Runtime:  "native",
-		Standard: "sip721",
-		Name:     name,
-		Symbol:   symbol,
-		Owner:    rawOwner,
-	})
+	// abi owns the deploy encoding and quote, so the spec bytes and gas limit
+	// the node builds from are exactly the ones the ABI would sign.
+	deployTx, err := abi.NewSIP721DeployTx(abi.TxOptions{ChainID: chainIDFor(), Sender: rawOwner},
+		contracts.DeploySpec{Name: name, Symbol: symbol, Owner: rawOwner})
 	if err != nil {
-		return "", "", fmt.Errorf("encode deploy spec: %w", err)
+		return "", "", fmt.Errorf("build deploy transaction: %w", err)
 	}
-
-	deployGasLimit := sip721DeployGasLimit(uint64(len(codeJSON)))
 
 	// ★ FIX: claim the wallet's next nonce BEFORE asking the node to build
 	// the deploy tx. The node's deploycontract handler reads the raw state
@@ -1123,9 +1057,9 @@ func (c *WalletClient) DeploySIP721Collection(name, symbol string) (string, stri
 	// positional array) — CallRPC passes this through verbatim.
 	resultData, err := rpc.CallRPC(c.nodeAddr, "deploycontract", map[string]interface{}{
 		"from":     rawOwner,
-		"code":     hex.EncodeToString(codeJSON),
-		"gasLimit": deployGasLimit.Uint64(),
-		"gasPrice": policy.GetDefaultPolicyParams().MinimumGasPrice.String(),
+		"code":     hex.EncodeToString(deployTx.Code),
+		"gasLimit": deployTx.GasLimit.Uint64(),
+		"gasPrice": deployTx.GasPrice.String(),
 		"nonce":    deployNonce,
 	}, 60)
 	if err != nil {
@@ -1191,46 +1125,12 @@ func (c *WalletClient) DeploySIP721Collection(name, symbol string) (string, stri
 	tx.Nonce = deployNonce
 	tx.Timestamp = time.Now().Unix()
 
-	kp, skBytes, err := keys.LoadKeyFromDisk(sessionPassphrase)
+	// Sign, encode and broadcast through the shared path. The nonce is passed
+	// explicitly so the deploy keeps the slot deploycontract was told about.
+	deployTxID, err := abi.Transact(c.transactOpts(chainIDFor(), &deployNonce), &tx)
 	if err != nil {
 		c.releasePendingNonce(sessionFingerprint, deployNonce)
-		return "", "", fmt.Errorf("failed to load key: %w", err)
-	}
-	defer func() {
-		for i := range skBytes {
-			skBytes[i] = 0
-		}
-	}()
-	if err := signTransactionLocally(&tx, skBytes, kp.PublicKey); err != nil {
-		c.releasePendingNonce(sessionFingerprint, deployNonce)
-		return "", "", fmt.Errorf("failed to sign deploy tx: %w", err)
-	}
-	signedJSON, err := json.Marshal(&tx)
-	if err != nil {
-		c.releasePendingNonce(sessionFingerprint, deployNonce)
-		return "", "", fmt.Errorf("failed to marshal deploy tx: %w", err)
-	}
-	sendData, err := rpc.CallRPC(c.nodeAddr, "sendrawtransaction",
-		[]interface{}{hex.EncodeToString(signedJSON)}, 120)
-	if err != nil {
-		c.releasePendingNonce(sessionFingerprint, deployNonce)
-		return "", "", fmt.Errorf("RPC error: %w", err)
-	}
-	var sent struct {
-		TxID  string `json:"txid"`
-		Error string `json:"error"`
-	}
-	if err := json.Unmarshal(sendData, &sent); err != nil {
-		c.releasePendingNonce(sessionFingerprint, deployNonce)
-		return "", "", fmt.Errorf("parse response: %w", err)
-	}
-	if sent.Error != "" {
-		c.releasePendingNonce(sessionFingerprint, deployNonce)
-		return "", "", fmt.Errorf("deploy tx rejected: %s", sent.Error)
-	}
-	if strings.TrimSpace(sent.TxID) == "" {
-		c.releasePendingNonce(sessionFingerprint, deployNonce)
-		return "", "", errors.New("node returned empty txid — deploy may have been rejected")
+		return "", "", fmt.Errorf("send deploy tx: %w", err)
 	}
 
 	// The collection only exists once the deploy tx is committed; wait for its
@@ -1244,33 +1144,33 @@ func (c *WalletClient) DeploySIP721Collection(name, symbol string) (string, stri
 	var committed bool
 	for {
 		if info, ierr := c.GetSIP721CollectionInfo(collection); ierr == nil && info.Owner != "" {
-			return collection, sent.TxID, nil
+			return collection, deployTxID, nil
 		}
 
-		if conf, poolStr, invalidReason, derr := c.getTxNodeState(sent.TxID); derr == nil {
+		if conf, poolStr, invalidReason, derr := c.getTxNodeState(deployTxID); derr == nil {
 			if invalidReason != "" {
-				return "", sent.TxID, fmt.Errorf(
+				return "", deployTxID, fmt.Errorf(
 					"deploy tx %s was REJECTED by the node and can never confirm: %s",
-					sent.TxID, invalidReason)
+					deployTxID, invalidReason)
 			}
 			if conf != nil {
 				committed = true
 				committedHeight = conf.Height
 			} else if poolStr != "" {
 				lastPool = poolStr
-				log.Printf("[WalletRPC] DeploySIP721Collection: deploy tx %s uncommitted (%s)", sent.TxID, poolStr)
+				log.Printf("[WalletRPC] DeploySIP721Collection: deploy tx %s uncommitted (%s)", deployTxID, poolStr)
 			}
 		}
 
 		if time.Now().After(deadline) {
 			if committed {
-				return collection, sent.TxID, fmt.Errorf(
+				return collection, deployTxID, fmt.Errorf(
 					"deploy tx %s committed at height %d but collection %s is still not readable — the contract runtime did not record sip721:info; check the node's block-execution logs",
-					sent.TxID, committedHeight, collection)
+					deployTxID, committedHeight, collection)
 			}
-			return collection, sent.TxID, fmt.Errorf(
+			return collection, deployTxID, fmt.Errorf(
 				"deploy tx %s was accepted but did not commit within 90s (last mempool state: %s) — if the node is producing blocks check its logs for the validation reason, otherwise confirm block production is running (solo mode mines a block every 10s)",
-				sent.TxID, lastPool)
+				deployTxID, lastPool)
 		}
 		time.Sleep(2 * time.Second)
 	}

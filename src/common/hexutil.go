@@ -23,6 +23,84 @@ import (
 // addresses should reference this constant instead of hardcoding "SPIF".
 const SPIFPrefix = "SPIF"
 
+// DEADPrefix is the canonical prefix for provably-unspendable burn addresses
+// ("DEAD XXXX XXXX ..."). A DEAD address is derived from a real SPHINCS+
+// public key exactly like a SPIF address (same SHAKE256+checksum pipeline,
+// different 4-byte org prefix), but its private key material is destroyed in
+// a burn ceremony (random passphrase wiped, encrypted blob never persisted),
+// so no one — including the ceremony operator — can ever spend from it.
+// Consensus treats DEAD addresses as receive-only: funds sent there are
+// permanently removed from circulation.
+const DEADPrefix = "DEAD"
+
+// DefaultBurnAddress is the protocol's default, canonical burn address.
+//
+// It was produced by a one-time burn ceremony: a real SPHINCS+ key pair was
+// generated under the DEAD org code with a 32-byte crypto-random passphrase
+// that was wiped from memory immediately after derivation, and the encrypted
+// private key was never written to disk. Only the address (display form) and
+// the public key (hex) were retained. The passphrase is unrecoverable by
+// design — brute-forcing 256 bits of entropy is infeasible — so this address
+// is provably unspendable.
+//
+// Display form (canonical, grouped):
+const DefaultBurnAddress = "DEAD 262C 098D 17D0 D99F 315C D9B7 C4D9 AEDA 685A 65FD 8630 DEFD CE21 F984 60B1 FA30"
+
+// DefaultBurnPublicKeyHex is the SPHINCS+ public key the default burn address
+// was derived from (hex-encoded, retained for auditability — it cannot spend).
+const DefaultBurnPublicKeyHex = "01c56901bf349670d46d3830bfd7033d05c06f06b73d9c7bd860363fafc6112e"
+
+// IsBurnAddress reports whether addr is a burn (DEAD-prefixed) address.
+// It accepts the grouped display form ("DEAD XXXX ..."), raw hex with a
+// literal DEAD prefix, and the canonical raw hex of the default burn address.
+func IsBurnAddress(addr string) bool {
+	prefix, _, err := SplitAddressPrefix(addr)
+	if err != nil {
+		return false
+	}
+	return prefix == DEADPrefix
+}
+
+// SplitAddressPrefix strips a known org prefix (SPIF or DEAD,
+// case-insensitive), all spaces, tabs, newlines and hyphens, and returns the
+// detected prefix ("" for raw hex with no prefix) plus the canonical cleaned
+// hex string (uppercase, without prefix). It validates the remainder is valid
+// hex of length 40 or 64.
+func SplitAddressPrefix(addr string) (prefix string, raw string, err error) {
+	cleaned := strings.TrimSpace(addr)
+	cleaned = strings.ReplaceAll(cleaned, " ", "")
+	cleaned = strings.ReplaceAll(cleaned, "\t", "")
+	cleaned = strings.ReplaceAll(cleaned, "\n", "")
+	cleaned = strings.ReplaceAll(cleaned, "-", "")
+	if len(cleaned) >= len(SPIFPrefix) && strings.EqualFold(cleaned[:len(SPIFPrefix)], SPIFPrefix) {
+		raw = cleaned[len(SPIFPrefix):]
+		prefix = SPIFPrefix
+	} else if len(cleaned) >= len(DEADPrefix) && strings.EqualFold(cleaned[:len(DEADPrefix)], DEADPrefix) {
+		raw = cleaned[len(DEADPrefix):]
+		prefix = DEADPrefix
+	} else {
+		raw = cleaned
+		prefix = ""
+	}
+	if len(raw) != 40 && len(raw) != 64 {
+		return "", "", fmt.Errorf("address must be 40 or 64 hex characters, got %d", len(raw))
+	}
+	if _, err := hex.DecodeString(raw); err != nil {
+		return "", "", fmt.Errorf("address is not valid hex: %w", err)
+	}
+	return prefix, strings.ToUpper(raw), nil
+}
+
+// NormalizeAddress strips any known prefix (SPIF or DEAD, case-insensitive),
+// all spaces, tabs, and hyphens, then validates the remainder is valid hex of
+// length 40 or 64. Returns the canonical cleaned hex string (uppercase,
+// without prefix) or an error. System addresses ("genesis", "") fail here —
+// use CanonicalAddress when pass-through is wanted.
+func NormalizeAddress(addr string) (string, error) {
+	_, raw, err := SplitAddressPrefix(addr)
+	return raw, err
+}
+
 // NormalizeSPIFAddress strips the SPIF prefix (case-insensitive), all spaces,
 // tabs, and hyphens, then validates that the remaining string is valid hex of
 // length 40 or 64. Returns the canonical cleaned hex string (uppercase, without
@@ -31,24 +109,12 @@ const SPIFPrefix = "SPIF"
 // Canonical form is UPPERCASE so that LevelDB state keys, mempool nonce keys,
 // and equality checks are stable regardless of whether the caller passed
 // "SPIF f6f6 ...", "f6f6...", or "F6F6...".
+//
+// NOTE: kept for backward compatibility. New code that must also accept DEAD
+// burn addresses should use NormalizeAddress / ValidateAddress instead.
 func NormalizeSPIFAddress(addr string) (string, error) {
-	raw := strings.TrimSpace(addr)
-	// Strip all whitespace/hyphens FIRST so both prefixed ("SPIF F6F6 ...")
-	// and raw ("F6F6 ...") display forms collapse to the same key.
-	raw = strings.ReplaceAll(raw, " ", "")
-	raw = strings.ReplaceAll(raw, "\t", "")
-	raw = strings.ReplaceAll(raw, "\n", "")
-	raw = strings.ReplaceAll(raw, "-", "")
-	if len(raw) >= len(SPIFPrefix) && strings.EqualFold(raw[:len(SPIFPrefix)], SPIFPrefix) {
-		raw = raw[len(SPIFPrefix):]
-	}
-	if len(raw) != 40 && len(raw) != 64 {
-		return "", fmt.Errorf("address must be 40 or 64 hex characters, got %d", len(raw))
-	}
-	if _, err := hex.DecodeString(raw); err != nil {
-		return "", fmt.Errorf("address is not valid hex: %w", err)
-	}
-	return strings.ToUpper(raw), nil
+	_, raw, err := SplitAddressPrefix(addr)
+	return raw, err
 }
 
 // CanonicalSPIFAddress returns the canonical (uppercase raw hex) form of addr.
@@ -63,9 +129,29 @@ func CanonicalSPIFAddress(addr string) string {
 
 // ValidateSPIFAddress returns true if the given string is a valid SPIF address.
 // It accepts formats with or without "SPIF" prefix and with spaces/hyphens.
+// NOTE: kept for backward compatibility — DEAD burn addresses also pass here
+// (same hex body, different prefix). Use ValidateAddress for new code.
 func ValidateSPIFAddress(addr string) bool {
 	_, err := NormalizeSPIFAddress(addr)
 	return err == nil
+}
+
+// ValidateAddress returns true if the given string is a valid protocol
+// address: SPIF wallet/contract address OR DEAD burn address, with or without
+// prefix, with spaces/hyphens tolerated.
+func ValidateAddress(addr string) bool {
+	_, err := NormalizeAddress(addr)
+	return err == nil
+}
+
+// CanonicalAddress returns the canonical (uppercase raw hex) form of addr.
+// If addr is not a valid SPIF/DEAD hex address (e.g. "genesis" or ""), it
+// returns the input unchanged so system addresses and empties pass through.
+func CanonicalAddress(addr string) string {
+	if raw, err := NormalizeAddress(addr); err == nil {
+		return raw
+	}
+	return addr
 }
 
 // FormatSPIFAddress takes a raw hex string (40 or 64 chars) and formats it as:
@@ -99,6 +185,61 @@ func MustFormatSPIFAddress(addr string) string {
 		panic(err)
 	}
 	return s
+}
+
+// MustFormatDEADAddress is like FormatDEADAddress but panics on error.
+func MustFormatDEADAddress(addr string) string {
+	s, err := FormatDEADAddress(addr)
+	if err != nil {
+		panic(err)
+	}
+	return s
+}
+
+// FormatDEADAddress takes a raw hex string (40 or 64 chars) and formats it as:
+//
+//	"DEAD XXXX XXXX XXXX ..." (groups of 4 hex characters).
+//
+// If the input already has a DEAD/SPIF prefix or spaces, it normalises first
+// (the hex body is prefix-independent) and re-renders with the DEAD prefix.
+// Returns the formatted string or an error if invalid.
+func FormatDEADAddress(addr string) (string, error) {
+	_, raw, err := SplitAddressPrefix(addr)
+	if err != nil {
+		return "", err
+	}
+
+	var groups []string
+	for i := 0; i < len(raw); i += 4 {
+		end := i + 4
+		if end > len(raw) {
+			end = len(raw)
+		}
+		groups = append(groups, raw[i:end])
+	}
+	return DEADPrefix + " " + strings.Join(groups, " "), nil
+}
+
+// FormatAddressWithPrefix formats raw hex with the given prefix ("SPIF" or
+// "DEAD"). Unknown prefixes fall back to SPIF.
+func FormatAddressWithPrefix(addr, prefix string) (string, error) {
+	p := strings.ToUpper(strings.TrimSpace(prefix))
+	if p != SPIFPrefix && p != DEADPrefix {
+		p = SPIFPrefix
+	}
+	_, raw, err := SplitAddressPrefix(addr)
+	if err != nil {
+		return "", err
+	}
+	var groups []string
+	for i := 0; i < len(raw); i += 4 {
+		end := i + 4
+		if end > len(raw) {
+			end = len(raw)
+		}
+		groups = append(groups, raw[i:end])
+	}
+	return p + " " + strings.Join(groups, " "), nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -136,6 +136,13 @@ type MintAndAnchorOptions struct {
 	NodeAddr string // Sphinx node TCP address (e.g. "127.0.0.1:30303")
 	From     string // Sender address for the on-chain transaction
 	KeyFile  string // Path to private key file for signing the transaction
+
+	// WaitMined opts the collection mint and its receipt anchor into
+	// abi.WaitMined on-chain confirmation instead of the historical
+	// broadcast-and-poll-only flow. nil (the default) keeps the existing
+	// behavior exactly; a non-nil enabled value blocks until each transaction
+	// is committed or rejected.
+	WaitMined *MintWaitOpts
 }
 
 // MintAndAnchorResult contains the complete result of a mint + anchor operation.
@@ -293,9 +300,9 @@ func MintAndAnchor(opts *MintAndAnchorOptions) (*MintAndAnchorResult, error) {
 		// mint), allocates next_token_id from sip721:info, and stores
 		// tokenURI[tokenId] + owner and the sip721:mint reverse index. The tokenId
 		// is read back from contract storage and trusted as the single counter value.
-		tokenID, collectionMintTxID, err = BroadcastSIP721CollectionMintWithTerms(
+		tokenID, collectionMintTxID, err = BroadcastSIP721CollectionMintWithWait(
 			opts.NodeAddr, opts.Collection, opts.From, opts.KeyFile, recipientTo, tokenURI, receipt.MintID,
-			opts.RoyaltyBPS, opts.UsageFeeNSPX, opts.RoyaltyRecipient)
+			opts.RoyaltyBPS, opts.UsageFeeNSPX, opts.RoyaltyRecipient, opts.WaitMined)
 		if err != nil {
 			return nil, fmt.Errorf("collection mint aborted: %w", err)
 		}
@@ -349,7 +356,7 @@ func MintAndAnchor(opts *MintAndAnchorOptions) (*MintAndAnchorResult, error) {
 			// so the receipt commitment must be anchored with the NEXT nonce
 			// (the mempool enforces an exact nonce match). broadcastReceiptAnchor
 			// fetches it from the node like step 4 did for the collection call.
-			txID, err = broadcastReceiptAnchor(opts.NodeAddr, opts.From, opts.KeyFile, anchorData)
+			txID, err = broadcastReceiptAnchorWithWait(opts.NodeAddr, opts.From, opts.KeyFile, anchorData, opts.WaitMined)
 			if err != nil {
 				fmt.Printf("   WARNING  Receipt anchor tx failed: %v (collection mint tx %s remains the on-chain proof)\n", err, collectionMintTxID)
 			} else {

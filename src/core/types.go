@@ -285,8 +285,13 @@ type GenesisValidator struct {
 // genesisAllocationEntry is the per-account row written to genesis_state.json.
 // It converts *big.Int balance fields to human-readable strings so the file
 // can be inspected without a Go runtime.
+//
+// The address is rendered in the canonical SPIF display form ("SPIF XXXX XXXX
+// ...", per common.FormatSPIFAddress) by MarshalJSON so the audit file matches
+// every other SPIF address rendered by the protocol (see formatJournalAddress).
+// The in-memory field always stays canonical raw uppercase hex.
 type genesisAllocationEntry struct {
-	// Address is the hex-encoded 20-byte account address without a "0x" prefix.
+	// Address is the hex-encoded 20- or 32-byte account address without a "0x" prefix.
 	Address string `json:"address"`
 
 	// BalanceNSPX is the initial balance expressed in nSPX (smallest unit).
@@ -301,11 +306,14 @@ type genesisAllocationEntry struct {
 
 // genesisValidatorEntry is the per-validator row written to genesis_state.json.
 // It mirrors GenesisValidator but expresses big.Int stake fields as strings.
+//
+// Like genesisAllocationEntry, the address is rendered with the SPIF prefix in
+// JSON output; the in-memory field always stays canonical raw uppercase hex.
 type genesisValidatorEntry struct {
 	// NodeID is the unique string identifier used throughout the consensus layer.
 	NodeID string `json:"node_id"`
 
-	// Address is the hex-encoded 20-byte reward address for this validator.
+	// Address is the hex-encoded 20- or 32-byte reward address for this validator.
 	Address string `json:"address"`
 
 	// StakeNSPX is the initial stake expressed in nSPX.
@@ -316,6 +324,107 @@ type genesisValidatorEntry struct {
 
 	// PublicKey is the hex-encoded SPHINCS+ public key (may be empty at genesis).
 	PublicKey string `json:"public_key,omitempty"`
+}
+
+// formatGenesisEntryAddress renders an in-memory canonical (raw uppercase hex)
+// genesis address in the canonical SPIF display form ("SPIF XXXX XXXX ...")
+// via common.FormatSPIFAddress, identical to every other SPIF address rendered
+// by the protocol. Values that are not valid SPIF hex pass through unchanged.
+func formatGenesisEntryAddress(raw string) string {
+	if formatted, err := common.FormatSPIFAddress(raw); err == nil {
+		return formatted
+	}
+	return raw
+}
+
+// parseGenesisEntryAddress is the inverse of formatGenesisEntryAddress: it
+// strips the "SPIF" prefix (plus any spaces/hyphens) and restores the canonical
+// raw uppercase hex form via common.NormalizeSPIFAddress. Values that are not
+// valid SPIF addresses pass through unchanged so malformed entries surface in
+// validation instead of silently changing.
+func parseGenesisEntryAddress(raw string) string {
+	if normalized, err := common.NormalizeSPIFAddress(raw); err == nil {
+		return normalized
+	}
+	return raw
+}
+
+// MarshalJSON renders the allocation address with the SPIF prefix in the
+// grouped display form, so genesis_state.json matches src/common's canonical
+// SPIF representation instead of bare hex.
+func (e genesisAllocationEntry) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Address     string `json:"address"`
+		BalanceNSPX string `json:"balance_nspx"`
+		BalanceSPX  string `json:"balance_spx"`
+		Label       string `json:"label"`
+	}{
+		Address:     formatGenesisEntryAddress(e.Address),
+		BalanceNSPX: e.BalanceNSPX,
+		BalanceSPX:  e.BalanceSPX,
+		Label:       e.Label,
+	})
+}
+
+// UnmarshalJSON parses allocation addresses in either form: raw hex (legacy
+// files) or SPIF-prefixed display form (new files). Either way the field is
+// stored as canonical raw uppercase hex.
+func (e *genesisAllocationEntry) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Address     string `json:"address"`
+		BalanceNSPX string `json:"balance_nspx"`
+		BalanceSPX  string `json:"balance_spx"`
+		Label       string `json:"label"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	e.Address = parseGenesisEntryAddress(raw.Address)
+	e.BalanceNSPX = raw.BalanceNSPX
+	e.BalanceSPX = raw.BalanceSPX
+	e.Label = raw.Label
+	return nil
+}
+
+// MarshalJSON renders the validator reward address with the SPIF prefix in the
+// grouped display form, so genesis_state.json matches src/common's canonical
+// SPIF representation instead of bare hex.
+func (e genesisValidatorEntry) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		NodeID    string `json:"node_id"`
+		Address   string `json:"address"`
+		StakeNSPX string `json:"stake_nspx"`
+		StakeSPX  string `json:"stake_spx"`
+		PublicKey string `json:"public_key,omitempty"`
+	}{
+		NodeID:    e.NodeID,
+		Address:   formatGenesisEntryAddress(e.Address),
+		StakeNSPX: e.StakeNSPX,
+		StakeSPX:  e.StakeSPX,
+		PublicKey: e.PublicKey,
+	})
+}
+
+// UnmarshalJSON parses validator reward addresses in either form: raw hex
+// (legacy files) or SPIF-prefixed display form (new files). Either way the
+// field is stored as canonical raw uppercase hex.
+func (e *genesisValidatorEntry) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		NodeID    string `json:"node_id"`
+		Address   string `json:"address"`
+		StakeNSPX string `json:"stake_nspx"`
+		StakeSPX  string `json:"stake_spx"`
+		PublicKey string `json:"public_key,omitempty"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	e.NodeID = raw.NodeID
+	e.Address = parseGenesisEntryAddress(raw.Address)
+	e.StakeNSPX = raw.StakeNSPX
+	e.StakeSPX = raw.StakeSPX
+	e.PublicKey = raw.PublicKey
+	return nil
 }
 
 // genesisStateSnapshot is an intermediate representation used exclusively for
@@ -439,6 +548,19 @@ type ChainCheckpoint struct {
 		MintedNSPX string `json:"minted_nspx"` // rewards minted in nSPX
 		MintedSPX  string `json:"minted_spx"`  // rewards minted in whole SPX
 	} `json:"rewards"`
+
+	// Burn accounting - every protocol burn (fee slice + block-reward slice)
+	// is credited to the canonical DEAD address, so its balance is the single
+	// auditable burn total. Circulating = Minted - Burned.
+	Burn struct {
+		Address          string `json:"address"`           // canonical DEAD burn address
+		BurnedNSPX       string `json:"burned_nspx"`       // DEAD balance in nSPX
+		BurnedSPX        string `json:"burned_spx"`        // DEAD balance in whole SPX
+		CirculatingNSPX  string `json:"circulating_nspx"`  // Minted - Burned, in nSPX
+		CirculatingSPX   string `json:"circulating_spx"`   // Minted - Burned, in whole SPX
+		FeeBurnBPS       uint64 `json:"fee_burn_bps"`      // policy fee burn share (BPS)
+		RewardBurnBPS    uint64 `json:"reward_burn_bps"`   // policy block-reward burn share (BPS)
+	} `json:"burn"`
 
 	// Distribution status - tracks whether genesis allocations have been distributed
 	Distribution struct {
@@ -937,6 +1059,14 @@ type AtomicCommitJournal struct {
 	StateRootBefore   string               `json:"state_root_before,omitempty"`
 	BlockFileWritten  bool                 `json:"block_file_written,omitempty"`
 	IndexUpdated      bool                 `json:"index_updated,omitempty"`
+
+	// Burn accounting for this block. Every protocol burn credits the DEAD
+	// address, and each such credit is also recorded here (via RecordBurn) so
+	// the journal is a self-contained audit trail: how much this block burned,
+	// and what the DEAD-address burn total was before the block ran (which is
+	// also the amount rollback restores to).
+	BurnedThisBlockNSPX string `json:"burned_this_block_nspx,omitempty"`
+	BurnedBeforeNSPX    string `json:"burned_before_nspx,omitempty"`
 }
 
 // ReorgJournal records chain reorganization state for crash recovery

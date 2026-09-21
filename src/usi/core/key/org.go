@@ -20,6 +20,12 @@ const (
 	// OrgSPIF is the SPIF organization code. It is derived from the canonical
 	// common.SPIFPrefix constant so the prefix has a single source of truth.
 	OrgSPIF OrgCode = common.SPIFPrefix // SPIF - Sphinx Fingerprint (Identity Defense System)
+	// OrgDEAD is the burn organization code. Addresses under this code
+	// ("DEAD XXXX XXXX ...") are derived from real SPHINCS+ public keys but
+	// their private keys are destroyed in a burn ceremony, so they are
+	// receive-only: consensus accepts transfers TO them and rejects any
+	// transaction spending FROM them.
+	OrgDEAD OrgCode = common.DEADPrefix // DEAD - provably-unspendable burn addresses
 )
 
 // orgMeta holds display metadata for an organisation.
@@ -33,6 +39,7 @@ type orgMeta struct {
 // orgRegistry is the authoritative list of supported organisations.
 var orgRegistry = []orgMeta{
 	{OrgSPIF, string(OrgSPIF), "Sphinx Fingerprint", "Identity Defense System"},
+	{OrgDEAD, string(OrgDEAD), "Dead Address", "Provably-unspendable burn address"},
 }
 
 // orgByCode provides O(1) lookup.
@@ -351,9 +358,10 @@ func NormalizeFingerprint(fp string) (string, error) {
 	clean = strings.ReplaceAll(clean, "-", "")
 	clean = strings.ToUpper(clean)
 
-	// Strip SPIF prefix
+	// Strip SPIF/DEAD prefix
 	originalLen := len(clean)
 	clean = strings.TrimPrefix(clean, string(OrgSPIF))
+	clean = strings.TrimPrefix(clean, string(OrgDEAD))
 	_, rest := extractOrgCode(clean)
 	if rest != "" {
 		clean = rest
@@ -408,6 +416,10 @@ func extractOrgCode(s string) (code, rest string) {
 	if len(s) >= 4 && s[:4] == string(OrgSPIF) {
 		log.Printf("[DEBUG] extractOrgCode: found org code %s", OrgSPIF)
 		return string(OrgSPIF), s[4:]
+	}
+	if len(s) >= 4 && s[:4] == string(OrgDEAD) {
+		log.Printf("[DEBUG] extractOrgCode: found org code %s", OrgDEAD)
+		return string(OrgDEAD), s[4:]
 	}
 	log.Printf("[DEBUG] extractOrgCode: no valid org code found in string")
 	return "", ""

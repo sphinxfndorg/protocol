@@ -164,7 +164,11 @@ func (m *MultisigManager) SignMessage(message []byte, privKey []byte, partyID st
 		return nil, nil, nil, nil, fmt.Errorf("failed to serialize signature: %v", err)
 	}
 
-	merkleRootBytes := merkleRoot.Hash.Bytes()
+	// FIXED: always store the canonical 32-byte big-endian encoding.
+	// .Hash.Bytes() is minimal-length and drops a leading 0x00 (~1/256 roots),
+	// producing a 31-byte value that VerifyTransactionAuth rejects with
+	// "invalid merkle root hash length: expected 32, got 31" (RPC -32602).
+	merkleRootBytes := hashtree.HashToBytes32(merkleRoot.Hash)
 
 	pkBytes, err := pk.SerializePK()
 	if err != nil {

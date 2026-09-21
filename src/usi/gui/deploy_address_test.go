@@ -5,18 +5,18 @@
 package gui
 
 import (
-	"encoding/json"
 	"strings"
 	"testing"
 
+	"github.com/sphinxfndorg/protocol/src/bind/abi"
 	"github.com/sphinxfndorg/protocol/src/common"
 	"github.com/sphinxfndorg/protocol/src/contracts"
 )
 
 // TestDeploySpecDerivesCanonicalSPIFCollectionAddress locks in the corrected
 // contract-address format for "Deploy New Collection": the deploy payload this
-// GUI encodes (identical bytes to DeploySIP721Collection's sip721DeploySpec
-// marshal) must derive a collection address in the canonical SPIF display form
+// GUI sends (now built by abi.NewSIP721DeployTx, the same builder the ABI
+// signs) must derive a collection address in the canonical SPIF display form
 // — "SPIF " followed by 16 space-separated groups of 4 UPPERCASE hex
 // characters (64 hex total) — the same shape as every identity address.
 //
@@ -30,21 +30,16 @@ import (
 func TestDeploySpecDerivesCanonicalSPIFCollectionAddress(t *testing.T) {
 	const rawOwner = "AABBCCDDEEFF00112233445566778899AABBCCDDEEFF00112233445566778899"
 
-	codeJSON, err := json.Marshal(sip721DeploySpec{
-		Runtime:  "native",
-		Standard: "sip721",
-		Name:     "Datasets",
-		Symbol:   "DSC",
-		Owner:    rawOwner,
-	})
+	deployTx, err := abi.NewSIP721DeployTx(abi.TxOptions{ChainID: 7331, Sender: rawOwner},
+		contracts.DeploySpec{Name: "Datasets", Symbol: "DSC", Owner: rawOwner})
 	if err != nil {
-		t.Fatalf("marshal deploy spec: %v", err)
+		t.Fatalf("build deploy transaction: %v", err)
 	}
 
 	// Every nonce the node could assign (0 = the handler's committed-nonce
 	// query, higher = pending reservations) must yield a canonical address.
 	for _, nonce := range []uint64{0, 1, 42} {
-		addr := contracts.ContractAddress(rawOwner, nonce, codeJSON)
+		addr := contracts.ContractAddress(rawOwner, nonce, deployTx.Code)
 
 		if !strings.HasPrefix(addr, common.SPIFPrefix+" ") {
 			t.Fatalf("deployed collection address must carry the canonical %q prefix followed by a space, got %q", common.SPIFPrefix, addr)

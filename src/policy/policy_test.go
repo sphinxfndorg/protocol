@@ -50,6 +50,7 @@ func TestQuoteTransactionGas(t *testing.T) {
 func TestPolicyControlsBlockRewardAndFeeAllocation(t *testing.T) {
 	p := NewPolicyParameters()
 	p.BlockReward = big.NewInt(123)
+	p.BlockRewardBurnBPS = 500 // 5% -> burn
 	p.ValidatorFeeBPS = 5000
 	p.StakerFeeBPS = 3000
 	p.TreasuryFeeBPS = 1000
@@ -61,6 +62,26 @@ func TestPolicyControlsBlockRewardAndFeeAllocation(t *testing.T) {
 	if p.CalculateBlockReward().Cmp(big.NewInt(123)) != 0 {
 		t.Fatal("block reward did not come from policy")
 	}
+	// 5% of 123 = floor(6.15) = 6 burned, 117 to miner.
+	split := p.SplitBlockReward(big.NewInt(123))
+	if split.Burned.Cmp(big.NewInt(6)) != 0 || split.Miner.Cmp(big.NewInt(117)) != 0 {
+		t.Fatalf("unexpected block reward split: miner=%s burned=%s", split.Miner, split.Burned)
+	}
+	if sum := new(big.Int).Add(split.Miner, split.Burned); sum.Cmp(big.NewInt(123)) != 0 {
+		t.Fatalf("split must sum to reward, got %s", sum)
+	}
+	// Zero-burn policy pays the full reward to the miner.
+	p.BlockRewardBurnBPS = 0
+	full := p.SplitBlockReward(big.NewInt(123))
+	if full.Miner.Cmp(big.NewInt(123)) != 0 || full.Burned.Sign() != 0 {
+		t.Fatalf("zero burn must pay full reward to miner: %+v", full)
+	}
+	// Out-of-range burn share is rejected.
+	p.BlockRewardBurnBPS = 10001
+	if err := p.Validate(); err != ErrInvalidBlockRewardBurn {
+		t.Fatalf("want ErrInvalidBlockRewardBurn, got %v", err)
+	}
+	p.BlockRewardBurnBPS = 500
 	d := p.DistributeFees(big.NewInt(10000))
 	if d.Validators.Cmp(big.NewInt(5000)) != 0 || d.Stakers.Cmp(big.NewInt(3000)) != 0 ||
 		d.Treasury.Cmp(big.NewInt(1000)) != 0 || d.Burned.Cmp(big.NewInt(1000)) != 0 {

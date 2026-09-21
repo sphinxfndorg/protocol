@@ -1,0 +1,36 @@
+{
+  "block_hash": "e494be938e61a6fcae69b94bf4cc2aaa1d9096f041cef5001cd1a356b49be013",
+  "block_height": 84,
+  "phase": "committed",
+  "state_changes": [
+    {
+      "address": "Node-127.0.0.1:30304",
+      "previous_balance": "133000036555000000000",
+      "previous_nonce": 0
+    },
+    {
+      "address": "SPIF 262C 098D 17D0 D99F 315C D9B7 C4D9 AEDA 685A 65FD 8630 DEFD CE21 F984 60B1 FA30",
+      "previous_balance": "20750019956267073340",
+      "previous_nonce": 0
+    },
+    {
+      "address": "system:staking-fee-pool",
+      "previous_balance": "1528768616332950639080",
+      "previous_nonce": 0
+    },
+    {
+      "address": "system:treasury-fee-pool",
+      "previous_balance": "382192169050437964787",
+      "previous_nonce": 0
+    }
+  ],
+  "committed": true,
+  "previous_tip_hash": "f38625121155c8e962995d10bde8237b591abd414cb9f965f6516d1457506e69",
+  "previous_tip_height": 83,
+  "started_at": "2026-09-22T03:04:00.304796+07:00",
+  "committed_at": "2026-09-22T03:04:02.899502+07:00",
+  "block_file_written": true,
+  "index_updated": true,
+  "burned_this_block_nspx": "250000000000000000",
+  "burned_before_nspx": "20750019956267073340"
+}

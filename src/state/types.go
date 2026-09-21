@@ -100,12 +100,6 @@ type Storage struct {
 	bestBlockHash string
 	totalBlocks   uint64
 
-	// storesSinceCheckpoint counts StoreBlock calls since block_index.json
-	// was last written. The file is a periodic checkpoint of the in-memory
-	// index (rawdb's h: lookups are the durable copy), so it is not rewritten
-	// on every block. Guarded by mu.
-	storesSinceCheckpoint int
-
 	// TPS Monitoring
 	tpsMetrics *TPSMetrics
 	tpsConfig  *TPSConfig
@@ -211,6 +205,33 @@ type TPSConfig struct {
 	ReportInterval time.Duration `json:"-"`
 }
 
+// BurnState reports the protocol's burn accounting in chain_state.json.
+//
+// Every protocol burn — the fee-allocation burn slice and the block-reward
+// burn slice defined by policy (BurnFeeBPS / BlockRewardBurnBPS) — is credited
+// to the canonical DEAD address, so its balance is the single auditable source
+// of burned supply. Circulating supply is therefore TotalSupply minus that
+// balance; the burned funds remain inside TotalSupply (they were minted or
+// already circulating) but are provably unspendable.
+type BurnState struct {
+	// BurnAddress is the canonical DEAD burn address (display form).
+	BurnAddress string `json:"burn_address"`
+	// BurnedNSPX is the DEAD address balance in nSPX (smallest unit).
+	BurnedNSPX string `json:"burned_nspx"`
+	// BurnedSPX is the same amount in whole SPX.
+	BurnedSPX string `json:"burned_spx"`
+	// CirculatingNSPX is TotalSupply minus BurnedNSPX, in nSPX.
+	CirculatingNSPX string `json:"circulating_nspx"`
+	// CirculatingSPX is the same amount in whole SPX.
+	CirculatingSPX string `json:"circulating_spx"`
+	// FeeBurnBPS is the policy share of each transaction fee that is burned.
+	FeeBurnBPS uint64 `json:"fee_burn_bps"`
+	// BlockRewardBurnBPS is the policy share of each block reward that is burned.
+	BlockRewardBurnBPS uint64 `json:"block_reward_burn_bps"`
+	// UpdatedAt is when this burn snapshot was taken (RFC3339).
+	UpdatedAt string `json:"updated_at"`
+}
+
 // Enhanced ChainState with TPS metrics
 type ChainState struct {
 	// Chain identification
@@ -230,6 +251,11 @@ type ChainState struct {
 
 	// TPS Metrics - NEW FIELD
 	TPSMetrics *TPSMetrics `json:"tps_metrics,omitempty"`
+
+	// Burn accounting — DEAD address balance, circulating supply, and the
+	// policy burn rates that produced them. Always emitted so explorers and
+	// auditors can read burn totals without recomputing them.
+	BurnState *BurnState `json:"burn_state"`
 
 	// Timestamp
 	Timestamp string `json:"timestamp"`

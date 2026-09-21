@@ -57,6 +57,38 @@ func computeUint256(data []byte) *uint256.Int {
 	return uint256.NewInt(0).SetBytes(hash)
 }
 
+// HashToBytes32 returns the canonical 32-byte big-endian encoding of a
+// uint256 hash value, preserving leading zero bytes.
+//
+// WARNING: (*uint256.Int).Bytes() returns the minimal-length representation
+// (it strips leading 0x00 bytes), so a hash that happens to start with 0x00
+// would silently become 31 (or fewer) bytes. Every consumer of a merkle root
+// in the signing pipeline (TransactionAuthBundle.MerkleRootHash, proof
+// leaves, P2P discovery messages, consensus serialization, multisig stores)
+// requires exactly 32 bytes and rejects anything else with
+// "invalid merkle root hash length: expected 32, got N" (surfaced to wallets
+// as JSON-RPC -32602). Always use this helper — never .Bytes() — when a
+// fixed 32-byte hash is needed.
+func HashToBytes32(h *uint256.Int) []byte {
+	if h == nil {
+		return make([]byte, 32)
+	}
+	b := h.Bytes32()
+	out := make([]byte, 32)
+	copy(out, b[:])
+	return out
+}
+
+// RootBytes32 returns the canonical 32-byte big-endian encoding of a
+// HashTreeNode's hash. See HashToBytes32 for why .Hash.Bytes() must not be
+// used directly.
+func (node *HashTreeNode) RootBytes32() []byte {
+	if node == nil || node.Hash == nil {
+		return make([]byte, 32)
+	}
+	return HashToBytes32(node.Hash)
+}
+
 // GetSiblingNode returns the sibling of the current node if it exists.
 func (node *HashTreeNode) GetSiblingNode(leafIndex int) (*HashTreeNode, error) {
 	// If the current node is a leaf, we can check its sibling based on its position
@@ -91,6 +123,24 @@ func BuildHashTree(leaves [][]byte) *HashTreeNode {
 				// Combine the hashes of two sibling nodes (left and right).
 				left, right := nodes[i], nodes[i+1]
 				// Concatenate the two hashes and compute the hash of the result to create the parent node.
+				//
+				// CONSENSUS-FROZEN LEGACY BEHAVIOR — DO NOT "FIX" by switching
+				// to fixed 32-byte concatenation:
+				// (*uint256.Int).Bytes() is minimal-length (strips leading
+				// 0x00), so this hashes a 62/63/64-byte preimage depending on
+				// the child hashes. Fixed-width padding would compute a
+				// DIFFERENT parent hash (and therefore a different receipt
+				// root) for ~3% of trees — any tree where a non-root node
+				// hash starts with 0x00. The stored receipt root is re-derived
+				// from sigParts during stateless replay verification
+				// (RebuildCanonicalReplayEvidence → VerifyTransactionAuthStateless
+				// → buildHashTreeFromSignature → VerifyCommitmentInRoot) and
+				// compared against the stored root, so old and new code MUST
+				// compute byte-identical trees or historical txs fail replay.
+				// The 31-byte export bug is fixed at the export boundary
+				// (HashToBytes32) instead — safe because the 32-byte admission
+				// gate rejects anything shorter, so no stored data could ever
+				// have depended on the old export behavior.
 				hash := computeUint256(append(left.Hash.Bytes(), right.Hash.Bytes()...))
 				// Create the parent node and set the parent pointers for the children
 				parent := &HashTreeNode{Hash: hash, Left: left, Right: right}
@@ -115,8 +165,10 @@ func BuildHashTree(leaves [][]byte) *HashTreeNode {
 
 // Save root hash to file
 func SaveRootHashToFile(root *HashTreeNode, filename string) error {
-	// Save the root hash (as a byte array) to a file
-	return ioutil.WriteFile(filename, root.Hash.Bytes(), 0644)
+	// Save the root hash (as a byte array) to a file.
+	// Use the fixed 32-byte encoding: .Hash.Bytes() would drop a leading
+	// zero byte and write a 31-byte file ~1/256 of the time.
+	return ioutil.WriteFile(filename, root.RootBytes32(), 0644)
 }
 
 // Load root hash from file

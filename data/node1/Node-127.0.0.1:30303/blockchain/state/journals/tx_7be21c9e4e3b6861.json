@@ -1,0 +1,66 @@
+{
+  "block_hash": "7be21c9e4e3b6861bbf91d0048fa5b70899ae574bd66f16249977d7c1f112e34",
+  "block_height": 16,
+  "phase": "committed",
+  "state_changes": [
+    {
+      "address": "SPIF F6F6 66A0 F07B B9F1 B9C3 6C0B C497 DEF7 89AC A6B4 A756 4F88 A627 7FCB BFD9 09F8",
+      "previous_balance": "30000000000000000000000000",
+      "previous_nonce": 0
+    },
+    {
+      "address": "SPIF 42D1 A449 30C6 1EE4 8B85 8E88 E393 BAA1 72D9 5DFF DE0D 5AE4 2B70 E60B 8C71 C2DB",
+      "previous_balance": "95000000000000000000000000",
+      "previous_nonce": 0
+    },
+    {
+      "address": "SPIF F6F6 66A0 F07B B9F1 B9C3 6C0B C497 DEF7 89AC A6B4 A756 4F88 A627 7FCB BFD9 09F8",
+      "previous_balance": "29000000000000000000000000",
+      "previous_nonce": 0
+    },
+    {
+      "address": "Node-127.0.0.1:30303",
+      "previous_balance": "38000000000000000000",
+      "previous_nonce": 0
+    },
+    {
+      "address": "system:staking-fee-pool",
+      "previous_balance": "283105065422950438276",
+      "previous_nonce": 0
+    },
+    {
+      "address": "system:treasury-fee-pool",
+      "previous_balance": "70776266355737609571",
+      "previous_nonce": 0
+    },
+    {
+      "address": "SPIF 262C 098D 17D0 D99F 315C D9B7 C4D9 AEDA 685A 65FD 8630 DEFD CE21 F984 60B1 FA30",
+      "previous_balance": "3750000000000000000",
+      "previous_nonce": 0
+    },
+    {
+      "address": "SPIF F6F6 66A0 F07B B9F1 B9C3 6C0B C497 DEF7 89AC A6B4 A756 4F88 A627 7FCB BFD9 09F8",
+      "previous_balance": "28999999999890500000000000",
+      "previous_nonce": 0
+    },
+    {
+      "address": "Node-127.0.0.1:30303",
+      "previous_balance": "38000065700000000000",
+      "previous_nonce": 0
+    },
+    {
+      "address": "SPIF 262C 098D 17D0 D99F 315C D9B7 C4D9 AEDA 685A 65FD 8630 DEFD CE21 F984 60B1 FA30",
+      "previous_balance": "3750005475000000000",
+      "previous_nonce": 0
+    }
+  ],
+  "committed": true,
+  "previous_tip_hash": "7382f250e010ce046c32f131159f9dca9a13a23e91bee12bc90729145d9c1259",
+  "previous_tip_height": 15,
+  "started_at": "2026-09-22T02:55:09.52408+07:00",
+  "committed_at": "2026-09-22T02:55:11.443148+07:00",
+  "block_file_written": true,
+  "index_updated": true,
+  "burned_this_block_nspx": "250005475000000000",
+  "burned_before_nspx": "3750000000000000000"
+}

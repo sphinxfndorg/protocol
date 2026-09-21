@@ -270,7 +270,9 @@ func (s *Server) handleDiscoveryMessage(msg *network.DiscoveryMessage, addr *net
 	// to the proof so it cannot be swapped out without proof verification failing.
 	dataBytes := msg.Data
 	proofData := append(msg.Timestamp, append(msg.Nonce, dataBytes...)...)
-	proofLeaves := [][]byte{msg.MerkleRoot.Bytes(), msg.Commitment}
+	// Fixed 32-byte leaf: .Bytes() is minimal-length and would drop a
+	// leading 0x00, desyncing sender/receiver proof leaves.
+	proofLeaves := [][]byte{hashtree.HashToBytes32(msg.MerkleRoot), msg.Commitment}
 	regeneratedProof, err := sigproof.GenerateSigProof(
 		[][]byte{proofData},
 		proofLeaves,
@@ -574,8 +576,9 @@ func (s *Server) sendUDPPing(addr *net.UDPAddr, toID network.NodeID, nonce []byt
 	// Generate cryptographic proof.
 	// FIX: fold commitment into proof leaves so GenerateSigProof stays at 3 args.
 	// Receiver regenerates with the same leaves = [merkleRootHash, commitment].
+	// Use fixed 32-byte root encoding: .Hash.Bytes() drops a leading 0x00.
 	proofData := append(sigTimestamp, append(sigNonce, dataBytes...)...)
-	proofLeaves := [][]byte{merkleRootNode.Hash.Bytes(), commitment}
+	proofLeaves := [][]byte{hashtree.HashToBytes32(merkleRootNode.Hash), commitment}
 	proof, err := sigproof.GenerateSigProof(
 		[][]byte{proofData},
 		proofLeaves,
@@ -666,7 +669,7 @@ func (s *Server) sendUDPPong(addr *net.UDPAddr, toID network.NodeID, nonce []byt
 	// Generate cryptographic proof.
 	// FIX: fold commitment into proof leaves.
 	proofData := append(sigTimestamp, append(sigNonce, dataBytes...)...)
-	proofLeaves := [][]byte{merkleRootNode.Hash.Bytes(), commitment}
+	proofLeaves := [][]byte{hashtree.HashToBytes32(merkleRootNode.Hash), commitment}
 	proof, err := sigproof.GenerateSigProof(
 		[][]byte{proofData},
 		proofLeaves,
@@ -792,7 +795,7 @@ func (s *Server) sendUDPNeighbors(addr *net.UDPAddr, targetID network.NodeID, no
 	// Generate cryptographic proof.
 	// FIX: fold commitment into proof leaves.
 	proofData := append(sigTimestamp, append(sigNonce, dataBytes...)...)
-	proofLeaves := [][]byte{merkleRootNode.Hash.Bytes(), commitment}
+	proofLeaves := [][]byte{hashtree.HashToBytes32(merkleRootNode.Hash), commitment}
 	proof, err := sigproof.GenerateSigProof(
 		[][]byte{proofData},
 		proofLeaves,

@@ -16,6 +16,7 @@ import (
 
 	logger "github.com/sphinxfndorg/protocol/src/console"
 	"github.com/sphinxfndorg/protocol/src/contracts"
+	"github.com/sphinxfndorg/protocol/src/common"
 	svm "github.com/sphinxfndorg/protocol/src/core/kernel/opcodes"
 	vmachine "github.com/sphinxfndorg/protocol/src/core/kernel/vm"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
@@ -718,6 +719,15 @@ func (mp *Mempool) performValidation(tx *types.Transaction) error {
 	contractPayload := tx.HasContractPayload()
 	if tx.Sender == "" || (tx.Receiver == "" && !contractPayload) {
 		return errors.New("empty sender or receiver")
+	}
+
+	// Burn addresses are receive-only: anyone may send TO a DEAD address
+	// (that is how coins are burned), but no transaction may spend FROM one —
+	// the private key was destroyed in the burn ceremony, so a valid
+	// signature from a DEAD address can never exist. Reject at admission so
+	// burn funds can never move, even via a compromised signer path.
+	if common.IsBurnAddress(tx.Sender) {
+		return fmt.Errorf("burn address %s is receive-only and cannot send transactions", tx.Sender)
 	}
 
 	if tx.Sender == tx.Receiver && !isMintAnchorReturnData(tx.ReturnData) {

@@ -237,3 +237,56 @@ func TestFormatMintFeeNSPX(t *testing.T) {
 		t.Fatalf("negative fee must render raw, got %q", got)
 	}
 }
+
+// TestIPFSPayloadHashIsDistinctFromFileHash locks in the canonical-artifact
+// contract that the old pipeline left implicit (and therefore confusing):
+//
+//   - FileHash covers the SIGNED file, which cannot exist before the signature
+//     is written, so it can never equal the hash of the pinned bytes;
+//   - IPFSPayloadHash covers the EXACT bytes pinned to IPFS, and is the value
+//     the mint receipt commits as PayloadHash.
+//
+// The test also proves the field survives every write path that carries
+// provenance, because a value that only lives on the in-memory Meta would be
+// silently dropped by the container writers (which rebuild the Meta from
+// ApplyOnChainData).
+func TestIPFSPayloadHashIsDistinctFromFileHash(t *testing.T) {
+	const (
+		fileHash    = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		payloadHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	)
+
+	m := &Meta{FileHash: fileHash}
+	SetIPFSPayloadHash(m, payloadHash)
+
+	// The two hashes describe different artifacts and must not be conflated.
+	if m.IPFSPayloadHash == m.FileHash {
+		t.Fatal("IPFSPayloadHash must be independent of FileHash")
+	}
+	if m.IPFSPayloadHash != payloadHash || m.FileHash != fileHash {
+		t.Fatalf("setter clobbered a hash: ipfs=%q file=%q", m.IPFSPayloadHash, m.FileHash)
+	}
+
+	// It must be part of the provenance view every renderer/container reads.
+	if got := OnChainData(m).IPFSPayloadHash; got != payloadHash {
+		t.Fatalf("OnChainData lost the payload hash: %q", got)
+	}
+
+	// And it must survive the ApplyOnChainData round-trip the container
+	// writers use (createUSIMetaFile rebuilds the Meta this way).
+	ApplyOnChainData(m, OnChainData(m))
+	if m.IPFSPayloadHash != payloadHash {
+		t.Fatalf("ApplyOnChainData round-trip dropped the payload hash: %q", m.IPFSPayloadHash)
+	}
+	if m.FileHash != fileHash {
+		t.Fatalf("ApplyOnChainData round-trip clobbered FileHash: %q", m.FileHash)
+	}
+
+	// Clone is used before writing some containers; it must carry the field.
+	if got := m.Clone().IPFSPayloadHash; got != payloadHash {
+		t.Fatalf("Clone dropped the payload hash: %q", got)
+	}
+
+	// Nil receiver must be inert, never panic.
+	SetIPFSPayloadHash(nil, payloadHash)
+}

@@ -13,6 +13,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 	"github.com/sphinxfndorg/protocol/src/core"
 	vault "github.com/sphinxfndorg/protocol/src/core/wallet/vault"
 	"github.com/sphinxfndorg/protocol/src/policy"
+	"github.com/sphinxfndorg/protocol/src/storage"
 	keys "github.com/sphinxfndorg/protocol/src/usi/core/key"
 	"github.com/sphinxfndorg/protocol/src/usi/core/sign"
 	usimail "github.com/sphinxfndorg/protocol/src/usi/mail"
@@ -40,6 +42,13 @@ import (
 // =========================================================================
 func Run() {
 	log.Println("Starting USI GUI application")
+
+	// Startup beacon: one line identifying the build, one line stating the gas
+	// denomination the fee panel renders. Both are printed BEFORE any key load
+	// or RPC call, so "the GUI shows 0 SPX/gas" can be diagnosed from the
+	// terminal alone (stale binary vs. wrong unit).
+	log.Printf("[USI-GUI] %s", buildBeaconLine())
+	log.Printf("[USI-GUI] %s", gasUnitBeaconLine())
 
 	myApp := app.NewWithID("com.usi.UniversalSovereignIdentity")
 	window := myApp.NewWindow("Universal Sovereign Identity")
@@ -457,6 +466,73 @@ func Run() {
 		memoEntry.Wrapping = fyne.TextWrapWord
 		memoEntry.SetMinRowsVisible(3)
 
+		// ── Transfer priority ─────────────────────────────────────
+		// Tiers are gas-price multipliers on the policy minimum (see
+		// TransferPriority in rpc.go): Standard 1x (cheapest), Medium 2x
+		// (balanced), High 5x (faster under congestion — deliberately not
+		// "fastest", a static multiplier cannot outbid a mempool it never
+		// observes), Custom (user multiplier, validated >= 1x).
+		prioritySelected := PriorityStandard.Label()
+		customMult := uint64(1)
+		feePreview := canvas.NewText("", colFaint)
+		feePreview.TextSize = 11
+		feePreview.TextStyle = fyne.TextStyle{Monospace: true}
+
+		customEntry := widget.NewEntry()
+		customEntry.SetPlaceHolder("Multiplier, e.g. 3 = 3x (min 1x)")
+		customEntry.Hide()
+
+		// quoteForPreview is the single fee-math path for the preview line,
+		// the confirm dialog, and the broadcast — all three read the same
+		// selector state, so preview and paid fee can never diverge.
+		quoteForPreview := func() (*policy.GasQuote, TransferPriority, uint64, string) {
+			priority := priorityFromLabel(prioritySelected)
+			mult := customMult
+			if priority == PriorityCustom {
+				if parsed, perr := strconv.ParseUint(strings.TrimSpace(customEntry.Text), 10, 64); perr == nil && parsed >= 1 {
+					mult = parsed
+				} else {
+					mult = customMult
+				}
+			}
+			return QuoteTransferGas(len(memoEntry.Text), priority, mult), priority, mult, priorityTierLabel(priority, mult)
+		}
+
+		updateFeePreview := func() {
+			quote, priority, mult, tierLabel := quoteForPreview()
+			feeSPX := new(big.Float).Quo(new(big.Float).SetInt(quote.GasFee), big.NewFloat(1e18))
+			// Gas price is quoted in gSPX, NOT SPX (the policy minimum is
+			// 1 gSPX = 10^-9 SPX). Rendering it as SPX rounded every tier to
+			// a flat "0" — see formatGasPriceAmount in theme.go.
+			feePreview.Text = fmt.Sprintf("Fee: %s %s · %s · %d gas @ %s %s",
+				formatSPXAmount(feeSPX), chainHeader.Symbol, tierLabel, quote.GasLimit.Uint64(), formatGasPriceAmount(quote.GasPrice), gasPriceUnitLabel)
+			feePreview.Color = colMuted
+			if priority == PriorityCustom {
+				if warn, werr := ValidateCustomMultiplier(mult); werr != nil {
+					feePreview.Text = "Custom multiplier must be at least 1x"
+					feePreview.Color = colDanger
+				} else if warn {
+					feePreview.Text += "  ⚠ unusually high (>100x) — double-check before sending"
+					feePreview.Color = colWarn
+				}
+			}
+			feePreview.Refresh()
+		}
+
+		prioritySelect := widget.NewSelect(transferPriorityOptions, func(sel string) {
+			prioritySelected = sel
+			if priorityFromLabel(sel) == PriorityCustom {
+				customEntry.Show()
+			} else {
+				customEntry.Hide()
+			}
+			updateFeePreview()
+		})
+		prioritySelect.SetSelected(prioritySelected)
+		memoEntry.OnChanged = func(string) { updateFeePreview() }
+		customEntry.OnChanged = func(string) { updateFeePreview() }
+		updateFeePreview()
+
 		sendBtn := widget.NewButtonWithIcon(fmt.Sprintf("Send %s", chainHeader.Symbol), theme.MailSendIcon(), func() {
 			if recipientEntry.Text == "" {
 				showErrorDialog(errors.New("please enter a recipient address"), window)
@@ -503,16 +579,63 @@ func Run() {
 				return
 			}
 
-			validatePassphraseDialog(window, "Confirm Transaction", fmt.Sprintf("Send %s %s to:\n%s\n\nMemo: %s",
-				formatSPXAmount(amount), chainHeader.Symbol, recipientEntry.Text, memoEntry.Text),
-				func(passphrase string) {
-					// Show transfer status popup with live block confirmation tracking
-					showTransferStatusDialog(window, walletClient, chainHeader, formatSPXAmount(amount), recipientEntry.Text, memoEntry.Text, passphrase, amountNSPX)
+			// proceedWithSend runs everything after the >100x gate: fee
+			// resolution, confirm message, passphrase dialog, status dialog.
+			// It is a plain closure invoked either directly (normal path) or
+			// from inside the ShowConfirm callback (warn path) — never across
+			// a channel, so the UI goroutine is never blocked waiting for a
+			// callback that itself needs the UI goroutine to fire.
+			proceedWithSend := func(quote *policy.GasQuote, tierLabel string) {
+				gasFeeNSPX := quote.GasFee
+				gasLimit := quote.GasLimit.Uint64()
+				gasPrice := quote.GasPrice
+				feeSPX := new(big.Float).Quo(new(big.Float).SetInt(gasFeeNSPX), big.NewFloat(1e18))
+				priorityPrice := new(big.Int).Set(gasPrice)
+				confirmMsg := fmt.Sprintf("Send %s %s to:\n%s\n\nMemo: %s\n\nPriority: %s\nTransaction Fee: %s %s (gas limit: %d, gas price: %s %s)",
+					formatSPXAmount(amount), chainHeader.Symbol, recipientEntry.Text, memoEntry.Text, tierLabel,
+					formatSPXAmount(feeSPX), chainHeader.Symbol, gasLimit, formatGasPriceAmount(gasPrice), gasPriceUnitLabel)
 
-					recipientEntry.SetText("")
-					amountEntry.SetText("")
-					memoEntry.SetText("")
-				})
+				validatePassphraseDialog(window, "Confirm Transaction", confirmMsg,
+					func(passphrase string) {
+						// Show transfer status popup with live block confirmation tracking
+						showTransferStatusDialog(window, walletClient, chainHeader, formatSPXAmount(amount), recipientEntry.Text, memoEntry.Text, passphrase, amountNSPX, gasFeeNSPX, gasLimit, gasPrice, tierLabel, priorityPrice)
+
+						recipientEntry.SetText("")
+						amountEntry.SetText("")
+						memoEntry.SetText("")
+					})
+			}
+
+			// Resolve the tier at send time from the live selector state (same
+			// path as the preview), then clamp: <1x is rejected, >100x warns
+			// but proceeds.
+			quote, priority, mult, tierLabel := quoteForPreview()
+			if priority == PriorityCustom {
+				if warn, werr := ValidateCustomMultiplier(mult); werr != nil {
+					showErrorDialog(werr, window)
+					return
+				} else if warn {
+					// Async gate — no channel, no wait. Fyne invokes this
+					// callback on the UI goroutine, so blocking the tapped
+					// handler here until the user answers would deadlock:
+					// the goroutine that must fire the callback is the same
+					// one parked on the receive. Instead the handler returns
+					// immediately after posting the dialog, and the "send
+					// anyway" path continues inside the callback. Cancel is
+					// a no-op.
+					dialog.ShowConfirm("Unusually high fee",
+						fmt.Sprintf("Custom multiplier %dx is unusually high (>100x). The fee will be %s %s. Send anyway?",
+							mult, formatSPXAmount(new(big.Float).Quo(new(big.Float).SetInt(quote.GasFee), big.NewFloat(1e18))), chainHeader.Symbol),
+						func(ok bool) {
+							if !ok {
+								return
+							}
+							proceedWithSend(quote, tierLabel)
+						}, window)
+					return
+				}
+			}
+			proceedWithSend(quote, tierLabel)
 		})
 		sendBtn.Importance = widget.HighImportance
 
@@ -552,7 +675,15 @@ func Run() {
 			sectionLabel("Memo (Optional)"),
 			spacer(6),
 			memoEntry,
-			spacer(20),
+			spacer(16),
+			sectionLabel("Transfer Speed"),
+			spacer(6),
+			prioritySelect,
+			spacer(6),
+			customEntry,
+			spacer(4),
+			feePreview,
+			spacer(16),
 			container.NewHBox(sendBtn, spacer(8), clearBtn),
 		)
 
@@ -1856,9 +1987,6 @@ func Run() {
 		resultOrgLbl.TextSize = 11
 		resultTimeLbl := canvas.NewText("—", colMuted)
 		resultTimeLbl.TextSize = 11
-		resultStatusLbl := canvas.NewText("Pending", colFaint)
-		resultStatusLbl.TextSize = 11
-		resultStatusLbl.TextStyle = fyne.TextStyle{Bold: true}
 		// NFT display metadata, recovered from the embedded Meta JSON
 		// (types.Meta.NFTName/NFTDescription) that the Mint Data flow froze
 		// into the signed document. "—" until a verified file supplies them.
@@ -1866,6 +1994,95 @@ func Run() {
 		resultNFTNameLbl.TextSize = 11
 		resultNFTDescLbl := canvas.NewText("—", colMuted)
 		resultNFTDescLbl.TextSize = 11
+
+		// ── Backend-recorded provenance ────────────────────────────────
+		// Everything below is data the backend ALREADY wrote into the file's
+		// metadata at mint time (sign.Meta) and re-embeds on every provenance
+		// refresh. None of it was displayed here before, so a user could not
+		// see the anchor, the token binding, or the economics their own file
+		// has carried all along.
+		newProvText := func() *canvas.Text {
+			t := canvas.NewText("—", colMuted)
+			t.TextSize = 11
+			t.TextStyle = fyne.TextStyle{Monospace: true}
+			return t
+		}
+		// resultAssuranceLbl is the tri-state the backend distinguishes but
+		// this screen previously collapsed into one "VALID" (see provenance.go).
+		resultAssuranceLbl := canvas.NewText("—", colMuted)
+		resultAssuranceLbl.TextSize = 11
+		resultAssuranceLbl.TextStyle = fyne.TextStyle{Bold: true}
+
+		pinStatusVal := canvas.NewText("—", colMuted)
+		pinStatusVal.TextSize = 12
+		pinStatusVal.TextStyle = fyne.TextStyle{Bold: true}
+		pinStatusDetailLbl := widget.NewLabel("Run Verify to read the payload retrievability and on-chain provenance this file carries.")
+		pinStatusDetailLbl.Wrapping = fyne.TextWrapWord
+		pinStatusDetailLbl.TextStyle = fyne.TextStyle{Italic: true}
+
+		provCIDVal := newProvText()
+		provPinnedHashVal := newProvText()
+		provSignedHashVal := newProvText()
+		provMintIDVal := newProvText()
+		provAnchorTxVal := newProvText()
+		provConfirmedVal := newProvText()
+		provBlockHashVal := newProvText()
+		provNonceVal := newProvText()
+		provMintPriceVal := newProvText()
+		provTokenVal := newProvText()
+		provTermsVal := newProvText()
+
+		// provTexts is the single list every reset walks, so a newly added
+		// field cannot be forgotten in one of the two reset paths.
+		provTexts := []*canvas.Text{
+			provCIDVal, provPinnedHashVal, provSignedHashVal, provMintIDVal,
+			provAnchorTxVal, provConfirmedVal, provBlockHashVal, provNonceVal,
+			provMintPriceVal, provTokenVal, provTermsVal,
+		}
+
+		resetProvenance := func() {
+			for _, t := range provTexts {
+				t.Text = "—"
+				t.Color = colMuted
+				t.Refresh()
+			}
+			resultAssuranceLbl.Text = "—"
+			resultAssuranceLbl.Color = colMuted
+			resultAssuranceLbl.Refresh()
+			pinStatusVal.Text = "—"
+			pinStatusVal.Color = colMuted
+			pinStatusVal.Refresh()
+			pinStatusDetailLbl.SetText("Run Verify to read the payload retrievability and on-chain provenance this file carries.")
+		}
+
+		// checkRetrievability asks the SAME storage probe the CLI's
+		// "ipfs verify" uses, so both surfaces report one verdict. It runs off
+		// the UI thread and never blocks the signature result from appearing.
+		checkRetrievability := func(meta *sign.Meta) {
+			if meta == nil || strings.TrimSpace(meta.IPFSCID) == "" {
+				fyne.Do(func() {
+					pinStatusVal.Text = "n/a — no IPFS CID"
+					pinStatusVal.Color = colMuted
+					pinStatusVal.Refresh()
+					pinStatusDetailLbl.SetText("This file was signed but never minted to IPFS, so there is no pin to check.")
+				})
+				return
+			}
+			durability, err := storage.NewClient(storage.DefaultConfig()).CheckRetrievability(meta.IPFSCID)
+			fyne.Do(func() {
+				if err != nil {
+					pinStatusVal.Text = "CHECK FAILED"
+					pinStatusVal.Color = colWarn
+					pinStatusVal.Refresh()
+					pinStatusDetailLbl.SetText("Could not check retrievability: " + err.Error())
+					return
+				}
+				pinStatusVal.Text = pinStatusTitle(durability)
+				pinStatusVal.Color = pinStatusColor(durability)
+				pinStatusVal.Refresh()
+				pinStatusDetailLbl.SetText(pinStatusDetail(durability))
+			})
+		}
 
 		updateDropZone := func(path string) {
 			dropBg.FillColor = color.RGBA{96, 165, 250, 15}
@@ -1883,9 +2100,6 @@ func Run() {
 			resultFileLbl.Text = filepath.Base(path)
 			resultFileLbl.Color = colText
 			resultFileLbl.Refresh()
-			resultStatusLbl.Text = "Pending"
-			resultStatusLbl.Color = colFaint
-			resultStatusLbl.Refresh()
 		}
 
 		resetDropZone := func() {
@@ -1909,8 +2123,6 @@ func Run() {
 			resultOrgLbl.Color = colMuted
 			resultTimeLbl.Text = "—"
 			resultTimeLbl.Color = colMuted
-			resultStatusLbl.Text = "Pending"
-			resultStatusLbl.Color = colFaint
 			resultNFTNameLbl.Text = "—"
 			resultNFTNameLbl.Color = colMuted
 			resultNFTDescLbl.Text = "—"
@@ -1919,9 +2131,9 @@ func Run() {
 			resultSignerLbl.Refresh()
 			resultOrgLbl.Refresh()
 			resultTimeLbl.Refresh()
-			resultStatusLbl.Refresh()
 			resultNFTNameLbl.Refresh()
 			resultNFTDescLbl.Refresh()
+			resetProvenance()
 		}
 
 		browseBtn := widget.NewButtonWithIcon("Browse File", theme.ViewRefreshIcon(), func() {
@@ -1958,24 +2170,55 @@ func Run() {
 			statusBig.Refresh()
 
 			go func() {
-				ok, meta, _ := sign.VerifyUniversal(selectedFile, sessionPassphrase)
+				result, meta, _ := sign.VerifyUniversal(selectedFile, sessionPassphrase)
+				// The backend reports a TRI-STATE, not a boolean. Collapsing
+				// INTEGRITY_ONLY into a flat "VALID" would claim authenticity
+				// the verification never established (see provenance.go).
+				assurance := assuranceFor(result)
 				fyne.Do(func() {
-					if ok.IsValid() && meta != nil {
-						addActivity(fmt.Sprintf("Verified: %s — VALID", filepath.Base(selectedFile)))
-						statusBig.Text = "✓  SIGNATURE VALID"
-						statusBig.Color = colAccent
-						if meta != nil && meta.Signer != "" {
-							resultSignerLbl.Text = meta.Signer
-						} else {
-							resultSignerLbl.Text = "Unknown signer"
+					// ─ Provenance recorded in the file ────────────────
+					// Rendered for EVERY outcome, including an invalid one: a
+					// file whose signature fails still displays the anchor and
+					// terms it claims, which is what lets a user see WHAT was
+					// tampered with, not merely that something was.
+					if meta != nil {
+						provCIDVal.Text = valueOr(meta.IPFSCID, "unpinned")
+						provCIDVal.Color = colText
+						provPinnedHashVal.Text = truncMiddle(valueOr(meta.IPFSPayloadHash, "n/a"), 14)
+						provSignedHashVal.Text = truncMiddle(valueOr(meta.FileHash, "n/a"), 14)
+						provMintIDVal.Text = truncMiddle(valueOr(meta.MintID, "unanchored"), 14)
+						provAnchorTxVal.Text = truncMiddle(valueOr(meta.AnchorTxID, "unanchored"), 14)
+						provConfirmedVal.Text = heightOr(meta.ConfirmedHeight, "pending")
+						provBlockHashVal.Text = truncMiddle(valueOr(meta.BlockHash, "pending"), 14)
+						provNonceVal.Text = valueOr(meta.AnchorNonce, "n/a")
+						provMintPriceVal.Text = valueOr(sign.FormatMintFeeNSPX(meta.MintFeeNSPX), "n/a")
+						provTokenVal.Text = tokenBinding(meta)
+						provTermsVal.Text = describeMetaTerms(meta)
+						for _, t := range provTexts {
+							t.Refresh()
 						}
+					}
+
+					resultAssuranceLbl.Text = assuranceTitle(assurance)
+					resultAssuranceLbl.Color = assuranceColor(assurance)
+					resultAssuranceLbl.Refresh()
+
+					if assurance != assuranceInvalid && meta != nil {
+						addActivity(fmt.Sprintf("Verified: %s — %s", filepath.Base(selectedFile), assuranceTitle(assurance)))
+						if assurance == assuranceAuthenticated {
+							statusBig.Text = "✓  SIGNATURE VALID — AUTHENTICATED"
+						} else {
+							statusBig.Text = "⚠  SIGNATURE VALID — INTEGRITY ONLY"
+						}
+						statusBig.Color = assuranceColor(assurance)
+
+						resultSignerLbl.Text = valueOr(meta.Signer, "Unknown signer")
 						resultSignerLbl.Color = colAccent
-						if meta != nil && meta.OrgCode != "" {
-							resultOrgLbl.Text = meta.OrgCode
-						} else {
-							resultOrgLbl.Text = "SPIF"
-						}
+						resultOrgLbl.Text = valueOr(meta.OrgCode, "SPIF")
 						resultOrgLbl.Color = colAccent
+						resultTimeLbl.Text = time.Unix(meta.Timestamp, 0).Format("2006-01-02 15:04")
+						resultTimeLbl.Color = colText
+
 						// NFT name/description frozen into the signed Meta at
 						// mint time (see sign.SetNFTMetadata). A plain signed
 						// file has none, so fall back to an explicit sentinel
@@ -1994,27 +2237,32 @@ func Run() {
 							resultNFTDescLbl.Text = "n/a (not an NFT mint)"
 							resultNFTDescLbl.Color = colMuted
 						}
-						resultTimeLbl.Text = time.Unix(meta.Timestamp, 0).Format("2006-01-02 15:04")
-						resultTimeLbl.Color = colText
-						resultStatusLbl.Text = "VERIFIED"
-						resultStatusLbl.Color = colAccent
-						dialog.ShowInformation("Verified ✓", "Signature is valid. File is authentic and untampered.", window)
+
+						// The dialog must match the assurance level: an
+						// integrity-only result must never be announced as
+						// proof of who signed.
+						dialog.ShowInformation("Verified — "+assuranceTitle(assurance),
+							assuranceDetail(assurance), window)
 					} else {
 						addActivity(fmt.Sprintf("Verified: %s — INVALID", filepath.Base(selectedFile)))
 						statusBig.Text = "✗  SIGNATURE INVALID"
 						statusBig.Color = colDanger
-						resultStatusLbl.Text = "FAILED"
-						resultStatusLbl.Color = colDanger
 						showErrorDialog(errors.New("signature invalid — file may have been tampered with"), window)
 					}
+
 					statusBig.Refresh()
 					resultSignerLbl.Refresh()
 					resultOrgLbl.Refresh()
 					resultTimeLbl.Refresh()
-					resultStatusLbl.Refresh()
 					resultNFTNameLbl.Refresh()
 					resultNFTDescLbl.Refresh()
 				})
+
+				// Retrievability is a separate, network-bound question. It runs
+				// after the verdict is on screen and never delays it.
+				if meta != nil {
+					go checkRetrievability(meta)
+				}
 			}()
 		})
 		verifyBtn.Importance = widget.HighImportance
@@ -2046,9 +2294,11 @@ func Run() {
 			spacer(6),
 			makeInfoLine("Signer", resultSignerLbl),
 			spacer(6),
-			makeInfoLine("Signed at", resultTimeLbl),
+			// Assurance is the backend's tri-state, shown as its own row so
+			// "self-consistent" is never read as "authenticated".
+			makeInfoLine("Assurance", resultAssuranceLbl),
 			spacer(6),
-			makeInfoLine("Status", resultStatusLbl),
+			makeInfoLine("Signed at", resultTimeLbl),
 			spacer(6),
 			makeInfoLine("NFT Name", resultNFTNameLbl),
 			spacer(6),
@@ -2058,7 +2308,60 @@ func Run() {
 		panel := container.NewVBox(
 			container.NewMax(panelBg, container.NewPadded(panelInner)),
 			spacer(12),
-			alertBox("Make sure the .usimeta sidecar file is in the same folder as the file being verified.", color.RGBA{96, 165, 250, 20}, colInfo),
+			alertBox("The result distinguishes an AUTHENTICATED signature (signer's key confirmed against the key directory) from INTEGRITY ONLY (self-consistent, but signer identity unconfirmed).", color.RGBA{96, 165, 250, 20}, colInfo),
+		)
+
+		// ── Backend-recorded provenance — full width ───────────────────
+		// Mirrors the Wallet screen's txSection pattern: this is tabular
+		// evidence, not a form field, and squeezing hashes into the 38% side
+		// column would truncate exactly the values a user needs to check.
+		provCard := styledCard(container.NewVBox(
+			sectionLabel("Payload Retrievability"),
+			spacer(8),
+			pinStatusVal,
+			spacer(4),
+			pinStatusDetailLbl,
+			spacer(14),
+			hRule(),
+			spacer(12),
+			sectionLabel("On-Chain Provenance (as recorded in this file)"),
+			spacer(8),
+			infoRowDynamic("Mint ID", provMintIDVal),
+			spacer(4),
+			infoRowDynamic("Anchor Tx", provAnchorTxVal),
+			spacer(4),
+			infoRowDynamic("Confirmed Block", provConfirmedVal),
+			spacer(4),
+			infoRowDynamic("Block Hash", provBlockHashVal),
+			spacer(4),
+			infoRowDynamic("Tx Nonce", provNonceVal),
+			spacer(4),
+			infoRowDynamic("Mint Price", provMintPriceVal),
+			spacer(4),
+			infoRowDynamic("Marketplace Token", provTokenVal),
+			spacer(4),
+			infoRowDynamic("Embedded Terms", provTermsVal),
+			spacer(14),
+			hRule(),
+			spacer(12),
+			sectionLabel("Storage"),
+			spacer(8),
+			infoRowDynamic("IPFS CID", provCIDVal),
+			spacer(4),
+			infoRowDynamic("Pinned Payload Hash", provPinnedHashVal),
+			spacer(4),
+			infoRowDynamic("Signed File Hash", provSignedHashVal),
+		), 0, 0)
+
+		provSection := container.NewVBox(
+			hRule(),
+			spacer(12),
+			sectionLabel("Backend-Recorded Provenance"),
+			spacer(8),
+			provCard,
+			spacer(12),
+			alertBox("These values are read from the document's own metadata — the same on-chain block the signer embedded into every container (PDF/XMP/Office/footer) at mint time. They are displayed exactly as recorded; re-checking them against the chain is what 'sphinx ipfs verify' does. Pinned Payload Hash covers the clean bytes uploaded to IPFS, Signed File Hash covers this signed file — they differ by design.", color.RGBA{96, 165, 250, 20}, colInfo),
+			spacer(24),
 		)
 
 		form := container.NewVBox(
@@ -2075,7 +2378,7 @@ func Run() {
 			container.NewHBox(verifyBtn, spacer(8), clearBtn),
 		)
 
-		setScreen(opLayout(form, panel))
+		setScreen(container.NewVBox(opLayout(form, panel), provSection))
 	}
 
 	// =========================================================================

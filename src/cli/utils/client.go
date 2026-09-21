@@ -17,12 +17,39 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sphinxfndorg/protocol/src/bind/abi"
 	logger "github.com/sphinxfndorg/protocol/src/console"
 	key "github.com/sphinxfndorg/protocol/src/core/sthincs/key/backend"
 	sign "github.com/sphinxfndorg/protocol/src/core/sthincs/sign/backend"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
 	"github.com/sphinxfndorg/protocol/src/policy"
 )
+
+// abiRPC adapts this package's callRPC to abi.RPCClient, so the shared
+// abi.Transact path can broadcast without abi importing the CLI transport. The
+// TTL is unused here: callRPC has no timeout parameter.
+type abiRPC struct{}
+
+func (abiRPC) CallRPC(nodeAddr, method string, params interface{}, ttlSeconds uint16) (json.RawMessage, error) {
+	list, ok := params.([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("abi rpc: %s params must be a positional array", method)
+	}
+	var raw json.RawMessage
+	if err := callRPC(nodeAddr, method, list, &raw); err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
+// abiSigner implements abi.Signer with this package's canonical signing path
+// (signTransactionCanonical), so key loading, the SPHINCS+ auth bundle and the
+// policy fee floor stay exactly where they were.
+type abiSigner struct{ keyFile string }
+
+func (s abiSigner) SignTransaction(tx *types.Transaction) error {
+	return signTransactionCanonical(tx, s.keyFile)
+}
 
 // SendTransaction sends a transaction via JSON-RPC
 func SendTransaction(opts SendTxOptions) error {
@@ -35,41 +62,34 @@ func SendTransaction(opts SendTxOptions) error {
 	}
 	weiAmount := new(big.Int).Mul(amountBig, big.NewInt(1e18))
 
-	// Get nonce if not provided
-	nonce := opts.Nonce
-	if nonce == 0 {
-		var err error
-		nonce, err = getNonce(opts.RPCURL, opts.From)
-		if err != nil {
-			logger.Warn("Failed to get nonce, using 0: %v", err)
-			nonce = 0
-		}
-		logger.Debug("Using nonce: %d", nonce)
+	// A caller-supplied --nonce wins. Otherwise leave it nil so abi.Transact
+	// resolves it from the node's getnonce — the method the node registers.
+	// This package used to pre-fill the nonce via spx_getTransactionCount,
+	// which is not a registered method, so a run without --nonce silently fell
+	// back to nonce 0 and was rejected by the exact-match mempool rule.
+	var nonce *uint64
+	if opts.Nonce != 0 {
+		nonce = &opts.Nonce
 	}
 
 	if opts.KeyFile == "" {
 		return fmt.Errorf("--key is required: transactions must be locally signed with a full SPHINCS auth bundle before broadcast")
 	}
 
-	tx, err := buildSignedTransaction(opts, weiAmount, nonce)
+	tx, err := buildTransaction(opts, weiAmount, opts.Nonce)
 	if err != nil {
 		return err
 	}
 
-	rawTx, err := json.Marshal(tx)
+	txID, err := abi.Transact(&abi.TransactOpts{
+		Client:   abiRPC{},
+		Signer:   abiSigner{keyFile: opts.KeyFile},
+		NodeAddr: opts.RPCURL,
+		ChainID:  tx.ChainID,
+		Nonce:    nonce,
+	}, tx)
 	if err != nil {
-		return fmt.Errorf("failed to marshal signed transaction: %w", err)
-	}
-
-	var result map[string]string
-	err = callRPC(opts.RPCURL, "sendrawtransaction", []interface{}{hex.EncodeToString(rawTx)}, &result)
-	if err != nil {
-		return fmt.Errorf("RPC call failed: %v", err)
-	}
-
-	txID := result["txid"]
-	if txID == "" {
-		txID = tx.ID
+		return fmt.Errorf("broadcast signed transaction: %w", err)
 	}
 	logger.Info("Transaction sent! TX ID: %s", txID)
 
@@ -86,11 +106,14 @@ func SendTransaction(opts SendTxOptions) error {
 	return nil
 }
 
-func buildSignedTransaction(opts SendTxOptions, amount *big.Int, nonce uint64) (*types.Transaction, error) {
+// buildTransaction assembles the unsigned transfer; abi.Transact applies the
+// nonce (nonce is the explicit override, 0 = let the node resolve it), derives
+// the ID, signs (through abiSigner), encodes and broadcasts it.
+func buildTransaction(opts SendTxOptions, amount *big.Int, nonce uint64) (*types.Transaction, error) {
 	gasLimit := big.NewInt(parseIntOrDefault(opts.GasLimit, 21000))
 	gasPrice := big.NewInt(parseIntOrDefault(opts.GasPrice, 1))
 
-	tx := &types.Transaction{
+	return &types.Transaction{
 		Sender:    opts.From,
 		Receiver:  opts.To,
 		Amount:    new(big.Int).Set(amount),
@@ -99,11 +122,7 @@ func buildSignedTransaction(opts SendTxOptions, amount *big.Int, nonce uint64) (
 		Nonce:     nonce,
 		Timestamp: time.Now().Unix(),
 		ChainID:   7331, // Sphinx Mainnet chain ID (EIP-155 replay protection)
-	}
-	if err := signTransactionCanonical(tx, opts.KeyFile); err != nil {
-		return nil, err
-	}
-	return tx, nil
+	}, nil
 }
 
 // signTransactionCanonical signs a transaction with the node's canonical
@@ -329,27 +348,6 @@ func WatchTransaction(opts WatchTxOptions) error {
 			}
 		}
 	}
-}
-
-// getNonce retrieves the next nonce for an address
-func getNonce(rpcURL, address string) (uint64, error) {
-	var nonceHex string
-	// Using spx_getTransactionCount
-	err := callRPC(rpcURL, "spx_getTransactionCount", []interface{}{address, "pending"}, &nonceHex)
-	if err != nil {
-		return 0, err
-	}
-
-	nonceHex = strings.TrimPrefix(nonceHex, "0x")
-	if nonceHex == "" {
-		return 0, nil
-	}
-	nonce, err := strconv.ParseUint(nonceHex, 16, 64)
-	if err != nil {
-		return 0, fmt.Errorf("failed to parse nonce: %v", err)
-	}
-
-	return nonce, nil
 }
 
 // callRPC makes a JSON-RPC call to the specified endpoint

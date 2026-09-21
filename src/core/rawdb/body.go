@@ -16,6 +16,15 @@ import (
 // WriteBody stores b keyed by hash — the same hash as the header it
 // belongs to. Bodies don't carry their own hash field, so the caller
 // (WriteBlock, or anyone reindexing) supplies it explicitly.
+//
+// NOTE (R8 Commit B): this standalone writer is retained, not deleted. Its
+// only production-adjacent caller is the tx_payload_test.go legacy fixture
+// (pre-payload chain reconstruction via WriteHeader+WriteBody+
+// WriteTxLookupEntries), and WriteTxLookupEntries in lookup.go keeps the
+// same standalone shape for backfills. Deleting WriteBody while keeping its
+// siblings would be asymmetric churn for zero behavioral gain; the atomic
+// commit path (writeBlockBatch) never calls it, so it cannot diverge from a
+// committed block.
 func WriteBody(db *database.DB, hash string, b *types.BlockBody) error {
 	if hash == "" {
 		return fmt.Errorf("rawdb: empty hash")

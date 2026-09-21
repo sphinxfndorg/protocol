@@ -44,6 +44,7 @@ func NewPolicyParameters() *PolicyParameters {
 		ReturnDataGasPerByte: 100,
 		MinimumGasPrice:      big.NewInt(1000000000),                            // 1 gSPX per gas
 		BlockReward:          new(big.Int).Mul(big.NewInt(5), big.NewInt(1e18)), // 5 SPX
+		BlockRewardBurnBPS:   500,  // 5% of each block reward -> DEAD burn address
 		ValidatorFeeBPS:      6000,
 		StakerFeeBPS:         2500,
 		TreasuryFeeBPS:       1000,
@@ -132,6 +133,9 @@ func (p *PolicyParameters) Validate() error {
 	}
 	if p.BlockReward == nil || p.BlockReward.Sign() < 0 {
 		return ErrInvalidBlockReward
+	}
+	if p.BlockRewardBurnBPS > 10000 {
+		return ErrInvalidBlockRewardBurn
 	}
 	if p.ContractDeployGas == 0 || p.ContractCallGas == 0 || p.SVMGasPerOperation == 0 {
 		return ErrInvalidTransactionFee

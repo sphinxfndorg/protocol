@@ -244,8 +244,32 @@ func (bc *Blockchain) GetChainTip() map[string]interface{} {
 // Returns: true if address is valid
 func (bc *Blockchain) ValidateAddress(address string) bool {
 	// Accepts raw hex (20-byte legacy or 32-byte SPHINCS+ addresses) as well
-	// as the "SPIF XXXX XXXX ..." display format handled by common.
-	return common.ValidateSPIFAddress(address)
+	// as the "SPIF XXXX XXXX ..." / "DEAD XXXX XXXX ..." display forms
+	// handled by common.
+	return common.ValidateAddress(address)
+}
+
+// GetBurnedBalance returns the total nSPX credited to the protocol burn
+// (DEAD) address — the single auditable source of burned supply across fee
+// burns, block-reward burns, slashing (when executed on-chain), and manual
+// user burns. Returns zero on any lookup failure rather than an error so
+// status/checkpoint paths stay infallible.
+func (bc *Blockchain) GetBurnedBalance() *big.Int {
+	stateDB, err := bc.newStateDB()
+	if err != nil {
+		return big.NewInt(0)
+	}
+	bal, err := stateDB.GetBalance(common.CanonicalAddress(common.DefaultBurnAddress))
+	if err != nil || bal == nil {
+		return big.NewInt(0)
+	}
+	return bal
+}
+
+// IsBurnAddress reports whether an address is a provably-unspendable DEAD
+// burn address. Funds sent there are permanently removed from circulation.
+func (bc *Blockchain) IsBurnAddress(address string) bool {
+	return common.IsBurnAddress(address)
 }
 
 // GetNetworkInfo returns network information

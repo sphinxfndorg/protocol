@@ -805,8 +805,12 @@ func VerifyCommitmentInRoot(rebuiltRoot *hashtree.HashTreeNode, expectedRoot *ha
 	// Both roots must have been derived from the same commitment-prepended
 	// leaf[0] and commitment-hashed leaf[4] for this check to pass.
 	// Pedersen analogy: verifying that two openings of c produce the same value.
-	rebuiltHash := hex.EncodeToString(rebuiltRoot.Hash.Bytes())
-	expectedHash := hex.EncodeToString(expectedRoot.Hash.Bytes())
+	// Use fixed 32-byte encodings so roots with a leading zero byte still
+	// compare as 64 hex chars (minimal-length .Bytes() would give 62).
+	rebuiltB := rebuiltRoot.Hash.Bytes32()
+	expectedB := expectedRoot.Hash.Bytes32()
+	rebuiltHash := hex.EncodeToString(rebuiltB[:])
+	expectedHash := hex.EncodeToString(expectedB[:])
 	return rebuiltHash == expectedHash
 }
 
@@ -1098,7 +1102,7 @@ func (sm *STHINCSManager) SignTransactionAuth(
 		return nil, err
 	}
 
-	merkleRootHash := merkleRoot.Hash.Bytes()
+	merkleRootHash := hashtree.HashToBytes32(merkleRoot.Hash)
 	proof, err := GenerateReceiptProof(message, timestamp, nonce, merkleRootHash, commitment, pkBytes)
 	if err != nil {
 		return nil, err

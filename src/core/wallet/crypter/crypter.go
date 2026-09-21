@@ -62,9 +62,17 @@ func NewUint256(b []byte) *Uint256 {
 	return u
 }
 
-// ToBytes converts Uint256 to a byte slice.
+// ToBytes converts Uint256 to a fixed 32-byte big-endian slice.
+// The underlying (*uint256.Int).Bytes() is minimal-length and would drop
+// leading 0x00 bytes, so this wrapper left-pads via Bytes32 instead.
 func (u *Uint256) ToBytes() []byte {
-	return u.uint256.Bytes()
+	if u == nil || u.uint256 == nil {
+		return make([]byte, 32)
+	}
+	b := u.uint256.Bytes32()
+	out := make([]byte, 32)
+	copy(out, b[:])
+	return out
 }
 
 // BytesToUint256 converts a byte slice to Uint256.

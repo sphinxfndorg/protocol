@@ -112,6 +112,45 @@ func callSIP20(store Store, address, caller string, call *CallSpec) (*ExecutionR
 			"owner":        info.Owner,
 			"total_supply": total.String(),
 		}}, nil
+
+	case "burn":
+		info, err := getSIP20Info(store, address)
+		if err != nil {
+			return nil, err
+		}
+		if caller != info.Owner {
+			return nil, errors.New("burn requires token owner")
+		}
+		from := call.Args["from"]
+		amount, err := parseAmount(call.Args["amount"])
+		if err != nil {
+			return nil, err
+		}
+		if from == "" {
+			return nil, errors.New("missing burn source")
+		}
+		if err := burnSIP20(store, address, from, amount); err != nil {
+			return nil, err
+		}
+		return &ExecutionResult{ContractAddress: address, Status: "ok", Return: map[string]string{
+			"method": "burn",
+			"from":   from,
+			"amount": amount.String(),
+		}}, nil
+
+	case "burn_self":
+		amount, err := parseAmount(call.Args["amount"])
+		if err != nil {
+			return nil, err
+		}
+		if err := burnSIP20(store, address, caller, amount); err != nil {
+			return nil, err
+		}
+		return &ExecutionResult{ContractAddress: address, Status: "ok", Return: map[string]string{
+			"method": "burn_self",
+			"from":   caller,
+			"amount": amount.String(),
+		}}, nil
 	}
 	return nil, fmt.Errorf("unsupported sip20 method: %s", call.Method)
 }
@@ -142,6 +181,22 @@ func transferSIP20(store Store, address, from, to string, amount *big.Int) error
 	toBal.Add(toBal, amount)
 	setSIP20Balance(store, address, from, fromBal)
 	setSIP20Balance(store, address, to, toBal)
+	return nil
+}
+
+func burnSIP20(store Store, address, from string, amount *big.Int) error {
+	if amount.Sign() <= 0 {
+		return errors.New("amount must be positive")
+	}
+	fromBal := getSIP20Balance(store, address, from)
+	if fromBal.Cmp(amount) < 0 {
+		return fmt.Errorf("insufficient token balance: have %s need %s", fromBal.String(), amount.String())
+	}
+	fromBal.Sub(fromBal, amount)
+	setSIP20Balance(store, address, from, fromBal)
+	total := getSIP20TotalSupply(store, address)
+	total.Sub(total, amount)
+	store.SetContractStorage(address, "sip20:total_supply", []byte(total.String()))
 	return nil
 }
 

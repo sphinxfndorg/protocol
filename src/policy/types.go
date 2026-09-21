@@ -36,6 +36,13 @@ type PolicyParameters struct {
 	// It is deliberately policy-owned rather than a node-local chain setting.
 	BlockReward *big.Int `json:"block_reward"`
 
+	// BlockRewardBurnBPS is the share of each freshly minted block reward
+	// credited to the protocol burn (DEAD) address instead of the proposer.
+	// Unlike BurnFeeBPS — which relocates already-circulating fee nSPX —
+	// this splits newly minted nSPX, so core must IncrementTotalSupply once
+	// for the full reward and then AddBalance each slice (never decrement).
+	BlockRewardBurnBPS uint64 `json:"block_reward_burn_bps"`
+
 	// Fee distribution is expressed in basis points and must total 10,000.
 	ValidatorFeeBPS uint64 `json:"validator_fee_bps"`
 	StakerFeeBPS    uint64 `json:"staker_fee_bps"`

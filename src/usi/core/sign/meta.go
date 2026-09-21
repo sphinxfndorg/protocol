@@ -21,6 +21,7 @@
 //	SetPinningContext()      → IPFS CID + chain-tip height + ERC-721 metadata
 //	EmbedSignature()         → hashes/signs the file and writes the container
 //	SetAnchorFee()           → policy mint fee + on-chain account nonce
+//	SetIPFSPayloadHash()     → hash of the exact bytes pinned (receipt PayloadHash)
 //	StampAnchorProvenance() / RefreshOnChainProvenance() → post-anchor txid,
 //	                           mint id, confirming block + token binding
 package sign
@@ -74,6 +75,12 @@ type OnChainProvenance struct {
 	IPFSCID     string // IPFS CID the payload was pinned under
 	BlockHeight uint64 // chain-tip height at mint time
 
+	// IPFSPayloadHash is hex(SHAKE-256 with org) of the exact bytes pinned
+	// under IPFSCID — equal to the mint receipt's PayloadHash, and NOT equal
+	// to Meta.FileHash (which covers the signed on-disk file). See the field
+	// docs on types.Meta for why the two must not be conflated.
+	IPFSPayloadHash string
+
 	// Anchor transaction
 	MintID          string // deterministic mint identifier (receipt.MintID)
 	AnchorTxID      string // sendrawtransaction result txid
@@ -117,6 +124,7 @@ func OnChainData(m *Meta) OnChainProvenance {
 	return OnChainProvenance{
 		IPFSCID:          m.IPFSCID,
 		BlockHeight:      m.BlockHeight,
+		IPFSPayloadHash:  m.IPFSPayloadHash,
 		MintID:           m.MintID,
 		AnchorTxID:       m.AnchorTxID,
 		AnchorPath:       m.AnchorPath,
@@ -145,6 +153,7 @@ func ApplyOnChainData(m *Meta, p OnChainProvenance) {
 	}
 	m.IPFSCID = p.IPFSCID
 	m.BlockHeight = p.BlockHeight
+	m.IPFSPayloadHash = p.IPFSPayloadHash
 	m.MintID = p.MintID
 	m.AnchorTxID = p.AnchorTxID
 	m.AnchorPath = p.AnchorPath
@@ -181,6 +190,25 @@ func SetPinningContext(m *Meta, cid string, blockHeight uint64, tokenURI, metada
 	m.BlockHeight = blockHeight
 	m.TokenURI = tokenURI
 	m.MetadataCID = metadataCID
+}
+
+// SetIPFSPayloadHash records hex(SHAKE-256 with org) of the exact bytes pinned
+// under IPFSCID — i.e. the mint receipt's PayloadHash.
+//
+// It is set AFTER mint.Mint() returns (the receipt is what defines the value),
+// and lands on disk because RefreshOnChainProvenance rewrites every container
+// once the anchor is resolved. Recording it makes the (expected) difference
+// between IPFSPayloadHash and FileHash explicit, instead of leaving a verifier
+// to wonder why a receipt's PayloadHash does not match the signed file's hash:
+// the pinned bytes are the clean, pre-signature original, while FileHash covers
+// the final signed file.
+func SetIPFSPayloadHash(m *Meta, payloadHashHex string) {
+	if m == nil {
+		return
+	}
+	p := OnChainData(m)
+	p.IPFSPayloadHash = payloadHashHex
+	ApplyOnChainData(m, p)
 }
 
 // SetNFTMetadata records the NFT display name and description typed on the

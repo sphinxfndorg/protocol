@@ -5,6 +5,7 @@ package mint
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/sphinxfndorg/protocol/src/common"
@@ -111,7 +112,8 @@ func TestSIP721TokenBindingFlowsThroughAnchorAndNodeVerifies(t *testing.T) {
 	receipt := mintTestReceipt(cid)
 	receipt.TokenID = 7
 	receipt.TokenURI = "ipfs://bafkqameta0000000000000000000000000"
-	receipt.ContractAddress = common.SPIFPrefix + "1234567890abcdef1234567890abcdef"
+	// Legacy 20-byte rendering: "SPIF" + 40 lowercase hex.
+	receipt.ContractAddress = common.SPIFPrefix + "1234567890abcdef1234567890abcdef12345678"
 
 	tagBytes, err := BuildAnchorData(receipt)
 	if err != nil {
@@ -124,8 +126,20 @@ func TestSIP721TokenBindingFlowsThroughAnchorAndNodeVerifies(t *testing.T) {
 	if err := json.Unmarshal(tagBytes, &tag); err != nil {
 		t.Fatal(err)
 	}
-	if tag.TokenID != 7 || tag.TokenURI != receipt.TokenURI || tag.Contract != receipt.ContractAddress {
+	if tag.TokenID != 7 || tag.TokenURI != receipt.TokenURI || !sameSPIFAddress(tag.Contract, receipt.ContractAddress) {
 		t.Fatalf("anchor did not carry token binding: %#v", tag)
+	}
+
+	// The tag must render every address in the canonical grouped SPIF form,
+	// never a bare hex blob, regardless of the form the receipt carried.
+	// Here the receipt carries the legacy "SPIF"+lowercase-hex rendering; the
+	// tag must collapse it into the grouped uppercase display form.
+	canonicalContract, ferr := common.FormatSPIFAddress(receipt.ContractAddress)
+	if ferr != nil {
+		t.Fatal(ferr)
+	}
+	if tag.Contract != canonicalContract {
+		t.Fatalf("anchor contract %q must render in canonical SPIF form %q", tag.Contract, canonicalContract)
 	}
 
 	// Partial SIP-721 bindings are rejected by the node.
@@ -184,8 +198,26 @@ func TestAnchorCarriesRoyaltyTermsAndNodeVerifies(t *testing.T) {
 	if err := json.Unmarshal(tagBytes, &tag); err != nil {
 		t.Fatal(err)
 	}
-	if tag.RoyaltyBPS != 250 || tag.UsageFeeNSPX != "100000000000000000" || tag.RoyaltyRecipient != recipient {
+	// The receipt carries the recipient as raw hex; the anchor must render it
+	// in the canonical grouped SPIF display form (matching the contract field)
+	// instead of a bare hex blob — this is the anchor_<mintid>.json sidecar's
+	// human-readable address identity.
+	formattedRecipient, ferr := common.FormatSPIFAddress(recipient)
+	if ferr != nil {
+		t.Fatal(ferr)
+	}
+	if tag.RoyaltyBPS != 250 || tag.UsageFeeNSPX != "100000000000000000" || tag.RoyaltyRecipient != formattedRecipient {
 		t.Fatalf("anchor did not carry embedded economics: %#v", tag)
+	}
+	if !strings.HasPrefix(tag.RoyaltyRecipient, "SPIF ") {
+		t.Fatalf("royalty_recipient must render in grouped SPIF form, got %q", tag.RoyaltyRecipient)
+	}
+
+	// The SAME receipt (raw-hex recipient in memory) must still verify against
+	// the grouped-form tag — address renderings are one identity, compared
+	// canonically in VerifyAnchor/verifyAnchorTerms.
+	if ok, verr := VerifyAnchor(receipt, tagBytes); !ok || verr != nil {
+		t.Fatalf("raw-hex receipt must verify against grouped-form anchor: ok=%v err=%v", ok, verr)
 	}
 
 	// Tampering with the terms breaks receipt↔anchor verification.

@@ -11,11 +11,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image/color"
 	"io"
 	"log"
 	"math/big"
 	"os"
 	"path/filepath"
+	debug "runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +28,7 @@ import (
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
+	"github.com/sphinxfndorg/protocol/src/bind/abi"
 	"github.com/sphinxfndorg/protocol/src/common"
 	"github.com/sphinxfndorg/protocol/src/core"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
@@ -52,6 +55,66 @@ var (
 	keyStoreOnce sync.Once
 	serverURL    = "http://localhost:8080"
 )
+
+// -------------------------------------------------------------------------
+// STARTUP BEACON
+// -------------------------------------------------------------------------
+
+// buildBeaconLine identifies the build actually running, printed once at
+// startup so the terminal shows which source tree / binary produced the window
+// on screen.
+//
+// ★ WHY THIS EXISTS: a UI value being wrong cannot be told apart from a stale
+// binary being run instead of the freshly-edited source. That ambiguity is
+// exactly what surrounded the "gas price always 0 SPX/gas" report: a prebuilt
+// ./cmd from an earlier session (which had no fee panel at all) sat next to the
+// working-tree fix in src/usi/gui. This line makes "which build am I looking
+// at?" answerable in one glance, before any RPC call or key load.
+func buildBeaconLine() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "build: info unavailable"
+	}
+	rev, modified, built := "unknown", "", ""
+	for _, s := range info.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			rev = s.Value
+		case "vcs.modified":
+			modified = s.Value
+		case "vcs.time":
+			built = s.Value
+		}
+	}
+	if len(rev) > 12 {
+		rev = rev[:12]
+	}
+	return fmt.Sprintf("build: %s rev=%s modified=%s built=%s go=%s",
+		info.Main.Path, rev, modified, built, info.GoVersion)
+}
+
+// gasUnitBeaconLine states the denomination every gas price in the UI is
+// rendered in, computed through the SAME two formatters the UI uses —
+// formatGasPriceAmount for gSPX and formatSPXAmount for the historical SPX
+// rendering — so "why did it read 0 SPX/gas?" is answerable from the terminal
+// without opening a dialog.
+//
+// The bug it documents: policy.MinimumGasPrice is 1,000,000,000 nSPX = 1 gSPX
+// = 10^-9 SPX, and formatSPXAmount prints at most six decimal places, so an
+// SPX rendering rounds the minimum — and every tier derived from it (2x, 5x,
+// N×) — to a flat "0". Dividing by 1 gSPX instead keeps the value legible.
+func gasUnitBeaconLine() string {
+	p := policy.GetDefaultPolicyParams()
+	if p == nil || p.MinimumGasPrice == nil {
+		return "gas price: policy unavailable"
+	}
+	asSPX := new(big.Float).SetPrec(256).Quo(
+		new(big.Float).SetPrec(256).SetInt(p.MinimumGasPrice),
+		big.NewFloat(1e18),
+	)
+	return fmt.Sprintf("gas price: minimum %s nSPX = %s %s (rendered as SPX through the 6-decimal formatter it rounds to %q — that was the bug)",
+		p.MinimumGasPrice.String(), formatGasPriceAmount(p.MinimumGasPrice), gasPriceUnitLabel, formatSPXAmount(asSPX))
+}
 
 func addActivity(activity string) {
 	log.Printf("[INFO] addActivity: recording activity: %s", activity[:min(100, len(activity))])
@@ -409,12 +472,84 @@ func validatePassphraseDialog(window fyne.Window, title, message string, onSucce
 	dialog.Show()
 }
 
+// feeRowPlaceholder is what every unresolved row of the popup's fee panel
+// shows. It is a distinct sentinel rather than an empty string so "not known
+// yet" can never be misread as "zero".
+const feeRowPlaceholder = "—"
+
+// transferFeeRowValues is the fully-resolved text and colour of every row in
+// the Transfer Status popup's "Transaction Fee" section.
+//
+// It exists so the numbers this popup shows on a send come from ONE pure
+// function a test can assert on directly, instead of being assembled inline
+// inside a background worker goroutine — where a mis-denominated conversion
+// (rendering a gSPX gas price as SPX) is invisible until a user reads "0" off
+// the screen, which is exactly what this panel used to display.
+type transferFeeRowValues struct {
+	GasFeeText    string
+	GasFeeColor   color.Color
+	GasLimitText  string
+	GasLimitColor color.Color
+	GasPriceText  string
+	GasPriceColor color.Color
+	PriorityText  string
+	PriorityColor color.Color
+}
+
+// transferFeeRows resolves the Transfer Status popup's fee section for one
+// send. gasFeeNSPX / gasLimit / gasPrice are the values the transaction
+// actually carries — quoted by the same QuoteTransferGas call the fee preview
+// and the confirm dialog used — so the panel reports what is being paid rather
+// than an estimate that could drift from it.
+//
+// The gas price is rendered in gSPX via formatGasPriceAmount, NOT in SPX: the
+// policy minimum is 1 gSPX (10^9 nSPX, per core/params.go's gSPX denomination)
+// = 10^-9 SPX, while formatSPXAmount prints at most six decimal places. An SPX
+// rendering therefore collapsed the minimum and every tier derived from it
+// (Medium 2x, High 5x, Custom N×) to a flat "0" in this panel.
+func transferFeeRows(chainSymbol string, gasFeeNSPX *big.Int, gasLimit uint64, gasPrice *big.Int, priorityLabel string) transferFeeRowValues {
+	v := transferFeeRowValues{
+		GasFeeText:    feeRowPlaceholder,
+		GasFeeColor:   colFaint,
+		GasLimitText:  feeRowPlaceholder,
+		GasLimitColor: colFaint,
+		GasPriceText:  feeRowPlaceholder,
+		GasPriceColor: colFaint,
+		PriorityText:  feeRowPlaceholder,
+		PriorityColor: colFaint,
+	}
+	if gasFeeNSPX != nil {
+		v.GasFeeText = formatSPXAmount(new(big.Float).SetPrec(256).Quo(
+			new(big.Float).SetPrec(256).SetInt(gasFeeNSPX),
+			big.NewFloat(1e18),
+		)) + " " + chainSymbol
+		v.GasFeeColor = colAccent
+	}
+	if gasLimit > 0 {
+		v.GasLimitText = fmt.Sprintf("%d gas units", gasLimit)
+		v.GasLimitColor = colText
+	}
+	if gasPrice != nil && gasPrice.Sign() > 0 {
+		v.GasPriceText = formatGasPriceAmount(gasPrice) + " " + gasPriceUnitLabel
+		v.GasPriceColor = colText
+	}
+	if strings.TrimSpace(priorityLabel) != "" {
+		v.PriorityText = priorityLabel
+		v.PriorityColor = colText
+	}
+	return v
+}
+
 // showTransferStatusDialog displays a modal popup that tracks a SPX transfer
 // through broadcast → pending → confirmed, mirroring the mint data block
 // confirmation UI style. It shows transfer status, block height, block
-// confirmation hash, and related transaction info. The dialog updates live
-// from a background polling goroutine via fyne.Do.
-func showTransferStatusDialog(window fyne.Window, client *WalletClient, chainHeader *core.SphinxChainHeader, amountStr, recipient, memo string, passphrase string, amountNSPX *big.Int) {
+// confirmation hash, transaction fee details, and related transaction info.
+// The dialog updates live from a background polling goroutine via fyne.Do.
+// priorityLabel is the user-visible tier tag (e.g. "High (5x)"); priorityPrice
+// is the exact gas price the confirmed send carries (may differ from the
+// preview gasPrice only if the caller re-quoted between dialogs — normally
+// identical, since both come from the same QuoteTransferGas call).
+func showTransferStatusDialog(window fyne.Window, client *WalletClient, chainHeader *core.SphinxChainHeader, amountStr, recipient, memo string, passphrase string, amountNSPX *big.Int, gasFeeNSPX *big.Int, gasLimit uint64, gasPrice *big.Int, priorityLabel string, priorityPrice *big.Int) {
 	statusIcon := canvas.NewText("⏳", colWarn)
 	statusIcon.TextSize = 36
 	statusTextStyle := fyne.TextStyle{Bold: true}
@@ -457,6 +592,23 @@ func showTransferStatusDialog(window fyne.Window, client *WalletClient, chainHea
 		memoVal.Color = colMuted
 	}
 
+	// Gas fee display widgets
+	gasFeeVal := canvas.NewText("—", colFaint)
+	gasFeeVal.TextSize = 11
+	gasFeeVal.TextStyle = fyne.TextStyle{Monospace: true}
+
+	gasLimitVal := canvas.NewText("—", colFaint)
+	gasLimitVal.TextSize = 11
+	gasLimitVal.TextStyle = fyne.TextStyle{Monospace: true}
+
+	gasPriceVal := canvas.NewText("—", colFaint)
+	gasPriceVal.TextSize = 11
+	gasPriceVal.TextStyle = fyne.TextStyle{Monospace: true}
+
+	priorityVal := canvas.NewText("—", colFaint)
+	priorityVal.TextSize = 11
+	priorityVal.TextStyle = fyne.TextStyle{Monospace: true}
+
 	blockHeightVal := canvas.NewText("—", colFaint)
 	blockHeightVal.TextSize = 11
 	blockHeightVal.TextStyle = fyne.TextStyle{Monospace: true}
@@ -496,6 +648,18 @@ func showTransferStatusDialog(window fyne.Window, client *WalletClient, chainHea
 		spacer(10),
 		hRule(),
 		spacer(10),
+		sectionLabel("Transaction Fee"),
+		spacer(6),
+		infoRowDynamic("Gas Fee", gasFeeVal),
+		spacer(4),
+		infoRowDynamic("Gas Limit", gasLimitVal),
+		spacer(4),
+		infoRowDynamic("Gas Price", gasPriceVal),
+		spacer(4),
+		infoRowDynamic("Priority", priorityVal),
+		spacer(10),
+		hRule(),
+		spacer(10),
 		sectionLabel("Block Confirmation"),
 		spacer(6),
 		infoRowDynamic("Block Height", blockHeightVal),
@@ -518,15 +682,19 @@ func showTransferStatusDialog(window fyne.Window, client *WalletClient, chainHea
 	content := container.NewMax(bg, container.NewPadded(inner))
 
 	dlg := dialog.NewCustomWithoutButtons("Transfer Status", content, window)
-	dlg.Resize(fyne.NewSize(480, 540))
+	dlg.Resize(fyne.NewSize(480, 620))
 	dlg.Show()
 
-	go transferStatusDialogWorker(dlg, inner, client, chainHeader, statusIcon, statusTitle, statusSub, progress, txidVal, liveStatus, blockHeightVal, blockHashVal, confirmTimeVal, networkConfVal, amountStr, recipient, memo, amountNSPX)
+	go transferStatusDialogWorker(dlg, inner, client, chainHeader, statusIcon, statusTitle, statusSub, progress, txidVal, liveStatus, blockHeightVal, blockHashVal, confirmTimeVal, networkConfVal, gasFeeVal, gasLimitVal, gasPriceVal, priorityVal, amountStr, recipient, memo, amountNSPX, gasFeeNSPX, gasLimit, gasPrice, priorityLabel, priorityPrice)
 }
 
 // transferStatusDialogWorker runs in a goroutine to broadcast the transaction
 // and poll for confirmation, updating the dialog widgets via fyne.Do.
-func transferStatusDialogWorker(dlg *dialog.CustomDialog, inner *fyne.Container, client *WalletClient, chainHeader *core.SphinxChainHeader, statusIcon, statusTitle, statusSub *canvas.Text, progress *widget.ProgressBar, txidVal, liveStatus, blockHeightVal, blockHashVal, confirmTimeVal, networkConfVal *canvas.Text, amountStr, recipient, memo string, amountNSPX *big.Int) {
+// priorityLabel is the user-visible tier tag (e.g. "High (5x)"); priorityPrice
+// is the exact gas price the confirmed send must carry — the worker
+// broadcasts via SendTransactionWithPriority so the fee preview shown before
+// confirmation and the fee actually paid can never diverge.
+func transferStatusDialogWorker(dlg *dialog.CustomDialog, inner *fyne.Container, client *WalletClient, chainHeader *core.SphinxChainHeader, statusIcon, statusTitle, statusSub *canvas.Text, progress *widget.ProgressBar, txidVal, liveStatus, blockHeightVal, blockHashVal, confirmTimeVal, networkConfVal, gasFeeVal, gasLimitVal, gasPriceVal, priorityVal *canvas.Text, amountStr, recipient, memo string, amountNSPX *big.Int, gasFeeNSPX *big.Int, gasLimit uint64, gasPrice *big.Int, priorityLabel string, priorityPrice *big.Int) {
 	fyne.Do(func() {
 		liveStatus.Text = "Broadcasting signed transaction to node…"
 		liveStatus.Color = colInfo
@@ -534,7 +702,35 @@ func transferStatusDialogWorker(dlg *dialog.CustomDialog, inner *fyne.Container,
 		progress.SetValue(0.25)
 	})
 
-	txID, err := client.SendTransaction(recipient, amountNSPX, memo)
+	// Populate the "Transaction Fee" panel from the values the broadcast
+	// actually carries, resolved by transferFeeRows so the exact strings this
+	// panel shows are produced by one pure, tested function.
+	//
+	// ★ FIX (two bugs at once): these rows used to be written straight from
+	// this background goroutine, but Fyne only permits widget mutation on the
+	// UI goroutine (see the fyne.Do used everywhere else in this file), so the
+	// writes and their Refresh() calls could be lost and the panel could keep
+	// its placeholder "—" for a value already computed. And the gas price was
+	// converted to SPX, which rounds the policy minimum (1 gSPX = 10^-9 SPX)
+	// — and every tier derived from it — to a flat "0"; transferFeeRows renders
+	// it in gSPX instead (see formatGasPriceAmount in theme.go).
+	feeRows := transferFeeRows(chainHeader.Symbol, gasFeeNSPX, gasLimit, gasPrice, priorityLabel)
+	fyne.Do(func() {
+		gasFeeVal.Text = feeRows.GasFeeText
+		gasFeeVal.Color = feeRows.GasFeeColor
+		gasFeeVal.Refresh()
+		gasLimitVal.Text = feeRows.GasLimitText
+		gasLimitVal.Color = feeRows.GasLimitColor
+		gasLimitVal.Refresh()
+		gasPriceVal.Text = feeRows.GasPriceText
+		gasPriceVal.Color = feeRows.GasPriceColor
+		gasPriceVal.Refresh()
+		priorityVal.Text = feeRows.PriorityText
+		priorityVal.Color = feeRows.PriorityColor
+		priorityVal.Refresh()
+	})
+
+	result, err := client.SendTransactionWithPriority(recipient, amountNSPX, memo, priorityPrice)
 
 	if err != nil {
 		fyne.Do(func() {
@@ -562,17 +758,17 @@ func transferStatusDialogWorker(dlg *dialog.CustomDialog, inner *fyne.Container,
 		statusTitle.Color = colInfo
 		statusSub.Text = "Broadcast to network — awaiting block inclusion…"
 		statusSub.Color = colMuted
-		txidVal.Text = truncMiddle(txID, 12)
+		txidVal.Text = truncMiddle(result.TxID, 12)
 		txidVal.Color = colText
 		progress.SetValue(0.5)
-		liveStatus.Text = fmt.Sprintf("Polling for confirmation (txid: %s…)", txID[:min(12, len(txID))])
+		liveStatus.Text = fmt.Sprintf("Polling for confirmation (txid: %s…)", result.TxID[:min(12, len(result.TxID))])
 		liveStatus.Color = colFaint
 		inner.Refresh()
 	})
 
-	addActivity(fmt.Sprintf("Sent %s %s to %s (tx: %s)", amountStr, chainHeader.Symbol, recipient[:min(16, len(recipient))]+"…", txID[:8]+"…"))
+	addActivity(fmt.Sprintf("Sent %s %s to %s (tx: %s)", amountStr, chainHeader.Symbol, recipient[:min(16, len(recipient))]+"…", result.TxID[:8]+"…"))
 
-	conf, _ := client.WaitForTxConfirmation(txID, 300*time.Second)
+	conf, _ := client.WaitForTxConfirmation(result.TxID, 300*time.Second)
 
 	fyne.Do(func() {
 		if conf != nil {
@@ -744,41 +940,74 @@ func describeMintTerms(job MintJob) string {
 }
 
 // pinNFTMetadata pins the ERC-721 metadata JSON for a mint and returns the
-// metadata CID together with its ipfs:// tokenURI.
+// metadata CID together with its ipfs:// tokenURI and the full pin outcome.
 //
-// It uses AddBytesToIPFSWithFallback — the SAME fallback contract as the media
-// payload pin — so a missing or unreachable IPFS daemon cannot abort a
-// collection mint after the file has already been signed. That is exactly the
-// bug behind "Marketplace Token Failed: a collection mint needs an ERC-721
-// metadata tokenURI — fill in the NFT name": the name WAS set, the strict
-// metadata upload failed because the daemon was unreachable, and the resulting
-// empty tokenURI was then misreported as a missing name.
-//
-// The fallback is a deterministic, content-addressed identifier (spxhash-…), so
-// the tokenURI is still a stable commitment and the marketplace token can be
-// minted; the metadata becomes retrievable under the identical CID once pinning
-// succeeds. The returned error is non-nil exactly when that fallback was used,
-// so callers log it as a warning rather than failing the mint.
+// It uses the SAME PinPayload contract as the media pin, so the caller can tell
+// "pinned durably" from "only on this machine" from "not uploaded at all"
+// instead of receiving a plausible-looking spxhash- identifier for a failed
+// upload. The outcome's OptIn flag is what distinguishes an explicitly
+// configured offline mint (SPHINX_IPFS_DISABLE) from a failure the caller
+// should refuse to build on: the mint worker aborts a collection mint whose
+// metadata was not really uploaded, because a tokenURI that nobody can fetch
+// is not an NFT — and a bare "ipfs://" with an empty CID (the old failure mode
+// of this function) passes the node's ipfs:// prefix check while pinning
+// nothing.
 //
 // The bytes are marshalled exactly as mint.UploadNFTMetadata marshals them
-// (MarshalIndent with two spaces), so a successful real pin yields the same
-// content CID this function would otherwise have produced.
-func pinNFTMetadata(uploader *storage.Client, nftMeta *mint.NFTMetadata, filename string) (metadataCID, tokenURI string, warn error) {
+// (MarshalIndent with two spaces), so a real pin yields the same content CID
+// that helper would have produced.
+func pinNFTMetadata(uploader *storage.Client, nftMeta *mint.NFTMetadata, filename string) (metadataCID, tokenURI string, outcome storage.PinOutcome) {
 	if nftMeta == nil {
-		return "", "", errors.New("nil NFT metadata")
+		outcome.Warn = errors.New("nil NFT metadata")
+		return "", "", outcome
 	}
 	if uploader == nil {
-		return "", "", errors.New("nil IPFS uploader")
+		outcome.Warn = errors.New("nil IPFS uploader")
+		return "", "", outcome
 	}
 	data, err := json.MarshalIndent(nftMeta, "", "  ")
 	if err != nil {
-		return "", "", fmt.Errorf("marshal NFT metadata: %w", err)
+		outcome.Warn = fmt.Errorf("marshal NFT metadata: %w", err)
+		return "", "", outcome
 	}
-	cid, warn := uploader.AddBytesToIPFSWithFallback(data, filename)
-	if strings.TrimSpace(cid) == "" {
-		return "", "", errors.New("empty metadata CID")
+	outcome = uploader.PinPayload(data, filename)
+	if strings.TrimSpace(outcome.CID) == "" {
+		if outcome.Warn == nil {
+			outcome.Warn = errors.New("empty metadata CID")
+		}
+		return "", "", outcome
 	}
-	return cid, "ipfs://" + cid, warn
+	return outcome.CID, "ipfs://" + outcome.CID, outcome
+}
+
+// pinBannerMessage renders a pin outcome as the Mint Status dialog's banner:
+// where the bytes actually are, and what that means for retrievability. It is
+// deliberately explicit in every case, because the previous behaviour showed a
+// green "Minted ✓" even when the payload had never left the machine.
+func pinBannerMessage(p storage.PinOutcome) string {
+	switch {
+	case !p.Uploaded() && p.OptIn:
+		return "⚠  OFFLINE MODE — nothing was uploaded. " + p.CID + " is a local content hash, NOT a retrievable IPFS CID; nobody else can fetch this data."
+	case !p.Uploaded():
+		return "⚠  NOTHING WAS UPLOADED — no IPFS backend accepted the file, so it exists only on this disk."
+	case !p.Durable():
+		return "⚠  PINNED TO YOUR LOCAL IPFS DAEMON ONLY — retrievable now, but unreachable once that daemon goes offline. Set SPHINX_IPFS_PINNING_SERVICE and SPHINX_IPFS_PINNING_TOKEN to pin durably."
+	default:
+		return "✓  Pinned durably via " + p.Source + " — retrievable without this machine."
+	}
+}
+
+// pinBannerImportance maps a pin outcome to the banner's severity, so the
+// dialog's colour matches how durable the pin actually is.
+func pinBannerImportance(p storage.PinOutcome) widget.Importance {
+	switch {
+	case !p.Uploaded():
+		return widget.DangerImportance
+	case !p.Durable():
+		return widget.WarningImportance
+	default:
+		return widget.SuccessImportance
+	}
 }
 
 // savedCollectionFile is where this identity's default SIP-721 collection is
@@ -856,6 +1085,13 @@ type mintStatusFields struct {
 	progress    *widget.ProgressBar
 	stepVal     *canvas.Text
 
+	// pinBanner is the durability banner: it states plainly where the bytes
+	// actually are (durably pinned / local daemon only / not uploaded at all),
+	// so a completed mint can never again look like a success while the
+	// payload has only ever existed on this disk. Hidden until it has
+	// something to say.
+	pinBanner *widget.Label
+
 	fileVal        *canvas.Text
 	cidVal         *canvas.Text
 	tokenURIVal    *canvas.Text
@@ -896,6 +1132,14 @@ func showMintStatusDialog(job MintJob) {
 	f.stepVal = canvas.NewText("Reading file…", colFaint)
 	f.stepVal.TextSize = 11
 	f.stepVal.TextStyle = fyne.TextStyle{Italic: true}
+
+	// Durability banner — see mintStatusFields.pinBanner. A wrapping Label
+	// (not canvas.Text) so a long explanation cannot stretch the window.
+	f.pinBanner = widget.NewLabel("")
+	f.pinBanner.Wrapping = fyne.TextWrapWord
+	f.pinBanner.TextStyle = fyne.TextStyle{Bold: true}
+	f.pinBanner.Importance = widget.DangerImportance
+	f.pinBanner.Hide()
 
 	f.fileVal = canvas.NewText(filepath.Base(job.SelectedFile), colMuted)
 	f.fileVal.TextSize = 11
@@ -946,6 +1190,10 @@ func showMintStatusDialog(job MintJob) {
 		spacer(6),
 		container.NewCenter(f.statusTitle),
 		container.NewCenter(f.statusSub),
+		spacer(10),
+		// Hidden until the pin outcome is known; a hidden Label contributes
+		// no layout space, so the dialog is unchanged for durable pins.
+		f.pinBanner,
 		spacer(16),
 		f.progress,
 		container.NewCenter(f.stepVal),
@@ -1025,6 +1273,37 @@ func mintStatusDialogWorker(job MintJob, f mintStatusFields) {
 		})
 	}
 
+	// pinBannerResized tracks whether the dialog has already been grown to make
+	// room for the durability banner, so repeated updates do not keep resizing.
+	var pinBannerResized bool
+
+	// setPinBanner shows (or, with empty text, hides) the durability banner.
+	// It is the GUI half of the PinOutcome contract: the mint's success state
+	// now depends on where the bytes actually are, not merely on the pipeline
+	// reaching its last step.
+	setPinBanner := func(text string, importance widget.Importance) {
+		fyne.Do(func() {
+			if strings.TrimSpace(text) == "" {
+				f.pinBanner.Hide()
+				f.pinBanner.Refresh()
+				return
+			}
+			f.pinBanner.Text = text
+			f.pinBanner.Importance = importance
+			f.pinBanner.Show()
+			f.pinBanner.Refresh()
+			// The dialog was sized before the banner existed. Fyne does not
+			// re-fit a shown window when its content changes, so a banner that
+			// appears later would be clipped at the bottom edge — i.e. the one
+			// warning that must never be missed would be the part cut off.
+			// Grow the dialog once, and only once, to make room.
+			if f.dlg != nil && !pinBannerResized {
+				f.dlg.Resize(fyne.NewSize(520, 700))
+				pinBannerResized = true
+			}
+		})
+	}
+
 	step(0.1, "Reading file…")
 	data, err := os.ReadFile(job.SelectedFile)
 	if err != nil {
@@ -1062,27 +1341,69 @@ func mintStatusDialogWorker(job MintJob, f mintStatusFields) {
 	// mint may never upload, and which an unreachable IPFS daemon can lose).
 	sign.SetNFTMetadata(meta, strings.TrimSpace(job.NFTName), strings.TrimSpace(job.NFTDescription))
 
-	// Upload signed payload bytes to IPFS BEFORE the sidecar is written (so
-	// the on-chain mint can bind to a real CID and the .usimeta sidecar can
-	// record it). A missing/unreachable IPFS daemon must NOT block the
-	// mint: AddBytesToIPFSWithFallback returns a deterministic local CID,
-	// and we surface the warning while continuing with the signature,
-	// receipt, and on-chain anchor.
+	// Upload the payload BEFORE the sidecar is written, so the on-chain mint
+	// can bind to a real CID and the .usimeta sidecar can record it.
+	//
+	// ★ CANONICAL ARTIFACT: the bytes uploaded here are the CLEAN,
+	// PRE-SIGNATURE file. That is deliberate, and it is what the receipt's
+	// PayloadHash and the anchor's CID commit to. The signature cannot be part
+	// of the bytes it signs, so the final on-disk file necessarily differs
+	// from the pinned copy by the signature container it gains — which is why
+	// Meta records BOTH: IPFSPayloadHash (the pinned bytes, = the receipt's
+	// PayloadHash) and FileHash (the signed file, what Verify re-hashes). An
+	// expected difference, never corruption.
+	//
+	// ★ This is where the old pipeline lied. AddBytesToIPFSWithFallback
+	// returned a plausible spxhash- "CID" whenever the daemon was
+	// unreachable, that CID was committed on-chain, and the dialog still
+	// ended in a green "Minted ✓" — even though the bytes had never left this
+	// machine. PinPayload reports durability explicitly, so the mint now stops
+	// BEFORE signing anything unless the operator explicitly opted into
+	// offline mode (SPHINX_IPFS_DISABLE=true).
 	step(0.58, "Uploading to IPFS…")
-	ipfsClient := storage.NewClient(storage.DefaultConfig())
-	cid, ipfsWarn := ipfsClient.AddBytesToIPFSWithFallback(data, fileBase)
-	ipfsNote := ""
-	if ipfsWarn != nil {
-		ipfsNote = " (IPFS unreachable — anchored with a local fallback CID)"
-		log.Printf("[WARN] Mint Data: continuing without real IPFS upload: %v", ipfsWarn)
+	ipfsCfg := storage.DefaultConfig()
+	ipfsClient := storage.NewClient(ipfsCfg)
+	pin := ipfsClient.PinPayload(data, fileBase)
+
+	if !pin.Uploaded() && !pin.OptIn {
+		// Nothing was uploaded, and this was not an opted-in offline mint.
+		// Refuse to sign or anchor: signing first would leave a
+		// signed-but-unanchored file that cannot be re-minted (IsAlreadySigned
+		// blocks re-signing), turning a recoverable upload problem into a dead
+		// end. The file on disk is untouched.
+		detail := pin.Warn
+		if detail == nil {
+			detail = storage.ErrNotUploaded
+		}
+		setPinBanner("⚠  NOTHING WAS UPLOADED — no IPFS backend accepted the file, so it exists only on this disk. The mint was stopped before signing. Start an IPFS daemon at "+
+			ipfsCfg.IPFSAddr+", or set SPHINX_IPFS_PINNING_SERVICE and SPHINX_IPFS_PINNING_TOKEN to pin durably, then mint again.", widget.DangerImportance)
+		fail("Not Uploaded — Mint Stopped", fmt.Errorf("%v\n\nNothing was signed and nothing was anchored. Your file is unchanged.", detail))
+		return
 	}
-	gatewayBase := storage.DefaultConfig().GatewayBaseURL
+
+	cid := pin.CID
+	gatewayBase := ipfsCfg.GatewayBaseURL
 	metadataURI := gatewayBase + "/ipfs/" + cid
 
+	if pin.Warn != nil {
+		log.Printf("[WARN] Mint Data: %v", pin.Warn)
+	}
+
+	// ipfsNote is appended to the final status text so the durable record of
+	// the mint says how retrievable the payload really is.
+	ipfsNote := ""
+	switch {
+	case !pin.Uploaded():
+		ipfsNote = " (NOT uploaded — local content hash only)"
+	case !pin.Durable():
+		ipfsNote = " (pinned to the local daemon only — not durable)"
+	}
+
+	setPinBanner(pinBannerMessage(pin), pinBannerImportance(pin))
 	fyne.Do(func() {
 		f.cidVal.Text = truncMiddle(cid, 12)
 		f.cidVal.Color = colText
-		if ipfsWarn != nil {
+		if !pin.Durable() {
 			f.cidVal.Color = colWarn
 		}
 		f.cidVal.Refresh()
@@ -1093,6 +1414,7 @@ func mintStatusDialogWorker(job MintJob, f mintStatusFields) {
 	// ERC-721 NFTs (name, description, image ipfs://<mediaCID>, attrs).
 	var tokenURI string
 	var metadataCID string
+	var metaPin storage.PinOutcome
 	if cid != "" && strings.TrimSpace(job.NFTName) != "" {
 		step(0.63, "Uploading metadata JSON…")
 		nftMeta := mint.BuildNFTMetadata(
@@ -1106,20 +1428,33 @@ func mintStatusDialogWorker(job MintJob, f mintStatusFields) {
 			"", // mintID not known yet
 			0,  // blockHeight not known yet
 		)
-		// Pin the metadata JSON with the SAME fallback contract as the payload
-		// above (see pinNFTMetadata), so an unreachable IPFS daemon cannot abort
-		// a collection mint after the file is already signed.
-		var metaWarn error
-		metadataCID, tokenURI, metaWarn = pinNFTMetadata(ipfsClient, nftMeta, fileBase+"_metadata.json")
-		if metaWarn != nil {
-			log.Printf("[WARN] Mint Data: metadata JSON pinned via deterministic fallback %s: %v", tokenURI, metaWarn)
+		// Pin the metadata JSON with the SAME PinPayload contract as the
+		// payload above (see pinNFTMetadata). If it could not really be
+		// uploaded — and offline mode was not explicitly opted into — abort
+		// BEFORE signing: a tokenURI nobody can fetch is not an NFT, and the
+		// old fallback produced either a spxhash tokenURI or a bare "ipfs://"
+		// (empty CID) that passed the node's ipfs:// prefix check while
+		// pinning nothing.
+		metadataCID, tokenURI, metaPin = pinNFTMetadata(ipfsClient, nftMeta, fileBase+"_metadata.json")
+		if !metaPin.Uploaded() && !metaPin.OptIn {
+			detail := metaPin.Warn
+			if detail == nil {
+				detail = storage.ErrNotUploaded
+			}
+			setPinBanner("⚠  NFT METADATA WAS NOT UPLOADED — the marketplace token needs an ERC-721 metadata tokenURI that anyone can fetch, and none could be pinned. The mint was stopped before signing. "+
+				"Start an IPFS daemon at "+ipfsCfg.IPFSAddr+", or set SPHINX_IPFS_PINNING_SERVICE and SPHINX_IPFS_PINNING_TOKEN, then mint again.", widget.DangerImportance)
+			fail("Metadata Not Uploaded — Mint Stopped", fmt.Errorf("%v\n\nNothing was signed and nothing was anchored. Your file is unchanged.", detail))
+			return
+		}
+		if metaPin.Warn != nil {
+			log.Printf("[WARN] Mint Data: metadata pin: %v", metaPin.Warn)
 		} else {
 			log.Printf("[INFO] Mint Data: metadata JSON uploaded, tokenURI=%s", tokenURI)
 		}
 		fyne.Do(func() {
 			f.tokenURIVal.Text = truncMiddle(tokenURI, 18)
 			f.tokenURIVal.Color = colText
-			if metaWarn != nil {
+			if !metaPin.Durable() {
 				f.tokenURIVal.Color = colWarn
 			}
 			f.tokenURIVal.Refresh()
@@ -1173,6 +1508,16 @@ func mintStatusDialogWorker(job MintJob, f mintStatusFields) {
 		mintRes.Receipt.RoyaltyBPS = job.RoyaltyBPS
 		mintRes.Receipt.UsageFeeNSPX = job.UsageFeeNSPX
 		mintRes.Receipt.RoyaltyRecipient = job.RoyaltyRecipient
+
+		// Record the hash of the EXACT bytes that were pinned — the receipt's
+		// PayloadHash. It intentionally differs from Meta.FileHash, which
+		// covers the signed on-disk file: the pinned artifact is the clean
+		// pre-signature original (the signature cannot be part of the bytes it
+		// signs). Recording it here makes that expected difference visible to
+		// a verifier instead of looking like corruption. It reaches disk
+		// because RefreshOnChainProvenance re-embeds the whole Meta into the
+		// file's container once the anchor resolves.
+		sign.SetIPFSPayloadHash(meta, mintRes.Receipt.PayloadHash)
 	}
 
 	if mintErr != nil {
@@ -1639,39 +1984,42 @@ func (c *WalletClient) AnchorMintReceipt(receipt *mint.MintReceipt) (txID string
 	// 2) Build deterministic CIDHash and create a storage artifact payload.
 	// 3) Anchor only the CIDHash/contract payload on-chain (replace receipt-anchor-only).
 	//
-	// NOTE: This uses storage module with safe fallbacks when IPFS is disabled.
+	// The receipt-JSON pin is an OFF-CHAIN CACHE for the node-side artifact
+	// index: the on-chain anchor commits the MEDIA CID/receipt hash (see
+	// mint.BuildAnchorData(anchorTag)), not this JSON's CID. It is therefore
+	// best-effort and never blocks anchoring — but it must still be honest.
+	// PinPayload reports whether anything was really stored, so when nothing
+	// was, the node-side cache is skipped entirely instead of registering an
+	// artifact that points at a local content hash.
 	payloadJSON, err := json.Marshal(receipt)
 	if err != nil {
 		return "", "", nil, 0, fmt.Errorf("marshal mint receipt: %w", err)
 	}
 
 	ipfsClient := storage.NewClient(storage.DefaultConfig())
-	cid, cidErr := ipfsClient.AddBytesToIPFSWithFallback(payloadJSON, fmt.Sprintf("mint_%s.json", receipt.MintID))
-	if cidErr != nil {
-		// Not fatal: the on-chain anchor only needs the CID hash commitment.
-		// A missing IPFS daemon must not block anchoring the receipt.
-		log.Printf("[WARN] AnchorMintReceipt: receipt not uploaded to IPFS, continuing with fallback CID: %v", cidErr)
-	}
-	cidHashHex := storage.CIDHash(cid)
-
-	artifact := &storage.StorageArtifact{
-		MintID:     receipt.MintID,
-		Subject:    receipt.Subject,
-		CID:        cid,
-		CIDHashHex: cidHashHex,
-		// best-effort fields
-		PayloadHash:   receipt.PayloadHash,
-		ReceiptHash:   "",
-		AnchorTagType: "nft_anchor",
+	receiptPin := ipfsClient.PinPayload(payloadJSON, fmt.Sprintf("mint_%s.json", receipt.MintID))
+	switch {
+	case !receiptPin.Uploaded():
+		log.Printf("[WARN] AnchorMintReceipt: receipt JSON not uploaded — skipping the node-side artifact cache (the on-chain anchor is unaffected): %v", receiptPin.Warn)
+	case !receiptPin.Durable():
+		log.Printf("[INFO] AnchorMintReceipt: receipt JSON pinned to the local daemon only (not durable): %v", receiptPin.Warn)
 	}
 
-	// Store artifact association on node (best-effort, bounded).
-	// This is a second full RPC round-trip (handshake + storeartifact); when
-	// the node is slow or unreachable it must not stall the anchor behind
-	// it — a timeout here only skips an off-chain cache, never the on-chain
-	// commitment. Skip it entirely when IPFS is disabled: without a real
-	// pinned CID there is nothing worth caching node-side.
-	if !storage.DefaultConfig().DisableIPFS {
+	// Store artifact association on node (best-effort, bounded), and only when
+	// the receipt JSON is actually retrievable: there is nothing worth caching
+	// node-side otherwise. This is a second full RPC round-trip (handshake +
+	// storeartifact); when the node is slow or unreachable it must not stall
+	// the anchor behind it — a timeout here only skips an off-chain cache,
+	// never the on-chain commitment.
+	if receiptPin.Uploaded() && !storage.DefaultConfig().DisableIPFS {
+		artifact := &storage.StorageArtifact{
+			MintID:        receipt.MintID,
+			Subject:       receipt.Subject,
+			CID:           receiptPin.CID,
+			CIDHashHex:    storage.CIDHash(receiptPin.CID),
+			PayloadHash:   receipt.PayloadHash,
+			AnchorTagType: "nft_anchor",
+		}
 		storeDone := make(chan struct{})
 		go func() {
 			defer close(storeDone)
@@ -1699,17 +2047,6 @@ func (c *WalletClient) AnchorMintReceipt(receipt *mint.MintReceipt) (txID string
 	log.Printf("[WalletRPC] AnchorMintReceipt: anchoring mint_id=%s subject=%s",
 		receipt.MintID, receipt.Subject)
 
-	kp, skBytes, err := keys.LoadKeyFromDisk(sessionPassphrase)
-	if err != nil {
-		return "", "", nil, 0, fmt.Errorf("failed to load key: %w", err)
-	}
-
-	defer func() {
-		for i := range skBytes {
-			skBytes[i] = 0
-		}
-	}()
-
 	// Mint anchors are a paid operation under the shared policy schedule: the
 	// ordinary gas quote only covers the data footprint, so QuoteMintDataGas
 	// raises the gas price until the gas fee reaches the policy mint fee
@@ -1727,14 +2064,6 @@ func (c *WalletClient) AnchorMintReceipt(receipt *mint.MintReceipt) (txID string
 	//   pinningMonths — IPFS retention (governance default).
 	mintPolicy := policy.GetDefaultPolicyParams()
 	gasQuote := mintPolicy.QuoteMintDataGas(uint64(len(payloadJSON)), uint64(len(anchorData)), mintPolicy.MintBaseHashes, mintPolicy.MintPinningMonths)
-
-	// ChainID for EIP-155 replay protection — must match the node's network.
-	// Fall back to the Sphinx mainnet chain ID (7331) when the header is
-	// unavailable.
-	chainID := uint64(7331)
-	if chainHdr := core.GetSphinxChainHeader(); chainHdr != nil && chainHdr.ChainID != 0 {
-		chainID = chainHdr.ChainID
-	}
 
 	// Use the node's exact current nonce (mempool enforces an EXACT match —
 	// "invalid nonce: %d must equal %d"). A timestamp fallback can never pass
@@ -1757,8 +2086,7 @@ func (c *WalletClient) AnchorMintReceipt(receipt *mint.MintReceipt) (txID string
 	}
 
 	tx := &types.Transaction{
-		ID:         "",
-		ChainID:    chainID,
+		ChainID:    chainIDFor(),
 		Sender:     rawSender,
 		Receiver:   rawSender, // self-send: this tx exists only to carry data
 		Amount:     mintFeeNSPX,
@@ -1766,46 +2094,15 @@ func (c *WalletClient) AnchorMintReceipt(receipt *mint.MintReceipt) (txID string
 		GasPrice:   gasQuote.GasPrice,
 		Nonce:      nonce,
 		Timestamp:  time.Now().Unix(),
-		Signature:  []byte{},
 		ReturnData: anchorData,
 	}
-	tx.ID = tx.Hash()
 
-	if err := signTransactionLocally(tx, skBytes, kp.PublicKey); err != nil {
-		c.releasePendingNonce(sessionFingerprint, nonce)
-		return "", "", nil, 0, fmt.Errorf("failed to sign anchor transaction: %w", err)
-	}
-
-	txData, err := json.Marshal(tx)
+	// Sign, encode and broadcast through the shared path. The nonce is passed
+	// explicitly because the caller records it alongside the anchor fee.
+	txID, err = abi.Transact(c.transactOpts(chainIDFor(), &nonce), tx)
 	if err != nil {
 		c.releasePendingNonce(sessionFingerprint, nonce)
-		return "", "", nil, 0, fmt.Errorf("failed to marshal transaction: %w", err)
-	}
-
-	rawTx := hex.EncodeToString(txData)
-
-	resultData, err := rpc.CallRPC(c.nodeAddr, "sendrawtransaction", []interface{}{rawTx}, 120)
-	if err != nil {
-		c.releasePendingNonce(sessionFingerprint, nonce)
-		return "", "", nil, 0, fmt.Errorf("RPC error: %w", err)
-	}
-	if len(resultData) == 0 || string(resultData) == "null" {
-		c.releasePendingNonce(sessionFingerprint, nonce)
-		return "", "", nil, 0, errors.New("empty response")
-	}
-
-	var result struct {
-		TxID   string `json:"txid"`
-		Status string `json:"status"`
-		Error  string `json:"error"`
-	}
-	if err := json.Unmarshal(resultData, &result); err != nil {
-		c.releasePendingNonce(sessionFingerprint, nonce)
-		return "", "", nil, 0, fmt.Errorf("parse response: %w", err)
-	}
-	if result.Error != "" {
-		c.releasePendingNonce(sessionFingerprint, nonce)
-		return "", "", nil, 0, fmt.Errorf("anchor tx rejected: %s", result.Error)
+		return "", "", nil, 0, fmt.Errorf("broadcast anchor transaction: %w", err)
 	}
 
 	// After successful RPC call:
@@ -1822,8 +2119,8 @@ func (c *WalletClient) AnchorMintReceipt(receipt *mint.MintReceipt) (txID string
 		// do not fail the operation, just warn
 		anchorPath = ""
 	}
-	log.Printf("[WalletRPC] AnchorMintReceipt: anchored as txid=%s, anchor saved to %s", result.TxID, anchorPath)
-	return result.TxID, anchorPath, mintFeeNSPX, nonce, nil
+	log.Printf("[WalletRPC] AnchorMintReceipt: anchored as txid=%s, anchor saved to %s", txID, anchorPath)
+	return txID, anchorPath, mintFeeNSPX, nonce, nil
 }
 
 // MintNFTInCollection executes the Ethereum-close SIP-721 collection mint for

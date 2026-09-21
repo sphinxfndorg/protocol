@@ -1605,15 +1605,15 @@ func (s *Storage) StoreBlock(block *types.Block) error {
 			height, blockHash, s.totalBlocks, block.Header.TxsRoot)
 	}
 
-	// Persist updated indices. block_index.json is a periodic checkpoint,
-	// not the source of truth — rawdb's h: lookups, written atomically with
-	// each block above, are — so rewriting the whole map on every block is
-	// avoided. Every block is still durable in rawdb, and Close checkpoints.
-	s.storesSinceCheckpoint++
-	if s.storesSinceCheckpoint >= blockIndexCheckpointEvery {
-		if err := s.saveBlockIndex(); err != nil {
-			return fmt.Errorf("failed to save block index: %w", err)
-		}
+	// Persist the updated index on every stored block. block_index.json is
+	// read back directly by GetGenesisHash, by GetAllBlocks' disk fallback,
+	// and by loadBlockIndex whenever no rawdb handle is attached, so it must
+	// always list the full set of blocks this node holds — a batched
+	// checkpoint that is stale (e.g. still listing only genesis) is read back
+	// as a real index by those callers. rawdb's h: lookups remain the
+	// authoritative reverse index; this file is kept in lockstep with it.
+	if err := s.saveBlockIndex(); err != nil {
+		return fmt.Errorf("failed to save block index: %w", err)
 	}
 	if err := s.saveChainState(); err != nil {
 		return fmt.Errorf("failed to save chain state: %w", err)
@@ -2777,15 +2777,17 @@ func isHexEncodedGenesis(s string) bool {
 	return s[:16] == "47454e455349535f"
 }
 
-// blockIndexCheckpointEvery bounds how many StoreBlock calls may pass before
-// block_index.json is rewritten. The file is only a checkpoint of the
-// in-memory index — rawdb's h: lookups are the durable copy and
-// loadBlockIndex rebuilds from them — so a stale file cannot lose blocks,
-// and rewriting the whole map on every block is pure overhead.
-const blockIndexCheckpointEvery = 1000
-
+// saveBlockIndex writes the complete hash -> height index to
+// block_index.json.
+//
+// This runs on every StoreBlock (and on DeleteBlocksAbove, ResetTip,
+// ReplaceGenesis, and Close) rather than being batched behind a checkpoint
+// interval. The file is read back directly by GetGenesisHash, by
+// GetAllBlocks' disk fallback, and by loadBlockIndex whenever no rawdb handle
+// is attached, so a stale file is not merely cosmetic — it presents a
+// truncated chain to those callers. rawdb's h: lookups are still the
+// authoritative reverse index; this file mirrors them.
 func (s *Storage) saveBlockIndex() error {
-	s.storesSinceCheckpoint = 0
 	indexFile := filepath.Join(s.indexDir, "block_index.json")
 
 	// Create a simplified index for persistence
@@ -2812,10 +2814,15 @@ func (s *Storage) saveBlockIndex() error {
 // The set of blocks comes from rawdb's h:<hash> -> height lookups when a db
 // handle is attached: they are written in the same atomic batch as each
 // header, so they are the durable, complete index, and rebuilding from them
-// means a missing or stale block_index.json checkpoint can no longer hide
-// blocks. block_index.json — now written periodically rather than once per
-// block — is used only as a fallback when rawdb has no entries: a chain
-// written before rawdb, or no db handle yet, as during NewStorage.
+// means a missing or stale block_index.json can no longer hide blocks.
+// block_index.json is used as a fallback when rawdb has no entries: a chain
+// written before rawdb, or no db handle yet, as during NewStorage. SetDB
+// re-runs this function once the handle is attached, so the rawdb path is the
+// one that wins on a normal restart.
+//
+// Whatever was loaded is written back to block_index.json before returning,
+// so the file always exists and always lists every block this node holds —
+// including entries that were only ever present in rawdb.
 func (s *Storage) loadBlockIndex() error {
 	indexFile := filepath.Join(s.indexDir, "block_index.json")
 
@@ -2912,6 +2919,18 @@ func (s *Storage) loadBlockIndex() error {
 		// Remove the corrupted index file
 		if err := os.Remove(indexFile); err != nil {
 			logger.Warn("Warning: Failed to remove corrupted index file: %v", err)
+		}
+	}
+
+	// Materialize the index from what was actually loaded. Entries rebuilt
+	// from rawdb would otherwise not reach the file until the next StoreBlock,
+	// which is exactly how a node that restarted on a rawdb-only chain ends up
+	// with a missing or genesis-only block_index.json — and that file is read
+	// directly by GetGenesisHash and GetAllBlocks. Failure is non-fatal: the
+	// in-memory index is already correct and rawdb stays authoritative.
+	if loadedCount > 0 {
+		if err := s.saveBlockIndex(); err != nil {
+			logger.Warn("loadBlockIndex: failed to write block_index.json: %v", err)
 		}
 	}
 

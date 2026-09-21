@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	common "github.com/sphinxfndorg/protocol/src/common"
 	database "github.com/sphinxfndorg/protocol/src/core/state"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
 )
@@ -61,7 +62,8 @@ func makeSimpleTx(id, sender, receiver string, amount int64) *types.Transaction 
 
 type crashTestHarness struct {
 	t      *testing.T
-	dir    string
+	dir    string // absolute temp root, used as the node data dir
+	node   string // node identifier passed to NewStorage
 	dbPath string
 	store  *Storage
 	db     *database.DB
@@ -76,6 +78,18 @@ func newCrashTestHarness(t *testing.T) *crashTestHarness {
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
 
+	// NewStorage resolves its directories through common.GetDataDir() joined
+	// with "Node-" + the name it is given, so point the global data dir at
+	// this test's temp dir and pass a bare node name. Passing the absolute
+	// temp path instead would be re-wrapped as "Node-/var/..." and written
+	// relative to the test's working directory, leaving stray
+	// src/state/data/Node-/var/... trees behind on every run.
+	prevDataDir := common.GetDataDir()
+	common.SetDataDir(dir)
+	t.Cleanup(func() { common.SetDataDir(prevDataDir) })
+
+	const nodeID = "crash-test-node"
+
 	// Create LevelDB instance
 	dbPath := filepath.Join(dir, "leveldb")
 	db, err := database.NewLevelDB(dbPath)
@@ -85,7 +99,7 @@ func newCrashTestHarness(t *testing.T) *crashTestHarness {
 	t.Cleanup(func() { db.Close() })
 
 	// Create storage
-	store, err := NewStorage(dir)
+	store, err := NewStorage(nodeID)
 	if err != nil {
 		t.Fatalf("NewStorage: %v", err)
 	}
@@ -94,6 +108,7 @@ func newCrashTestHarness(t *testing.T) *crashTestHarness {
 	return &crashTestHarness{
 		t:      t,
 		dir:    dir,
+		node:   nodeID,
 		dbPath: dbPath,
 		store:  store,
 		db:     db,
@@ -183,7 +198,7 @@ func TestRawdbWriteThenReload(t *testing.T) {
 	}
 
 	// Reload by creating a new Storage pointing at the same directory.
-	store2, err := NewStorage(h.dir)
+	store2, err := NewStorage(h.node)
 	if err != nil {
 		t.Fatalf("NewStorage (reload): %v", err)
 	}

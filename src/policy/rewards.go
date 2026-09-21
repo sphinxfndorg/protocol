@@ -8,6 +8,49 @@ import (
 	"math/big"
 )
 
+// BlockRewardSplit is the deterministic split of one minted block reward.
+type BlockRewardSplit struct {
+	// Total is the full minted reward (post supply-cap clamp).
+	Total *big.Int `json:"total"`
+	// Miner is credited to the proposer's reward address.
+	Miner *big.Int `json:"miner"`
+	// Burned is credited to the protocol burn (DEAD) address.
+	Burned *big.Int `json:"burned"`
+}
+
+// SplitBlockReward splits reward into the proposer's share and the burn
+// share per BlockRewardBurnBPS. Integer math only (floor on burn, remainder
+// to miner) so miner+burned == reward exactly. A copy-safe zero split is
+// returned for nil/non-positive rewards.
+func (p *PolicyParameters) SplitBlockReward(reward *big.Int) *BlockRewardSplit {
+	if reward == nil || reward.Sign() <= 0 {
+		return &BlockRewardSplit{Total: big.NewInt(0), Miner: big.NewInt(0), Burned: big.NewInt(0)}
+	}
+	total := new(big.Int).Set(reward)
+	bps := uint64(0)
+	if p != nil {
+		bps = p.BlockRewardBurnBPS
+	}
+	if bps == 0 {
+		return &BlockRewardSplit{Total: total, Miner: total, Burned: big.NewInt(0)}
+	}
+	if bps > basisPoints {
+		bps = basisPoints
+	}
+	burned := new(big.Int).Mul(total, new(big.Int).SetUint64(bps))
+	burned.Div(burned, new(big.Int).SetUint64(basisPoints))
+	miner := new(big.Int).Sub(total, burned)
+	return &BlockRewardSplit{Total: total, Miner: miner, Burned: burned}
+}
+
+// GetBlockRewardBurnShare returns the fraction of each block reward burned.
+func (p *PolicyParameters) GetBlockRewardBurnShare() float64 {
+	if p == nil {
+		return 0
+	}
+	return float64(p.BlockRewardBurnBPS) / float64(basisPoints)
+}
+
 // CalculateValidatorRewardExact returns the commission portion of an epoch's
 // staking rewards using integer basis points. The staking subsystem can use it
 // when it snapshots validator and delegation balances at an epoch boundary.

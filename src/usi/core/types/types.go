@@ -39,6 +39,19 @@ type Meta struct {
 	IPFSCID     string `json:"ipfs_cid,omitempty"`     // IPFS CID the payload was pinned under
 	BlockHeight uint64 `json:"block_height,omitempty"` // chain-tip height at mint time
 
+	// IPFSPayloadHash is hex(SHAKE-256 with org) of the EXACT bytes uploaded
+	// to IPFS — the preimage of IPFSCID, and byte-for-byte equal to the mint
+	// receipt's PayloadHash (see mint.Mint). It is deliberately NOT FileHash:
+	// FileHash covers the SIGNED on-disk file (signature container / XMP
+	// segment included), and that cannot exist before the signature does, so
+	// the two values differ by construction. The pinned bytes are canonical
+	// for IPFS/anchor retrieval; FileHash remains canonical for signature
+	// verification. Optional, so legacy .usimeta sidecars still decode.
+	//
+	// Without this field the divergence was invisible, and a receipt whose
+	// PayloadHash != meta.FileHash looked like corruption.
+	IPFSPayloadHash string `json:"ipfs_payload_hash,omitempty"`
+
 	// ERC-721 NFT metadata context (set when minting NFTs with metadata JSON).
 	// TokenURI points to the metadata JSON on IPFS (like Ethereum ERC-721).
 	// NFTName/NFTDescription mirror the metadata JSON's name/description so
@@ -131,6 +144,7 @@ func (m *Meta) Clone() *Meta {
 		DocumentTitle:      m.DocumentTitle,
 		IPFSCID:            m.IPFSCID,
 		BlockHeight:        m.BlockHeight,
+		IPFSPayloadHash:    m.IPFSPayloadHash,
 		TokenURI:           m.TokenURI,
 		MetadataCID:        m.MetadataCID,
 		NFTName:            m.NFTName,

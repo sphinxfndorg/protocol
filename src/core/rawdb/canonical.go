@@ -36,6 +36,32 @@ func ReadCanonicalHash(db *database.DB, height uint64) (string, error) {
 	return string(data), nil
 }
 
+// ReadHeightLookups returns every hash->height pair recorded under the h:
+// prefix. WriteCanonicalHash and writeBlockBatch maintain that prefix for
+// every stored block, so it is a durable reverse index that a caller can
+// rebuild an in-memory hash->height map from without reading a single block
+// body, or depending on the periodically-checkpointed block_index.json.
+// Corrupt or malformed entries are skipped rather than aborting the read.
+func ReadHeightLookups(db *database.DB) (map[string]uint64, error) {
+	keys, values, err := db.ListEntriesWithPrefix(heightLookupPrefix, 0)
+	if err != nil {
+		return nil, fmt.Errorf("rawdb: list height lookups: %w", err)
+	}
+
+	out := make(map[string]uint64, len(keys))
+	for i, key := range keys {
+		if len(key) <= len(heightLookupPrefix) {
+			continue
+		}
+		height, err := decodeHeight(string(values[i]))
+		if err != nil {
+			continue
+		}
+		out[key[len(heightLookupPrefix):]] = height
+	}
+	return out, nil
+}
+
 func ReadHeightByHash(db *database.DB, hash string) (uint64, error) {
 	data, err := db.GetQuiet(heightLookupKey(hash))
 	if err != nil {

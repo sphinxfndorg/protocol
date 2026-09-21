@@ -11,6 +11,7 @@ import (
 	"github.com/sphinxfndorg/protocol/src/contracts"
 	database "github.com/sphinxfndorg/protocol/src/core/state"
 	txtypes "github.com/sphinxfndorg/protocol/src/core/transaction"
+	storage "github.com/sphinxfndorg/protocol/src/state"
 )
 
 const (
@@ -102,9 +103,23 @@ func callIB(t *testing.T, method string, args map[string]string) []byte {
 	return cd
 }
 
-func mkIB(t *testing.T, db *database.DB) *Blockchain {
+// mkIB builds the minimum *Blockchain the in-block executor needs: a real
+// storage layer with the shared LevelDB handles attached to it.
+//
+// bc.SetStorageDB / bc.SetStateDB forward to bc.storage, so a zero-value
+// Blockchain (where bc.storage is nil) panics inside Storage.SetDB before any
+// block can be executed. NewBlockchain always creates the storage layer first;
+// this helper mirrors that ordering, then attaches the handles through the
+// same public setters a real node uses.
+func mkIB(t *testing.T, dir string, db *database.DB) *Blockchain {
 	t.Helper()
-	bc := &Blockchain{}
+	store, err := storage.NewStorage(dir)
+	if err != nil {
+		t.Fatalf("NewStorage: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	bc := &Blockchain{storage: store}
 	bc.SetStorageDB(db)
 	bc.SetStateDB(db)
 	return bc
@@ -119,12 +134,13 @@ func execIB(t *testing.T, bc *Blockchain, height uint64, txs ...*txtypes.Transac
 	return root
 }
 func TestStablecoinInBlockLifecycle(t *testing.T) {
-	db, err := database.NewLevelDB(t.TempDir() + "/ib-state")
+	dir := t.TempDir()
+	db, err := database.NewLevelDB(dir + "/ib-state")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	bc := mkIB(t, db)
+	bc := mkIB(t, dir, db)
 
 	fundIB(t, NewStateDB(db), ibAdmin)
 	fundIB(t, NewStateDB(db), ibAlice)
@@ -193,7 +209,10 @@ func TestStablecoinInBlockLifecycle(t *testing.T) {
 		t.Fatalf("total after burn: got %s want 800", got)
 	}
 
-	selfBurn := &txtypes.Transaction{ID: "ib-self", Sender: ibBob, Nonce: 1,
+	// Bob's first OUTGOING transaction: receiving 300 in block 3 does not bump
+	// his nonce (applyTransactions increments the sender's nonce only), so the
+	// self-burn must be signed with nonce 0.
+	selfBurn := &txtypes.Transaction{ID: "ib-self", Sender: ibBob, Nonce: 0,
 		Amount: big.NewInt(0), Timestamp: common.GetCurrentTimestamp(),
 		ToContract: addr, CallData: callIB(t, "burn_self", map[string]string{"amount": "100"})}
 	priceIB(t, bc, selfBurn)

@@ -65,12 +65,46 @@ func (p *PolicyParameters) CalculateValidatorRewardExact(validatorStake, totalSt
 }
 
 // CalculateBlockReward returns the policy-defined reward for one ordinary
-// block. A copy is returned so callers cannot mutate the active policy.
-func (p *PolicyParameters) CalculateBlockReward() *big.Int {
+// block at the given height. The base reward decays geometrically with chain
+// height, following the same rate(y) = 5% × 0.8^(y-1) integer-decay curve used
+// for epoch inflation: the base amount is scaled by InflationDecayBPS once per
+// elapsed blocks-per-year boundary, so year 1 pays the full policy BlockReward
+// and every subsequent year pays 80% of the year before it (with the default
+// policy constants).
+//
+// This is a pure function of the block height and policy constants — no state
+// DB reads, no wall-clock time, no peer state — so every replaying node derives
+// the identical reward and the identical state root. All math is big.Int /
+// uint64 basis points with multiply-before-divide ordering; no float64 ever
+// enters the consensus path.
+//
+// A copy is returned so callers cannot mutate the active policy.
+func (p *PolicyParameters) CalculateBlockReward(height uint64) *big.Int {
 	if p == nil || p.BlockReward == nil {
 		return big.NewInt(0)
 	}
-	return new(big.Int).Set(p.BlockReward)
+	// Derive the 1-indexed policy year from the height alone. Without a
+	// usable blocks-per-year (degenerate block time), the reward stays flat.
+	year := uint64(1)
+	if blocksPerYear := p.GetBlocksPerYear(); blocksPerYear > 0 {
+		year = height/blocksPerYear + 1
+	}
+	// Same integer-decay loop shape as CalculateEpochInflationExact: the
+	// multiplier walks 10000 → 8000 → 6400 → … in basis points, always
+	// multiply-before-divide so no node can drift by a single unit.
+	decayBPS := p.InflationDecayBPS
+	if decayBPS == 0 || decayBPS > basisPoints {
+		decayBPS = basisPoints
+	}
+	multiplierBPS := basisPoints
+	for i := uint64(1); i < year; i++ {
+		multiplierBPS = multiplierBPS * decayBPS / basisPoints
+	}
+	if multiplierBPS == basisPoints {
+		return new(big.Int).Set(p.BlockReward)
+	}
+	reward := new(big.Int).Mul(p.BlockReward, new(big.Int).SetUint64(multiplierBPS))
+	return reward.Div(reward, new(big.Int).SetUint64(basisPoints))
 }
 
 // CalculateValidatorReward calculates reward for a validator based on their stake

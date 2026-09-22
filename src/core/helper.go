@@ -575,10 +575,12 @@ func (bc *Blockchain) ActivePolicy() *policy.PolicyParameters {
 	return policy.GetDefaultPolicyParams()
 }
 
-// PolicyBlockReward returns the consensus block reward. Chain parameters may
-// configure network mechanics, but monetary issuance is owned by policy.
-func (bc *Blockchain) PolicyBlockReward() *big.Int {
-	return bc.ActivePolicy().CalculateBlockReward()
+// PolicyBlockReward returns the consensus block reward for the block at the
+// given height. Chain parameters may configure network mechanics, but monetary
+// issuance is owned by policy. The height selects the point on the policy
+// decay curve, keeping the reward a pure function of committed chain position.
+func (bc *Blockchain) PolicyBlockReward(height uint64) *big.Int {
+	return bc.ActivePolicy().CalculateBlockReward(height)
 }
 
 // ValidateTransactionPolicy enforces governance policy for non-system txs.

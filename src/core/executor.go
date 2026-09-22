@@ -741,7 +741,7 @@ func (bc *Blockchain) mintBlockReward(block *types.Block, stateDB *StateDB) {
 	// (There's no separate "distribution block 1" anymore — genesis
 	// allocations are distributed inside block 0 itself via
 	// ExecuteGenesisBlock, so block 1 is just the first ordinary block.)
-	reward := bc.PolicyBlockReward()
+	reward := bc.PolicyBlockReward(block.GetHeight())
 	if reward.Sign() <= 0 {
 		return
 	}

@@ -59,7 +59,7 @@ func TestPolicyControlsBlockRewardAndFeeAllocation(t *testing.T) {
 	if err := p.Validate(); err != nil {
 		t.Fatalf("custom policy should be valid: %v", err)
 	}
-	if p.CalculateBlockReward().Cmp(big.NewInt(123)) != 0 {
+	if p.CalculateBlockReward(1).Cmp(big.NewInt(123)) != 0 {
 		t.Fatal("block reward did not come from policy")
 	}
 	// 5% of 123 = floor(6.15) = 6 burned, 117 to miner.

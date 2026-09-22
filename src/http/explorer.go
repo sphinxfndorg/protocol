@@ -1173,7 +1173,7 @@ func blockRewardSplit(bc *core.Blockchain, height uint64) (total, miner, burned 
 	if bc == nil || height == 0 {
 		return zero, big.NewInt(0), big.NewInt(0)
 	}
-	total = bc.PolicyBlockReward()
+	total = bc.PolicyBlockReward(height)
 	if total == nil {
 		total = big.NewInt(0)
 	}

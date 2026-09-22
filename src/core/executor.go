@@ -589,10 +589,23 @@ func writeCheckpointFile(path string, checkpoint *ChainCheckpoint) error {
 func (bc *Blockchain) applyTransactions(block *types.Block, stateDB *StateDB) error {
 	proposerID := block.Header.ProposerID
 
+	// Accumulate gas used across all transactions in this block.
+	// GasUsed is set to 0 when the block is created (CreateBlock) and
+	// updated here so the explorer and other consumers see the real total.
+	var gasUsedAcc *big.Int
+
 	for i, tx := range block.Body.TxsList {
 		if tx == nil || tx.Amount == nil {
 			return fmt.Errorf("transaction %d is missing amount", i)
 		}
+		// Accumulate gas used for this transaction.
+		if tx.GasLimit != nil {
+			if gasUsedAcc == nil {
+				gasUsedAcc = new(big.Int)
+			}
+			gasUsedAcc.Add(gasUsedAcc, tx.GasLimit)
+		}
+
 		// Genesis (block 0) distribution transactions have
 		// Sender: GenesisVaultAddress and are processed here as normal
 		// transfers, same as any other block. ExecuteBlock funds the vault
@@ -696,6 +709,11 @@ func (bc *Blockchain) applyTransactions(block *types.Block, stateDB *StateDB) er
 		stateDB.IncrementNonce(tx.Sender)
 		logger.Info("executor: tx[%d] %s → %s %s nSPX (gas %s nSPX) ✓",
 			i, tx.Sender, tx.Receiver, tx.Amount.String(), gasFee.String())
+	}
+
+	// Update the block header with the accumulated gas used.
+	if gasUsedAcc != nil {
+		block.Header.GasUsed = gasUsedAcc
 	}
 	return nil
 }

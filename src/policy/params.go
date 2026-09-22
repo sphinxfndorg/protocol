@@ -48,7 +48,16 @@ func NewPolicyParameters() *PolicyParameters {
 		ValidatorFeeBPS:      6000,
 		StakerFeeBPS:         2500,
 		TreasuryFeeBPS:       1000,
-		BurnFeeBPS:           500,
+		BurnFeeBPS:           500, // starting fee-burn rate (5%)
+
+		// Usage-responsive fee-burn policy: start at BurnFeeBPS (5%), step
+		// ±5 BPS per block toward/away from 50% utilization of the previous
+		// finalized block's gas, clamped to [2%, 10%]. Policy-owned, not
+		// chain-config — see types.go.
+		BurnFeeFloorBPS:             200,
+		BurnFeeCeilingBPS:           1000,
+		BurnFeeStepBPS:              5,
+		BurnFeeTargetUtilizationBPS: 5000,
 		ContractDeployGas:    100000,
 		ContractCallGas:      30000,
 		ContractCodeGasByte:  50,
@@ -143,6 +152,22 @@ func (p *PolicyParameters) Validate() error {
 	if p.WASMMaxCodeBytes == 0 || p.WASMMemoryPages == 0 || p.WASMGasPerOperation == 0 ||
 		p.StorageReadGas == 0 || p.StorageWriteGas == 0 || p.EventGasPerByte == 0 || p.ContractTransferGas == 0 || p.WASMMaxEvents == 0 {
 		return ErrInvalidTransactionFee
+	}
+
+	// Validate the usage-responsive fee-burn policy: the clamp window must
+	// be ordered and the utilization target must be a valid share.
+	floorBPS, ceilingBPS := p.EffectiveBurnFeeBounds()
+	if p.BurnFeeFloorBPS > p.BurnFeeCeilingBPS && p.BurnFeeCeilingBPS != 0 && p.BurnFeeFloorBPS != 0 {
+		return ErrInvalidBurnFeePolicy
+	}
+	if p.BurnFeeTargetUtilizationBPS > basisPoints {
+		return ErrInvalidBurnFeePolicy
+	}
+	if ceilingBPS > basisPoints {
+		return ErrInvalidBurnFeePolicy
+	}
+	if p.BurnFeeBPS > 0 && (p.BurnFeeBPS < floorBPS || p.BurnFeeBPS > ceilingBPS) {
+		return ErrInvalidBurnFeePolicy
 	}
 
 	// Validate minting parameters

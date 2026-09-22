@@ -49,6 +49,20 @@ type PolicyParameters struct {
 	TreasuryFeeBPS  uint64 `json:"treasury_fee_bps"`
 	BurnFeeBPS      uint64 `json:"burn_fee_bps"`
 
+	// Usage-responsive fee-burn policy. BurnFeeBPS above is the STARTING
+	// rate; at each block the executor rolls it one fixed step toward or
+	// away from a target utilization of the previous finalized block's gas
+	// (an EIP-1559-style fee-market feedback on the BURN side only — the
+	// mint side, BlockRewardBurnBPS, is deliberately untouched by this).
+	// Like BlockReward, these are policy-owned, not chain-config: they are
+	// part of the governance/SIPS-governed monetary schedule, never a
+	// node-local chain setting, and they are consensus inputs (every node
+	// must roll the identical rate from the committed previous block).
+	BurnFeeFloorBPS             uint64 `json:"burn_fee_floor_bps"`              // lower clamp, e.g. 200 (2%)
+	BurnFeeCeilingBPS           uint64 `json:"burn_fee_ceiling_bps"`            // upper clamp, e.g. 1000 (10%)
+	BurnFeeStepBPS              uint64 `json:"burn_fee_step_bps"`               // fixed integer step per block, e.g. 5
+	BurnFeeTargetUtilizationBPS uint64 `json:"burn_fee_target_utilization_bps"` // target share of the previous block's gas limit, e.g. 5000 (50%)
+
 	// Contract execution schedule. Core meters native calls and the restricted
 	// deterministic SVM against these values.
 	ContractDeployGas    uint64 `json:"contract_deploy_gas"`

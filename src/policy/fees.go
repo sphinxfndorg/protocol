@@ -434,6 +434,10 @@ func (p *PolicyParameters) GetFeePerByte() *big.Int {
 // DistributeFees distributes collected fees according to the policy's basis
 // point allocation. Rounding remainder is burned so the output always sums to
 // totalFees.
+//
+// Consensus note: the executor now uses DistributeFeesWithBurnBPS, which
+// carries the usage-responsive per-block burn rate. DistributeFees remains for
+// legacy callers and always applies the static policy BurnFeeBPS.
 func (p *PolicyParameters) DistributeFees(totalFees *big.Int) *FeeDistribution {
 	if totalFees.Sign() <= 0 {
 		return &FeeDistribution{
@@ -470,6 +474,144 @@ func (p *PolicyParameters) DistributeFees(totalFees *big.Int) *FeeDistribution {
 	if sum.Cmp(totalFees) != 0 {
 		diff := new(big.Int).Sub(totalFees, sum)
 		burnedShare.Add(burnedShare, diff)
+	}
+
+	return &FeeDistribution{
+		TotalFees:  totalFees,
+		Validators: validatorsShare,
+		Stakers:    stakersShare,
+		Treasury:   treasuryShare,
+		Burned:     burnedShare,
+	}
+}
+
+// EffectiveBurnFeeBounds returns the clamp window [floor, ceiling] for the
+// usage-responsive fee-burn rate, filling in protocol defaults when a legacy
+// policy (persisted before these fields existed) leaves them at zero. A
+// misconfigured window where floor > ceiling is collapsed onto the floor so
+// the rate remains deterministic and in-range no matter what.
+func (p *PolicyParameters) EffectiveBurnFeeBounds() (floorBPS, ceilingBPS uint64) {
+	floorBPS, ceilingBPS = uint64(200), uint64(1000)
+	if p != nil {
+		if p.BurnFeeFloorBPS > 0 {
+			floorBPS = p.BurnFeeFloorBPS
+		}
+		if p.BurnFeeCeilingBPS > 0 {
+			ceilingBPS = p.BurnFeeCeilingBPS
+		}
+	}
+	if floorBPS > ceilingBPS {
+		ceilingBPS = floorBPS
+	}
+	return floorBPS, ceilingBPS
+}
+
+// NextBurnFeeBPS rolls the usage-responsive fee-burn rate for one block. It is
+// a pure function of (policy, current rate, previous finalized block gas) —
+// no live peer state, no wall-clock time, no node-local data — so every
+// replaying node derives the identical rate and state root.
+//
+// The inputs are the previous block's committed header values (GasUsed and
+// GasLimit as persisted in the state DB when that block was executed), never
+// the in-progress block. When the previous utilization was above the target
+// share of the gas limit the rate steps UP by the fixed integer step (fuller
+// blocks burn a larger fee slice); below the target it steps DOWN; exactly at
+// the target it holds. The result is clamped to the policy's [floor, ceiling]
+// window. Unusable gas inputs (nil/zero limit) leave the rate unchanged apart
+// from the clamp. All math is uint64 / big.Int with multiply-before-divide.
+//
+// This adjusts ONLY the tx-fee-side burn (BurnFeeBPS family). The mint-side
+// BlockRewardBurnBPS split is a separate, untouched policy lever.
+func (p *PolicyParameters) NextBurnFeeBPS(currentBPS uint64, prevGasUsed, prevGasLimit *big.Int) uint64 {
+	floorBPS, ceilingBPS := p.EffectiveBurnFeeBounds()
+
+	next := currentBPS
+	if prevGasLimit != nil && prevGasLimit.Sign() > 0 {
+		used := prevGasUsed
+		if used == nil || used.Sign() < 0 {
+			// Never read the caller's buffer: clamp a copy.
+			used = big.NewInt(0)
+		}
+		// utilizationBPS = used * 10000 / limit — multiply-before-divide
+		// so the ratio is computed identically on every node.
+		utilizationBPS := new(big.Int).Mul(used, new(big.Int).SetUint64(basisPoints))
+		utilizationBPS.Div(utilizationBPS, prevGasLimit)
+
+		targetBPS := p.BurnFeeTargetUtilizationBPS
+		if targetBPS == 0 || targetBPS > basisPoints {
+			targetBPS = 5000
+		}
+		stepBPS := p.BurnFeeStepBPS
+
+		switch utilizationBPS.Cmp(new(big.Int).SetUint64(targetBPS)) {
+		case 1: // above target: fuller blocks burn more next block
+			if next > ^uint64(0)-stepBPS {
+				next = ^uint64(0)
+			} else {
+				next = next + stepBPS
+			}
+		case -1: // below target: quieter blocks burn less next block
+			if next >= stepBPS {
+				next = next - stepBPS
+			} else {
+				next = 0
+			}
+		}
+		// utilization == target → hold the rate exactly.
+	}
+
+	if next < floorBPS {
+		next = floorBPS
+	}
+	if next > ceilingBPS {
+		next = ceilingBPS
+	}
+	return next
+}
+
+// DistributeFeesWithBurnBPS is the consensus fee distribution used by the
+// executor: identical share weights to DistributeFees, but the burn slice is
+// taken FIRST at the caller-supplied per-block burn rate (the value rolled by
+// NextBurnFeeBPS from the previous finalized block), and the remaining pool is
+// split across validators/stakers/treasury by their static policy weights, so
+// the output always sums to totalFees exactly. At the default configuration
+// and default burn rate the result is identical to DistributeFees.
+func (p *PolicyParameters) DistributeFeesWithBurnBPS(totalFees *big.Int, burnBPS uint64) *FeeDistribution {
+	if totalFees == nil || totalFees.Sign() <= 0 {
+		return &FeeDistribution{
+			TotalFees:  big.NewInt(0),
+			Validators: big.NewInt(0),
+			Stakers:    big.NewInt(0),
+			Treasury:   big.NewInt(0),
+			Burned:     big.NewInt(0),
+		}
+	}
+
+	if burnBPS > basisPoints {
+		burnBPS = basisPoints
+	}
+
+	// Burn slice first: floor(totalFees * burnBPS / 10000),
+	// multiply-before-divide so no node can drift by a rounding unit.
+	burnedShare := new(big.Int).Mul(totalFees, new(big.Int).SetUint64(burnBPS))
+	burnedShare.Div(burnedShare, new(big.Int).SetUint64(basisPoints))
+
+	remaining := new(big.Int).Sub(totalFees, burnedShare)
+
+	// Split what's left across the static non-burn weights. The treasury
+	// share absorbs the integer rounding dust so the sum is exact.
+	denominator := p.ValidatorFeeBPS + p.StakerFeeBPS + p.TreasuryFeeBPS
+	validatorsShare := big.NewInt(0)
+	stakersShare := big.NewInt(0)
+	treasuryShare := new(big.Int).Set(remaining)
+	if denominator > 0 && remaining.Sign() > 0 {
+		denom := new(big.Int).SetUint64(denominator)
+		validatorsShare = new(big.Int).Mul(remaining, new(big.Int).SetUint64(p.ValidatorFeeBPS))
+		validatorsShare.Div(validatorsShare, denom)
+		stakersShare = new(big.Int).Mul(remaining, new(big.Int).SetUint64(p.StakerFeeBPS))
+		stakersShare.Div(stakersShare, denom)
+		treasuryShare = new(big.Int).Sub(remaining, validatorsShare)
+		treasuryShare.Sub(treasuryShare, stakersShare)
 	}
 
 	return &FeeDistribution{

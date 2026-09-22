@@ -682,7 +682,11 @@ func (bc *Blockchain) applyTransactions(block *types.Block, stateDB *StateDB) er
 			// The burn slice relocates already-circulating nSPX to the
 			// protocol burn (DEAD) address so DEAD's balance is the single
 			// auditable source of burned supply (fees, slashing, rewards).
-			distribution := bc.ActivePolicy().DistributeFees(gasFee)
+			// The burn rate is the usage-responsive per-block rate rolled
+			// from the previous finalized block's committed gas — the
+			// mint-side BlockRewardBurnBPS split is unaffected by it.
+			burnBPS := stateDB.GetBurnFeeBPS(bc.ActivePolicy().BurnFeeBPS)
+			distribution := bc.ActivePolicy().DistributeFeesWithBurnBPS(gasFee, burnBPS)
 			if distribution.Validators.Sign() > 0 {
 				gasAddr := TreasuryFeePoolAddress
 				// A valid ordinary block has a proposer. On malformed historical
@@ -961,8 +965,25 @@ func (bc *Blockchain) distributeEpochStakingRewards(stateDB *StateDB, stakingRew
 // computed during block creation won't match the state root computed during
 // block verification on other nodes, causing state divergence on late joiners.
 func (bc *Blockchain) applyBlockTransitions(block *types.Block, stateDB *StateDB) error {
+	height := block.GetHeight()
+
+	// Roll the usage-responsive fee-burn rate BEFORE this block's
+	// transactions are applied. The only inputs are the PREVIOUS finalized
+	// block's gas footprint and burn rate exactly as committed to the state
+	// DB when that block was executed — never the live consensus set, never
+	// wall-clock time, never this block's in-progress state. This is the
+	// same determinism discipline as the block-3 ★ FIX: every input is
+	// either a committed chain value or derived deterministically from one,
+	// so every replaying node rolls the identical rate and state root.
+	if height > 0 {
+		p := bc.ActivePolicy()
+		currentBPS := stateDB.GetBurnFeeBPS(p.BurnFeeBPS)
+		prevUsed, prevLimit := stateDB.GetPrevBlockGas()
+		stateDB.SetBurnFeeBPS(p.NextBurnFeeBPS(currentBPS, prevUsed, prevLimit))
+	}
+
 	// For genesis block, fund the vault BEFORE distributing to allocations.
-	if block.GetHeight() == 0 {
+	if height == 0 {
 		bc.mintBlockReward(block, stateDB)
 		// Persist the genesis validator stakes so the first epoch-boundary
 		// inflation distribution has a deterministic on-chain stake snapshot.
@@ -973,13 +994,32 @@ func (bc *Blockchain) applyBlockTransitions(block *types.Block, stateDB *StateDB
 		return err
 	}
 
+	// Persist THIS block's finalized gas footprint for the next block's
+	// burn-rate roll. The values come from the header that execution just
+	// finalized (applyTransactions accumulates GasUsed; GasLimit is part of
+	// the committed header), so the snapshot is identical on the proposing
+	// leader and on every replaying verifier.
+	bc.recordBlockGasSnapshot(block, stateDB)
+
 	// For all other blocks, mint reward AFTER transactions.
-	if block.GetHeight() > 0 {
+	if height > 0 {
 		bc.mintBlockReward(block, stateDB)
 		bc.mintEpochInflation(block, stateDB)
 	}
 
 	return nil
+}
+
+// recordBlockGasSnapshot persists the block's finalized gas footprint
+// (GasUsed, GasLimit) into the deterministic policy-state namespace so the
+// next block's usage-responsive burn-rate roll reads it from committed state.
+// nil fields are normalized to zero, keeping leader preview and verifier
+// execution byte-identical.
+func (bc *Blockchain) recordBlockGasSnapshot(block *types.Block, stateDB *StateDB) {
+	if block == nil || stateDB == nil || block.Header == nil {
+		return
+	}
+	stateDB.SetPrevBlockGas(block.Header.GasUsed, block.Header.GasLimit)
 }
 
 // ExecuteBlock is called from CommitBlock.
@@ -1016,6 +1056,19 @@ func (bc *Blockchain) previewStateRoot(height uint64, txs []*types.Transaction, 
 		},
 		Body: types.BlockBody{TxsList: txs},
 	}
+
+	// Mirror CreateBlock's gas header fields exactly. The usage-responsive
+	// burn-rate roll persists the block's finalized (GasUsed, GasLimit) into
+	// the state root, so the leader's preview must write the same snapshot
+	// the verifiers' ExecuteBlock will write from the sealed header — or the
+	// previewed state root would diverge from the committed one (the same
+	// preview/execute class of bug the ★ FIX below guards).
+	gasLimit := big.NewInt(0)
+	if bc.chainParams != nil && bc.chainParams.BlockGasLimit != nil {
+		gasLimit = new(big.Int).Set(bc.chainParams.BlockGasLimit)
+	}
+	block.Header.GasLimit = gasLimit
+	block.Header.GasUsed = big.NewInt(0)
 
 	// ★ FIX: Use the exact same execution path as ExecuteBlock so the state
 	// root computed during block creation (on the bootstrap node) matches the

@@ -23,4 +23,5 @@ var (
 	ErrInvalidBlockRewardBurn    = errors.New("invalid block reward burn share")
 	ErrInvalidMinMintBalance     = errors.New("invalid minimum mint balance")
 	ErrInvalidMintParams         = errors.New("invalid mint sizing parameters")
+	ErrInvalidBurnFeePolicy      = errors.New("invalid usage-responsive burn fee policy")
 )

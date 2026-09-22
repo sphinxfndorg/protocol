@@ -286,6 +286,84 @@ func (s *StateDB) GetAllValidatorStakes() (map[string]*big.Int, error) {
 	return stakes, nil
 }
 
+// ----------------------------------------------------------------------------
+// Deterministic policy state (burn-rate feedback), part of the state root
+//
+// The usage-responsive fee-burn rate and the previous finalized block's gas
+// footprint are persisted in the same deterministic contract-state namespace
+// as validator stakes, so they are hashed into the state root and replayed
+// identically from genesis. The executor reads the committed pair at the
+// start of block N to roll the rate for block N from block N-1's finalized
+// gas — never from live peer state, wall-clock time, or the in-progress
+// block (see the block-3 divergence ★ FIX in executor.go for the class of
+// bug this design keeps closed).
+// ----------------------------------------------------------------------------
+
+const (
+	// policyStateBurnFeeKey persists the burn rate in effect for fee
+	// distribution after the most recent roll.
+	policyStateBurnFeeKey = "policy:burn_fee_bps"
+	// policyStatePrevGasUsedKey persists the previous finalized block's
+	// total gas used (from its header once execution finalized it).
+	policyStatePrevGasUsedKey = "policy:prev_gas_used"
+	// policyStatePrevGasLimitKey persists the previous finalized block's
+	// gas limit (the utilization denominator).
+	policyStatePrevGasLimitKey = "policy:prev_gas_limit"
+)
+
+// GetBurnFeeBPS returns the persisted fee-burn rate, or defaultBPS when no
+// rate has been committed yet (fresh genesis / legacy state).
+func (s *StateDB) GetBurnFeeBPS(defaultBPS uint64) uint64 {
+	value, err := s.GetContractValue(policyStateBurnFeeKey)
+	if err != nil || len(value) == 0 {
+		return defaultBPS
+	}
+	rate, ok := new(big.Int).SetString(string(value), 10)
+	if !ok || rate.Sign() < 0 || !rate.IsUint64() {
+		return defaultBPS
+	}
+	return rate.Uint64()
+}
+
+// SetBurnFeeBPS stages the fee-burn rate for the enclosing block; the write
+// is committed — and hashed into the state root — together with that block.
+func (s *StateDB) SetBurnFeeBPS(bps uint64) {
+	s.SetContractValue(policyStateBurnFeeKey, []byte(new(big.Int).SetUint64(bps).String()))
+}
+
+// GetPrevBlockGas returns the previous finalized block's committed gas
+// footprint as (used, limit). Missing or corrupt records yield zeros, which
+// the policy roll treats as "no signal" (rate holds apart from clamping).
+func (s *StateDB) GetPrevBlockGas() (*big.Int, *big.Int) {
+	used, limit := big.NewInt(0), big.NewInt(0)
+	if value, err := s.GetContractValue(policyStatePrevGasUsedKey); err == nil && len(value) > 0 {
+		if v, ok := new(big.Int).SetString(string(value), 10); ok && v.Sign() >= 0 {
+			used = v
+		}
+	}
+	if value, err := s.GetContractValue(policyStatePrevGasLimitKey); err == nil && len(value) > 0 {
+		if v, ok := new(big.Int).SetString(string(value), 10); ok && v.Sign() >= 0 {
+			limit = v
+		}
+	}
+	return used, limit
+}
+
+// SetPrevBlockGas stages the enclosing block's finalized gas footprint so the
+// NEXT block's burn-rate roll reads it from committed state. nil fields are
+// normalized to zero so leader preview and verifier execution always persist
+// byte-identical values.
+func (s *StateDB) SetPrevBlockGas(used, limit *big.Int) {
+	if used == nil || used.Sign() < 0 {
+		used = big.NewInt(0)
+	}
+	if limit == nil || limit.Sign() < 0 {
+		limit = big.NewInt(0)
+	}
+	s.SetContractValue(policyStatePrevGasUsedKey, []byte(used.String()))
+	s.SetContractValue(policyStatePrevGasLimitKey, []byte(limit.String()))
+}
+
 // ClearValidatorStakes removes all validator stake records from both the
 // pending map and the committed store. Used by state rebuilds so replay
 // recomputes validator stake records from scratch.

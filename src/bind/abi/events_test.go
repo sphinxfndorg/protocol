@@ -447,7 +447,7 @@ func TestWatchContractEventsValidatesArgs(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "callback is required") {
 		t.Fatalf("err = %v, want callback validation error", err)
 	}
-	err = WatchContractEvents(nil, eventOpts(&stubClient{}), "addr", 0, time.Millisecond, func(txid string, events []Event) {})
+	err = WatchContractEvents(context.Background(), eventOpts(&stubClient{}), "addr", 0, time.Millisecond, func(txid string, events []Event) {})
 	if err == nil {
 		t.Fatal("expected error for nil/uncancelable context")
 	}

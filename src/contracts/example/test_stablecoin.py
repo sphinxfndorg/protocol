@@ -146,7 +146,16 @@ def main():
     cbin = HERE / "test_stablecoin_c"
     src = HERE / "test_stablecoin.c"
     try:
-        subprocess.run(["clang", "-o", str(cbin), str(src)], check=True, capture_output=True)
+        subprocess.run([
+            "clang",
+            "-Wall",
+            "-Wextra",
+            "-std=c11",
+            "-O2",
+            "-o",
+            str(cbin),
+            str(src),
+        ], check=True, capture_output=True)
         r = subprocess.run([str(cbin)], capture_output=True, text=True)
         ok = r.returncode == 0 and "ALL C TESTS PASSED" in r.stdout
         check(ok, "c binary cross-check", f"rc={r.returncode}")

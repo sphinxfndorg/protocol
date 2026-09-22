@@ -38,6 +38,7 @@ func TestValidateTransactionBasicAllowsZeroValueContractTxs(t *testing.T) {
 		if err := mp.validateTransactionBasic(tx); err != nil {
 			t.Fatalf("%s: expected admission, got: %v", name, err)
 		}
+
 	}
 	mustFail := func(name string, tx *types.Transaction) {
 		t.Helper()

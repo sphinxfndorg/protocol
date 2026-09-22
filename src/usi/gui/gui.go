@@ -3362,7 +3362,13 @@ func Run() {
 					tokenIDEntry.Text, formatNSPXAmount(price), chainHeader.Symbol, collectionEntry.Text, tokenIDEntry.Text),
 				func(passphrase string) {
 					if err := callSIP721Method(collectionEntry.Text, "list",
-						map[string]string{"token_id": tokenIDEntry.Text, "price_nspx": price.String()}, nil); err != nil {
+						// "price" is the ABI-required argument name — the typed
+						// SIP721Contract.List packs the same key and the node's
+						// dispatcher reads it first (falling back to price_nspx).
+						// Sending price_nspx alone failed EncodeCall with
+						// "ABI method list requires price" before the tx could
+						// ever reach the node.
+						map[string]string{"token_id": tokenIDEntry.Text, "price": price.String()}, nil); err != nil {
 						showErrorDialog(err, window)
 						return
 					}

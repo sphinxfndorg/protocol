@@ -162,7 +162,7 @@ export default function AddressDetail({
             <div className="mt-6 border-t border-white/5 pt-6 flex flex-col gap-4">
               {migrationStep === 'idle' && (
                 <div className="flex flex-col sm:flex-row gap-4 items-center justify-between bg-brand-red/5 p-4 rounded-xl border border-brand-red/20">
-                  <div className="text-xs space-y-0.5">
+                  <div className="text-xs space-0.5">
                     <div className="text-white font-semibold">Interactive Laboratory: PQC Transition</div>
                     <p className="text-slate-400">Migrate your SPX holdings from ECDSA to SPHINCS+ instantly.</p>
                   </div>
@@ -243,12 +243,24 @@ export default function AddressDetail({
                   <th className="py-3 px-2">Counterparty</th>
                   <th className="py-3 px-2">Value Amount</th>
                   <th className="py-3 px-2">Time</th>
+                  <th className="py-3 px-2">Contract</th>
                   <th className="py-3 px-2 text-right">Protection</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/5 text-xs">
                 {addressTxs.map((tx) => {
                   const isOutgoing = tx.sender === wallet.address;
+                  // The contract address this row touches, if any: an address a
+                  // deploy CREATED, a call TARGET, or the collection a mint
+                  // anchor bound its token to. Keeping them distinct matters —
+                  // "created" is the collection this identity now owns.
+                  const contractEntry = tx.createdContract
+                    ? { label: 'Created', address: tx.createdContract }
+                    : tx.toContract
+                      ? { label: 'Called', address: tx.toContract }
+                      : tx.anchorContract
+                        ? { label: 'Mint anchor', address: tx.anchorContract }
+                        : null;
                   return (
                     <tr 
                       key={tx.txid}
@@ -288,6 +300,19 @@ export default function AddressDetail({
                       </td>
                       <td className="py-3.5 px-2 font-mono text-slate-400">
                         {formatTimeAgo(tx.timestamp)}
+                      </td>
+                      <td
+                        className="py-3.5 px-2 font-mono max-w-[18rem] truncate"
+                        title={contractEntry ? `${contractEntry.label}: ${contractEntry.address}` : ''}
+                      >
+                        {contractEntry ? (
+                          <span className="text-brand-cyan">
+                            <span className="text-slate-500">{contractEntry.label} </span>
+                            {formatHash(contractEntry.address, 10)}
+                          </span>
+                        ) : (
+                          <span className="text-slate-600">—</span>
+                        )}
                       </td>
                       <td className="py-3.5 px-2 text-right font-mono text-slate-400">
                         {tx.signatureScheme}

@@ -5,15 +5,19 @@
 
 import { useState } from 'react';
 import { Validator } from '../types';
-import { Globe, Radio, Shield, Users, Server, Cpu, Navigation } from 'lucide-react';
+import { Globe } from 'lucide-react';
 import { formatHash } from '../utils/formatters';
 
 interface ValidatorMapProps {
   validators: Validator[];
   onSelectAddress: (address: string) => void;
+  // Chain tip, used to derive real liveness ("not attesting") from each
+  // validator's lastAttested height. Optional: without it the liveness tile
+  // reports nothing rather than guessing.
+  tipHeight?: number;
 }
 
-export default function ValidatorMap({ validators, onSelectAddress }: ValidatorMapProps) {
+export default function ValidatorMap({ validators, onSelectAddress, tipHeight }: ValidatorMapProps) {
   const [hoveredNode, setHoveredNode] = useState<Validator | null>(null);
   const [selectedNode, setSelectedNode] = useState<Validator | null>(null);
 
@@ -29,21 +33,32 @@ export default function ValidatorMap({ validators, onSelectAddress }: ValidatorM
     return { x, y };
   };
 
-  const getStatusColor = (status: string) => {
-    switch (status) {
-      case 'active': return 'bg-brand-green border-brand-green/30 text-brand-green';
-      case 'slashed': return 'bg-brand-red border-brand-red/30 text-brand-red';
-      default: return 'bg-slate-500 border-white/5 text-slate-400';
-    }
-  };
-
   const getStatusText = (status: string) => {
     if (status === 'active') return 'Attesting';
-    if (status === 'slashed') return 'Slashed (Jailed)';
+    // "Ejected", not "Jailed": core sets IsSlashed one-way and then skips the
+    // validator from the active set permanently (consensus/staking.go). There
+    // is no unjail/cooldown path, so "Jailed" would imply a rejoin that this
+    // chain cannot perform.
+    if (status === 'slashed') return 'Slashed (Ejected)';
     return 'Exited';
   };
 
   const totalStake = validators.reduce((acc, val) => acc + parseFloat(val.stakeSpx), 0);
+
+  // Slashed here means ejected: the validator's stake fell below the minimum
+  // after a downtime penalty and core removed it from the active set.
+  const slashedCount = validators.filter(v => v.status === 'slashed').length;
+
+  // Liveness is a different question from slashing, and is derived rather than
+  // hardcoded: a validator is "not attesting" when its last attested height
+  // lags the chain tip. Only computed when the tip is actually known — with no
+  // tip there is no honest lag to report, so the tile says so instead of
+  // rendering a number that would look like a healthy zero.
+  const ATTESTATION_LAG_BLOCKS = 10;
+  const livenessKnown = typeof tipHeight === 'number' && tipHeight > 0;
+  const notAttesting = livenessKnown
+    ? validators.filter(v => tipHeight - (v.lastAttested || 0) > ATTESTATION_LAG_BLOCKS).length
+    : 0;
 
   return (
     <div className="space-y-8 animate-fadeIn">
@@ -64,7 +79,7 @@ export default function ValidatorMap({ validators, onSelectAddress }: ValidatorM
       </div>
 
       {/* 2. Global stats row */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
         <div className="bg-slate-900/40 border border-white/5 rounded-2xl p-4 backdrop-blur-md">
           <div className="text-[10px] text-slate-500 font-mono uppercase">Total Network Stake</div>
           <div className="text-xl font-bold font-mono text-white mt-1">
@@ -90,10 +105,24 @@ export default function ValidatorMap({ validators, onSelectAddress }: ValidatorM
         </div>
 
         <div className="bg-slate-900/40 border border-white/5 rounded-2xl p-4 backdrop-blur-md">
-          <div className="text-[10px] text-slate-500 font-mono uppercase">Slashed Jailed</div>
-          <div className="text-xl font-bold font-mono text-brand-red mt-1">
-            {validators.filter(v => v.status === 'slashed').length}
-            <span className="text-xs text-slate-500 ml-1">Offline</span>
+          <div className="text-[10px] text-slate-500 font-mono uppercase">Slashed (Ejected)</div>
+          <div className={`text-xl font-bold font-mono mt-1 ${slashedCount > 0 ? 'text-brand-red' : 'text-slate-300'}`}>
+            {slashedCount}
+            <span className="text-xs text-slate-500 ml-1">Validators</span>
+          </div>
+        </div>
+
+        <div className="bg-slate-900/40 border border-white/5 rounded-2xl p-4 backdrop-blur-md">
+          <div className="text-[10px] text-slate-500 font-mono uppercase">Not Attesting</div>
+          <div className={`text-xl font-bold font-mono mt-1 ${!livenessKnown ? 'text-slate-500' : notAttesting > 0 ? 'text-brand-gold' : 'text-slate-300'}`}>
+            {livenessKnown ? (
+              <>
+                {notAttesting}
+                <span className="text-xs text-slate-500 ml-1">Behind &gt;{ATTESTATION_LAG_BLOCKS} blocks</span>
+              </>
+            ) : (
+              <span className="text-sm font-normal">Awaiting chain tip</span>
+            )}
           </div>
         </div>
       </div>
@@ -189,7 +218,6 @@ export default function ValidatorMap({ validators, onSelectAddress }: ValidatorM
                 const isSelected = selectedNode?.id === val.id;
 
                 let color = '#555577'; // default
-                let filterGlow = '';
                 if (isActive) {
                   color = '#22ff88';
                 } else if (isSlashed) {
@@ -362,7 +390,7 @@ export default function ValidatorMap({ validators, onSelectAddress }: ValidatorM
                       </button>
                     </td>
                     <td className="py-3.5 px-2 text-right font-mono font-bold text-slate-400">
-                      {val.status === 'active' ? 'SPHINCS+ SECURE' : (val.status === 'slashed' ? 'SLASHED / JAILED' : 'OFFLINE')}
+                      {val.status === 'active' ? 'SPHINCS+ SECURE' : (val.status === 'slashed' ? 'SLASHED / EJECTED' : 'EXITED')}
                     </td>
                   </tr>
                 );

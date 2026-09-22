@@ -46,6 +46,25 @@ type MempoolConfig struct {
 }
 
 // PooledTransaction wraps transaction with metadata
+// String renders the status as the wire/API name used by mempool diagnostics
+// payloads, so callers outside this package (the explorer's /mempool endpoint)
+// never have to switch on the numeric enum — and a new status can never be
+// rendered as a bare number in an operator-facing view.
+func (s TransactionStatus) String() string {
+	switch s {
+	case StatusBroadcast:
+		return "broadcast"
+	case StatusPending:
+		return "pending"
+	case StatusValidating:
+		return "validating"
+	case StatusInvalid:
+		return "invalid"
+	default:
+		return "unknown"
+	}
+}
+
 type PooledTransaction struct {
 	Transaction *types.Transaction
 	Status      TransactionStatus
@@ -95,6 +114,14 @@ type StateDB interface {
 	GetTransactionHistory(address string, limit int) ([]*types.Transaction, error)
 	ContractExists(address string) bool
 	Close() error
+}
+
+// ContractCodeProvider is an optional extension implemented by state backends
+// that can expose deployed bytecode to admission. Keeping it optional preserves
+// compatibility with lightweight test providers while allowing runtime-specific
+// gas validation when the node has the full state backend.
+type ContractCodeProvider interface {
+	GetContractCode(address string) ([]byte, error)
 }
 
 // Mempool manages all transaction pools (broadcast, pending, validation)

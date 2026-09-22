@@ -477,6 +477,55 @@ func validatePassphraseDialog(window fyne.Window, title, message string, onSucce
 // yet" can never be misread as "zero".
 const feeRowPlaceholder = "—"
 
+// transferOutcome is the three-way terminal state of a transfer's
+// confirmation wait: the node committed it, the node rejected it, or we ran
+// out of polling budget without either answer.
+type transferOutcome int
+
+const (
+	// transferConfirmed: the transaction was committed to a block.
+	transferConfirmed transferOutcome = iota
+	// transferRejected: the node moved the transaction into its invalid pool,
+	// so it can never confirm.
+	transferRejected
+	// transferTimedOut: neither confirmation nor rejection arrived in time —
+	// still genuinely unknown, and explicitly NOT a rejection.
+	transferTimedOut
+)
+
+// classifyTransferOutcome decides what the Transfer Status dialog must show
+// from WaitForTxConfirmation's two results.
+//
+// ★ WHY THIS EXISTS: the dialog used to write `conf, _ := WaitForTxConfirmation
+// (...)`, discarding the error. The node validates nonce, balance, signature
+// and replay protection ASYNCHRONOUSLY — sendrawtransaction has already
+// returned a txid by then — so a rejected send comes back here as a
+// *TxRejectedError while conf is nil. Discarding it made every rejection render
+// as "Still Pending … after 5 minutes". Worse, the dialog is the only place
+// that could hand the wallet's reserved nonce back, so the reservation leaked
+// with it: the shared table claims max(chain nonce, local reservation), which
+// pushed every subsequent send past the chain's nonce, each was rejected the
+// same way, and the mempool never held a transaction at all — the "0 pending"
+// the explorer then reported forever.
+//
+// A rejection therefore takes precedence over a confirmation-less result, so a
+// refused send can never be presented as a merely slow one; while a non-
+// rejection error (a transient RPC failure) still means "unknown", so it must
+// not be reported as terminal either.
+func classifyTransferOutcome(conf *TxConfirmation, err error) transferOutcome {
+	if err != nil {
+		var rejected *TxRejectedError
+		if errors.As(err, &rejected) {
+			return transferRejected
+		}
+		return transferTimedOut
+	}
+	if conf != nil {
+		return transferConfirmed
+	}
+	return transferTimedOut
+}
+
 // transferFeeRowValues is the fully-resolved text and colour of every row in
 // the Transfer Status popup's "Transaction Fee" section.
 //
@@ -768,10 +817,32 @@ func transferStatusDialogWorker(dlg *dialog.CustomDialog, inner *fyne.Container,
 
 	addActivity(fmt.Sprintf("Sent %s %s to %s (tx: %s)", amountStr, chainHeader.Symbol, recipient[:min(16, len(recipient))]+"…", result.TxID[:8]+"…"))
 
-	conf, _ := client.WaitForTxConfirmation(result.TxID, 300*time.Second)
+	conf, waitErr := client.WaitForTxConfirmation(result.TxID, 300*time.Second)
+	outcome := classifyTransferOutcome(conf, waitErr)
+
+	// The node has terminally refused this transaction: it can never confirm,
+	// so the nonce reserved for it must come back. A rejected transaction
+	// never consumes its nonce on-chain, and leaving the reservation claimed
+	// starts the account's NEXT broadcast past the chain's nonce — which is
+	// exactly how one failed send turned into an unbroken run of failed sends
+	// with the mempool reading "0 pending" throughout. Release happens here,
+	// off the UI goroutine, before any widget is touched.
+	if outcome == transferRejected {
+		client.releasePendingNonce(sessionFingerprint, result.Nonce)
+	}
+
+	rejectionReason := ""
+	var rejected *TxRejectedError
+	if waitErr != nil && errors.As(waitErr, &rejected) {
+		rejectionReason = rejected.Reason
+	}
+	if rejectionReason == "" && waitErr != nil {
+		rejectionReason = waitErr.Error()
+	}
 
 	fyne.Do(func() {
-		if conf != nil {
+		switch outcome {
+		case transferConfirmed:
 			statusIcon.Text = "✓"
 			statusIcon.Color = colAccent
 			statusTitle.Text = "Transaction Confirmed"
@@ -800,7 +871,24 @@ func transferStatusDialogWorker(dlg *dialog.CustomDialog, inner *fyne.Container,
 			progress.SetValue(1)
 
 			addActivity(fmt.Sprintf("Send %s to %s confirmed in block %d", amountStr, recipient[:min(16, len(recipient))]+"…", conf.Height))
-		} else {
+		case transferRejected:
+			// The node's OWN reason, verbatim: this is a terminal outcome, not
+			// a wait that might still succeed, so it is reported with the same
+			// severity as a broadcast failure rather than downgraded to
+			// "still pending".
+			statusIcon.Text = "✗"
+			statusIcon.Color = colDanger
+			statusTitle.Text = "Transaction Rejected by Node"
+			statusTitle.Color = colDanger
+			statusSub.Text = rejectionReason
+			statusSub.Color = colDanger
+			statusSub.TextSize = 10
+			liveStatus.Text = "Rejected — cannot confirm; nonce released, you can send again"
+			liveStatus.Color = colDanger
+			progress.SetValue(0)
+
+			addActivity(fmt.Sprintf("Send %s to %s REJECTED: %s", amountStr, recipient[:min(16, len(recipient))]+"…", rejectionReason))
+		default:
 			statusIcon.Text = "⚠"
 			statusIcon.Color = colWarn
 			statusTitle.Text = "Transaction Still Pending"
@@ -1635,7 +1723,15 @@ func mintStatusDialogWorker(job MintJob, f mintStatusFields) {
 
 				// Wait for the deferred anchor to confirm too, so the
 				// sidecar records the real block instead of pending.
-				anchorConf, _ := job.Client.WaitForTxConfirmation(txID, 10*time.Minute)
+				anchorConf, anchorWaitErr := job.Client.WaitForTxConfirmation(txID, 10*time.Minute)
+				if anchorWaitErr != nil {
+					// Terminal rejection: the anchor can never commit, so its
+					// reserved nonce must come back — a leaked reservation
+					// would push every later broadcast past the chain's nonce
+					// ("invalid nonce: N must equal M").
+					job.Client.releasePendingNonce(sessionFingerprint, nonce)
+					log.Printf("[Mint Data] deferred anchor %s rejected: %v", txID, anchorWaitErr)
+				}
 				var confirmedBlock interface {
 					GetHeight() uint64
 					GetHash() string
@@ -1768,6 +1864,14 @@ func mintStatusDialogWorker(job MintJob, f mintStatusFields) {
 		// 300s(+600s background) budget and then claiming it was merely
 		// "still pending" — that made a refused anchor look like one that
 		// simply never got mined (0 pending tx, forever).
+		//
+		// A rejected tx never consumes its nonce, so give the anchor's
+		// reservation back — otherwise every failed anchor permanently
+		// inflates the wallet's next nonce past the chain's and the next
+		// unrelated broadcast dies with "invalid nonce: N must equal M".
+		// (WaitForTxConfirmation only ever returns a terminal rejection as
+		// its error; timeouts come back as (nil, nil).)
+		job.Client.releasePendingNonce(sessionFingerprint, anchorNonce)
 		log.Printf("[ERROR] Mint Data: anchor tx %s rejected by node: %v", txID, confErr)
 		addActivity(fmt.Sprintf("Signed document: %s (NFT anchor rejected: %v)", fileBase, confErr))
 		fail("NFT Anchor Rejected", confErr)

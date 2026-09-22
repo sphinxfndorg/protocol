@@ -206,8 +206,14 @@ func broadcastSIP721CollectionMintWithTerms(nodeAddr, collection, from, keyFile,
 		// while an in-flight tx still owns its nonce and WILL commit (the
 		// contract rejects duplicate mint_ids, so re-minting would only
 		// produce a second, permanently-unconfirmable tx).
+		// The mint tx either REJECTED (never commits — its reservation is
+		// free and must be given back, or every retry permanently inflates
+		// the local nonce past the chain's: that is the reported
+		// "invalid nonce: 5 must equal 2" deploy failure) or is still in
+		// flight (its nonce stays claimed — re-minting the same mint_id
+		// would only produce a second, permanently-unconfirmable tx).
 		state := txNodeStateString(nodeAddr, txID)
-		if strings.Contains(state, "node rejected it") {
+		if releaseRejectedNonce(nodeAddr, rawFrom, nonce, state) {
 			return 0, txID, fmt.Errorf("collection mint tx %s was REJECTED by the node and will never commit (%s) — the mint did NOT happen; fix the cause and mint again (last poll error: %v)",
 				txID, state, err)
 		}
@@ -225,6 +231,24 @@ func broadcastSIP721CollectionMintWithTerms(nodeAddr, collection, from, keyFile,
 // collection-mint transaction to be included in a block and its tokenId to
 // become visible in contract storage.
 const TokenIDConfirmTimeout = 60 * time.Second
+
+// releaseRejectedNonce gives the process-local reservation for nonce back when
+// nodeState proves the transaction terminally rejected (the "node rejected it:
+// …" marker txNodeStateString produces from gettransactionreceipt's
+// invalid_reason). A rejected transaction never consumes its nonce on chain,
+// but Nonces.Reserve has already advanced the account past it — without this
+// release every retry permanently pushes the next reservation higher than the
+// chain's nonce, which the mempool's exact-match rule reports on the NEXT
+// unrelated broadcast as "invalid nonce: N must equal M" (wallet ahead of
+// chain, e.g. "5 must equal 2"). Returns false for every other state (still
+// in flight, committed, unaskable) so an in-flight tx keeps owning its nonce.
+func releaseRejectedNonce(nodeAddr, sender string, nonce uint64, nodeState string) bool {
+	if !strings.Contains(nodeState, "node rejected it") {
+		return false
+	}
+	Nonces.Release(nodeAddr, sender, nonce)
+	return true
+}
 
 // txNodeStateString asks the node where a broadcast transaction currently is,
 // as a short human-readable diagnostic string:

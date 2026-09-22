@@ -475,6 +475,15 @@ type SendTransactionResult struct {
 	GasLimit *big.Int
 	GasPrice *big.Int
 	GasFee   *big.Int
+	// Nonce is the account nonce this send reserved from the wallet's shared
+	// reservation table. The caller needs it because the node validates the
+	// nonce ASYNCHRONOUSLY: sendrawtransaction returns a txid first, and only
+	// later does the pool move a bad transaction into its invalid pool. The
+	// reservation must then be released by hand — see
+	// transferStatusDialogWorker — or the account's next reservation starts
+	// past the chain's nonce and every later send from this wallet is rejected
+	// the same way.
+	Nonce uint64
 }
 
 // SendTransactionWithPriority sends funds to a recipient at the given gas
@@ -529,10 +538,39 @@ func (c *WalletClient) SendTransactionWithPriority(toAddress string, amount *big
 		Timestamp:  time.Now().Unix(),
 		ReturnData: []byte(memo),
 	}
-	// abi.Transact applies the reserved nonce, derives the ID, signs, encodes
-	// and broadcasts — and gives the reservation back if any of that fails.
-	txid, err := abi.Transact(c.transactOpts(chainIDFor(), nil), tx)
+
+	// ★ FIX: claim the nonce HERE rather than letting abi.Transact claim it
+	// internally (the old `transactOpts(..., nil)`).
+	//
+	// The node checks gas and fee synchronously (ValidateTransactionPolicy) but
+	// validates the NONCE — along with balance, signature and replay protection
+	// — only asynchronously, inside the mempool's performValidation, which runs
+	// after sendrawtransaction has already returned a txid. So a rejected send
+	// comes back as a terminal rejection on the confirmation poll, not as a
+	// broadcast error, and abi.Transact's own release (which fires only when
+	// the broadcast itself fails) never runs for it.
+	//
+	// Letting that stand was not a lost-transaction bug, it was a permanent
+	// one: the shared reservation claims max(chain nonce, local reservation),
+	// so a slot leaked by an async rejection pushed every LATER send from this
+	// account past the nonce the chain expects. Each new send was then rejected
+	// the same way, the pool never held anything, and every surface downstream
+	// — the explorer's mempool above all — read "0 pending" for as long as the
+	// user kept retrying. Reserving here and returning the nonce is what lets
+	// transferStatusDialogWorker release it when the rejection arrives.
+	nonce, nerr := c.getCurrentNonce(sessionFingerprint)
+	if nerr != nil {
+		return nil, fmt.Errorf("failed to get account nonce from node: %w", nerr)
+	}
+	tx.Nonce = nonce
+
+	// abi.Transact derives the ID (which commits to the nonce), signs, encodes
+	// and broadcasts with the explicit nonce above. It will NOT release a nonce
+	// the caller supplied, so a failed broadcast is released here instead —
+	// the same contract AnchorMintReceipt follows.
+	txid, err := abi.Transact(c.transactOpts(chainIDFor(), &nonce), tx)
 	if err != nil {
+		c.releasePendingNonce(sessionFingerprint, nonce)
 		return nil, fmt.Errorf("send transaction: %w", err)
 	}
 
@@ -541,6 +579,7 @@ func (c *WalletClient) SendTransactionWithPriority(toAddress string, amount *big
 		GasLimit: gasQuote.GasLimit,
 		GasPrice: gasQuote.GasPrice,
 		GasFee:   gasQuote.GasFee,
+		Nonce:    nonce,
 	}, nil
 }
 
@@ -1149,6 +1188,13 @@ func (c *WalletClient) DeploySIP721Collection(name, symbol string) (string, stri
 
 		if conf, poolStr, invalidReason, derr := c.getTxNodeState(deployTxID); derr == nil {
 			if invalidReason != "" {
+				// The deploy can never commit: give its reserved nonce back,
+				// or the account's next reservation starts one higher than
+				// the chain's and the FOLLOWING broadcast is rejected with
+				// "invalid nonce: N must equal M" (wallet ahead of chain —
+				// the reported "5 must equal 2" after earlier failed
+				// transactions leaked their reservations).
+				c.releasePendingNonce(sessionFingerprint, deployNonce)
 				return "", deployTxID, fmt.Errorf(
 					"deploy tx %s was REJECTED by the node and can never confirm: %s",
 					deployTxID, invalidReason)

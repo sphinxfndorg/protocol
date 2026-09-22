@@ -20,11 +20,13 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/sphinxfndorg/protocol/src/common"
+	"github.com/sphinxfndorg/protocol/src/contracts"
 	"github.com/sphinxfndorg/protocol/src/core"
 	"github.com/sphinxfndorg/protocol/src/core/rawdb"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
 	denom "github.com/sphinxfndorg/protocol/src/params/denom"
 	"github.com/sphinxfndorg/protocol/src/policy"
+	"github.com/sphinxfndorg/protocol/src/pool"
 )
 
 // registerExplorerRoutes adds all block explorer API endpoints to the Gin router.
@@ -44,6 +46,10 @@ func (s *Server) registerExplorerRoutes(r *gin.RouterGroup) {
 		explorer.GET("/validators", s.handleExplorerValidators)
 		explorer.GET("/validators/map", s.handleExplorerValidatorMap)
 		explorer.GET("/validators/:id", s.handleExplorerValidatorDetail)
+		// POST /mine lets the explorer's "Expand block" control ask THIS node
+		// to produce and commit one block from its mempool. Gated to a
+		// single-validator (solo/devnet) node — see handleExplorerMine.
+		explorer.POST("/mine", s.handleExplorerMine)
 	}
 }
 
@@ -271,6 +277,35 @@ func (s *Server) handleExplorerStats(c *gin.Context) {
 	})
 }
 
+// blocksPageRange resolves the paginated height window for the blocks list.
+// The window is walked newest-first: the handler iterates
+// `h := startHeight; h > endHeight; h--` and serves block h-1, so heights
+// (endHeight, startHeight)-1 are covered. Page numbers are clamped into
+// [1, totalPages] first, so an out-of-range request re-serves the last page
+// instead of underflowing the subtraction below.
+//
+// The frontend's fetchAllBlocks depends on consecutive pages partitioning the
+// chain with no gap and no overlap — see TestBlocksPageRangeCoversEveryHeightOnce.
+func blocksPageRange(blockCount, page, limit uint64) (startHeight, endHeight, clampedPage, totalPages uint64) {
+	if limit == 0 || blockCount == 0 {
+		return 0, 0, page, 0
+	}
+	totalPages = (blockCount + limit - 1) / limit
+	clampedPage = page
+	if clampedPage < 1 {
+		clampedPage = 1
+	}
+	if clampedPage > totalPages {
+		clampedPage = totalPages
+	}
+
+	startHeight = blockCount - (clampedPage-1)*limit
+	if startHeight > limit {
+		endHeight = startHeight - limit
+	}
+	return startHeight, endHeight, clampedPage, totalPages
+}
+
 // ============================================================================
 // Handler: Blocks List (paginated)
 // ============================================================================
@@ -402,6 +437,63 @@ func (s *Server) handleExplorerBlockByHash(c *gin.Context) {
 }
 
 // ============================================================================
+// Handler: Mine one block on this node
+// ============================================================================
+
+// handleExplorerMine produces and commits exactly one block from this node's
+// mempool and returns its full detail payload — the explorer's "Expand block"
+// action, wired to real block production rather than a simulated one.
+//
+// It deliberately runs the same sequence the solo-mining loop uses
+// (CreateBlock -> CommitBlock), so the resulting block is indistinguishable
+// from one the node produced on its own schedule: it goes through the normal
+// block hashing, state-root computation, policy validation, atomic-commit
+// journal, and persistence path.
+//
+// Gated to single-validator nodes on purpose. On a multi-validator cluster the
+// PBFT leader drives block production; letting an HTTP caller also mint at
+// tip+1 on a follower would produce a competing block at the same height. So
+// rather than silently risk a fork, this returns 409 and tells the operator to
+// let consensus propose. CommitBlock's own guards (stale height, non-contiguous
+// height, running status, tx auth) remain the second line of defence.
+func (s *Server) handleExplorerMine(c *gin.Context) {
+	bc := s.blockchain
+	if bc == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "blockchain not initialized"})
+		return
+	}
+
+	// Solo/devnet only: refuse to mint at tip+1 while a quorum is responsible
+	// for proposing.
+	if vs := bc.GetValidatorSet(); vs != nil {
+		if active := len(vs.GetValidators()); active > 1 {
+			c.JSON(http.StatusConflict, gin.H{
+				"error": fmt.Sprintf(
+					"this node has %d validators; block production is driven by the PBFT leader, not the explorer",
+					active),
+				"validators": active,
+			})
+			return
+		}
+	}
+
+	block, err := bc.CreateBlock()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to create block: %v", err)})
+		return
+	}
+
+	if err := bc.CommitBlock(core.NewBlockHelper(block)); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to commit block: %v", err)})
+		return
+	}
+
+	detail := formatBlockDetail(bc, block)
+	stampBlockConfirmations(detail, bc.GetBlockCount())
+	c.JSON(http.StatusOK, detail)
+}
+
+// ============================================================================
 // Handler: Transaction Detail
 // ============================================================================
 
@@ -512,7 +604,10 @@ func (s *Server) handleExplorerTransaction(c *gin.Context) {
 		"signature":       fmt.Sprintf("%x", tx.Signature),
 		"public_key":      fmt.Sprintf("%x", tx.PublicKey),
 		"signature_hash":  fmt.Sprintf("%x", tx.SignatureHash),
+		"auth_timestamp":  fmt.Sprintf("%x", tx.AuthTimestamp),
+		"auth_nonce":      fmt.Sprintf("%x", tx.AuthNonce),
 		"merkle_root":     fmt.Sprintf("%x", tx.MerkleRootHash),
+		"merkle_root_hash": fmt.Sprintf("%x", tx.MerkleRootHash),
 		"commitment":      fmt.Sprintf("%x", tx.Commitment),
 		"proof":           fmt.Sprintf("%x", tx.Proof),
 		"has_return_data": len(tx.ReturnData) > 0,
@@ -522,6 +617,11 @@ func (s *Server) handleExplorerTransaction(c *gin.Context) {
 		response["return_data_text"] = decodeReturnData(tx.ReturnData)
 		response["return_data_kind"] = returnDataKind(tx.ReturnData)
 	}
+	// Contract provenance: the address a deploy CREATED (derived exactly as
+	// block execution derives it) and the collection a mint anchor bound its
+	// token to. Without this a collection deploy/anchor named no address at
+	// all — see addContractFields.
+	addContractFields(tx, response)
 
 	if len(tx.Data) > 0 {
 		response["data"] = fmt.Sprintf("%x", tx.Data)
@@ -632,7 +732,7 @@ func (s *Server) handleExplorerAddress(c *gin.Context) {
 			}
 		}
 
-		txList = append(txList, gin.H{
+		row := gin.H{
 			"txid":          tx.ID,
 			"direction":     dir,
 			"amount_spx":    amount,
@@ -648,7 +748,13 @@ func (s *Server) handleExplorerAddress(c *gin.Context) {
 			"block_height":  txBlockHeight,
 			"block_hash":    txBlockHash,
 			"confirmations": txConfirmations,
-		})
+		}
+		// Contract provenance on every history row: the address a deploy
+		// CREATED and the collection a mint anchor bound its token to. An
+		// address history is where a user looks for their own minted
+		// collections, so the transaction that created one has to name it.
+		addContractFields(tx, row)
+		txList = append(txList, row)
 	}
 
 	balances := gin.H{
@@ -810,7 +916,7 @@ func (s *Server) handleExplorerMempool(c *gin.Context) {
 					new(big.Float).SetFloat64(1e18),
 				).Text('f', 6)
 			}
-			pendingTxs = append(pendingTxs, gin.H{
+			row := gin.H{
 				"txid":       tx.ID,
 				"sender":     tx.Sender,
 				"receiver":   tx.Receiver,
@@ -818,15 +924,95 @@ func (s *Server) handleExplorerMempool(c *gin.Context) {
 				"nonce":      tx.Nonce,
 				"timestamp":  tx.Timestamp,
 				"age_sec":    time.Since(time.Unix(tx.Timestamp, 0)).Seconds(),
-			})
+				// Gas fields let the UI compute the projected next block's real
+				// weight (sum of gas demand vs the tip's gas limit) instead of
+				// inventing a percentage.
+				"gas_limit": bigIntString(tx.GasLimit),
+				"gas_price": bigIntString(tx.GasPrice),
+			}
+			// A pending deploy already has a determined contract address — it is
+			// a pure function of (sender, nonce, code), all of which are on the
+			// transaction — so the mempool view can name the collection a pending
+			// deploy will create before the block commits.
+			addContractFields(tx, row)
+			pendingTxs = append(pendingTxs, row)
 		}
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"mempool":     mempoolInfo,
+	// Pool breakdown — the honesty layer over the pending list below.
+	//
+	// ★ WHY: sendrawtransaction accepts a transaction and returns its txid
+	// BEFORE the pool validates it (nonce/balance/signature are checked
+	// asynchronously in performValidation; only gas/fee are synchronous in
+	// ValidateTransactionPolicy). So the moment a client is waiting on a send,
+	// the pool holds either an in-flight entry (broadcast/validating) or a
+	// REJECTED entry (moved to the invalid pool) — and GetPendingTransactions,
+	// which counts only validated mineable entries, reports neither. A view
+	// built on it alone therefore reads a bare "0 pending" both while a send is
+	// in flight and after the node has refused it, which is exactly when an
+	// operator needs to see the pool. The counts and both lists below are
+	// emitted alongside the pending rows so zero is never the whole story.
+	broadcast, validating, pendingCount, invalidCount, tracked := bc.MempoolSnapshot()
+	snapshot := [5]int{broadcast, validating, pendingCount, invalidCount, tracked}
+
+	rejectedTxs := make([]gin.H, 0)
+	inFlightTxs := make([]gin.H, 0)
+	if mempool != nil {
+		for _, entry := range mempool.RejectedTransactions() {
+			rejectedTxs = append(rejectedTxs, mempoolEntryRow(entry, true))
+		}
+		for _, entry := range mempool.InFlightTransactions() {
+			inFlightTxs = append(inFlightTxs, mempoolEntryRow(entry, false))
+		}
+	}
+
+	c.JSON(http.StatusOK, mempoolResponse(mempoolInfo, pendingTxs, inFlightTxs, rejectedTxs, snapshot))
+}
+
+// mempoolEntryRow renders one non-mineable pool entry for the /mempool
+// payload. includeReason is true only for rejected entries: an in-flight
+// transaction has no failure to report, and emitting an empty "reason" there
+// would read as one.
+func mempoolEntryRow(entry pool.MempoolEntry, includeReason bool) gin.H {
+	row := gin.H{
+		"txid":   entry.TxID,
+		"sender": entry.Sender,
+		"nonce":  entry.Nonce,
+		"status": entry.Status,
+	}
+	if includeReason {
+		// The node's own validation failure — "invalid nonce: 5 must equal 2",
+		// "insufficient balance", … — which is the reason a broadcast send can
+		// never confirm.
+		row["reason"] = entry.Reason
+	}
+	return row
+}
+
+// mempoolResponse assembles the /mempool body from the three row lists and the
+// pool snapshot, kept out of the handler so the payload shape — in particular
+// that the pool breakdown and the rejected list are present alongside the
+// pending rows — is directly testable without a running blockchain.
+//
+// tx_count stays the PENDING count it has always been (existing consumers key
+// off it); pool.total is the number of transactions the pool tracks overall.
+func mempoolResponse(info map[string]interface{}, pendingTxs, inFlightTxs, rejectedTxs []gin.H, snapshot [5]int) gin.H {
+	return gin.H{
+		"mempool": info,
+		// Only VALIDATED, mineable transactions — see the handler comment for
+		// why this alone is not enough to describe the pool.
 		"pending_txs": pendingTxs,
 		"tx_count":    len(pendingTxs),
-	})
+		"pool": gin.H{
+			"broadcast":  snapshot[0],
+			"validating": snapshot[1],
+			"pending":    snapshot[2],
+			"invalid":    snapshot[3],
+			"total":      snapshot[4],
+		},
+		"in_flight_txs": inFlightTxs,
+		"rejected_txs":  rejectedTxs,
+	}
 }
 
 // ============================================================================
@@ -1137,6 +1323,51 @@ func returnDataKind(data []byte) string {
 	return "memo"
 }
 
+// addContractFields stamps the contract address a transaction involves onto an
+// explorer payload, on top of the to_contract / is_contract_tx pair the
+// handlers already emit.
+//
+// ★ WHY THIS EXISTS: the explorer could name a contract a transaction CALLS
+// (to_contract) but never the contract a transaction CREATES, so the deploy
+// that mints a dataset's SIP-721 collection showed up as a receiverless
+// transaction with no address anywhere in the block or transaction view.
+// Nothing was missing on-chain — a deployment simply carries no ToContract
+// (its destination is derived at execution time) and the address only exists
+// as contracts.ContractAddress(sender, nonce, code) — so the explorer has to
+// re-derive it exactly the way block execution does, from the same three
+// inputs. Both the sender/nonce and the code bytes are part of the committed
+// transaction, so the derived address is deterministic and identical to the
+// one the state DB stores the contract under.
+//
+// A mint ANCHOR is the second place a contract address travels without
+// ToContract: the AnchorTag inside ReturnData records the SIP-721
+// collection/token the minted data was bound to (see core.AnchorTag's
+// Contract/TokenID/TokenURI), which is what makes a minted item discoverable
+// on the Marketplace. Those are surfaced here too, decoded through the same
+// core.ParseTag every node validates anchors with, so the explorer reports the
+// committed binding rather than a re-parse of its own.
+//
+// Addresses are emitted in the canonical grouped SPIF display form produced by
+// contracts.ContractAddress — the same string the wallet, the node's contract
+// registry and the Marketplace use as a lookup key.
+func addContractFields(tx *types.Transaction, payload gin.H) {
+	if tx == nil || payload == nil {
+		return
+	}
+	payload["is_contract_deploy"] = tx.IsContractDeployment()
+	if tx.IsContractDeployment() {
+		payload["created_contract"] = contracts.ContractAddress(tx.Sender, tx.Nonce, tx.Code)
+	}
+	if tag, err := core.ParseTag(tx.ReturnData); err == nil && tag != nil {
+		if contract := strings.TrimSpace(tag.Contract); contract != "" {
+			payload["anchor_contract"] = contract
+			if tag.TokenID != 0 {
+				payload["anchor_token_id"] = tag.TokenID
+			}
+		}
+	}
+}
+
 // blockBurnTotals reads this block's burn accounting from its atomic-commit
 // journal (tx_<hashprefix>.json): how much nSPX the block burned, and what the
 // DEAD-address total was before the block ran. Journals are written for every
@@ -1263,6 +1494,11 @@ func formatBlockSummary(bc *core.Blockchain, block *types.Block) gin.H {
 		"sig_valid":         block.Header.SigValid,
 		"chain_weight":      bigIntString(block.Header.ChainWeight),
 		"attestation_count": len(block.Body.Attestations),
+		// Signature fields — the proposer's block seal and the data it covers.
+		// These let an auditor verify the block's authenticity offline.
+		"proposer_id":        block.Header.ProposerID,
+		"proposer_signature": fmt.Sprintf("%x", block.Header.ProposerSignature),
+		"sig_data_hash":      fmt.Sprintf("%x", block.Header.SigDataHash),
 		// Burned coins live at the provably-unspendable DEAD address; the
 		// journal totals below are the per-block auditable source for "how
 		// many coins were burned in this block". Empty when no journal exists
@@ -1317,6 +1553,20 @@ func formatBlockDetail(bc *core.Blockchain, block *types.Block) gin.H {
 			"burned_this_tx_spx":  nspxToSPXString(burned),
 			"to_contract":    tx.ToContract,
 			"is_contract_tx": tx.HasContractPayload(),
+			// SPHINCS+ auth bundle: the per-transaction signature (as opposed
+			// to the block-level proposer signature). A PQ explorer must show
+			// these per transaction: the STHINCS+ signature, its hash, the
+			// verifying public key, auth bindings, receipt root, commitment,
+			// and consistency proof.
+			"signature":       fmt.Sprintf("%x", tx.Signature),
+			"signature_hash":  fmt.Sprintf("%x", tx.SignatureHash),
+			"public_key":      fmt.Sprintf("%x", tx.PublicKey),
+			"auth_timestamp":  fmt.Sprintf("%x", tx.AuthTimestamp),
+			"auth_nonce":      fmt.Sprintf("%x", tx.AuthNonce),
+			"merkle_root":     fmt.Sprintf("%x", tx.MerkleRootHash),
+			"merkle_root_hash": fmt.Sprintf("%x", tx.MerkleRootHash),
+			"commitment":      fmt.Sprintf("%x", tx.Commitment),
+			"proof":           fmt.Sprintf("%x", tx.Proof),
 		}
 		// ReturnData is where mint anchors live: core.ValidateAnchorData
 		// parses the AnchorTag out of it, and its CID field is the only
@@ -1339,6 +1589,13 @@ func formatBlockDetail(bc *core.Blockchain, block *types.Block) gin.H {
 			txSummary["return_data_text"] = decodeReturnData(tx.ReturnData)
 			txSummary["return_data_kind"] = returnDataKind(tx.ReturnData)
 		}
+		// Contract provenance for the whole block in one request: the address
+		// a deployment created (contracts.ContractAddress(sender, nonce,
+		// code)) and the collection a mint anchor committed its token to. A
+		// block view that lists transactions but not the contract addresses
+		// they created cannot answer "which collection did this deploy mint?"
+		// without re-deriving every deploy client-side.
+		addContractFields(tx, txSummary)
 		txList = append(txList, txSummary)
 	}
 
@@ -1379,8 +1636,12 @@ func formatBlockDetail(bc *core.Blockchain, block *types.Block) gin.H {
 			"sig_valid":     block.Header.SigValid,
 			"commit_status": block.Header.CommitStatus,
 			"chain_weight":  bigIntString(block.Header.ChainWeight),
-			"age":           summary["age"],
-			"age_sec":       summary["age_sec"],
+			// Signature fields - proposer block seal and data it covers.
+			"proposer_id":        block.Header.ProposerID,
+			"proposer_signature": fmt.Sprintf("%x", block.Header.ProposerSignature),
+			"sig_data_hash":      fmt.Sprintf("%x", block.Header.SigDataHash),
+			"age":                summary["age"],
+			"age_sec":            summary["age_sec"],
 		},
 		"tx_count":     len(txList),
 		"transactions": txList,

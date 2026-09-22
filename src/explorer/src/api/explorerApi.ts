@@ -9,37 +9,171 @@
 
 import { Block, Transaction, Validator, Wallet, NetworkStats, HolderGrowthPoint, Attestation } from '../types';
 import { formatSPIFAddress, normalizeSPIFAddress } from '../utils/formatters';
+import * as mock from '../mock/blockchainData';
 
 // Base URL for API requests. In development, Vite proxies /api to the Go backend.
 // In production, the Go server serves both the static files and the API.
 const API_BASE = '/api/v1/explorer';
 
-// ============================================================================
-// Response type helpers
-// ============================================================================
+// Data provenance. The explorer falls back to a simulated chain so the UI stays
+// inspectable with no node running, but an explorer silently rendering invented
+// blocks is a real hazard: an operator would believe the node is healthy. Every
+// fallback flips this to 'mock' so App can render a visible warning banner.
+export type DataSource = 'live' | 'mock';
+let dataSource: DataSource = 'live';
 
-interface ApiResponse<T> {
-  data?: T;
-  error?: string;
+/** True when the most recent API call had to fall back to simulated data. */
+export function getDataSource(): DataSource {
+  return dataSource;
 }
 
-// ============================================================================
-// Generic fetch wrapper
-// ============================================================================
-
+// Generic fetch wrapper with graceful fallback to simulated mock data
+// if the local Go backend is not yet started.
 async function fetchApi<T>(endpoint: string, options?: RequestInit): Promise<T> {
   const url = `${API_BASE}${endpoint}`;
-  const res = await fetch(url, {
-    headers: { 'Accept': 'application/json' },
-    ...options,
-  });
+  try {
+    const res = await fetch(url, {
+      headers: { 'Accept': 'application/json' },
+      ...options,
+    });
 
-  if (!res.ok) {
-    const text = await res.text().catch(() => 'unknown error');
-    throw new Error(`API ${res.status} ${res.statusText}: ${text}`);
+    if (!res.ok) {
+      const text = await res.text().catch(() => 'unknown error');
+      throw new Error(`API ${res.status} ${res.statusText}: ${text}`);
+    }
+
+    const body = await res.json();
+    dataSource = 'live';
+    return body;
+  } catch (err) {
+    // If backend is unreachable, gracefully fall back to mock data — flagged
+    // via getDataSource() so the UI never presents it as real chain state.
+    return handleMockFallback<T>(endpoint);
+  }
+}
+
+function handleMockFallback<T>(endpoint: string): T {
+  dataSource = 'mock';
+  const state = mock.getBlockchainState();
+  if (endpoint.startsWith('/stats')) {
+    return {
+      block_count: state.stats.tipHeight,
+      tps: {
+        current_tps: state.stats.currentTps,
+        average_tps: state.stats.averageTps,
+        peak_tps: state.stats.peakTps,
+      },
+      mempool: {
+        size: state.stats.mempoolSize,
+        bytes: state.stats.mempoolBytes,
+      },
+      validators: {
+        active_validators: state.stats.activeValidators,
+        total_validators: state.stats.totalValidators,
+        total_stake_spx: state.stats.totalStakeSpx,
+        min_stake_spx: state.stats.minStakeSpx,
+      },
+      chain: {
+        chain_id: state.stats.chainId,
+        symbol: state.stats.symbol,
+        genesis_hash: state.stats.genesisHash,
+        sync_mode: state.stats.syncMode,
+      },
+      burn: {
+        address: state.stats.burnAddress,
+        burned_spx: state.stats.burnedSpx,
+        burned_nspx: state.stats.burnedNspx,
+        circulating_spx: state.stats.circulatingSpx,
+        circulating_nspx: state.stats.circulatingNspx,
+        total_supply_spx: state.stats.totalSupplySpx,
+        total_supply_nspx: state.stats.totalSupplyNspx,
+        max_supply_spx: state.stats.maxSupplySpx,
+        burn_percent: state.stats.burnPercent,
+      },
+      wallets: {
+        total_accounts: state.stats.totalAccounts,
+        active_wallets: state.stats.activeWallets,
+        spif_addresses: state.stats.sphincsAddresses,
+      },
+    } as unknown as T;
   }
 
-  return res.json();
+  if (endpoint.startsWith('/blocks')) {
+    return {
+      blocks: state.blocks,
+      total: state.blocks.length,
+    } as unknown as T;
+  }
+
+  if (endpoint.startsWith('/block/')) {
+    const heightOrHash = endpoint.replace('/block/', '');
+    const height = parseInt(heightOrHash);
+    const blk = !isNaN(height)
+      ? state.blocks.find(b => b.height === height)
+      : state.blocks.find(b => b.hash === heightOrHash);
+    if (blk) {
+      const txs = state.transactions.filter(t => t.blockHeight === blk.height);
+      return {
+        block_height: blk.height,
+        block_hash: blk.hash,
+        header: blk,
+        transactions: txs,
+        attestations: [],
+      } as unknown as T;
+    }
+  }
+
+  if (endpoint.startsWith('/mempool')) {
+    // Simulated mempool: only the pending set exists, and the breakdown says
+    // so explicitly rather than reporting zeros a reader might take for a real
+    // node's empty pool.
+    return {
+      pending_txs: state.mempool,
+      pool: {
+        broadcast: 0,
+        validating: 0,
+        pending: state.mempool.length,
+        invalid: 0,
+        total: state.mempool.length,
+      },
+      in_flight_txs: [],
+      rejected_txs: [],
+    } as unknown as T;
+  }
+
+  if (endpoint.startsWith('/validators')) {
+    return {
+      validators: state.validators,
+    } as unknown as T;
+  }
+
+  if (endpoint.startsWith('/wallets')) {
+    return {
+      rich_list: state.wallets,
+    } as unknown as T;
+  }
+
+  if (endpoint.startsWith('/holders/growth')) {
+    const today = new Date();
+    const points = Array.from({ length: 30 }).map((_, i) => {
+      const d = new Date(today);
+      d.setDate(d.getDate() - (29 - i));
+      return {
+        date: d.toISOString().split('T')[0],
+        holders: 120 + Math.floor(i * 4.2),
+        new_holders: Math.floor(Math.random() * 8) + 1,
+      };
+    });
+    return { points } as unknown as T;
+  }
+
+  if (endpoint.startsWith('/search')) {
+    const urlParams = new URLSearchParams(endpoint.split('?')[1] || '');
+    const q = urlParams.get('q') || '';
+    return mock.searchBlockchain(q) as unknown as T;
+  }
+
+  return {} as unknown as T;
 }
 
 // ============================================================================
@@ -49,9 +183,6 @@ async function fetchApi<T>(endpoint: string, options?: RequestInit): Promise<T> 
 export async function fetchStats(): Promise<NetworkStats> {
   const raw: any = await fetchApi('/stats');
 
-  // Burn accounting may come from the dedicated `burn` panel or, on older
-  // nodes, only from the `wallets` block. Prefer the panel and fall back so the
-  // dashboard never renders an empty burn card against a compatible backend.
   const burn = raw.burn || {};
   const wallets = raw.wallets || {};
 
@@ -74,6 +205,7 @@ export async function fetchStats(): Promise<NetworkStats> {
     symbol: raw.chain?.symbol || 'SPX',
     genesisHash: raw.chain?.genesis_hash || '',
     syncMode: raw.chain?.sync_mode || 'Fully Audited (SPHINCS+ Hash Signature Verified)',
+    blockTimeSeconds: Number(raw.chain?.block_time_seconds) || 12,
     burnAddress: burn.address || wallets.burn_address || '',
     burnedSpx: burn.burned_spx || wallets.burned_spx || '0',
     burnedNspx: burn.burned_nspx || wallets.burned_nspx || '0',
@@ -114,8 +246,55 @@ export async function fetchBlocks(page: number = 1, limit: number = 25): Promise
   return raw.blocks.map((b: any) => mapBlock(b));
 }
 
-// BlockDetailPayload is what the block page binds to: the header plus the full
-// transaction body and the PBFT attestations that committed it.
+// Hard ceiling on pagination rounds so a malformed/circular response can never
+// spin this loop: 200 pages × 100 rows = 20,000 blocks.
+const MAX_BLOCK_PAGES = 200;
+// The backend's max page size — anything above 100 is silently rejected and
+// reset to 25 by handleExplorerBlocks, so never request more than this.
+const BLOCK_PAGE_LIMIT = 100;
+
+// fetchAllBlocks walks EVERY page of /blocks so "All Mined Block States"
+// renders the entire chain instead of just the newest page. The handler
+// returns blocks newest-first along with `total`; we keep requesting pages
+// until every reported block has been seen.
+//
+// Rows are keyed by height because a block mined between page fetches shifts
+// every subsequent page's window — without dedupe that shift would duplicate
+// heights across the page boundary. The final sort restores strict
+// newest-first order regardless of the order pages arrived in.
+export async function fetchAllBlocks(): Promise<Block[]> {
+  const byHeight = new Map<number, Block>();
+  let total = Number.POSITIVE_INFINITY;
+
+  for (let page = 1; page <= MAX_BLOCK_PAGES; page++) {
+    const raw: any = await fetchApi(`/blocks?page=${page}&limit=${BLOCK_PAGE_LIMIT}`);
+    const rows: any[] = Array.isArray(raw?.blocks) ? raw.blocks : [];
+    if (rows.length === 0) {
+      break;
+    }
+
+    for (const row of rows) {
+      const block = mapBlock(row);
+      byHeight.set(block.height, block);
+    }
+
+    const reportedTotal = Number(raw?.total);
+    if (Number.isFinite(reportedTotal) && reportedTotal > 0) {
+      total = reportedTotal;
+    }
+    if (byHeight.size >= total) {
+      break;
+    }
+    // A short page is the last one; stop rather than asking a clamped
+    // backend (it re-serves the final page for any out-of-range request).
+    if (rows.length < BLOCK_PAGE_LIMIT) {
+      break;
+    }
+  }
+
+  return Array.from(byHeight.values()).sort((a, b) => b.height - a.height);
+}
+
 export interface BlockDetailPayload {
   block: Block;
   transactions: Transaction[];
@@ -150,12 +329,6 @@ export async function fetchBlockByHash(hash: string): Promise<Block | null> {
   }
 }
 
-/**
- * Coerces the backend's commit status into the badge vocabulary the UI styles.
- * The node reports PBFT phases ("proposed"/"prepared"/"committed"); the explorer
- * renders a narrower set, so anything unknown reads as committed rather than
- * blank, and the pre-commit phases read as pending.
- */
 function mapCommitStatus(status: unknown): Block['commitStatus'] {
   switch (String(status || '').toLowerCase()) {
     case 'proposed':
@@ -185,7 +358,7 @@ function mapBlock(b: any): Block {
     stateRoot: b.state_root || '',
     chainWeight: b.chain_weight || '0',
     commitStatus: mapCommitStatus(b.commit_status),
-    txCount: Number(b.tx_count) || 0,
+    txCount: Number(b.tx_count),
     signatureScheme: 'SPHINCS+-128s' as const,
     version: Number(b.version) || 0,
     unclesHash: b.uncles_hash || '',
@@ -194,20 +367,20 @@ function mapBlock(b: any): Block {
     confirmations: Number(b.confirmations) || 0,
     age: b.age || '',
     ageSec: Number(b.age_sec),
-    // Block-level burn information
     burnedThisBlockSpx: b.burned_this_block_spx,
     burnedThisBlockNspx: b.burned_this_block_nspx,
     burnedBeforeNspx: b.burned_before_nspx,
-    // Coinbase/block reward details
     blockRewardSpx: b.block_reward_spx,
     blockRewardNspx: b.block_reward_nspx,
     blockRewardMinerNspx: b.block_reward_miner_nspx,
     blockRewardBurnedNspx: b.block_reward_burned_nspx,
-    // Network/protocol details
     extraData: b.extra_data,
     miner: b.miner,
     logsBloom: b.logs_bloom,
     gasPrice: b.gas_price,
+    proposerId: b.proposer_id || b.proposer || '',
+    proposerSignature: b.proposer_signature || '',
+    sigDataHash: b.sig_data_hash || '',
   };
 }
 
@@ -228,7 +401,7 @@ function mapBlockDetail(raw: any): Block {
     stateRoot: header.state_root || '',
     chainWeight: header.chain_weight || '0',
     commitStatus: mapCommitStatus(header.commit_status),
-    txCount: Number(raw.tx_count) || raw.transactions?.length || 0,
+    txCount: "tx_count" in raw ? Number(raw.tx_count) : (raw.transactions?.length ?? 0),
     signatureScheme: 'SPHINCS+-128s' as const,
     version: Number(header.version) || 0,
     unclesHash: header.uncles_hash || '',
@@ -237,20 +410,20 @@ function mapBlockDetail(raw: any): Block {
     confirmations: Number(raw.confirmations) || 0,
     age: header.age || '',
     ageSec: Number(header.age_sec),
-    // Block-level burn information
     burnedThisBlockSpx: raw.burned_this_block_spx,
     burnedThisBlockNspx: raw.burned_this_block_nspx,
     burnedBeforeNspx: raw.burned_before_nspx,
-    // Coinbase/block reward details
     blockRewardSpx: raw.block_reward_spx,
     blockRewardNspx: raw.block_reward_nspx,
     blockRewardMinerNspx: raw.block_reward_miner_nspx,
     blockRewardBurnedNspx: raw.block_reward_burned_nspx,
-    // Network/protocol details
     extraData: header.extra_data,
     miner: header.miner,
     logsBloom: header.logs_bloom,
     gasPrice: header.gas_price,
+    proposerId: header.proposer_id || header.proposer || '',
+    proposerSignature: header.proposer_signature || '',
+    sigDataHash: header.sig_data_hash || '',
   };
 }
 
@@ -263,11 +436,6 @@ function mapAttestation(att: any): Attestation {
   };
 }
 
-/**
- * Maps a transaction row embedded in a block payload. Those rows carry the same
- * economic fields as the standalone /tx endpoint, so the block page can show
- * amounts, fees and confirmation depth without a request per transaction.
- */
 function mapBlockTransaction(tx: any, blockPayload: any): Transaction {
   const header = blockPayload?.header || {};
   return {
@@ -300,17 +468,22 @@ function mapBlockTransaction(tx: any, blockPayload: any): Transaction {
     feeNspx: tx.fee_nspx || '0',
     age: tx.age,
     isContractTx: Boolean(tx.is_contract_tx),
-    toContract: tx.to_contract || '',
-    // Enhanced transaction details
+    toContract: tx.to_contract ? formatSPIFAddress(tx.to_contract) : '',
+    isContractDeploy: Boolean(tx.is_contract_deploy),
+    createdContract: tx.created_contract ? formatSPIFAddress(tx.created_contract) : '',
+    anchorContract: tx.anchor_contract ? formatSPIFAddress(tx.anchor_contract) : '',
+    anchorTokenId: Number(tx.anchor_token_id) || 0,
     proof: tx.proof,
+    signatureHash: tx.signature_hash || "",
+    commitment: tx.commitment || "",
+    authTimestamp: tx.auth_timestamp || "",
+    authNonce: tx.auth_nonce || "",
     gasUsed: toNumber(tx.gas_used),
-    // Burn information for this transaction
     burnedThisTxSpx: tx.burned_this_tx_spx,
     burnedThisTxNspx: tx.burned_this_tx_nspx,
   };
 }
 
-/** Parses a backend numeric string (nSPX/gas figures) without losing precision. */
 function toNumber(value: unknown): number {
   const n = Number(value);
   return Number.isFinite(n) ? n : 0;
@@ -354,19 +527,23 @@ function mapTransaction(raw: any): Transaction {
     returnDataText: raw.return_data_text || undefined,
     returnDataKind: raw.return_data_kind || undefined,
     signatureScheme: 'SPHINCS+-128s' as const,
-    // Confirmation provenance from the standalone endpoint: naming the block
-    // that committed the tx is what lets the detail page link to it.
     blockHash: raw.block_hash || '',
     confirmations: Number(raw.confirmations) || 0,
     feeSpx: raw.gas_fee_spx || '0',
     feeNspx: raw.fee_nspx || '0',
     age: raw.age,
     isContractTx: Boolean(raw.is_contract_tx),
-    toContract: raw.to_contract || '',
-    // Enhanced transaction details
+    toContract: raw.to_contract ? formatSPIFAddress(raw.to_contract) : '',
+    isContractDeploy: Boolean(raw.is_contract_deploy),
+    createdContract: raw.created_contract ? formatSPIFAddress(raw.created_contract) : '',
+    anchorContract: raw.anchor_contract ? formatSPIFAddress(raw.anchor_contract) : '',
+    anchorTokenId: Number(raw.anchor_token_id) || 0,
     proof: raw.proof,
+    signatureHash: raw.signature_hash || "",
+    commitment: raw.commitment || "",
+    authTimestamp: raw.auth_timestamp || "",
+    authNonce: raw.auth_nonce || "",
     gasUsed: Number(raw.gas_used),
-    // Burn information for this transaction
     burnedThisTxSpx: raw.burned_this_tx_spx,
     burnedThisTxNspx: raw.burned_this_tx_nspx,
   };
@@ -381,11 +558,9 @@ export async function fetchAddress(address: string): Promise<{
   transactions: Transaction[];
 } | null> {
   try {
-    // Normalize the address to raw hex before querying the backend
     const rawHex = normalizeSPIFAddress(address);
     const raw: any = await fetchApi(`/address/${rawHex}`);
 
-    // Format the address from the response into SPIF display format
     const formattedAddress = formatSPIFAddress(raw.address || rawHex);
 
     const wallet: Wallet = {
@@ -394,7 +569,7 @@ export async function fetchAddress(address: string): Promise<{
       balanceSpx: raw.balance_spx || '0',
       nonce: raw.nonce || 0,
       isActive: raw.nonce > 0,
-      addressType: raw.address_type === 'SPIF' ? 'SPHINCS+ (Stateless Hash)' : 'Legacy (ECDSA - Vulnerable)',
+      addressType: 'SPHINCS+ (Stateless Hash)',
     };
 
     const transactions: Transaction[] = (raw.transactions || []).map((tx: any) => ({
@@ -406,11 +581,9 @@ export async function fetchAddress(address: string): Promise<{
       amountNspx: tx.amount_nspx || '0',
       nonce: tx.nonce || 0,
       timestamp: tx.timestamp || 0,
-      // The address endpoint now reports the committing block per row, so each
-      // history line can state its confirmation depth.
       blockHeight: Number(tx.block_height) || 0,
-      gasLimit: 0,
-      gasPrice: 0,
+      gasLimit: toNumber(tx.gas_limit),
+      gasPrice: toNumber(tx.gas_price),
       gasFeeSpx: tx.fee_spx || '0',
       chainId: 'sphinx-post-quantum-1',
       isSystemTx: false,
@@ -424,6 +597,12 @@ export async function fetchAddress(address: string): Promise<{
       feeSpx: tx.fee_spx || '0',
       feeNspx: tx.fee_nspx || '0',
       age: tx.age,
+      // Contract provenance, so a wallet/address history names the collection
+      // its own deploy created and the one its mint was anchored to.
+      isContractDeploy: Boolean(tx.is_contract_deploy),
+      createdContract: tx.created_contract ? formatSPIFAddress(tx.created_contract) : '',
+      anchorContract: tx.anchor_contract ? formatSPIFAddress(tx.anchor_contract) : '',
+      anchorTokenId: Number(tx.anchor_token_id) || 0,
     }));
 
     return { wallet, transactions };
@@ -436,43 +615,129 @@ export async function fetchAddress(address: string): Promise<{
 // Mempool
 // ============================================================================
 
-export async function fetchMempool(): Promise<Transaction[]> {
+/** Per-pool counts straight from the node's MempoolSnapshot. */
+export interface MempoolPoolSummary {
+  /** Accepted, not yet validated. */
+  broadcast: number;
+  /** Mid-validation right now. */
+  validating: number;
+  /** Validated and mineable — what "pending" properly means. */
+  pending: number;
+  /** Rejected by validation; can never confirm. */
+  invalid: number;
+  /** Every transaction the pool still tracks. */
+  total: number;
+}
+
+/**
+ * One mempool row that is NOT mineable yet — either still being accepted
+ * (broadcast/validating) or already refused (invalid, carrying the node's
+ * reason). Kept separate from Transaction because such a row has no amount,
+ * no fee and no confirmation to render: it is a pipeline state, not a
+ * transfer.
+ */
+export interface MempoolTxRow {
+  txid: string;
+  sender: string;
+  nonce?: number;
+  status: string;
+  /** Only set for a rejected row: why it can never confirm. */
+  reason?: string;
+}
+
+/**
+ * The full mempool picture. `pending` alone cannot answer "where did my send
+ * go?" — the node returns a txid from sendrawtransaction BEFORE validating the
+ * nonce, so a send is briefly in-flight and may end up rejected, and both of
+ * those read as an empty pending list. The pool summary and the two extra
+ * lists exist so a zero here is never the whole story.
+ */
+export interface MempoolView {
+  pending: Transaction[];
+  pool: MempoolPoolSummary;
+  inFlight: MempoolTxRow[];
+  rejected: MempoolTxRow[];
+}
+
+const EMPTY_POOL: MempoolPoolSummary = {
+  broadcast: 0,
+  validating: 0,
+  pending: 0,
+  invalid: 0,
+  total: 0,
+};
+
+function mapMempoolTx(tx: any): Transaction {
+  return {
+    txid: tx.txid || '',
+    status: 'pending' as const,
+    sender: formatSPIFAddress(tx.sender || ''),
+    receiver: formatSPIFAddress(tx.receiver || ''),
+    amountSpx: tx.amount_spx || '0',
+    amountNspx: '0',
+    nonce: tx.nonce || 0,
+    timestamp: tx.timestamp || 0,
+    blockHeight: 0,
+    gasLimit: toNumber(tx.gas_limit),
+    gasPrice: toNumber(tx.gas_price),
+    gasFeeSpx: '0',
+    chainId: 'sphinx-post-quantum-1',
+    isSystemTx: false,
+    signature: '',
+    publicKey: '',
+    merkleRoot: '',
+    hasFullAuth: false,
+    signatureScheme: 'SPHINCS+-128s' as const,
+    blockHash: '',
+    confirmations: 0,
+    feeSpx: '0',
+    feeNspx: '0',
+    // A pending deploy's address is already determined by
+    // (sender, nonce, code), and a pending mint anchor already names its
+    // collection, so both are carried through for the mempool view.
+    isContractTx: Boolean(tx.is_contract_tx),
+    toContract: tx.to_contract ? formatSPIFAddress(tx.to_contract) : '',
+    isContractDeploy: Boolean(tx.is_contract_deploy),
+    createdContract: tx.created_contract ? formatSPIFAddress(tx.created_contract) : '',
+    anchorContract: tx.anchor_contract ? formatSPIFAddress(tx.anchor_contract) : '',
+    anchorTokenId: Number(tx.anchor_token_id) || 0,
+  };
+}
+
+function mapMempoolRow(raw: any): MempoolTxRow {
+  return {
+    txid: raw.txid || '',
+    sender: formatSPIFAddress(raw.sender || ''),
+    nonce: Number(raw.nonce) || 0,
+    status: raw.status || 'unknown',
+    reason: raw.reason || undefined,
+  };
+}
+
+/**
+ * Fetches the full mempool picture: the mineable pending set, the pool
+ * breakdown, the in-flight entries awaiting validation, and the rejected
+ * entries with the node's reason for each.
+ */
+export async function fetchMempoolView(): Promise<MempoolView> {
   try {
     const raw: any = await fetchApi('/mempool');
-
-    if (!raw.pending_txs || !Array.isArray(raw.pending_txs)) {
-      return [];
-    }
-
-    return raw.pending_txs.map((tx: any) => ({
-      txid: tx.txid || '',
-      status: 'pending' as const,
-      sender: formatSPIFAddress(tx.sender || ''),
-      receiver: formatSPIFAddress(tx.receiver || ''),
-      amountSpx: tx.amount_spx || '0',
-      amountNspx: '0',
-      nonce: tx.nonce || 0,
-      timestamp: tx.timestamp || 0,
-      blockHeight: 0,
-      gasLimit: 0,
-      gasPrice: 0,
-      gasFeeSpx: '0',
-      chainId: 'sphinx-post-quantum-1',
-      isSystemTx: false,
-      signature: '',
-      publicKey: '',
-      merkleRoot: '',
-      hasFullAuth: false,
-      signatureScheme: 'SPHINCS+-128s' as const,
-      // A mempool transaction is unconfirmed by definition: no block, no depth.
-      blockHash: '',
-      confirmations: 0,
-      feeSpx: '0',
-      feeNspx: '0',
-    }));
+    const rows = (name: string): any[] =>
+      Array.isArray(raw?.[name]) ? raw[name] : [];
+    return {
+      pending: rows('pending_txs').map(mapMempoolTx),
+      pool: { ...EMPTY_POOL, ...(raw?.pool || {}) },
+      inFlight: rows('in_flight_txs').map(mapMempoolRow),
+      rejected: rows('rejected_txs').map(mapMempoolRow),
+    };
   } catch {
-    return [];
+    return { pending: [], pool: { ...EMPTY_POOL }, inFlight: [], rejected: [] };
   }
+}
+
+/** The mineable pending transactions only — see fetchMempoolView for the rest. */
+export async function fetchMempool(): Promise<Transaction[]> {
+  return (await fetchMempoolView()).pending;
 }
 
 // ============================================================================
@@ -493,7 +758,7 @@ export async function fetchWallets(limit: number = 50): Promise<Wallet[]> {
       balanceSpx: w.balance_spx || '0',
       nonce: w.nonce || 0,
       isActive: w.is_active || false,
-      addressType: w.address_type === 'SPIF' ? 'SPHINCS+ (Stateless Hash)' : 'Legacy (ECDSA - Vulnerable)',
+      addressType: 'SPHINCS+ (Stateless Hash)',
     }));
   } catch {
     return [];
@@ -563,7 +828,7 @@ export async function fetchValidatorMap(): Promise<Validator[]> {
 }
 
 // ============================================================================
-// Search
+// Search & Mining
 // ============================================================================
 
 export async function search(query: string): Promise<{
@@ -571,7 +836,6 @@ export async function search(query: string): Promise<{
   matches?: Array<{ type: string; id: string; name: string; extra?: string }>;
 }> {
   try {
-    // Normalize SPIF addresses to raw hex before sending to backend
     const normalizedQuery = normalizeSPIFAddress(query);
     const raw: any = await fetchApi(`/search?q=${encodeURIComponent(normalizedQuery)}`);
     return {
@@ -582,3 +846,59 @@ export async function search(query: string): Promise<{
     return { matches: [] };
   }
 }
+
+/** Result of a mine request, with its data provenance made explicit. */
+export interface MineResult {
+  block: Block;
+  transactions: Transaction[];
+  /**
+   * True when this block came from the local simulation engine because the node
+   * was unreachable. A simulated block is NOT on any chain — callers must not
+   * present it as confirmed chain state.
+   */
+  simulated: boolean;
+}
+
+/**
+ * Ask the node to produce and commit one block (POST /explorer/mine).
+ *
+ * The distinction between "the node said no" and "there is no node" matters
+ * here: an explicit refusal (e.g. 409 on a multi-validator cluster, where the
+ * PBFT leader owns block production) is thrown as an Error so the caller can
+ * surface the real reason. Only a transport-level failure — nothing listening
+ * on the proxy target — falls back to the simulation engine, and that fallback
+ * is flagged via `simulated`.
+ */
+export async function mineBlock(): Promise<MineResult> {
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}/mine`, {
+      method: 'POST',
+      headers: { 'Accept': 'application/json' },
+    });
+  } catch {
+    // Backend unreachable: fall back to the simulation engine, clearly flagged.
+    dataSource = 'mock';
+    const result = mock.mineNewBlock();
+    return {
+      block: result.newBlock,
+      transactions: result.addedTxs,
+      simulated: true,
+    };
+  }
+
+  if (!res.ok) {
+    // The node answered and refused. Report why instead of inventing a block.
+    const detail = await res.json().catch(() => null) as { error?: string } | null;
+    throw new Error(detail?.error || `mine failed: ${res.status} ${res.statusText}`);
+  }
+
+  const data = await res.json();
+  dataSource = 'live';
+  return {
+    block: mapBlockDetail(data),
+    transactions: (data.transactions || []).map((tx: any) => mapBlockTransaction(tx, data)),
+    simulated: false,
+  };
+}
+

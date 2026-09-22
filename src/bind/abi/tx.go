@@ -4,6 +4,7 @@
 package abi
 
 import (
+	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -11,7 +12,9 @@ import (
 	"math/big"
 	"strings"
 
+	"github.com/sphinxfndorg/protocol/src/contracts"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
+	"github.com/sphinxfndorg/protocol/src/policy"
 )
 
 // assembleUnsignedTx is the single canonical constructor for every unsigned
@@ -107,6 +110,84 @@ type RPCClient interface {
 // and imports no signing backend.
 type Signer interface {
 	SignTransaction(tx *types.Transaction) error
+}
+
+// requiredContractGas mirrors the node's admission-time gas floor for a
+// contract transaction (mempool verifyContractGas — the STRICTEST of the
+// node's three quotes, alongside consensus RequiredTransactionGas and the
+// execution runtime's check). code is the bytecode the node will load: the
+// deploy's own Code for a deployment, or the STORED contract code fetched via
+// storedContractCode for a call.
+//
+// ★ WHY THIS EXISTS: a call built by NewCallTx / transactionQuote knows only
+// its calldata, so it offers `base + ContractCallGas + calldata×25` — short by
+// exactly `storedCode×ContractCodeGasByte + operations×SVMGasPerOperation`,
+// the two terms the node adds because it analyses the deployed program. That
+// gap is precisely the reported mint failure:
+//
+//	contract gas validation failed: gas limit 60925 below required 68475
+//
+// (68475 − 60925 = 7550 = 151 stored code bytes × 50 for a native SIP-721
+// collection; an SVM target additionally charges its operation count). Transact
+// re-quotes with this helper before deriving the transaction ID, so every
+// SIP-721 call — GUI, mint package, CLI — offers the floor the node will
+// actually enforce. Returns false when the code cannot be classified, in which
+// case the caller keeps the built quote unchanged (this helper only ever
+// raises a limit, never lowers one).
+func requiredContractGas(code, callData, returnData []byte, deploy bool) (*big.Int, bool) {
+	p := policy.GetDefaultPolicyParams()
+	if p == nil {
+		return nil, false
+	}
+	var quote *policy.GasQuote
+	switch {
+	case bytes.HasPrefix(code, contracts.SVM1Magic):
+		operations, err := contracts.AnalyzeSVM(code)
+		if err != nil {
+			return nil, false
+		}
+		quote = p.QuoteContractGas(deploy, uint64(len(code)), uint64(len(callData)), operations)
+	case contracts.IsWASM(code):
+		analysis, err := contracts.AnalyzeWASM(code)
+		if err != nil {
+			return nil, false
+		}
+		quote = p.QuoteWASMContractGas(deploy, uint64(len(code)), uint64(len(callData)),
+			analysis.Operations, analysis.StorageReads, analysis.StorageWrites,
+			analysis.EventBytes, analysis.Transfers)
+	default:
+		quote = p.QuoteContractGas(deploy, uint64(len(code)), uint64(len(callData)), 0)
+	}
+	base := p.QuoteTransactionGas(uint64(len(returnData)))
+	base.GasLimit.Add(base.GasLimit, quote.GasLimit)
+	return base.GasLimit, true
+}
+
+// storedContractCode reads a deployed contract's bytecode from the node's
+// registry (getcontract), so a call's gas can be quoted against the SAME code
+// the mempool will load at admission. Returns false whenever the code is
+// unavailable (address unknown, older node without the field, transport
+// error) — the caller then keeps its calldata-only quote, which is exactly the
+// pre-existing behaviour, so a read failure can never make a broadcast worse.
+func storedContractCode(client RPCClient, nodeAddr, address string, ttl uint16) ([]byte, bool) {
+	if client == nil || strings.TrimSpace(address) == "" {
+		return nil, false
+	}
+	raw, err := client.CallRPC(nodeAddr, "getcontract", []interface{}{address}, ttl)
+	if err != nil || len(raw) == 0 || strings.TrimSpace(string(raw)) == "null" {
+		return nil, false
+	}
+	var out struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, false
+	}
+	code, err := hex.DecodeString(strings.TrimPrefix(strings.TrimSpace(out.Code), "0x"))
+	if err != nil || len(code) == 0 {
+		return nil, false
+	}
+	return code, true
 }
 
 // TransactOpts mirrors go-ethereum's bind.TransactOpts: the per-session state
@@ -240,6 +321,29 @@ func Transact(opts *TransactOpts, tx *types.Transaction) (txid string, err error
 	if tx.Nonce != nonce {
 		tx.Nonce = nonce
 		tx.ID = ""
+	}
+	// ★ FIX: raise the gas limit to the node's code-inclusive admission floor
+	// BEFORE the transaction ID is derived (the ID commits to GasLimit) and
+	// before signing. A call built from calldata alone underquotes by the
+	// stored code's bytes and SVM operation count, which the mempool's
+	// verifyContractGas adds after loading the deployed program — that is the
+	// reported "gas limit 60925 below required 68475" mint rejection. For a
+	// deployment the code is already on the transaction, so no RPC is needed;
+	// for a call the stored code is read once via getcontract. When the code
+	// cannot be read or classified, the built quote is kept unchanged — this
+	// path only ever raises a limit, never lowers one, and never fails the
+	// broadcast (an underquote still surfaces as the node's own error, exactly
+	// as before).
+	if len(tx.Code) > 0 || strings.TrimSpace(tx.ToContract) != "" {
+		code := tx.Code
+		if len(code) == 0 {
+			code, _ = storedContractCode(opts.Client, opts.NodeAddr, tx.ToContract, opts.ttl())
+		}
+		if required, ok := requiredContractGas(code, tx.CallData, tx.ReturnData, len(tx.Code) > 0); ok &&
+			(tx.GasLimit == nil || tx.GasLimit.Cmp(required) < 0) {
+			tx.GasLimit = required
+			tx.ID = ""
+		}
 	}
 	if tx.ID == "" {
 		tx.ID = tx.Hash()

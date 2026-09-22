@@ -1,0 +1,15 @@
+{
+  "type": "mint_anchor",
+  "mint_id": "2e480e002181cc33597e08609e6697da64c95e54799bd13e016e1a8421097b74",
+  "subject": "2024-018.pdf",
+  "cid": "bafybeihz7fguqhwqriiperaibv5bqknae37f42re6l4pxq5jaiiyun7ae4",
+  "minter_public_key": "26ab03b69f62fb057ee47fbb2ef6d43922ae05b1976bf10e72e971b43ee7c62a",
+  "receipt_hash": "88cd4f4ceed91c0fa489ed3304644d5548d8ec4c67581c29fb70cda6a807b662",
+  "cid_hash_hex": "31b413581384052a24cd90dcda8cf42f0c9417039fd4e0377a0d2d25391df880",
+  "token_id": 1,
+  "token_uri": "ipfs://bafkreigvt2rnhpfbzenmwj7clyfegvyninzcvdabocoysr3zb432a4qnwm",
+  "contract": "SPIF A414 73C3 F0A1 3525 73EE 6E92 0F6C 2B6B 7CE1 1368 ED16 992B DEC2 4A62 0DCD 38A0",
+  "royalty_bps": 500,
+  "usage_fee_nspx": "1000000000000000000",
+  "royalty_recipient": "SPIF F6F6 66A0 F07B B9F1 B9C3 6C0B C497 DEF7 89AC A6B4 A756 4F88 A627 7FCB BFD9 09F8"
+}

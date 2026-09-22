@@ -32,6 +32,31 @@ export default function TxDetail({
     }
   };
 
+  // Contract provenance rows. A deploy CREATES an address (it has no
+  // toContract to read — the chain derives the address from sender + nonce +
+  // code), a call TARGETS one, and a mint anchor records the SIP-721
+  // collection its token was bound to inside returnData. Those are three
+  // distinct facts, so each gets its own row instead of one overloaded
+  // "contract" field that would silently stand for whichever came first.
+  const contractRows: Array<{ label: string; address: string; note?: string }> = [];
+  if (tx.createdContract) {
+    contractRows.push({
+      label: 'Contract Created (Deploy)',
+      address: tx.createdContract,
+      note: 'derived on-chain from sender + nonce + code',
+    });
+  }
+  if (tx.toContract) {
+    contractRows.push({ label: 'Contract Called', address: tx.toContract });
+  }
+  if (tx.anchorContract) {
+    contractRows.push({
+      label: 'SIP-721 Collection (Mint Anchor)',
+      address: tx.anchorContract,
+      note: tx.anchorTokenId ? `token #${tx.anchorTokenId}` : undefined,
+    });
+  }
+
   return (
     <div className="space-y-8 animate-fadeIn">
       {/* 1. Page Header */}
@@ -121,6 +146,39 @@ export default function TxDetail({
                 </button>
               </div>
             </div>
+
+            {/* Contract provenance — created address, call target, and the
+                collection a mint anchor bound its token to. */}
+            {contractRows.map((row) => (
+              <div
+                key={row.label}
+                className="col-span-2 flex flex-col gap-1.5 bg-slate-950 border border-brand-cyan/20 rounded-xl p-3.5"
+              >
+                <span className="text-[10px] text-brand-cyan uppercase tracking-widest font-mono flex items-center gap-1.5">
+                  <FileCode className="w-3.5 h-3.5" />
+                  {row.label}
+                </span>
+                <div className="flex items-center justify-between gap-4">
+                  <button
+                    onClick={() => onSelectAddress(row.address)}
+                    className="text-xs font-mono text-brand-cyan hover:underline text-left break-all select-all"
+                    title={row.address}
+                  >
+                    {row.address}
+                  </button>
+                  <button
+                    onClick={() => handleCopy(row.address)}
+                    className="p-1.5 text-slate-500 hover:text-brand-cyan rounded transition cursor-pointer"
+                    title="Copy contract address"
+                  >
+                    <Copy className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+                {row.note && (
+                  <span className="text-[10px] text-slate-500 font-mono">{row.note}</span>
+                )}
+              </div>
+            ))}
 
             {/* Block height */}
             <div className="flex flex-col gap-1.5 bg-slate-950 border border-white/5 rounded-xl p-3.5">
@@ -325,6 +383,69 @@ export default function TxDetail({
                 {tx.signature}
               </div>
             </div>
+
+            {/* SPHINCS+ auth bundle: the remaining fields that HasFullAuthBundle()
+                requires server-side. Without these a transaction's signature can
+                be seen but not independently re-derived, so the explorer shows
+                them alongside the signature rather than only the node knowing. */}
+            {(tx.signatureHash || tx.commitment || tx.authTimestamp || tx.authNonce || tx.proof) && (
+              <div className="space-y-3 pt-1 border-t border-white/5">
+                <span className="text-[10px] text-slate-500 uppercase tracking-widest font-mono block pt-3">SPHINCS+ Auth Bundle</span>
+
+                {tx.signatureHash && (
+                  <div className="flex flex-col gap-1.5 bg-slate-950 border border-white/5 rounded-xl p-3.5">
+                    <div className="flex justify-between items-center">
+                      <span className="text-[10px] text-slate-500 uppercase tracking-widest font-mono">Signature Hash (Replay Bind)</span>
+                      <button onClick={() => handleCopy(tx.signatureHash || '')} className="p-1 text-slate-500 hover:text-brand-cyan rounded cursor-pointer">
+                        <Copy className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                    <div className="text-xs text-white font-mono truncate">{tx.signatureHash}</div>
+                  </div>
+                )}
+
+                {tx.commitment && (
+                  <div className="flex flex-col gap-1.5 bg-slate-950 border border-white/5 rounded-xl p-3.5">
+                    <div className="flex justify-between items-center">
+                      <span className="text-[10px] text-slate-500 uppercase tracking-widest font-mono">Binding Commitment</span>
+                      <button onClick={() => handleCopy(tx.commitment || '')} className="p-1 text-slate-500 hover:text-brand-cyan rounded cursor-pointer">
+                        <Copy className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                    <div className="text-xs text-white font-mono truncate">{tx.commitment}</div>
+                  </div>
+                )}
+
+                {(tx.authTimestamp || tx.authNonce) && (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    {tx.authTimestamp && (
+                      <div className="flex flex-col gap-1.5 bg-slate-950 border border-white/5 rounded-xl p-3.5">
+                        <span className="text-[10px] text-slate-500 uppercase tracking-widest font-mono">Auth Timestamp</span>
+                        <div className="text-xs text-white font-mono truncate">{tx.authTimestamp}</div>
+                      </div>
+                    )}
+                    {tx.authNonce && (
+                      <div className="flex flex-col gap-1.5 bg-slate-950 border border-white/5 rounded-xl p-3.5">
+                        <span className="text-[10px] text-slate-500 uppercase tracking-widest font-mono">Auth Nonce</span>
+                        <div className="text-xs text-white font-mono truncate">{tx.authNonce}</div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {tx.proof && (
+                  <div className="flex flex-col gap-1.5 bg-slate-950 border border-white/5 rounded-xl p-3.5">
+                    <div className="flex justify-between items-center">
+                      <span className="text-[10px] text-slate-500 uppercase tracking-widest font-mono">Consistency Proof</span>
+                      <button onClick={() => handleCopy(tx.proof || '')} className="p-1 text-slate-500 hover:text-brand-cyan rounded cursor-pointer">
+                        <Copy className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                    <div className="text-xs text-white font-mono break-all">{tx.proof}</div>
+                  </div>
+                )}
+              </div>
+            )}
 
           </div>
         </div>

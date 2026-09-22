@@ -200,14 +200,16 @@ func (bc *Blockchain) GetMemPoolInfo() map[string]interface{} {
 
 	mempoolStats := bc.mempool.GetStats()
 
-	// Safe type assertion with conversion
+	// Safe type assertion with conversion — the mempool's GetStats() returns
+	// "current_bytes" (not "mempool_size_bytes") and "total_transactions"
+	// (not "transaction_count").
 	bytesVal := uint64(0)
-	if val, ok := mempoolStats["mempool_size_bytes"].(uint64); ok {
+	if val, ok := mempoolStats["current_bytes"].(uint64); ok {
 		bytesVal = val
 	}
 
 	return map[string]interface{}{
-		"size":            mempoolStats["transaction_count"],
+		"size":            mempoolStats["total_transactions"],
 		"bytes":           bytesVal,
 		"usage":           bytesVal * 2,
 		"max_mempool":     300000000,

@@ -15,6 +15,26 @@ import (
 
 const RuntimeWASM = "wasm1"
 
+type wasmReadOnlyStore struct {
+	Store
+	values map[string][]byte
+}
+
+func newWASMReadOnlyStore(store Store) *wasmReadOnlyStore {
+	return &wasmReadOnlyStore{Store: store, values: make(map[string][]byte)}
+}
+
+func (s *wasmReadOnlyStore) GetContractStorage(address, key string) ([]byte, error) {
+	if value, ok := s.values[address+"\x00"+key]; ok {
+		return append([]byte(nil), value...), nil
+	}
+	return s.Store.GetContractStorage(address, key)
+}
+
+func (s *wasmReadOnlyStore) SetContractStorage(address, key string, value []byte) {
+	s.values[address+"\x00"+key] = append([]byte(nil), value...)
+}
+
 var wasmMagic = []byte{'\x00', 'a', 's', 'm', '\x01', '\x00', '\x00', '\x00'}
 
 // IsWASM reports whether code is a WebAssembly 1.0 binary.
@@ -95,6 +115,24 @@ func ExecuteWASM(store Store, address string, code, callData []byte, maxCodeByte
 	return ExecuteWASMWithContext(store, address, code, callData, maxCodeBytes, memoryPages, WASMContext{})
 }
 
+// ExecuteWASMReadOnly evaluates a WASM contract against an isolated storage
+// overlay. Reads observe writes made earlier in the invocation, but no write
+// reaches the supplied store and transfers are always rejected.
+func ExecuteWASMReadOnly(store Store, address string, code, callData []byte, maxCodeBytes uint64, memoryPages uint32) (*ExecutionResult, error) {
+	return ExecuteWASMReadOnlyWithContext(store, address, code, callData, maxCodeBytes, memoryPages, WASMContext{})
+}
+
+// ExecuteWASMReadOnlyWithContext is the contextual form of
+// ExecuteWASMReadOnly. The Transfer callback in execution is deliberately
+// ignored, so read-only callers cannot move balances.
+func ExecuteWASMReadOnlyWithContext(store Store, address string, code, callData []byte, maxCodeBytes uint64, memoryPages uint32, execution WASMContext) (*ExecutionResult, error) {
+	overlay := newWASMReadOnlyStore(store)
+	execution.Transfer = func(string, uint64) error {
+		return errors.New("WASM transfer unavailable in read-only execution")
+	}
+	return executeWASMWithStore(overlay, address, code, callData, maxCodeBytes, memoryPages, execution)
+}
+
 // WASMContext exposes deterministic transaction/block values. Address-like
 // values are represented as the first 64 bits of SHA-256(address), avoiding a
 // non-portable pointer/string ABI across Rust, C/C++, TinyGo and AssemblyScript.
@@ -107,6 +145,10 @@ type WASMContext struct {
 }
 
 func ExecuteWASMWithContext(store Store, address string, code, callData []byte, maxCodeBytes uint64, memoryPages uint32, execution WASMContext) (*ExecutionResult, error) {
+	return executeWASMWithStore(store, address, code, callData, maxCodeBytes, memoryPages, execution)
+}
+
+func executeWASMWithStore(store Store, address string, code, callData []byte, maxCodeBytes uint64, memoryPages uint32, execution WASMContext) (*ExecutionResult, error) {
 	if store == nil {
 		return nil, errors.New("nil contract store")
 	}

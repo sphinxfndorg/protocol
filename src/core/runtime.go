@@ -226,6 +226,9 @@ func (bc *Blockchain) GetContract(address string) (*contracts.ContractMeta, []by
 	if err := json.Unmarshal(metaJSON, &meta); err != nil {
 		return nil, nil, fmt.Errorf("decode contract metadata: %w", err)
 	}
+	if err := contracts.ValidateContractMeta(&meta); err != nil {
+		return nil, nil, fmt.Errorf("validate contract metadata: %w", err)
+	}
 	code, err := store.GetContractCode(address)
 	if err != nil {
 		return nil, nil, fmt.Errorf("load contract code: %w", err)
@@ -244,6 +247,48 @@ func (bc *Blockchain) GetContractStorage(address, key string) ([]byte, error) {
 		return nil, err
 	}
 	return newContractStore(state).GetContractStorage(address, key)
+}
+
+// CallContractReadOnly executes a WASM contract against an isolated overlay.
+// It never commits storage changes or transfers and is intended for RPC,
+// indexers, and wallet simulation.
+func (bc *Blockchain) CallContractReadOnly(address, caller string, callData []byte, value *big.Int, blockHeight uint64) (*contracts.ExecutionResult, error) {
+	if address == "" {
+		return nil, errors.New("missing contract address")
+	}
+	if value == nil || value.Sign() < 0 || !value.IsUint64() {
+		return nil, errors.New("invalid read-only value")
+	}
+	state, err := bc.newStateDB()
+	if err != nil {
+		return nil, err
+	}
+	defer state.Close()
+	store := newContractStore(state)
+	metaJSON, err := store.GetContractMeta(address)
+	if err != nil {
+		return nil, fmt.Errorf("load contract metadata: %w", err)
+	}
+	var meta contracts.ContractMeta
+	if err := json.Unmarshal(metaJSON, &meta); err != nil {
+		return nil, fmt.Errorf("decode contract metadata: %w", err)
+	}
+	if err := contracts.ValidateContractMeta(&meta); err != nil {
+		return nil, fmt.Errorf("validate contract metadata: %w", err)
+	}
+	if meta.Runtime != contracts.RuntimeWASM {
+		return nil, fmt.Errorf("read-only execution is not supported for runtime %q", meta.Runtime)
+	}
+	code, err := store.GetContractCode(address)
+	if err != nil {
+		return nil, fmt.Errorf("load contract code: %w", err)
+	}
+	policy := bc.ActivePolicy()
+	return contracts.ExecuteWASMReadOnlyWithContext(store, address, code, callData,
+		policy.WASMMaxCodeBytes, policy.WASMMemoryPages, contracts.WASMContext{
+			Caller: caller, Value: value.Uint64(), BlockHeight: blockHeight,
+			MaxEvents: policy.WASMMaxEvents,
+		})
 }
 
 // executeContractTransaction runs deploy/call transactions as part of block
@@ -272,7 +317,7 @@ func (bc *Blockchain) executeContractTransaction(tx *types.Transaction, state *S
 			if store.ContractExists(address) {
 				return fmt.Errorf("contract already exists: %s", address)
 			}
-			meta, err := json.Marshal(&contracts.ContractMeta{Address: address, Creator: tx.Sender, Runtime: "svm1", Standard: "svm1", CreatedAt: tx.Timestamp})
+			meta, err := json.Marshal(&contracts.ContractMeta{Address: address, Creator: tx.Sender, Runtime: contracts.RuntimeSVM1, RuntimeVersion: contracts.SVM1RuntimeVersion, Standard: contracts.RuntimeSVM1, CreatedAt: tx.Timestamp})
 			if err != nil {
 				return err
 			}
@@ -297,7 +342,7 @@ func (bc *Blockchain) executeContractTransaction(tx *types.Transaction, state *S
 			if store.ContractExists(address) {
 				return fmt.Errorf("contract already exists: %s", address)
 			}
-			meta, err := json.Marshal(&contracts.ContractMeta{Address: address, Creator: tx.Sender, Runtime: contracts.RuntimeWASM, Standard: contracts.RuntimeWASM, CreatedAt: tx.Timestamp})
+			meta, err := json.Marshal(&contracts.ContractMeta{Address: address, Creator: tx.Sender, Runtime: contracts.RuntimeWASM, RuntimeVersion: contracts.WASMRuntimeVersion, Standard: contracts.RuntimeWASM, CreatedAt: tx.Timestamp})
 			if err != nil {
 				return err
 			}
@@ -326,6 +371,9 @@ func (bc *Blockchain) executeContractTransaction(tx *types.Transaction, state *S
 		var meta contracts.ContractMeta
 		if err := json.Unmarshal(metaJSON, &meta); err != nil {
 			return fmt.Errorf("decode contract meta: %w", err)
+		}
+		if err := contracts.ValidateContractMeta(&meta); err != nil {
+			return fmt.Errorf("validate contract meta: %w", err)
 		}
 		if meta.Runtime == "svm1" {
 			code, err := store.GetContractCode(tx.ToContract)

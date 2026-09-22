@@ -138,11 +138,20 @@ func (s *StateDB) GetContractValue(key string) ([]byte, error) {
 	if value, ok := s.contractPending[key]; ok {
 		return append([]byte(nil), value...), nil
 	}
+
 	value, err := s.db.Get(contractPrefix + key)
 	if err != nil {
 		return nil, err
 	}
+
 	return append([]byte(nil), value...), nil
+}
+
+// GetContractCode exposes deployed bytecode to mempool admission and tooling.
+// Contract code is stored under the same composite key used by the consensus
+// contract store.
+func (s *StateDB) GetContractCode(address string) ([]byte, error) {
+	return s.GetContractValue(address + ":code:")
 }
 
 // SetContractValue stages a contract-state write for the enclosing block.

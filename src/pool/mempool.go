@@ -458,6 +458,87 @@ func (mp *Mempool) MempoolSnapshot() (broadcast, validating, pending, invalid, a
 	return len(mp.broadcastPool), len(mp.validationPool), len(mp.pendingPool), len(mp.invalidPool), len(mp.allTransactions)
 }
 
+// MempoolEntry is one tracked transaction as diagnostics report it: the
+// identity the explorer renders plus, for a rejected transaction, the node's
+// own reason it can never confirm.
+type MempoolEntry struct {
+	TxID   string
+	Sender string
+	Nonce  uint64
+	// Status is the wire name of the pool the entry sits in
+	// ("broadcast" | "validating" | "pending" | "invalid"), so callers outside
+	// this package never have to switch on the numeric enum.
+	Status string
+	// Reason is non-empty only for a rejected (invalid) transaction.
+	Reason string
+}
+
+// RejectedTransactions returns every transaction the pool has rejected, each
+// carrying the exact reason it can never confirm.
+//
+// ★ WHY THIS EXISTS: GetPendingTransactions answers only "what is mineable",
+// which is the right question for the block producer but a misleading one for
+// an operator watching the mempool. A transaction the pool accepted and then
+// rejected — the common failure for a wallet whose reserved nonce had drifted
+// past the chain's — reads through it as "0 pending", so the view reports an
+// empty mempool at exactly the moment it holds the most interesting
+// information: why a broadcast send went nowhere. The explorer lists these
+// alongside the pending set for that reason.
+func (mp *Mempool) RejectedTransactions() []MempoolEntry {
+	mp.lock.RLock()
+	defer mp.lock.RUnlock()
+
+	out := make([]MempoolEntry, 0, len(mp.invalidPool))
+	for id, pt := range mp.invalidPool {
+		if pt == nil || pt.Transaction == nil {
+			continue
+		}
+		out = append(out, MempoolEntry{
+			TxID:   id,
+			Sender: pt.Transaction.Sender,
+			Nonce:  pt.Transaction.Nonce,
+			Status: pt.Status.String(),
+			Reason: pt.Error,
+		})
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].TxID < out[j].TxID })
+	return out
+}
+
+// InFlightTransactions returns transactions that are tracked but NOT yet
+// mineable: freshly broadcast, mid-validation, or parked unvalidated because
+// the validation channel was full.
+//
+// These are what a client actually waits on after sendrawtransaction returns a
+// txid. Reporting them separately from the pending set (GetPendingTransactions)
+// is what lets the mempool view distinguish "nothing here" from "accepted,
+// still being validated" instead of collapsing both to a bare zero.
+func (mp *Mempool) InFlightTransactions() []MempoolEntry {
+	mp.lock.RLock()
+	defer mp.lock.RUnlock()
+
+	out := make([]MempoolEntry, 0, len(mp.allTransactions))
+	for id, pt := range mp.allTransactions {
+		if pt == nil || pt.Transaction == nil {
+			continue
+		}
+		if pt.Status == StatusInvalid {
+			continue // reported by RejectedTransactions
+		}
+		if pt.Status == StatusPending && pt.Validated {
+			continue // mineable, reported as pending
+		}
+		out = append(out, MempoolEntry{
+			TxID:   id,
+			Sender: pt.Transaction.Sender,
+			Nonce:  pt.Transaction.Nonce,
+			Status: pt.Status.String(),
+		})
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].TxID < out[j].TxID })
+	return out
+}
+
 // SelectTransactionsForBlock selects transactions for block inclusion with priority
 func (mp *Mempool) SelectTransactionsForBlock(maxBlockSize, targetBlockSize uint64) ([]*types.Transaction, uint64) {
 	mp.lock.RLock()

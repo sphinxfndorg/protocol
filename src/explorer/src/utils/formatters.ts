@@ -160,7 +160,7 @@ export function formatHeight(height: number): string {
   return `#${height.toLocaleString()}`;
 }
 
-export function formatHash(hash: string, len: number = 8): string {
+export function formatHash(hash: string | undefined, len: number = 8): string {
   if (!hash) return '';
   if (hash.length <= len * 2 + 3) return hash;
 

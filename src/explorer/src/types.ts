@@ -49,6 +49,10 @@ export interface Block {
   miner?: string;
   logsBloom?: string;
   gasPrice?: string;
+  // Signature fields — the proposer's block seal and the data it covers.
+  proposerId?: string;
+  proposerSignature?: string;
+  sigDataHash?: string;
 }
 
 // Attestation is a PBFT commit vote from a validator for a specific block.
@@ -85,7 +89,7 @@ export interface Transaction {
   // mint anchors, JSON payloads and plain memos distinctly.
   returnDataText?: string;
   returnDataKind?: string;
-  signatureScheme: 'SPHINCS+-128f' | 'SPHINCS+-128s' | 'SPHINCS+-192f' | 'SPHINCS+-256f' | 'XMSS' | 'Legacy (ECDSA)';
+  signatureScheme: 'SPHINCS+-128f' | 'SPHINCS+-128s' | 'SPHINCS+-192f' | 'SPHINCS+-256f' | 'XMSS';
   // Confirmation provenance. blockHash is empty and confirmations is 0 while a
   // transaction is still in the mempool.
   blockHash: string;
@@ -95,8 +99,27 @@ export interface Transaction {
   age?: string;
   isContractTx?: boolean;
   toContract?: string;
+  // Contract DEPLOYMENT provenance. A deployment carries no toContract — the
+  // address is derived on-chain from (sender, nonce, code) at execution time —
+  // so createdContract is the only address such a transaction has. The backend
+  // derives it exactly the way block execution does, so this is the collection
+  // address the wallet will use as its storage key, in canonical SPIF form.
+  isContractDeploy?: boolean;
+  createdContract?: string;
+  // Mint-anchor binding: the SIP-721 collection a minted token was bound to
+  // (recorded inside the AnchorTag in returnData, not in toContract) and that
+  // token's id. This is where minted data lands on the Marketplace.
+  anchorContract?: string;
+  anchorTokenId?: number;
   // Enhanced transaction details
   proof?: string;
+  // SPHINCS+ signature fields — the cryptographic proof that the sender
+  // authorized this transaction. These are what make the tx independently
+  // auditable without trusting the node.
+  signatureHash?: string;
+  commitment?: string;
+  authTimestamp?: string;
+  authNonce?: string;
   gasUsed?: number;
   // Burn information for this transaction
   burnedThisTxSpx?: string;
@@ -126,7 +149,7 @@ export interface Wallet {
   balanceSpx: string;
   nonce: number;
   isActive: boolean;
-  addressType: 'SPHINCS+ (Stateless Hash)' | 'Legacy (ECDSA - Vulnerable)';
+  addressType: 'SPHINCS+ (Stateless Hash)';
 }
 
 export interface NetworkStats {
@@ -148,6 +171,9 @@ export interface NetworkStats {
   symbol: string;
   genesisHash: string;
   syncMode: string;
+  // Target block time in seconds, from the chain consensus config, so the
+  // explorer can estimate when the next block is likely to be sealed.
+  blockTimeSeconds: number;
   // Supply and burn accounting, served verbatim by /explorer/stats. Burned coins
   // live at the provably-unspendable DEAD address, so the totals below are the
   // single auditable source for "how many coins have been burned".

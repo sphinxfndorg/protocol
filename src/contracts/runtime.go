@@ -17,10 +17,52 @@ import (
 )
 
 const (
-	RuntimeNative  = "native"
-	StandardSIP20  = "sip20"
-	StandardSIP721 = "sip721"
+	RuntimeNative               = "native"
+	StandardSIP20               = "sip20"
+	StandardSIP721              = "sip721"
+	NativeRuntimeVersion uint32 = 1
+	SVM1RuntimeVersion   uint32 = 1
+	WASMRuntimeVersion   uint32 = 1
+	// Runtime*Version aliases keep the naming parallel with RuntimeNative,
+	// RuntimeSVM1, and RuntimeWASM for callers defining ABI tables.
+	RuntimeNativeVersion = NativeRuntimeVersion
+	RuntimeSVM1Version   = SVM1RuntimeVersion
+	RuntimeWASMVersion   = WASMRuntimeVersion
 )
+
+// RuntimeVersion returns the ABI version supported for a runtime.
+func RuntimeVersion(runtime string) (uint32, bool) {
+	switch strings.ToLower(strings.TrimSpace(runtime)) {
+	case RuntimeNative:
+		return NativeRuntimeVersion, true
+	case RuntimeSVM1:
+		return SVM1RuntimeVersion, true
+	case RuntimeWASM:
+		return WASMRuntimeVersion, true
+	default:
+		return 0, false
+	}
+}
+
+// ValidateContractMeta validates the versioned runtime identity stored with a
+// contract. Missing versions are legacy v1 metadata and remain valid.
+func ValidateContractMeta(meta *ContractMeta) error {
+	if meta == nil {
+		return errors.New("nil contract metadata")
+	}
+	runtime := strings.ToLower(strings.TrimSpace(meta.Runtime))
+	expected, ok := RuntimeVersion(runtime)
+	if !ok {
+		return fmt.Errorf("unsupported runtime: %s", meta.Runtime)
+	}
+	if meta.RuntimeVersion != 0 && meta.RuntimeVersion != expected {
+		return fmt.Errorf("unsupported %s runtime version: %d", runtime, meta.RuntimeVersion)
+	}
+	if meta.RuntimeVersion == 0 {
+		meta.RuntimeVersion = expected
+	}
+	return nil
+}
 
 func BuildDeployCode(spec *DeploySpec) ([]byte, error) {
 	if spec == nil {
@@ -74,10 +116,11 @@ func Deploy(store Store, tx *types.Transaction) (*ExecutionResult, error) {
 	}
 	store.SetContractCode(address, code)
 	metaJSON, err := json.Marshal(&ContractMeta{
-		Address:  address,
-		Creator:  tx.Sender,
-		Runtime:  spec.Runtime,
-		Standard: spec.Standard,
+		Address:        address,
+		Creator:        tx.Sender,
+		Runtime:        spec.Runtime,
+		RuntimeVersion: NativeRuntimeVersion,
+		Standard:       spec.Standard,
 		// Transaction time is consensus data. Never use local wall time in
 		// execution because it would make nodes derive different state roots.
 		CreatedAt: tx.Timestamp,
@@ -137,6 +180,9 @@ func CallWithContext(store Store, tx *types.Transaction, ctx *NativeCallContext)
 	var meta ContractMeta
 	if err := json.Unmarshal(metaJSON, &meta); err != nil {
 		return nil, fmt.Errorf("decode contract meta: %w", err)
+	}
+	if err := ValidateContractMeta(&meta); err != nil {
+		return nil, fmt.Errorf("validate contract meta: %w", err)
 	}
 	var call CallSpec
 	if err := json.Unmarshal(tx.CallData, &call); err != nil {

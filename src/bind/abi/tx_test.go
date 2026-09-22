@@ -28,6 +28,11 @@ type stubClient struct {
 	// empty means getcontract fails the way the node fails for an address with
 	// no contract stored at it.
 	standard string
+	// contractCode is the deployed bytecode getcontract returns alongside meta
+	// (hex on the wire). Empty keeps the pre-code wire shape's effective value:
+	// storedContractCode treats it as "no code available" and falls back to the
+	// calldata-only gas quote.
+	contractCode []byte
 	// nullContract makes getcontract answer a bare null instead of erroring,
 	// modelling the defensive "miss rendered as a null body" case.
 	nullContract bool
@@ -65,7 +70,16 @@ func (c *stubClient) CallRPC(nodeAddr, method string, params interface{}, ttlSec
 		if c.standard == "" {
 			return nil, errors.New("stub: no contract registered at the requested address")
 		}
-		return json.RawMessage(fmt.Sprintf(`{"meta":{"standard":%q}}`, c.standard)), nil
+		// "code" is the deployed bytecode getcontract now carries; meta-only
+		// readers ignore the extra field, and an empty value models a node
+		// whose registry has no code yet. "runtime"/"runtime_version" mirror
+		// the ContractMeta the node's getcontract handler returns (native
+		// sip20/sip721 contracts deploy with runtime "native", version 1),
+		// which contracts.Call validates before dispatching a read — a meta
+		// without a runtime fails as "unsupported runtime".
+		return json.RawMessage(fmt.Sprintf(`{"meta":{"runtime":%q,"runtime_version":%d,"standard":%q},"code":%q}`,
+			contracts.RuntimeNative, contracts.NativeRuntimeVersion, c.standard,
+			hex.EncodeToString(c.contractCode))), nil
 	case "getcontractstorage":
 		key := ""
 		if len(paramList) > 1 {
@@ -180,8 +194,14 @@ func TestTransactSignsEncodesAndBroadcasts(t *testing.T) {
 	if signer.signed != 1 {
 		t.Fatalf("signer called %d times, want 1", signer.signed)
 	}
-	if len(client.calls) != 1 {
-		t.Fatalf("made %d RPC calls, want 1 (explicit nonce must not re-read getnonce)", len(client.calls))
+	// Two calls: the pre-broadcast getcontract code read (the stub has no code
+	// registered, so the calldata-only quote is kept) and the broadcast itself.
+	// The point of the count stands: an explicit nonce must not re-read getnonce.
+	if len(client.calls) != 2 {
+		t.Fatalf("made %d RPC calls, want 2 (getcontract then sendrawtransaction; explicit nonce must not re-read getnonce)", len(client.calls))
+	}
+	if client.calls[0].method != "getcontract" || client.calls[1].method != "sendrawtransaction" {
+		t.Fatalf("calls = %#v, want getcontract then sendrawtransaction", client.methods())
 	}
 	broadcast := client.broadcast(t)
 	if broadcast.Nonce != nonce {
@@ -223,19 +243,26 @@ func TestSIPContractsShareOneTransactPath(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("SIP721 Mint: %v", err)
 	}
-	if len(client.calls) != 2 {
-		t.Fatalf("made %d RPC calls, want 2 (one per mint)", len(client.calls))
-	}
+	// Each typed write reads the stored contract code once (getcontract) so its
+	// gas can cover the code bytes the mempool charges, then broadcasts.
+	broadcasts := make([]stubCall, 0, 2)
 	for _, call := range client.calls {
-		if call.method != "sendrawtransaction" {
-			t.Fatalf("method = %s, want sendrawtransaction", call.method)
+		if call.method == "sendrawtransaction" {
+			broadcasts = append(broadcasts, call)
+			continue
+		}
+		if call.method != "getcontract" {
+			t.Fatalf("unexpected method %s (want getcontract reads + sendrawtransaction broadcasts)", call.method)
 		}
 	}
+	if len(broadcasts) != 2 {
+		t.Fatalf("made %d broadcasts, want 2 (one per mint); calls = %#v", len(broadcasts), client.methods())
+	}
 
-	if decoded := decodeNewCall(t, client.calls[0].params[0].(string), SIP20ABI); decoded.Method != "mint" || decoded.Args["amount"] != "100" {
+	if decoded := decodeNewCall(t, broadcasts[0].params[0].(string), SIP20ABI); decoded.Method != "mint" || decoded.Args["amount"] != "100" {
 		t.Fatalf("sip20 calldata = %#v", decoded)
 	}
-	if decoded := decodeNewCall(t, client.calls[1].params[0].(string), SIP721ABI); decoded.Method != "mint" ||
+	if decoded := decodeNewCall(t, broadcasts[1].params[0].(string), SIP721ABI); decoded.Method != "mint" ||
 		decoded.Args["token_uri"] != "ipfs://cid" || decoded.Args["royalty_bps"] != "500" || decoded.Args["royalty_recipient"] != "bob" {
 		t.Fatalf("sip721 calldata = %#v", decoded)
 	}
@@ -282,10 +309,19 @@ func TestSIP721TypedWritesPackNodeArgumentNames(t *testing.T) {
 		if txid != "tx-w" {
 			t.Fatalf("%s txid = %q, want tx-w", want.label, txid)
 		}
-		if len(client.calls) != before+1 {
-			t.Fatalf("%s made %d RPC calls, want 1", want.label, len(client.calls)-before)
+		// Two RPC calls per write: the getcontract code read for gas quoting,
+		// then the broadcast.
+		if len(client.calls) != before+2 {
+			t.Fatalf("%s made %d RPC calls, want 2 (getcontract + sendrawtransaction)", want.label, len(client.calls)-before)
 		}
-		decoded := decodeNewCall(t, client.calls[before].params[0].(string), SIP721ABI)
+		if client.calls[before].method != "getcontract" {
+			t.Fatalf("%s first call = %s, want getcontract", want.label, client.calls[before].method)
+		}
+		broadcast := client.calls[before+1]
+		if broadcast.method != "sendrawtransaction" {
+			t.Fatalf("%s second call = %s, want sendrawtransaction", want.label, broadcast.method)
+		}
+		decoded := decodeNewCall(t, broadcast.params[0].(string), SIP721ABI)
 		if decoded.Method != want.method {
 			t.Fatalf("%s method = %s, want %s", want.label, decoded.Method, want.method)
 		}
@@ -308,7 +344,13 @@ func TestSIP20TransferPacksNodeArgumentNames(t *testing.T) {
 	if _, err := (SIP20Contract{Address: "SPIF20"}).Transfer(opts, "alice", "bob", "100"); err != nil {
 		t.Fatalf("SIP20 Transfer: %v", err)
 	}
-	decoded := decodeNewCall(t, client.calls[0].params[0].(string), SIP20ABI)
+	// Last call is the broadcast; the first is the getcontract code read that
+	// lets Transact quote gas against the stored code.
+	last := client.calls[len(client.calls)-1]
+	if last.method != "sendrawtransaction" {
+		t.Fatalf("last call = %s, want sendrawtransaction", last.method)
+	}
+	decoded := decodeNewCall(t, last.params[0].(string), SIP20ABI)
 	if decoded.Method != "transfer" || decoded.Args["to"] != "bob" || decoded.Args["amount"] != "100" {
 		t.Fatalf("calldata = %#v", decoded)
 	}

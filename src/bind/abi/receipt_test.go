@@ -123,7 +123,7 @@ func TestWaitMinedRequiresCancelableContext(t *testing.T) {
 	if _, err := WaitMined(context.Background(), receiptOpts(client), "tx-5", time.Millisecond); err == nil {
 		t.Fatal("expected an uncancelable context to be rejected")
 	}
-	if _, err := WaitMined(nil, receiptOpts(client), "tx-5", time.Millisecond); err == nil {
+	if _, err := WaitMined(context.Background(), receiptOpts(client), "tx-5", time.Millisecond); err == nil {
 		t.Fatal("expected a nil context to be rejected")
 	}
 	if len(client.calls) != 0 {

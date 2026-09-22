@@ -5,6 +5,7 @@
 package pool
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -14,12 +15,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sphinxfndorg/protocol/src/common"
 	logger "github.com/sphinxfndorg/protocol/src/console"
 	"github.com/sphinxfndorg/protocol/src/contracts"
-	"github.com/sphinxfndorg/protocol/src/common"
 	svm "github.com/sphinxfndorg/protocol/src/core/kernel/opcodes"
 	vmachine "github.com/sphinxfndorg/protocol/src/core/kernel/vm"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
+	"github.com/sphinxfndorg/protocol/src/policy"
 )
 
 // mintAnchorTagType mirrors core.AnchorTagType ("mint_anchor").
@@ -610,8 +612,21 @@ func (mp *Mempool) validateTransactionByType(tx *types.Transaction, txType TxTyp
 	}
 }
 
-// validateDeployment checks that the Code field parses as a valid DeploySpec.
+// validateDeployment accepts the same runtime payloads as block execution.
 func (mp *Mempool) validateDeployment(tx *types.Transaction) error {
+	if bytes.HasPrefix(tx.Code, contracts.SVM1Magic) {
+		if _, err := contracts.AnalyzeSVM(tx.Code); err != nil {
+			return fmt.Errorf("invalid SVM1 deploy code: %w", err)
+		}
+		return nil
+	}
+	if contracts.IsWASM(tx.Code) {
+		p := policy.GetDefaultPolicyParams()
+		if err := contracts.ValidateWASM(tx.Code, p.WASMMaxCodeBytes, p.WASMMemoryPages); err != nil {
+			return fmt.Errorf("invalid WASM deploy code: %w", err)
+		}
+		return nil
+	}
 	var spec contracts.DeploySpec
 	if err := json.Unmarshal(tx.Code, &spec); err != nil {
 		return fmt.Errorf("invalid deploy code: not a valid DeploySpec: %w", err)
@@ -636,6 +651,26 @@ func (mp *Mempool) validateCall(tx *types.Transaction) error {
 	contractAddr := tx.ToContract
 	if !stateDB.ContractExists(contractAddr) {
 		return fmt.Errorf("contract %s does not exist", contractAddr)
+	}
+
+	if provider, ok := stateDB.(ContractCodeProvider); ok {
+		code, err := provider.GetContractCode(contractAddr)
+		if err != nil {
+			return fmt.Errorf("load contract code: %w", err)
+		}
+		if bytes.HasPrefix(code, contracts.SVM1Magic) {
+			if _, err := contracts.AnalyzeSVM(code); err != nil {
+				return fmt.Errorf("invalid stored SVM1 code: %w", err)
+			}
+			return nil
+		}
+		if contracts.IsWASM(code) {
+			p := policy.GetDefaultPolicyParams()
+			if err := contracts.ValidateWASM(code, p.WASMMaxCodeBytes, p.WASMMemoryPages); err != nil {
+				return fmt.Errorf("invalid stored WASM code: %w", err)
+			}
+			return nil
+		}
 	}
 
 	var call contracts.CallSpec
@@ -763,6 +798,9 @@ func (mp *Mempool) performValidation(tx *types.Transaction) error {
 	if err := mp.verifyTransactionGas(tx, minGasPrice); err != nil {
 		return fmt.Errorf("gas validation failed: %w", err)
 	}
+	if err := mp.verifyContractGas(tx); err != nil {
+		return fmt.Errorf("contract gas validation failed: %w", err)
+	}
 
 	lastTimestamp := mp.getLastTransactionTimestamp(tx.Sender)
 	if err := mp.verifyTransactionReplayProtection(tx, lastTimestamp); err != nil {
@@ -770,6 +808,62 @@ func (mp *Mempool) performValidation(tx *types.Transaction) error {
 	}
 
 	logger.Debug("All SVM validations passed for transaction %s", tx.ID)
+	return nil
+}
+
+// verifyContractGas mirrors the executor's deterministic gas calculation.
+// Admission must reject underfunded contract transactions before they occupy a
+// nonce slot, while ordinary transfers continue to use the base gas check.
+func (mp *Mempool) verifyContractGas(tx *types.Transaction) error {
+	if tx == nil || (len(tx.Code) == 0 && tx.ToContract == "") {
+		return nil
+	}
+	p := policy.GetDefaultPolicyParams()
+	deploy := len(tx.Code) > 0
+	code := tx.Code
+	if !deploy {
+		if mp.stateProvider == nil {
+			return nil
+		}
+		stateDB, err := mp.stateProvider.NewStateDB()
+		if err != nil {
+			return fmt.Errorf("open state: %w", err)
+		}
+		defer stateDB.Close()
+		provider, ok := stateDB.(ContractCodeProvider)
+		if !ok {
+			return nil
+		}
+		code, err = provider.GetContractCode(tx.ToContract)
+		if err != nil {
+			return fmt.Errorf("load code: %w", err)
+		}
+	}
+
+	var quote *policy.GasQuote
+	switch {
+	case bytes.HasPrefix(code, contracts.SVM1Magic):
+		operations, err := contracts.AnalyzeSVM(code)
+		if err != nil {
+			return err
+		}
+		quote = p.QuoteContractGas(deploy, uint64(len(code)), uint64(len(tx.CallData)), operations)
+	case contracts.IsWASM(code):
+		analysis, err := contracts.AnalyzeWASM(code)
+		if err != nil {
+			return err
+		}
+		quote = p.QuoteWASMContractGas(deploy, uint64(len(code)), uint64(len(tx.CallData)),
+			analysis.Operations, analysis.StorageReads, analysis.StorageWrites,
+			analysis.EventBytes, analysis.Transfers)
+	default:
+		quote = p.QuoteContractGas(deploy, uint64(len(code)), uint64(len(tx.CallData)), 0)
+	}
+	base := p.QuoteTransactionGas(uint64(len(tx.ReturnData)))
+	base.GasLimit.Add(base.GasLimit, quote.GasLimit)
+	if tx.GasLimit == nil || tx.GasLimit.Cmp(base.GasLimit) < 0 {
+		return fmt.Errorf("gas limit %v below required %s", tx.GasLimit, base.GasLimit)
+	}
 	return nil
 }
 

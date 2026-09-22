@@ -17,10 +17,9 @@
 // (no loops — wasm_analysis.go:232-233 rejects them). First-touch mint
 // allocates id=NEXT_ID and bumps the counter: one extra write per new
 // address, reads stay single-slot after that.
+#include <stdint.h>
+
 #ifdef SPHINX_WASM
-typedef unsigned long uint64_t;
-typedef long int64_t;
-typedef unsigned int uint32_t;
 extern uint64_t storage_get(uint64_t k);
 extern void storage_set(uint64_t k, uint64_t v);
 extern uint64_t calldata_word(uint64_t off);
@@ -29,11 +28,11 @@ extern uint64_t transferred_value(void);
 extern uint64_t block_height(void);
 extern void emit_event(uint64_t topic, uint64_t value);
 
-#define SLOT_TOTAL   0x54554f54414cULL
-#define SLOT_ADMIN   0x41444d494eULL
-#define SLOT_NEXT_ID 0x4e4558544944ULL
-#define SLOT_IDBASE  0x0100000000000000ULL
-#define SLOT_BALBASE 0x0200000000000000ULL
+#define SLOT_TOTAL   UINT64_C(0x54554f54414c)
+#define SLOT_ADMIN   UINT64_C(0x41444d494e)
+#define SLOT_NEXT_ID UINT64_C(0x4e4558544944)
+#define SLOT_IDBASE  UINT64_C(0x0100000000000000)
+#define SLOT_BALBASE UINT64_C(0x0200000000000000)
 #define NOWNER 8
 
 static uint64_t slot_of(uint64_t owner) {

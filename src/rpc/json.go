@@ -18,6 +18,7 @@ import (
 	"github.com/sphinxfndorg/protocol/src/consensus"
 	"github.com/sphinxfndorg/protocol/src/contracts"
 	"github.com/sphinxfndorg/protocol/src/core"
+	state "github.com/sphinxfndorg/protocol/src/core/state"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
 	security "github.com/sphinxfndorg/protocol/src/handshake"
 )
@@ -414,6 +415,7 @@ func (h *JSONRPCHandler) registerMethods() {
 	h.methods["getnonce"] = h.getNonce
 	h.methods["getcontract"] = h.getContract
 	h.methods["getcontractstorage"] = h.getContractStorage
+	h.methods["callcontractreadonly"] = h.callContractReadOnly
 
 	h.methods["deploycontract"] = h.deployContract
 	h.methods["callcontract"] = h.callContract
@@ -455,9 +457,56 @@ func (h *JSONRPCHandler) getContractStorage(params interface{}) (interface{}, er
 	}
 	value, err := h.server.blockchain.GetContractStorage(address, key)
 	if err != nil {
+		// A key that simply has not been written yet — e.g. a token whose
+		// mint transaction has not committed, which is the normal state while
+		// a wallet polls for confirmation — is a MISS, not a malformed
+		// request. Every handler error is mapped to -32602 Invalid params
+		// above, so answering null here instead keeps clients from reporting
+		// a plain "not found" as "RPC error (-32602): key contract:…".
+		// All existing consumers (wallet decodeStorageHex, the mint storage
+		// poller, abi's remoteStore) already render a null body as a clean
+		// miss.
+		if errors.Is(err, state.ErrNotFound) {
+			return nil, nil
+		}
 		return nil, err
 	}
 	return hex.EncodeToString(value), nil
+}
+
+func (h *JSONRPCHandler) callContractReadOnly(params interface{}) (interface{}, error) {
+	var values []interface{}
+	if err := h.parseParams(params, &values); err != nil {
+		return nil, err
+	}
+	if len(values) != 1 {
+		return nil, errors.New("callcontractreadonly requires one object")
+	}
+	raw, ok := values[0].(map[string]interface{})
+	if !ok {
+		return nil, errors.New("invalid read-only call parameters")
+	}
+	address, _ := raw["to"].(string)
+	caller, _ := raw["from"].(string)
+	callDataHex, _ := raw["callData"].(string)
+	if address == "" || callDataHex == "" {
+		return nil, errors.New("to and callData are required")
+	}
+	callData, err := hex.DecodeString(strings.TrimPrefix(callDataHex, "0x"))
+	if err != nil {
+		return nil, fmt.Errorf("invalid callData hex: %w", err)
+	}
+	value := new(big.Int)
+	if rawValue, ok := raw["value"].(string); ok && rawValue != "" {
+		if _, ok := value.SetString(rawValue, 10); !ok {
+			return nil, errors.New("invalid value")
+		}
+	}
+	result, err := h.server.blockchain.CallContractReadOnly(address, caller, callData, value, 0)
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 // deployContract builds an unsigned contract deployment transaction and returns

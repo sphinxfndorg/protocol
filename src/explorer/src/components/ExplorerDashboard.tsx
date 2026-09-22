@@ -3,19 +3,28 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useEffect } from 'react';
 import { 
-  ShieldAlert, Cpu, HardDrive, Database, 
-  Users, Activity, Key, Globe, Radio, Play, Pause, RefreshCw 
+  ShieldAlert, Database, Activity, Key, Radio, Play, Pause, RefreshCw 
 } from 'lucide-react';
 import { Block, Transaction, NetworkStats, Wallet, HolderGrowthPoint } from '../types';
+import { MempoolView } from '../api/explorerApi';
 import { formatHash } from '../utils/formatters';
+import BlockChainIcon from './BlockChainIcon';
+import MempoolChainView from './MempoolChainView';
 
 interface DashboardProps {
   stats: NetworkStats;
   blocks: Block[];
   transactions: Transaction[];
   mempool: Transaction[];
+  /**
+   * Full mempool picture. `mempool` alone is the validated mineable set, so it
+   * reads zero both while a broadcast send is still being validated and after
+   * the node refused it — passing the breakdown through is what lets the
+   * status chip say WHICH, instead of asserting "0 Pending TXs" over a pool
+   * that is very much not empty.
+   */
+  mempoolView?: MempoolView | null;
   wallets: Wallet[];
   holderGrowth: HolderGrowthPoint[];
   autoMineActive: boolean;
@@ -32,6 +41,7 @@ export default function ExplorerDashboard({
   blocks,
   transactions,
   mempool,
+  mempoolView,
   wallets,
   holderGrowth,
   autoMineActive,
@@ -42,40 +52,6 @@ export default function ExplorerDashboard({
   onSelectTx,
   onSelectAddress
 }: DashboardProps) {
-  const [mempoolAnimationOffset, setMempoolAnimationOffset] = useState(0);
-
-  // Animate mempool bubbles subtly
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setMempoolAnimationOffset(prev => (prev + 0.05) % (Math.PI * 2));
-    }, 50);
-    return () => clearInterval(interval);
-  }, []);
-
-  const getSignatureBadge = (scheme: string) => {
-    if (scheme.startsWith('SPHINCS+')) {
-      return (
-        <span className="px-2 py-0.5 bg-brand-cyan/15 border border-brand-cyan/20 text-brand-cyan text-[11px] font-mono rounded font-semibold shadow-[0_0_8px_rgba(0,240,255,0.05)]">
-          {scheme}
-        </span>
-      );
-    }
-    switch (scheme) {
-      case 'XMSS':
-        return (
-          <span className="px-2 py-0.5 bg-brand-gold/15 border border-brand-gold/20 text-brand-gold text-[11px] font-mono rounded font-semibold">
-            XMSS
-          </span>
-        );
-      default:
-        return (
-          <span className="px-2 py-0.5 bg-brand-red/15 border border-brand-red/20 text-brand-red text-[11px] font-mono rounded font-semibold animate-pulse">
-            ECDSA (Vuln)
-          </span>
-        );
-    }
-  };
-
   const maxHolders = Math.max(1, ...holderGrowth.map(point => point.holders));
   const growthPath = holderGrowth.map((point, index) => {
     const x = holderGrowth.length <= 1 ? 0 : (index / (holderGrowth.length - 1)) * 100;
@@ -83,16 +59,53 @@ export default function ExplorerDashboard({
     return `${index === 0 ? 'M' : 'L'} ${x} ${y}`;
   }).join(' ');
 
+  // Mempool breakdown. Fall back to `mempool` when the node's payload predates
+  // the pool summary, so an older API still renders a sane pending number.
+  const pool = mempoolView?.pool;
+  const pendingCount = pool ? pool.pending : mempool.length;
+  const inFlightCount = pool ? pool.broadcast + pool.validating : (mempoolView?.inFlight.length ?? 0);
+  const rejectedCount = pool ? pool.invalid : (mempoolView?.rejected.length ?? 0);
+
   return (
     <div className="space-y-8 animate-fadeIn">
       
       {/* 1. Live Engine Controls */}
       <div className="flex flex-col md:flex-row gap-4 items-center justify-between bg-slate-900/50 border border-white/5 p-4 rounded-2xl backdrop-blur-md">
         
-        {/* Status Indicator Info */}
-        <div className="flex items-center gap-2.5 px-3 py-1.5 bg-slate-950/50 border border-white/5 rounded-xl text-xs font-mono text-slate-400">
-          <Database className="w-4 h-4 text-brand-cyan" />
-          <span>LEDGER ENGINE SIMULATOR STATUS</span>
+        {/* Status Indicator Info with Live Mempool Telemetry */}
+        <div className="flex flex-wrap items-center gap-2.5">
+          <div className="flex items-center gap-2 px-3 py-1.5 bg-slate-950/50 border border-white/5 rounded-xl text-xs font-mono text-slate-400">
+            <Database className="w-4 h-4 text-brand-cyan" />
+            <span className="font-semibold text-white">ENGINE STATUS</span>
+          </div>
+
+          <div className="flex items-center gap-2 px-3 py-1.5 bg-slate-950/50 border border-white/5 rounded-xl text-xs font-mono text-slate-300">
+            <Radio className="w-3.5 h-3.5 text-amber-400 animate-pulse" />
+            {/* The pending count used to be the ONLY number here, so a pool
+                holding an in-flight or a rejected send still read "0 Pending
+                TXs". Report the three states side by side; the rejected chip
+                is red and explicit because those transactions can never
+                confirm — the reader needs the reason from the mempool tab. */}
+            <span className="text-amber-400 font-bold">
+              {pendingCount} Pending TXs
+            </span>
+            {inFlightCount > 0 && (
+              <>
+                <span className="text-slate-600">|</span>
+                <span className="text-amber-300 font-semibold">{inFlightCount} in flight</span>
+              </>
+            )}
+            {rejectedCount > 0 && (
+              <>
+                <span className="text-slate-600">|</span>
+                <span className="text-brand-red font-semibold">{rejectedCount} rejected</span>
+              </>
+            )}
+            <span className="text-slate-600">|</span>
+            <span className="text-slate-400">{((stats.mempoolBytes ?? (mempool.length * 480)) / 1024).toFixed(0)} KB Buffer</span>
+            <span className="text-slate-600">|</span>
+            <span className="text-brand-cyan font-medium">{stats.currentTps || 24} TPS</span>
+          </div>
         </div>
 
         {/* Engine Controls */}
@@ -126,6 +139,15 @@ export default function ExplorerDashboard({
           </button>
         </div>
       </div>
+
+      {/* MEMPOOL.SPACE BLOCK & CHAIN VIEW */}
+      <MempoolChainView
+        stats={stats}
+        blocks={blocks}
+        mempool={mempool}
+        onSelectBlock={onSelectBlock}
+        onManualMine={onManualMine}
+      />
 
       {/* 2. Quantum Network Stats Grid */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -233,40 +255,55 @@ export default function ExplorerDashboard({
         )}
       </div>
 
-      {/* 3. Splitted View: Blocks/Txs and the Mempool Live Activity */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
-        
-        {/* Left: Latest Blocks and Transactions */}
-        <div className="lg:col-span-8 space-y-8">
-          
-          {/* Blocks Section */}
-          <div className="bg-slate-900/30 border border-white/5 rounded-2xl p-6 backdrop-blur-md">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-base font-semibold text-white flex items-center gap-2">
-                <span className="w-1.5 h-4 bg-brand-cyan rounded-full" />
-                Latest Blocks
-              </h2>
-              <span className="text-xs text-slate-500 font-mono">Live Mine Stream</span>
-            </div>
+      {/* 3. Latest Blocks and Active Addresses */}
+      <div className="space-y-8">
+        {/* Blocks Section with 3D Isometric Box & Chain Link Icons */}
+        <div className="bg-slate-900/30 border border-white/5 rounded-2xl p-6 backdrop-blur-md">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-base font-semibold text-white flex items-center gap-2">
+              <span className="w-1.5 h-4 bg-brand-cyan rounded-full" />
+              Latest Blocks
+            </h2>
+            <span className="text-xs text-slate-500 font-mono">Live Mine Stream</span>
+          </div>
 
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-sm text-slate-300">
-                <thead>
-                  <tr className="border-b border-white/5 text-[10px] text-slate-500 uppercase tracking-wider font-mono">
-                    <th className="py-3 px-2">Height</th>
-                    <th className="py-3 px-2">Hash</th>
-                    <th className="py-3 px-2">TXs</th>
-                    <th className="py-3 px-2">Proposer Node</th>
-                    <th className="py-3 px-2 text-right">Protection</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-white/5">
-                  {blocks.slice(0, 5).map((block) => (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-sm text-slate-300">
+              <thead>
+                <tr className="border-b border-white/5 text-[10px] text-slate-500 uppercase tracking-wider font-mono">
+                  <th className="py-3 px-2">Block State</th>
+                  <th className="py-3 px-2">Height</th>
+                  <th className="py-3 px-2">Hash</th>
+                  <th className="py-3 px-2">TXs</th>
+                  <th className="py-3 px-2 text-right">Proposer Node</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-white/5">
+                {blocks.slice(0, 5).map((block) => {
+                  const isBlockConfirmed = block.commitStatus === 'finalized' || block.commitStatus === 'committed';
+                  return (
                     <tr 
                       key={block.height}
                       onClick={() => onSelectBlock(block.height)}
                       className="hover:bg-white/[0.02] active:bg-white/[0.04] transition duration-150 cursor-pointer"
                     >
+                      <td className="py-2.5 px-2">
+                        <div className="flex items-center gap-1.5">
+                          <BlockChainIcon
+                            size={32}
+                            height={block.height}
+                            state={isBlockConfirmed ? 'confirmed' : 'produced'}
+                            animated={true}
+                          />
+                          <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded border uppercase font-bold ${
+                            isBlockConfirmed
+                              ? 'bg-brand-green/10 text-brand-green border-brand-green/20'
+                              : 'bg-brand-cyan/10 text-brand-cyan border-brand-cyan/20 animate-pulse'
+                          }`}>
+                            {isBlockConfirmed ? 'Locked' : 'Produced'}
+                          </span>
+                        </div>
+                      </td>
                       <td className="py-3 px-2 font-mono font-bold text-brand-cyan">
                         #{block.height}
                       </td>
@@ -276,153 +313,60 @@ export default function ExplorerDashboard({
                       <td className="py-3 px-2 font-mono text-xs">
                         {block.txCount} txs
                       </td>
-                      <td className="py-3 px-2 font-mono text-xs text-slate-500 hover:text-brand-purple">
+                      <td className="py-3 px-2 font-mono text-xs text-slate-500 hover:text-brand-purple text-right">
                         {formatHash(block.proposer, 6)}
                       </td>
-                      <td className="py-3 px-2 text-right">
-                        {getSignatureBadge(block.signatureScheme)}
-                      </td>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
-
-          {/* Active Address Section */}
-          <div className="bg-slate-900/30 border border-white/5 rounded-2xl p-6 backdrop-blur-md">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-base font-semibold text-white flex items-center gap-2">
-                <span className="w-1.5 h-4 bg-brand-cyan rounded-full" />
-                Active Address
-              </h2>
-            </div>
-
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-sm text-slate-300">
-                <thead>
-                  <tr className="border-b border-white/5 text-[10px] text-slate-500 uppercase tracking-wider font-mono">
-                    <th className="py-3 px-2">Address</th>
-                    <th className="py-3 px-2 text-right">Integrity Status</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-white/5">
-                  {[...wallets]
-                    .sort((a, b) => b.nonce - a.nonce || parseFloat(b.balanceSpx) - parseFloat(a.balanceSpx))
-                    .slice(0, 6)
-                    .map((wallet) => {
-                      return (
-                        <tr 
-                          key={wallet.address}
-                          onClick={() => onSelectAddress(wallet.address)}
-                          className="hover:bg-white/[0.02] active:bg-white/[0.04] transition duration-150 cursor-pointer"
-                        >
-                          <td className="py-3.5 px-2 font-mono text-xs text-brand-cyan font-semibold truncate max-w-[150px] md:max-w-[200px]" title={wallet.address}>
-                            {wallet.address}
-                          </td>
-                          <td className="py-3.5 px-2 text-right">
-                            <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase bg-brand-green/10 text-brand-green border border-brand-green/20 shadow-[0_0_8px_rgba(0,240,255,0.1)]">
-                              Armored (SPHINCS+-128s)
-                            </span>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                </tbody>
-              </table>
-            </div>
-          </div>
-
         </div>
 
-        {/* Right: Live Activity Mempool Visualizer (Website Exclusive Concept) */}
-        <div className="lg:col-span-4 flex flex-col gap-6">
-          <div className="bg-slate-900/30 border border-white/5 rounded-2xl p-6 backdrop-blur-md flex-1 flex flex-col">
-            <div className="mb-4">
-              <h2 className="text-base font-semibold text-white flex items-center gap-2">
-                <span className="w-1.5 h-4 bg-brand-gold rounded-full" />
-                Mempool Live Activity
-              </h2>
-              <p className="text-xs text-slate-500 font-mono mt-1">Pending transactions floating in state space</p>
-            </div>
+        {/* Active Address Section */}
+        <div className="bg-slate-900/30 border border-white/5 rounded-2xl p-6 backdrop-blur-md">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-base font-semibold text-white flex items-center gap-2">
+              <span className="w-1.5 h-4 bg-brand-cyan rounded-full" />
+              Active Address
+            </h2>
+          </div>
 
-            {/* Simulated Mempool Activity Area */}
-            <div className="relative border border-white/5 bg-slate-950/80 rounded-2xl h-80 overflow-hidden flex-1 flex flex-col items-center justify-center">
-              
-              {/* Particle flow lines background in Card */}
-              <div className="absolute inset-0 opacity-20 pointer-events-none">
-                <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-48 h-48 rounded-full border border-dashed border-brand-gold animate-spin-slow" />
-                <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-64 h-64 rounded-full border border-dashed border-brand-cyan/40 animate-pulse" />
-              </div>
-
-              {/* Transactions floating bubbles */}
-              {mempool.length === 0 ? (
-                <div className="text-center p-4 z-10 text-slate-600 space-y-2">
-                  <Radio className="w-8 h-8 text-slate-700 mx-auto animate-pulse" />
-                  <p className="text-xs font-mono font-medium">Mempool Cleared — Miner Synchronized</p>
-                </div>
-              ) : (
-                <div className="absolute inset-0 z-10 p-4">
-                  {mempool.map((tx, idx) => {
-                    // Calculate floating sinusoidal physics values based on index and animated offset
-                    const phase = idx * (Math.PI / 3) + mempoolAnimationOffset;
-                    const xPercent = 20 + ((idx * 35) % 60);
-                    const yPercent = 25 + ((idx * 27 + Math.sin(phase) * 12) % 55);
-                    const sizePx = 45 + (parseFloat(tx.amountSpx) % 20); // bubble size relates to tx amount
-
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-sm text-slate-300">
+              <thead>
+                <tr className="border-b border-white/5 text-[10px] text-slate-500 uppercase tracking-wider font-mono">
+                  <th className="py-3 px-2">Address</th>
+                  <th className="py-3 px-2 text-right">Integrity Status</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-white/5">
+                {[...wallets]
+                  .sort((a, b) => b.nonce - a.nonce || parseFloat(b.balanceSpx) - parseFloat(a.balanceSpx))
+                  .slice(0, 6)
+                  .map((wallet) => {
                     return (
-                      <button
-                        key={tx.txid}
-                        onClick={() => onSelectTx(tx.txid)}
-                        className="absolute -translate-x-1/2 -translate-y-1/2 flex flex-col items-center justify-center rounded-full border cursor-pointer transition-all duration-300 hover:scale-115 hover:z-20 text-[9px] group"
-                        style={{
-                          left: `${xPercent}%`,
-                          top: `${yPercent}%`,
-                          width: `${sizePx}px`,
-                          height: `${sizePx}px`,
-                          background: tx.signatureScheme.includes('SPHINCS+') 
-                            ? 'rgba(0, 240, 255, 0.08)' 
-                            : tx.signatureScheme.includes('XMSS')
-                            ? 'rgba(255, 170, 51, 0.08)'
-                            : 'rgba(255, 51, 102, 0.08)',
-                          borderColor: tx.signatureScheme.includes('SPHINCS+') 
-                            ? 'rgba(0, 240, 255, 0.25)' 
-                            : tx.signatureScheme.includes('XMSS')
-                            ? 'rgba(255, 170, 51, 0.25)'
-                            : 'rgba(255, 51, 102, 0.25)',
-                          boxShadow: tx.signatureScheme.includes('SPHINCS+')
-                            ? '0 0 15px rgba(0,240,255,0.05)'
-                            : '0 0 15px rgba(255,170,51,0.05)'
-                        }}
+                      <tr 
+                        key={wallet.address}
+                        onClick={() => onSelectAddress(wallet.address)}
+                        className="hover:bg-white/[0.02] active:bg-white/[0.04] transition duration-150 cursor-pointer"
                       >
-                        <span className="font-mono text-slate-400 text-[8px] tracking-tight group-hover:text-white">
-                          {formatHash(tx.txid, 3)}
-                        </span>
-                        <span className="font-bold text-white leading-none mt-0.5">
-                          {parseFloat(tx.amountSpx).toFixed(0)} SPX
-                        </span>
-                        
-                        {/* Interactive tooltip */}
-                        <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col bg-slate-900 border border-white/10 rounded-lg p-2.5 w-40 text-left pointer-events-none text-[10px] space-y-1 font-mono shadow-2xl z-30 leading-snug animate-fadeIn">
-                          <div className="text-white font-bold text-xs border-b border-white/5 pb-1 mb-1">Pending Tx</div>
-                          <div><span className="text-slate-500">Val:</span> <span className="text-white">{parseFloat(tx.amountSpx).toFixed(2)} SPX</span></div>
-                          <div className="truncate"><span className="text-slate-500">From:</span> <span className="text-slate-300">{tx.sender}</span></div>
-                          <div className="truncate"><span className="text-slate-500">Sig:</span> <span className="text-brand-cyan font-bold">{tx.signatureScheme}</span></div>
-                        </div>
-                      </button>
+                        <td className="py-3.5 px-2 font-mono text-xs text-brand-cyan font-semibold truncate max-w-[150px] md:max-w-[200px]" title={wallet.address}>
+                          {wallet.address}
+                        </td>
+                        <td className="py-3.5 px-2 text-right">
+                          <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase bg-brand-green/10 text-brand-green border border-brand-green/20 shadow-[0_0_8px_rgba(0,240,255,0.1)]">
+                            Armored (SPHINCS+-128s)
+                          </span>
+                        </td>
+                      </tr>
                     );
                   })}
-                </div>
-              )}
-            </div>
-
-            <div className="mt-4 flex justify-between text-[11px] text-slate-500 font-mono border-t border-white/5 pt-4">
-              <div>Total Pending: {stats.mempoolSize}</div>
-              <div>Buffer: {stats.mempoolBytes.toLocaleString()} Bytes</div>
-            </div>
+              </tbody>
+            </table>
           </div>
         </div>
-
       </div>
 
     </div>

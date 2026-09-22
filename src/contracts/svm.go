@@ -10,6 +10,8 @@ import (
 	kv "github.com/sphinxfndorg/protocol/src/core/kernel/vm"
 )
 
+const RuntimeSVM1 = "svm1"
+
 // SVM1 magic and opcode bytes are defined centrally in the kernel opcode
 // package. They are re-exported here so the contracts layer and its callers
 // keep this identical public API while the authoritative definitions live

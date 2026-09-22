@@ -50,6 +50,7 @@ static int sc_mint(const char *caller, const char *to, uint64_t amount) {
 }
 // returns 0 ok, -1 auth, -2 funds, -3 arg
 static int sc_burn(const char *caller, const char *from, uint64_t amount) {
+    if (!sc_admin_set) return -3;
     if (strcmp(caller, sc_admin) != 0) return -1;
     if (!from || !*from || amount == 0) return -3;
     ScAcct *a = sc_find(from);
@@ -83,9 +84,15 @@ static uint64_t sc_balance(const char *o) { ScAcct *a = sc_find(o); return a ? a
 static void sc_init(const char *admin) {
     memset(sc_accts, 0, sizeof(sc_accts));
     sc_total_supply = 0;
-    strncpy(sc_admin, admin, 63);
-    sc_admin[63] = '\0';
-    sc_admin_set = 1;
+    if (admin) {
+        memset(sc_admin, 0, 64);
+        strncpy(sc_admin, admin, 63);
+        sc_admin[63] = '\0';
+        sc_admin_set = 1;
+    } else {
+        sc_admin[0] = '\0';
+        sc_admin_set = 0;
+    }
 }
 static uint64_t sc_total(void) { return sc_total_supply; }
 

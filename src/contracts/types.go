@@ -16,11 +16,14 @@ type Store interface {
 }
 
 type ContractMeta struct {
-	Address   string `json:"address"`
-	Creator   string `json:"creator"`
-	Runtime   string `json:"runtime"`
-	Standard  string `json:"standard"`
-	CreatedAt int64  `json:"created_at"`
+	Address string `json:"address"`
+	Creator string `json:"creator"`
+	Runtime string `json:"runtime"`
+	// RuntimeVersion identifies the consensus ABI for Runtime. A zero value
+	// is accepted when reading legacy metadata and means version one.
+	RuntimeVersion uint32 `json:"runtime_version,omitempty"`
+	Standard       string `json:"standard"`
+	CreatedAt      int64  `json:"created_at"`
 }
 
 type DeploySpec struct {

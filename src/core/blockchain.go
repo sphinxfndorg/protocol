@@ -1263,6 +1263,9 @@ func (bc *Blockchain) GetChainInfo() map[string]interface{} {
 		"current_height":  blockHeight,                             // Current blockchain height
 		"latest_block":    blockHash,                               // Latest block hash
 		"network":         networkName,                             // Network type (mainnet/testnet/devnet)
+		// Target block time (in seconds) so the explorer can estimate
+		// when the next block is likely to be sealed.
+		"block_time_seconds": params.ConsensusConfig.BlockTime.Seconds(),
 	}
 }
 

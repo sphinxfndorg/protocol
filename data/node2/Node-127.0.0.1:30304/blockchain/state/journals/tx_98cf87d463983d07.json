@@ -1,0 +1,76 @@
+{
+  "block_hash": "98cf87d463983d07dc377cbf529a5da5ec952b16a716de7b09d8c0e37083cb1c",
+  "block_height": 12,
+  "phase": "committed",
+  "state_changes": [
+    {
+      "address": "SPIF F6F6 66A0 F07B B9F1 B9C3 6C0B C497 DEF7 89AC A6B4 A756 4F88 A627 7FCB BFD9 09F8",
+      "previous_balance": "30000000000000000000000000",
+      "previous_nonce": 0
+    },
+    {
+      "address": "SPIF 42D1 A449 30C6 1EE4 8B85 8E88 E393 BAA1 72D9 5DFF DE0D 5AE4 2B70 E60B 8C71 C2DB",
+      "previous_balance": "95000000000000000000000000",
+      "previous_nonce": 0
+    },
+    {
+      "address": "SPIF F6F6 66A0 F07B B9F1 B9C3 6C0B C497 DEF7 89AC A6B4 A756 4F88 A627 7FCB BFD9 09F8",
+      "previous_balance": "29000000000000000000000000",
+      "previous_nonce": 0
+    },
+    {
+      "address": "Node-127.0.0.1:30304",
+      "previous_balance": "14250000000000000000",
+      "previous_nonce": 0
+    },
+    {
+      "address": "system:staking-fee-pool",
+      "previous_balance": "288767158293614919210",
+      "previous_nonce": 0
+    },
+    {
+      "address": "system:treasury-fee-pool",
+      "previous_balance": "72191789573403729804",
+      "previous_nonce": 0
+    },
+    {
+      "address": "SPIF 262C 098D 17D0 D99F 315C D9B7 C4D9 AEDA 685A 65FD 8630 DEFD CE21 F984 60B1 FA30",
+      "previous_balance": "2750000000000000000",
+      "previous_nonce": 0
+    },
+    {
+      "address": "SPIF F6F6 66A0 F07B B9F1 B9C3 6C0B C497 DEF7 89AC A6B4 A756 4F88 A627 7FCB BFD9 09F8",
+      "previous_balance": "28999999999977400000000000",
+      "previous_nonce": 0
+    },
+    {
+      "address": "Node-127.0.0.1:30304",
+      "previous_balance": "14250013645642105263",
+      "previous_nonce": 0
+    },
+    {
+      "address": "SPIF 262C 098D 17D0 D99F 315C D9B7 C4D9 AEDA 685A 65FD 8630 DEFD CE21 F984 60B1 FA30",
+      "previous_balance": "2750000994400000000",
+      "previous_nonce": 0
+    },
+    {
+      "address": "system:staking-fee-pool",
+      "previous_balance": "288767163979299129736",
+      "previous_nonce": 0
+    },
+    {
+      "address": "system:treasury-fee-pool",
+      "previous_balance": "72191791847677414015",
+      "previous_nonce": 0
+    }
+  ],
+  "committed": true,
+  "previous_tip_hash": "37b734f86e35d3dcbfb127b375d106edd108c864d77578f5116172646567846c",
+  "previous_tip_height": 11,
+  "started_at": "2026-09-23T02:55:06.932994+07:00",
+  "committed_at": "2026-09-23T02:55:12.348178+07:00",
+  "block_file_written": true,
+  "index_updated": true,
+  "burned_this_block_nspx": "250000994400000000",
+  "burned_before_nspx": "2750000000000000000"
+}

@@ -846,7 +846,21 @@ func (bc *Blockchain) mintEpochInflation(block *types.Block, stateDB *StateDB) {
 	// seedValidatorStakesFromGenesis, updated via explicit stake transactions).
 	// This guarantees every replaying node derives the identical distribution and
 	// arrives at the same state root.
-	distribution := p.CalculateEpochInflationExact(stateDB.GetTotalSupply(), year)
+	//
+	// The stake-responsive inflation multiplier uses that SAME committed
+	// epoch-boundary stake snapshot — summed exactly as
+	// distributeEpochStakingRewards sums it — never a live or mid-epoch
+	// consensus read, so a stake/unstake cannot manipulate the multiplier
+	// without first being committed in a block that every node replays.
+	totalStaked := big.NewInt(0)
+	if stakes, err := stateDB.GetAllValidatorStakes(); err == nil {
+		for _, stake := range stakes {
+			if stake != nil {
+				totalStaked.Add(totalStaked, stake)
+			}
+		}
+	}
+	distribution := p.CalculateEpochInflationExact(stateDB.GetTotalSupply(), totalStaked, year)
 	if distribution.TotalMinted.Sign() <= 0 {
 		return
 	}

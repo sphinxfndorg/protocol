@@ -190,7 +190,9 @@ func TestCalculateEpochInflationExactUsesPolicyBPS(t *testing.T) {
 	p.InitialInflationBPS = 500
 	p.InflationDecayBPS = 8000
 	p.StakingRewardBPS = 8000
-	d := p.CalculateEpochInflationExact(big.NewInt(1000000), 2)
+	// 70% of supply staked = exactly on the 7000 BPS target, so the
+	// stake-responsive multiplier is exactly 1.0x (10000 BPS) here.
+	d := p.CalculateEpochInflationExact(big.NewInt(1000000), big.NewInt(700000), 2)
 	// 1,000,000 * (5% * 80%) = 40,000, entirely integer based.
 	if d.TotalMinted.Cmp(big.NewInt(40000)) != 0 || d.StakingRewards.Cmp(big.NewInt(32000)) != 0 || d.CommunityFund.Cmp(big.NewInt(8000)) != 0 {
 		t.Fatalf("unexpected exact inflation distribution: %+v", d)

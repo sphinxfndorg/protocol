@@ -113,6 +113,17 @@ type PolicyParameters struct {
 	StakingRewardBPS    uint64 `json:"staking_reward_bps"`
 	TargetStakeBPS      uint64 `json:"target_stake_bps"`
 
+	// Stake-responsive epoch inflation. The stake ratio (committed validator
+	// stake over total supply, both read from the state DB at the epoch
+	// boundary — never a live or mid-epoch read) scales the decayed base
+	// mint by CalculateStakeAdjustedMultiplierBPS. Like BlockReward, these
+	// are policy-owned, not chain-config: SIPS-governable monetary levers,
+	// never node-local settings, and consensus inputs every node must apply
+	// identically.
+	StakeInflationSensitivityBPS uint64 `json:"stake_inflation_sensitivity_bps"` // response to a 1.0x deviation, 10000 = 1:1
+	StakeMultiplierFloorBPS      uint64 `json:"stake_multiplier_floor_bps"`      // lower clamp, 5000 = 0.5x
+	StakeMultiplierCeilingBPS    uint64 `json:"stake_multiplier_ceiling_bps"`    // upper clamp, 20000 = 2.0x
+
 	InitialInflationRate float64 `json:"initial_inflation_rate"` // Infl₀ = 0.05 (5% annual)
 	InflationDecayFactor float64 `json:"inflation_decay_factor"` // γ = 0.8 (decay factor)
 	StakingRewardShare   float64 `json:"staking_reward_share"`   // γ = 0.8 (80% to stakers)
@@ -128,6 +139,7 @@ type InflationDistribution struct {
 	TotalMinted         *big.Int `json:"total_minted"`          // Total tokens minted this epoch
 	StakingRewards      *big.Int `json:"staking_rewards"`       // Tokens to stakers
 	CommunityFund       *big.Int `json:"community_fund"`        // Tokens to community pool
+	StakeMultiplierBPS  uint64   `json:"stake_multiplier_bps"`  // Stake-responsive multiplier applied to the decayed base (10000 = 1.0x)
 }
 
 // FeeComponents represents the breakdown of transaction fees

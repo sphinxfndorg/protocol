@@ -98,6 +98,13 @@ func NewPolicyParameters() *PolicyParameters {
 		InflationDecayFactor: 0.8,  // γ = 0.8 (decay factor for geometric progression)
 		StakingRewardShare:   0.8,  // 80% to stakers
 		TargetStakeRatio:     0.70, // 70% target staked ratio
+
+		// Stake-responsive epoch inflation: a 1:1 response to the stake
+		// ratio's deviation from TargetStakeBPS, clamped to [0.5x, 2.0x].
+		// Policy-owned, not chain-config — see types.go.
+		StakeInflationSensitivityBPS: 10000,
+		StakeMultiplierFloorBPS:      5000,
+		StakeMultiplierCeilingBPS:    20000,
 	}
 }
 
@@ -180,6 +187,17 @@ func (p *PolicyParameters) Validate() error {
 
 	if p.ValidatorFeeBPS+p.StakerFeeBPS+p.TreasuryFeeBPS+p.BurnFeeBPS != 10000 {
 		return ErrInvalidFeeDistribution
+	}
+
+	// Validate the stake-responsive inflation multiplier policy: the clamp
+	// window must be ordered (when configured) and the sensitivity must be
+	// non-negative by construction of uint64.
+	if p.StakeMultiplierFloorBPS > p.StakeMultiplierCeilingBPS &&
+		p.StakeMultiplierFloorBPS != 0 && p.StakeMultiplierCeilingBPS != 0 {
+		return ErrInvalidInflationRate
+	}
+	if p.StakeMultiplierCeilingBPS > 100000 { // sanity: multipliers beyond 10x are nonsensical
+		return ErrInvalidInflationRate
 	}
 
 	// Validate inflation parameters

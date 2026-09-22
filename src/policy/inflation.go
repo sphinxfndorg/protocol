@@ -11,10 +11,84 @@ import (
 
 const basisPoints = uint64(10000)
 
+// CalculateStakeAdjustedMultiplierBPS ports the stake-ratio responsiveness of
+// CalculateAnnualInflationWithStakeAdjustment to pure integer basis-point
+// math. It is a pure function of its two arguments and policy constants — no
+// state DB reads, no wall-clock time, no peer state — so every replaying node
+// derives the identical multiplier and state root.
+//
+//	stakedRatioBPS  = totalStaked * 10000 / totalSupply   (multiply-before-divide)
+//	deviationBPS    = TargetStakeBPS - stakedRatioBPS      (signed)
+//	multiplierBPS   = 10000 + deviationBPS * SensitivityBPS / 10000
+//
+// The multiplier is clamped to [StakeMultiplierFloorBPS, StakeMultiplierCeilingBPS]
+// (0.5x–2.0x by default). A zero or nil totalSupply (the genesis guard)
+// returns exactly 10000 (1.0x); a zero/nil/negative totalStaked is a 0% stake
+// ratio. All math is big.Int / uint64 with multiply-before-divide ordering.
+func (p *PolicyParameters) CalculateStakeAdjustedMultiplierBPS(totalStaked, totalSupply *big.Int) uint64 {
+	if totalSupply == nil || totalSupply.Sign() <= 0 {
+		return basisPoints // genesis guard: 1.0x
+	}
+
+	sensitivityBPS := p.StakeInflationSensitivityBPS
+	if sensitivityBPS == 0 {
+		sensitivityBPS = basisPoints
+	}
+	floorBPS, ceilingBPS := p.StakeMultiplierFloorBPS, p.StakeMultiplierCeilingBPS
+	if floorBPS == 0 {
+		floorBPS = 5000
+	}
+	if ceilingBPS == 0 {
+		ceilingBPS = 20000
+	}
+	if floorBPS > ceilingBPS {
+		floorBPS, ceilingBPS = ceilingBPS, floorBPS
+	}
+	targetBPS := p.TargetStakeBPS
+	if targetBPS > basisPoints {
+		targetBPS = basisPoints
+	}
+
+	// stakedRatioBPS = totalStaked * 10000 / totalSupply — always multiply
+	// before divide so the ratio is computed identically on every node.
+	stakedRatioBPS := big.NewInt(0)
+	if totalStaked != nil && totalStaked.Sign() > 0 {
+		stakedRatioBPS = new(big.Int).Mul(totalStaked, new(big.Int).SetUint64(basisPoints))
+		stakedRatioBPS.Div(stakedRatioBPS, totalSupply)
+	}
+
+	// deviationBPS = target - stakedRatio (signed, big.Int so an over-100%
+	// ratio cannot overflow anything).
+	deviationBPS := new(big.Int).Sub(new(big.Int).SetUint64(targetBPS), stakedRatioBPS)
+
+	// multiplierBPS = 10000 + deviationBPS * SensitivityBPS / 10000.
+	adjustment := new(big.Int).Mul(deviationBPS, new(big.Int).SetUint64(sensitivityBPS))
+	adjustment.Div(adjustment, new(big.Int).SetUint64(basisPoints))
+	multiplierBPS := new(big.Int).SetUint64(basisPoints)
+	multiplierBPS.Add(multiplierBPS, adjustment)
+
+	// Clamp to [floor, ceiling] (0.5x–2.0x by default).
+	if multiplierBPS.Sign() < 0 || multiplierBPS.Cmp(new(big.Int).SetUint64(floorBPS)) < 0 {
+		return floorBPS
+	}
+	if multiplierBPS.Cmp(new(big.Int).SetUint64(ceilingBPS)) > 0 {
+		return ceilingBPS
+	}
+	return multiplierBPS.Uint64()
+}
+
 // CalculateEpochInflationExact calculates issuance using only integer policy
 // values. It is the consensus-safe counterpart to CalculateEpochInflation,
 // whose float values are retained for estimates and legacy callers.
-func (p *PolicyParameters) CalculateEpochInflationExact(totalSupply *big.Int, year uint64) *InflationDistribution {
+//
+// totalStaked must come from the epoch-boundary validator snapshot — the
+// deterministic validator-stake records already committed to the state DB
+// (the same snapshot the epoch staking-reward distribution reads) — never
+// from a live or mid-epoch consensus read. That is what keeps the
+// stake-responsive multiplier immune to stake-timing griefing: a stake or
+// unstake can only influence an epoch boundary once its block is actually
+// committed, identically on every node.
+func (p *PolicyParameters) CalculateEpochInflationExact(totalSupply, totalStaked *big.Int, year uint64) *InflationDistribution {
 	if totalSupply == nil || totalSupply.Sign() <= 0 || p == nil || p.GetEpochsPerYear() == 0 {
 		return &InflationDistribution{Year: year, TotalMinted: big.NewInt(0), StakingRewards: big.NewInt(0), CommunityFund: big.NewInt(0)}
 	}
@@ -28,6 +102,15 @@ func (p *PolicyParameters) CalculateEpochInflationExact(totalSupply *big.Int, ye
 	denominator := new(big.Int).SetUint64(basisPoints * p.GetEpochsPerYear())
 	totalMinted := new(big.Int).Mul(totalSupply, new(big.Int).SetUint64(rateBPS))
 	totalMinted.Div(totalMinted, denominator)
+
+	// Stake-responsive scaling on top of the decayed base amount, always
+	// multiply-before-divide:
+	//
+	//	adjustedAmount = baseDecayedAmount * multiplierBPS / 10000
+	multiplierBPS := p.CalculateStakeAdjustedMultiplierBPS(totalStaked, totalSupply)
+	totalMinted.Mul(totalMinted, new(big.Int).SetUint64(multiplierBPS))
+	totalMinted.Div(totalMinted, new(big.Int).SetUint64(basisPoints))
+
 	stakingRewards := new(big.Int).Mul(totalMinted, new(big.Int).SetUint64(p.StakingRewardBPS))
 	stakingRewards.Div(stakingRewards, new(big.Int).SetUint64(basisPoints))
 	communityFund := new(big.Int).Sub(totalMinted, stakingRewards)
@@ -39,6 +122,7 @@ func (p *PolicyParameters) CalculateEpochInflationExact(totalSupply *big.Int, ye
 		TotalMinted:         totalMinted,
 		StakingRewards:      stakingRewards,
 		CommunityFund:       communityFund,
+		StakeMultiplierBPS:  multiplierBPS,
 	}
 }
 

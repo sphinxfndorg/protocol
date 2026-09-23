@@ -220,6 +220,12 @@ The GUI entry point shown here is:
 go/src/usi/gui/gui.go
 ```
 
+Package documentation for `src/usi/gui` — including what the technology is
+for (self-patenting data, protecting data, renting/licensing data) and what
+developers can build with the SIP-721 smart contracts — lives in
+[`gui/README.md`](./gui/README.md).
+
+
 Main dependencies used by the GUI include:
 
 - `fyne.io/fyne/v2` for the desktop interface

@@ -2013,6 +2013,34 @@ func Run() {
 		resultAssuranceLbl.TextSize = 11
 		resultAssuranceLbl.TextStyle = fyne.TextStyle{Bold: true}
 
+		// resultOnChainLbl is the ON-CHAIN half of the result: whether the
+		// node agrees with the provenance this file records. One glanceable
+		// value beside the offline "Assurance" row (see onchain_verify.go).
+		resultOnChainLbl := canvas.NewText("—", colMuted)
+		resultOnChainLbl.TextSize = 11
+		resultOnChainLbl.TextStyle = fyne.TextStyle{Bold: true}
+
+		// ── Live on-chain verification widgets ─────────────────────────────
+		// The provenance block further down shows what the FILE records.
+		// These show whether the NODE agrees with it, re-checked on every
+		// Verify press: status verdict, its explanation, and one line per
+		// check (anchor tx, mint id, CID, token, terms, block).
+		chainStatusVal := canvas.NewText("—", colMuted)
+		chainStatusVal.TextSize = 12
+		chainStatusVal.TextStyle = fyne.TextStyle{Bold: true}
+		chainDetailLbl := widget.NewLabel("Press Verify Data to re-check this file's recorded provenance against the node.")
+		chainDetailLbl.Wrapping = fyne.TextWrapWord
+		chainDetailLbl.TextStyle = fyne.TextStyle{Italic: true}
+		chainChecksBox := container.NewVBox(widget.NewLabel("Not checked yet."))
+
+		// statusBig is the screen's headline. Declared here (not next to the
+		// button) because checkOnChain — defined below — recomputes it as the
+		// COMBINED offline + on-chain verdict once the node has answered.
+		statusBig := canvas.NewText("", colMuted)
+		statusBig.TextSize = 16
+		statusBig.TextStyle = fyne.TextStyle{Bold: true}
+		statusBig.Alignment = fyne.TextAlignCenter
+
 		pinStatusVal := canvas.NewText("—", colMuted)
 		pinStatusVal.TextSize = 12
 		pinStatusVal.TextStyle = fyne.TextStyle{Bold: true}
@@ -2052,7 +2080,18 @@ func Run() {
 			pinStatusVal.Text = "—"
 			pinStatusVal.Color = colMuted
 			pinStatusVal.Refresh()
-			pinStatusDetailLbl.SetText("Run Verify to read the payload retrievability and on-chain provenance this file carries.")
+			pinStatusDetailLbl.SetText("Run Verify to read the payload retrievability and to re-check the file's on-chain provenance against the node.")
+			// On-chain verification: back to "not checked" so a fresh file
+			// never appears to carry the previous file's chain verdict.
+			chainStatusVal.Text = "—"
+			chainStatusVal.Color = colMuted
+			chainStatusVal.Refresh()
+			chainDetailLbl.SetText("Press Verify Data to re-check this file's recorded provenance against the node.")
+			chainChecksBox.Objects = []fyne.CanvasObject{widget.NewLabel("Not checked yet.")}
+			chainChecksBox.Refresh()
+			resultOnChainLbl.Text = "—"
+			resultOnChainLbl.Color = colMuted
+			resultOnChainLbl.Refresh()
 		}
 
 		// checkRetrievability asks the SAME storage probe the CLI's
@@ -2081,6 +2120,71 @@ func Run() {
 				pinStatusVal.Color = pinStatusColor(durability)
 				pinStatusVal.Refresh()
 				pinStatusDetailLbl.SetText(pinStatusDetail(durability))
+			})
+		}
+
+		// checkOnChain is the second half of "Verify Data": it re-checks the
+		// provenance this file RECORDS against what the node actually has
+		// (see onchain_verify.go). It runs off the UI thread after the
+		// offline verdict is already on screen, never blocks it, and reports
+		// an honest state — a node that cannot be reached is NOT a pass, and
+		// a chain that disagrees is a mismatch rather than a silent success.
+		checkOnChain := func(meta *sign.Meta, offline assuranceLevel, checkedFile string) {
+			var status onChainStatus
+			var checks []chainCheck
+			if meta == nil || strings.TrimSpace(meta.AnchorTxID) == "" {
+				// Offline-signed file: no network call is even needed.
+				status, checks = evaluateOnChain(meta, anchorEvidence{})
+			} else {
+				status, checks = evaluateOnChain(meta, walletClient.gatherAnchorEvidence(meta))
+			}
+
+			fyne.Do(func() {
+				// The user may have cleared the screen (or picked another
+				// file) while the node was being queried — never paint a
+				// stale verdict over a fresh selection.
+				if selectedFile != checkedFile {
+					return
+				}
+
+				chainChecksBox.Objects = nil
+				for _, c := range checks {
+					lbl := widget.NewLabel(chainCheckLine(c))
+					lbl.Wrapping = fyne.TextWrapWord
+					switch c.Status {
+					case checkPass:
+						lbl.Importance = widget.SuccessImportance
+					case checkFail:
+						lbl.Importance = widget.DangerImportance
+					case checkSkip:
+						lbl.Importance = widget.LowImportance
+					default:
+						lbl.Importance = widget.WarningImportance
+					}
+					chainChecksBox.Add(lbl)
+				}
+				chainChecksBox.Refresh()
+
+				chainStatusVal.Text = onChainStatusTitle(status)
+				chainStatusVal.Color = onChainStatusColor(status)
+				chainStatusVal.Refresh()
+				chainDetailLbl.SetText(onChainStatusDetail(status, inconclusiveChecks(checks)))
+
+				resultOnChainLbl.Text = onChainStatusTitle(status)
+				resultOnChainLbl.Color = onChainStatusColor(status)
+				resultOnChainLbl.Refresh()
+
+				// Replace the offline-only headline with the COMBINED one, so
+				// the screen's big status line describes both halves.
+				statusBig.Text, statusBig.Color = combinedVerifyHeadline(offline, status)
+				statusBig.Refresh()
+
+				switch status {
+				case onChainVerified:
+					addActivity(fmt.Sprintf("On-chain verified: %s — %s", filepath.Base(checkedFile), onChainStatusTitle(status)))
+				case onChainMismatch:
+					addActivity(fmt.Sprintf("On-chain MISMATCH: %s — file provenance disagrees with the node", filepath.Base(checkedFile)))
+				}
 			})
 		}
 
@@ -2154,23 +2258,24 @@ func Run() {
 		})
 		browseBtn.Importance = widget.HighImportance
 
-		statusBig := canvas.NewText("", colMuted)
-		statusBig.TextSize = 16
-		statusBig.TextStyle = fyne.TextStyle{Bold: true}
-		statusBig.Alignment = fyne.TextAlignCenter
-
 		verifyBtn := widget.NewButtonWithIcon("Verify Data", theme.ConfirmIcon(), func() {
 			if selectedFile == "" {
 				showErrorDialog(errors.New("please select a file"), window)
 				return
 			}
 
+			// Capture the file this run is about. The offline and on-chain
+			// checks both run in the background, and the user may clear the
+			// screen or pick another file while they do; checkOnChain must
+			// not paint a stale verdict over a newer selection.
+			checkedFile := selectedFile
+
 			statusBig.Text = "Verifying…"
 			statusBig.Color = colMuted
 			statusBig.Refresh()
 
 			go func() {
-				result, meta, _ := sign.VerifyUniversal(selectedFile, sessionPassphrase)
+				result, meta, _ := sign.VerifyUniversal(checkedFile, sessionPassphrase)
 				// The backend reports a TRI-STATE, not a boolean. Collapsing
 				// INTEGRITY_ONLY into a flat "VALID" would claim authenticity
 				// the verification never established (see provenance.go).
@@ -2263,6 +2368,13 @@ func Run() {
 				if meta != nil {
 					go checkRetrievability(meta)
 				}
+				// The ON-CHAIN half runs alongside it: the offline verdict
+				// above is already displayed, and this fills in whether the
+				// node agrees with the provenance the file records. It also
+				// runs for a file whose signature is INVALID — knowing what
+				// the chain says about a tampered file's claimed anchor is
+				// exactly what shows WHAT was tampered with.
+				go checkOnChain(meta, assurance, checkedFile)
 			}()
 		})
 		verifyBtn.Importance = widget.HighImportance
@@ -2298,6 +2410,12 @@ func Run() {
 			// "self-consistent" is never read as "authenticated".
 			makeInfoLine("Assurance", resultAssuranceLbl),
 			spacer(6),
+			// On-Chain is the second, independent half: whether the node
+			// agrees with the provenance this file records (see
+			// onchain_verify.go). Shown as its own row for the same reason —
+			// a sound signature says nothing about the chain.
+			makeInfoLine("On-Chain", resultOnChainLbl),
+			spacer(6),
 			makeInfoLine("Signed at", resultTimeLbl),
 			spacer(6),
 			makeInfoLine("NFT Name", resultNFTNameLbl),
@@ -2308,7 +2426,7 @@ func Run() {
 		panel := container.NewVBox(
 			container.NewMax(panelBg, container.NewPadded(panelInner)),
 			spacer(12),
-			alertBox("The result distinguishes an AUTHENTICATED signature (signer's key confirmed against the key directory) from INTEGRITY ONLY (self-consistent, but signer identity unconfirmed).", color.RGBA{96, 165, 250, 20}, colInfo),
+			alertBox("The result distinguishes an AUTHENTICATED signature (signer's key confirmed against the key directory) from INTEGRITY ONLY (self-consistent, but signer identity unconfirmed) — and separately re-checks the file's recorded on-chain provenance against the node.", color.RGBA{96, 165, 250, 20}, colInfo),
 		)
 
 		// ── Backend-recorded provenance — full width ───────────────────
@@ -2321,6 +2439,21 @@ func Run() {
 			pinStatusVal,
 			spacer(4),
 			pinStatusDetailLbl,
+			spacer(14),
+			hRule(),
+			spacer(12),
+			// ── Live on-chain verification ────────────────────────────────
+			// The block below this one shows what the FILE records. This
+			// block shows whether the NODE agrees — re-checked on every
+			// Verify press, with a failed row per disagreement so a
+			// mismatch says exactly which value is wrong.
+			sectionLabel("On-Chain Verification (live — checked against the node)"),
+			spacer(8),
+			chainStatusVal,
+			spacer(4),
+			chainDetailLbl,
+			spacer(8),
+			chainChecksBox,
 			spacer(14),
 			hRule(),
 			spacer(12),
@@ -2356,18 +2489,18 @@ func Run() {
 		provSection := container.NewVBox(
 			hRule(),
 			spacer(12),
-			sectionLabel("Backend-Recorded Provenance"),
+			sectionLabel("Offline Record & Live On-Chain Verification"),
 			spacer(8),
 			provCard,
 			spacer(12),
-			alertBox("These values are read from the document's own metadata — the same on-chain block the signer embedded into every container (PDF/XMP/Office/footer) at mint time. They are displayed exactly as recorded; re-checking them against the chain is what 'sphinx ipfs verify' does. Pinned Payload Hash covers the clean bytes uploaded to IPFS, Signed File Hash covers this signed file — they differ by design.", color.RGBA{96, 165, 250, 20}, colInfo),
+			alertBox("The file's own recorded values are shown exactly as written; the 'On-Chain Verification' block above re-checks them against the node every time you press Verify Data — a node that cannot be reached reports UNREACHABLE rather than a pass. Pinned Payload Hash covers the clean bytes uploaded to IPFS, Signed File Hash covers this signed file — they differ by design.", color.RGBA{96, 165, 250, 20}, colInfo),
 			spacer(24),
 		)
 
 		form := container.NewVBox(
 			screenTitle("Verify Data"),
 			spacer(4),
-			screenSubtitle("Confirm a file is authentic and has not been tampered with"),
+			screenSubtitle("Verify offline (signature) and on-chain (anchor, block, token, terms)"),
 			spacer(20),
 			dropZone,
 			spacer(8),

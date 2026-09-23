@@ -420,15 +420,42 @@ func getMapKeys(m map[string]interface{}) []string {
 // This wraps the message in a fixed-width, height-capped scroll area instead,
 // so the dialog (and window) size no longer depends on message length; long
 // text wraps and scrolls internally rather than stretching the layout.
+//
+// ★ MIRROR: the same message ALSO lands on the terminal (see
+// formatGUIErrorLogLine below). A pop-up is transient — once dismissed it is
+// gone — while the terminal log survives the session, which is what makes
+// "it showed an error" reports actually diagnosable.
 func showErrorDialog(err error, window fyne.Window) {
 	if err == nil {
 		return
 	}
+	// Mirror to the terminal BEFORE showing the pop-up: the pop-up is
+	// dismissible and leaves no trace, while the log line survives the
+	// session. Same message, verbatim (no truncation — the terminal, unlike
+	// the window layout, has no width to protect).
+	log.Printf("%s", formatGUIErrorLogLine(err))
 	msgLabel := widget.NewLabel(err.Error())
 	msgLabel.Wrapping = fyne.TextWrapWord
 	scroll := container.NewScroll(msgLabel)
 	scroll.SetMinSize(fyne.NewSize(420, 100))
 	dialog.NewCustom("Error", "OK", scroll, window).Show()
+}
+
+// formatGUIErrorLogLine renders the exact terminal line showErrorDialog emits
+// for an error.
+//
+// ★ WHY THIS EXISTS: every GUI error popup must ALSO land on the terminal.
+// A pop-up is transient — once dismissed it is gone, and a user reporting
+// "it showed an error" can rarely quote it back exactly. The terminal log is
+// the durable record: support can diff the reported behaviour against the
+// precise node error without asking the user to reproduce the click path.
+// Kept pure (no window, no logging side effect) so the tag and the verbatim
+// message contract are directly testable without a display.
+func formatGUIErrorLogLine(err error) string {
+	if err == nil {
+		return ""
+	}
+	return fmt.Sprintf("[USI-GUI][ERROR] %v", err)
 }
 
 // validatePassphraseDialog shows a dialog to validate passphrase using keys.LoadKeyFromDisk

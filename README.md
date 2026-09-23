@@ -33,6 +33,12 @@ We are building this foundation not just for economic participants, but for ever
 
 Sphinx is an open-source, post-quantum secure blockchain layer 1 protocol written in Go. We believe that every person brings a unique perspective and set of skills, which is why everyone is invited to contribute to this project. Whether you're a developer, researcher, or enthusiast, your input can help us build a resilient, **sovereign-grade blockchain infrastructure for the next digital era**. The project is under active development, and we welcome contributions from all walks of life!
 
+## Whitepaper
+
+See the [Sphinx Protocol Whitepaper](https://whitepaper.sphinxfnd.org) for the implementation-aligned
+architecture, quantum and AI threat model, cryptographic design, consensus,
+smart-contract technology, economics, governance proposal, security boundaries.
+
 ## Getting Started
 
 To contribute to the project, you need to have Go installed on your system. Follow the steps below to set up your environment.

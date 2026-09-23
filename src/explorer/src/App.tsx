@@ -51,6 +51,14 @@ export default function App() {
   const [selectedBlockHeight, setSelectedBlockHeight] = useState<number | null>(null);
   const [selectedTxId, setSelectedTxId] = useState<string | null>(null);
   const [selectedAddress, setSelectedAddress] = useState<string | null>(null);
+  // Authoritative copy of the transaction open in TxDetail, resolved from the
+  // node's /tx/:txid endpoint. The cached `transactions` array can hold a
+  // stale mempool row (blockHeight 0, status pending) for a txid that has
+  // since been committed, so the detail view must not trust the cache alone.
+  const [selectedTx, setSelectedTx] = useState<Transaction | null>(null);
+  // True only when NEITHER the node nor the cache had a record — drives the
+  // not-found view instead of silently rendering an unrelated row.
+  const [selectedTxMissing, setSelectedTxMissing] = useState(false);
 
   // Search input in header
   const [headerSearch, setHeaderSearch] = useState('');
@@ -94,7 +102,12 @@ export default function App() {
         tipHeight: block.height,
         mempoolSize: Math.max(0, prev.mempoolSize - newTxs.length)
       } : prev);
-      setTransactions(prev => [...newTxs, ...prev]);
+      // Drop cached mempool copies of the just-mined txids so the first
+      // `.find` match for each is the committed (blockHeight > 0) row — a
+      // leftover pending copy rendered mined txs as "Unconfirmed (Mempool)".
+      const minedIds = new Set(newTxs.map(t => t.txid));
+      setMempool(prev => prev.filter(tx => !minedIds.has(tx.txid)));
+      setTransactions(prev => [...newTxs, ...prev.filter(tx => !minedIds.has(tx.txid))]);
 
       // After 1000ms transition to Confirmed
       setTimeout(() => {
@@ -145,8 +158,13 @@ export default function App() {
         api.fetchHolderGrowth(30),
       ]);
 
-      // Collect all transactions: start with mempool txs, then add block txs
-      const allTxs: Transaction[] = [...mempoolData.pending];
+      // Collect all transactions: mempool first, then block txs — keyed so a
+      // txid present in BOTH resolves to the committed block copy. The detail
+      // view picks its row with `.find`, so leaving a stale pending copy
+      // (blockHeight 0, confirmations 0) ahead of the mined one rendered a
+      // confirmed transaction as "Unconfirmed (Mempool)".
+      const txByTxid = new Map<string, Transaction>();
+      mempoolData.pending.forEach((tx) => txByTxid.set(tx.txid, tx));
 
       const recentBlocks = blocksData.slice(0, 5);
       const details: Record<number, api.BlockDetailPayload> = {};
@@ -154,8 +172,9 @@ export default function App() {
         const detail = await api.fetchBlockDetail(block.height);
         if (!detail) continue;
         details[block.height] = detail;
-        detail.transactions.forEach((tx) => allTxs.push(tx));
+        detail.transactions.forEach((tx) => txByTxid.set(tx.txid, tx));
       }
+      const allTxs: Transaction[] = Array.from(txByTxid.values());
 
       setStats(statsData);
       setBlocks(blocksData);
@@ -207,9 +226,20 @@ export default function App() {
       if (cancelled || !detail) return;
       setBlockDetails(prev => ({ ...prev, [selectedBlockHeight]: detail }));
       setTransactions(prev => {
-        const known = new Set(prev.map(t => t.txid));
-        const additions = detail.transactions.filter(t => !known.has(t.txid));
-        return additions.length > 0 ? [...prev, ...additions] : prev;
+        const byTxid = new Map(prev.map(t => [t.txid, t] as const));
+        let changed = false;
+        for (const tx of detail.transactions) {
+          const existing = byTxid.get(tx.txid);
+          // Add the block's copy, and let it REPLACE a cached mempool copy of
+          // the same txid: skipping every known txid kept the pending row
+          // forever, and the detail view (first `.find` match) then showed
+          // the mined transaction as unconfirmed.
+          if (!existing || (existing.blockHeight === 0 && tx.blockHeight > 0)) {
+            byTxid.set(tx.txid, tx);
+            changed = true;
+          }
+        }
+        return changed ? Array.from(byTxid.values()) : prev;
       });
     })();
 
@@ -217,6 +247,56 @@ export default function App() {
       cancelled = true;
     };
   }, [selectedBlockHeight, blockDetails]);
+
+  // Resolve the selected transaction against the node, not just the local
+  // cache. fetchApi falls back to simulated `{}` when the node is down, so a
+  // payload only counts when it identifies THIS txid; failing that, the view
+  // falls back to a local copy or reports the tx as unknown instead of
+  // rendering an unrelated row (the old `|| transactions[0]` did exactly
+  // that).
+  useEffect(() => {
+    if (selectedTxId === null) {
+      setSelectedTx(null);
+      setSelectedTxMissing(false);
+      return;
+    }
+
+    let cancelled = false;
+    // Paint immediately from cache, preferring an already-mined copy so a
+    // stale pending row never flashes first.
+    const matches = [...transactions, ...mempool].filter(t => t.txid === selectedTxId);
+    const local = matches.find(t => t.blockHeight > 0) || matches[0] || null;
+    setSelectedTx(local);
+    setSelectedTxMissing(false);
+
+    (async () => {
+      const fresh = await api.fetchTransaction(selectedTxId);
+      if (cancelled) return;
+      if (fresh && fresh.txid === selectedTxId) {
+        setSelectedTx(fresh);
+        setTransactions(prev => {
+          const idx = prev.findIndex(t => t.txid === fresh.txid);
+          if (idx === -1) return [...prev, fresh];
+          const next = [...prev];
+          next[idx] = fresh;
+          return next;
+        });
+        // A committed tx must not linger in the cached pending set.
+        if (fresh.blockHeight > 0) {
+          setMempool(prev => prev.filter(t => t.txid !== fresh.txid));
+        }
+      } else if (!local) {
+        setSelectedTxMissing(true);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+    // Deliberately keyed on the txid alone: 15s refreshes of `transactions`
+    // must not re-trigger a lookup for an already-open detail view.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedTxId]);
 
   // Perform search query resolution via backend
   const handleSearch = async (query: string) => {
@@ -449,14 +529,41 @@ export default function App() {
             );
           })()}
 
-          {selectedTxId !== null && (
-            <TxDetail
-              tx={transactions.find(t => t.txid === selectedTxId) || mempool.find(t => t.txid === selectedTxId) || transactions[0]}
-              onBack={clearDetailViews}
-              onSelectBlock={setSelectedBlockHeight}
-              onSelectAddress={setSelectedAddress}
-            />
-          )}
+          {selectedTxId !== null && (() => {
+            const tx = selectedTx && selectedTx.txid === selectedTxId ? selectedTx : null;
+            if (tx) {
+              return (
+                <TxDetail
+                  tx={tx}
+                  onBack={clearDetailViews}
+                  onSelectBlock={setSelectedBlockHeight}
+                  onSelectAddress={setSelectedAddress}
+                />
+              );
+            }
+            if (selectedTxMissing) {
+              return (
+                <div className="flex flex-col items-center justify-center gap-4 py-24 text-center">
+                  <Shield className="w-8 h-8 text-brand-red" />
+                  <p className="font-mono text-xs text-slate-400 max-w-md break-all">
+                    Transaction <span className="text-brand-purple">{selectedTxId}</span> was not found on this node.
+                  </p>
+                  <button
+                    onClick={clearDetailViews}
+                    className="px-4 py-2 bg-brand-cyan/10 border border-brand-cyan/30 text-brand-cyan rounded-xl text-xs font-mono hover:bg-brand-cyan/20 transition cursor-pointer"
+                  >
+                    Back to Explorer
+                  </button>
+                </div>
+              );
+            }
+            return (
+              <div className="flex flex-col items-center justify-center gap-3 py-24 text-slate-400">
+                <Activity className="w-6 h-6 text-brand-cyan animate-pulse" />
+                <span className="font-mono text-xs">Resolving transaction…</span>
+              </div>
+            );
+          })()}
 
           {selectedAddress !== null && (
             <AddressDetail

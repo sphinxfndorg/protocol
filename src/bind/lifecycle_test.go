@@ -18,6 +18,8 @@ import (
 	"os"
 	"reflect"
 	"runtime"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -260,16 +262,28 @@ type closerFunc func() error
 
 func (f closerFunc) Close() error { return f() }
 
+// lifecycleCycles is the number of start → stop passes TestStartStopRestartInProcess
+// runs (F1): two cycles prove a restart works; four prove the residual set is a
+// constant baseline rather than a slow leak that two cycles happen to hide.
+const lifecycleCycles = 4
+
 // TestStartStopRestartInProcess is the contract Phase 2a exists for: the node
 // must be startable, stoppable via NodeOptions.Stop, and startable AGAIN in the
 // same process on the SAME ports and data directory — which only works if the
 // listeners, the DHT and the databases were actually released.
 //
-// It also measures goroutines across the two cycles: a per-start leak shows up as
-// a growing resident count even when a constant library baseline remains.
+// F1 adds goroutine forensics on top of the count checks:
+//   - the resident count must be CONSTANT across cycles 2..lifecycleCycles
+//     (cycle 1 is the warm-up: libraries keep one-time workers that legitimately
+//     survive the first stop), and
+//   - after the final stop, every goroutine NOT in the pre-start baseline set is
+//     dumped and grouped by its top frame; no group-(a) frame (any frame in
+//     bind/consensus/network/dht/transport/core/rpc/handshake) may remain —
+//     those are ours and would be a leak. Group-(b) third-party workers
+//     (leveldb, gin, net/http, prometheus, …) are listed for justification.
 func TestStartStopRestartInProcess(t *testing.T) {
 	if testing.Short() {
-		t.Skip("boots a real node twice")
+		t.Skip("boots a real node repeatedly")
 	}
 
 	// The console package installs a process-wide SIGINT handler at import time
@@ -282,10 +296,11 @@ func TestStartStopRestartInProcess(t *testing.T) {
 	dir := t.TempDir()
 	cfg := lifecycleNodeConfig(t)
 
-	baseline := runtime.NumGoroutine()
-	afterFirst := 0
+	baselineIDs := goroutineIDSet(t, goroutineDump(t))
+	baseline := len(baselineIDs)
+	settledByCycle := make([]int, 0, lifecycleCycles)
 
-	for cycle := 1; cycle <= 2; cycle++ {
+	for cycle := 1; cycle <= lifecycleCycles; cycle++ {
 		stop := make(chan struct{})
 		done := make(chan error, 1)
 
@@ -315,15 +330,29 @@ func TestStartStopRestartInProcess(t *testing.T) {
 		assertPortFree(t, cfg.HTTPPort, fmt.Sprintf("cycle %d: HTTP", cycle))
 
 		settled := settleGoroutines(t, baseline+40, 60*time.Second)
-		t.Logf("cycle %d: %d goroutines resident (test baseline %d)", cycle, settled, baseline)
-		if cycle == 1 {
-			afterFirst = settled
-			continue
+		settledByCycle = append(settledByCycle, settled)
+		t.Logf("cycle %d: %d goroutines resident (pre-start baseline %d)", cycle, settled, baseline)
+	}
+
+	// Constant residual across cycles 2..N (cycle 1 may keep one-time library
+	// warm-up workers; from cycle 2 on, a restart must leave the same set).
+	for i := 2; i < len(settledByCycle); i++ {
+		if settledByCycle[i] != settledByCycle[1] {
+			t.Errorf("residual goroutines not constant: cycles 2..%d = %v",
+				lifecycleCycles, settledByCycle[1:])
+			break
 		}
-		if settled > afterFirst+10 {
-			t.Fatalf("goroutines grew across restarts: after cycle 1 = %d, after cycle 2 = %d — a per-start leak",
-				afterFirst, settled)
-		}
+	}
+
+	// Forensics: classify every goroutine that survived the final stop and is not
+	// part of the pre-start baseline.
+	report := classifyResidualGoroutines(t, baselineIDs)
+	t.Logf("residual goroutine groups after cycle %d (baseline %d):\n%s",
+		lifecycleCycles, baseline, report.table())
+
+	if len(report.ours) > 0 {
+		t.Errorf("group (a): %d of OUR goroutines survived shutdown — these are leaks and must be fixed or explained:\n%s",
+			len(report.ours), strings.Join(report.ours, "\n"))
 	}
 }
 
@@ -418,6 +447,41 @@ func settleGoroutines(t *testing.T, want int, timeout time.Duration) int {
 	return got
 }
 
+// goroutineDump returns the full all-goroutine stack dump.
+func goroutineDump(t *testing.T) string {
+	t.Helper()
+	buf := make([]byte, 8<<20)
+	n := runtime.Stack(buf, true)
+	return string(buf[:n])
+}
+
+// goroutineIDSet parses every "goroutine <id> [...]" header in a dump.
+func goroutineIDSet(t *testing.T, dump string) map[uint64]struct{} {
+	t.Helper()
+	ids := make(map[uint64]struct{})
+	for _, block := range strings.Split(dump, "\n\n") {
+		if id, ok := parseGoroutineID(block); ok {
+			ids[id] = struct{}{}
+		}
+	}
+	return ids
+}
+
+// parseGoroutineID extracts the numeric id from a single goroutine's stack block.
+func parseGoroutineID(block string) (uint64, bool) {
+	first, _, _ := strings.Cut(block, "\n")
+	if !strings.HasPrefix(first, "goroutine ") {
+		return 0, false
+	}
+	rest := strings.TrimPrefix(first, "goroutine ")
+	num, _, _ := strings.Cut(rest, " ")
+	id, err := strconv.ParseUint(num, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return id, true
+}
+
 // firstLines keeps a goroutine dump readable in a failure message.
 func firstLines(s string, max int) string {
 	lines := strings.Split(s, "\n")
@@ -425,4 +489,170 @@ func firstLines(s string, max int) string {
 		lines = lines[:max]
 	}
 	return strings.Join(lines, "\n")
+}
+
+// indent prefixes every line of s with pad.
+func indent(s, pad string) string {
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		lines[i] = pad + l
+	}
+	return strings.Join(lines, "\n")
+}
+
+// ourFrameMarkers name the packages whose surviving goroutines are OUR leaks
+// (F1 group (a)): anything under src/ that the node itself spawns.
+var ourFrameMarkers = []string{
+	"/src/bind",
+	"/src/consensus",
+	"/src/network",
+	"/src/dht",
+	"/src/transport",
+	"/src/core",
+	"/src/rpc",
+	"/src/handshake",
+}
+
+// thirdPartyMarkers name libraries that keep their own background workers (F1
+// group (b)): acceptable to survive, but must be listed and justified.
+var thirdPartyMarkers = []string{
+	"goleveldb", // sydtr: compaction goroutines owned by the DB handle
+	"gin-gonic",
+	"net/http", // Transport idlers persist until CloseIdleConnections
+	"prometheus",
+	"go.uber.org/zap",
+	"gorilla/websocket",
+	"libp2p",
+	"hashicorp",
+}
+
+// residualReport groups surviving goroutines by classification and top frame.
+type residualReport struct {
+	ours        []string // group (a) — must be empty after shutdown
+	thirdParty  []string // group (b) — listed with counts for justification
+	testHarness []string // the running test itself + testing framework
+	other       []string // runtime/stdlib one-offs, listed for completeness
+}
+
+// table renders the grouped-by-top-frame count table for the test log.
+func (r residualReport) table() string {
+	section := func(title string, rows []string) []string {
+		out := []string{"  " + title}
+		if len(rows) == 0 {
+			return append(out, "    (none)")
+		}
+		return append(out, rows...)
+	}
+	lines := section("group (a) OURS (must be 0):", r.ours)
+	lines = append(lines, section("group (b) third-party (justify):", r.thirdParty)...)
+	lines = append(lines, section("test harness:", r.testHarness)...)
+	lines = append(lines, section("other (runtime/stdlib):", r.other)...)
+	return strings.Join(lines, "\n")
+}
+
+// classifyResidualGoroutines dumps every goroutine whose id is NOT in baseline
+// and buckets each by its top frame:
+//
+//	harness     — any testing.* frame (the running test goroutine itself)
+//	group (a)   — any frame in our src/ packages: a leak, test must fail
+//	group (b)   — third-party worker: listed for justification
+//	other       — runtime/stdlib one-offs: listed for completeness
+//
+// Samples keep the first full stack seen per bucket so a group-(a) failure is
+// diagnosable from the test log alone.
+func classifyResidualGoroutines(t *testing.T, baseline map[uint64]struct{}) residualReport {
+	t.Helper()
+	dump := goroutineDump(t)
+
+	counts := map[string]int{}     // "class\ttopframe" → count
+	samples := map[string]string{} // key → first full stack seen
+
+	for _, block := range strings.Split(dump, "\n\n") {
+		id, ok := parseGoroutineID(block)
+		if !ok {
+			continue
+		}
+		if _, isBaseline := baseline[id]; isBaseline {
+			continue
+		}
+		frames := stackFrames(block)
+		if len(frames) == 0 {
+			continue
+		}
+		key := classifyStack(frames) + "\t" + frames[0]
+		counts[key]++
+		if _, seen := samples[key]; !seen {
+			samples[key] = block
+		}
+	}
+
+	var rep residualReport
+	for key, n := range counts {
+		class, frame, _ := strings.Cut(key, "\t")
+		line := fmt.Sprintf("%3d × %s", n, frame)
+		switch class {
+		case "ours":
+			rep.ours = append(rep.ours, line+"\n"+indent(firstLines(samples[key], 25), "      "))
+		case "third-party":
+			rep.thirdParty = append(rep.thirdParty, line)
+		case "harness":
+			rep.testHarness = append(rep.testHarness, line)
+		default:
+			rep.other = append(rep.other, line)
+		}
+	}
+	sort.Strings(rep.ours)
+	sort.Strings(rep.thirdParty)
+	sort.Strings(rep.testHarness)
+	sort.Strings(rep.other)
+	return rep
+}
+
+// classifyStack buckets one goroutine's frames by the rules above.
+func classifyStack(frames []string) string {
+	hasOurs, hasThird, hasTesting := false, false, false
+	for _, f := range frames {
+		if strings.Contains(f, "testing.") {
+			hasTesting = true
+		}
+		for _, m := range ourFrameMarkers {
+			if strings.Contains(f, m) {
+				hasOurs = true
+			}
+		}
+		for _, m := range thirdPartyMarkers {
+			if strings.Contains(f, m) {
+				hasThird = true
+			}
+		}
+	}
+	// The test's own goroutine reaches src/bind helpers, so testing.* frames
+	// take precedence over everything else.
+	if hasTesting {
+		return "harness"
+	}
+	if hasOurs {
+		return "ours"
+	}
+	if hasThird {
+		return "third-party"
+	}
+	return "other"
+}
+
+// stackFrames extracts the trimmed frame lines of one goroutine block, skipping
+// the "goroutine N [...]" header and "created by" lines.
+func stackFrames(block string) []string {
+	var frames []string
+	for _, ln := range strings.Split(block, "\n") {
+		ln = strings.TrimSpace(ln)
+		if ln == "" || strings.HasPrefix(ln, "goroutine ") {
+			continue
+		}
+		if strings.HasPrefix(ln, "created by ") {
+			continue
+		}
+		frames = append(frames, ln)
+	}
+	return frames
 }

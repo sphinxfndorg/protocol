@@ -69,6 +69,22 @@ func DefaultLogger() *Logger {
 	return defaultLogger
 }
 
+// SetDefaultWriter rebinds the process-wide default renderer — the one every
+// package-level Info/Warn/Error call and the node dashboard write through — to
+// w, re-detecting its TTY properties (see Renderer.SetWriter). Passing nil
+// restores os.Stdout.
+//
+// This is the supported way for a host process (the desktop GUI) to capture
+// node output into its own log pane: the renderer is created once at import
+// time, so replacing its writer is the only seam that does not require touching
+// every call site. The CLI never calls it, so its output path is unchanged.
+func SetDefaultWriter(w io.Writer) {
+	if w == nil {
+		w = os.Stdout
+	}
+	defaultLogger.r.SetWriter(w)
+}
+
 // SetLevel sets the minimum level for the default logger.
 func SetLevel(lv Level) {
 	defaultLogger.SetLevel(lv)

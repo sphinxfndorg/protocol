@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -57,6 +58,57 @@ var (
 	rendererOnce    sync.Once
 )
 
+// Process-wide host-integration switches.
+//
+// Both default to false, so a plain CLI process behaves exactly as it always
+// has. They exist for hosts — the desktop GUI — that embed the node in a
+// larger application and therefore own the terminal, the log stream and the
+// shutdown path themselves.
+var (
+	// signalHandlerDisabled makes the SIGINT/SIGTERM handler installed by
+	// Default() ignore signals. See DisableSignalHandler.
+	signalHandlerDisabled atomic.Bool
+
+	// liveRegionDisabled suppresses every live-region repaint (spinners,
+	// progress bars, status lines). See DisableLiveRegion.
+	liveRegionDisabled atomic.Bool
+)
+
+// DisableSignalHandler makes the already-installed SIGINT/SIGTERM handler stop
+// acting: it no longer restores the terminal and, above all, no longer calls
+// os.Exit(130).
+//
+// The handler is installed at import time by Default() (which package-level
+// logging triggers), so it cannot simply "not be installed" — this switch is
+// checked when a signal arrives instead. That is also why the registration is
+// deliberately left in place: while any signal.Notify registration exists, the
+// Go runtime suppresses the default terminate-the-process action, so
+// SIGINT/SIGTERM keep being delivered to the host's own handler (bind's node
+// shutdown) instead of killing the process instantly. Calling signal.Stop or
+// signal.Reset here would restore that default action and break exactly that
+// property.
+//
+// One-way and process-wide; intended to be called by the host before it starts
+// a node. The CLI never calls it.
+func DisableSignalHandler() { signalHandlerDisabled.Store(true) }
+
+// signalHandlerDisabledNow reports whether the installed handler must ignore
+// signals. Extracted so the ignore path is testable without os.Exit.
+func signalHandlerDisabledNow() bool { return signalHandlerDisabled.Load() }
+
+// DisableLiveRegion makes the default renderer stop painting the live region:
+// Attach becomes a no-op (so nothing is ever registered and the animation
+// ticker never starts) and lines already collected are dropped. Permanent log
+// lines keep flowing to the renderer's writer, which is what a host that pipes
+// node output into its own pane (the desktop GUI) needs.
+//
+// One-way and process-wide, like DisableSignalHandler. The default (false)
+// leaves the CLI's terminal dashboard untouched.
+func DisableLiveRegion() { liveRegionDisabled.Store(true) }
+
+// liveRegionEnabled reports whether live-region painting is still on.
+func liveRegionEnabled() bool { return !liveRegionDisabled.Load() }
+
 // Default returns the process-wide renderer bound to os.Stdout and installs
 // a SIGINT/SIGTERM handler that restores the terminal before exiting. Safe
 // to call from multiple goroutines; initialization happens exactly once.
@@ -84,6 +136,26 @@ func NewRenderer(w io.Writer) *Renderer {
 	}
 }
 
+// SetWriter rebinds the renderer to a new output writer and re-detects whether
+// that writer is an interactive terminal (ANSI animation on a TTY, plain
+// throttled text otherwise). Anything already attached stays attached; the next
+// paint goes to the new writer. This is the seam SetDefaultWriter uses so a host
+// can capture node output without rebuilding the process-wide renderer.
+func (r *Renderer) SetWriter(w io.Writer) {
+	f, _ := w.(*os.File)
+	tty := f != nil && isTerminal(f)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.out = w
+	r.isTTY = tty
+	r.ansi = tty && runtime.GOOS != "windows"
+	// Drop the throttle timestamps so the first line/snapshot through the new
+	// writer is emitted immediately instead of waiting out the previous
+	// writer's window.
+	r.lastPaint = time.Time{}
+	r.lastPlain = time.Time{}
+}
+
 func isTerminal(f *os.File) bool {
 	fi, err := f.Stat()
 	if err != nil {
@@ -108,6 +180,12 @@ func (r *Renderer) ANSI() bool { return r.ansi }
 // done. Detaching triggers one final redraw so the region reflects removal
 // immediately instead of waiting for the next tick.
 func (r *Renderer) Attach(rr Renderable) (detach func()) {
+	if !liveRegionEnabled() {
+		// The host owns output (see DisableLiveRegion): never register, never
+		// start the animation ticker. The no-op detach keeps every caller's
+		// contract intact.
+		return func() {}
+	}
 	r.mu.Lock()
 	r.attached = append(r.attached, rr)
 	if r.ansi && !r.ticking {
@@ -188,6 +266,13 @@ func (r *Renderer) redraw(force bool) {
 }
 
 func (r *Renderer) collectLinesLocked() []string {
+	if !liveRegionEnabled() {
+		// The live region was disabled — possibly after something had already
+		// attached. Report an empty region so paintLocked erases whatever was
+		// on screen once, maybePlainSnapshotLocked writes nothing, and Log
+		// stops appending a region beneath every line.
+		return nil
+	}
 	var out []string
 	for _, a := range r.attached {
 		out = append(out, a.Lines()...)
@@ -307,6 +392,13 @@ func (r *Renderer) InstallSignalHandler() {
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		sig := <-c
+		if signalHandlerDisabledNow() {
+			// A host owns shutdown (see DisableSignalHandler). Restoring the
+			// terminal or exiting here would race the host's graceful node
+			// shutdown, so the signal is consumed and ignored — the host's own
+			// registration receives the same signal independently.
+			return
+		}
 		r.Shutdown()
 		fmt.Fprintf(os.Stderr, "\nreceived %s, shutting down\n", sig)
 		os.Exit(130)

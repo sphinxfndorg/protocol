@@ -421,6 +421,10 @@ func (h *JSONRPCHandler) registerMethods() {
 	h.methods["callcontract"] = h.callContract
 
 	h.methods["gettransactionevents"] = h.getTransactionEvents
+
+	// Read-only sync status for wallet/GUI clients (nil-provider-safe; see
+	// syncstatus.go for the honesty rules and the provider wiring).
+	h.methods["getsyncstatus"] = h.getSyncStatus
 }
 
 func (h *JSONRPCHandler) getContract(params interface{}) (interface{}, error) {

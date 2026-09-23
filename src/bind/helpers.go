@@ -30,6 +30,7 @@ import (
 	security "github.com/sphinxfndorg/protocol/src/handshake"
 	denom "github.com/sphinxfndorg/protocol/src/params/denom"
 	"github.com/sphinxfndorg/protocol/src/pool"
+	"github.com/sphinxfndorg/protocol/src/rpc"
 )
 
 func (s *phase2InitState) begin() bool {
@@ -624,6 +625,12 @@ func getPeerTipHeight(peerAddr string) (uint64, error) {
 //
 // This loop NEVER gives up — it retries with exponential backoff (up to 5 minutes)
 // and keeps trying all known peers indefinitely until the node is caught up.
+//
+// It also publishes OBSERVATIONAL snapshots of the values it already computed
+// (local height, network tip, reachable peers, sync state) to the
+// getsyncstatus provider via observeSync (see rpc.SyncStatusTracker). Those
+// calls have no return value any branch consults and cannot affect control
+// flow; they only make the existing state readable to wallets.
 func runBlockSyncLoop(
 	ctx context.Context,
 	bc *core.Blockchain,
@@ -633,8 +640,27 @@ func runBlockSyncLoop(
 	syncState *SyncState,
 	syncStateMu *sync.Mutex,
 	progress *logger.BlockchainProgress, // NEW
+	tracker *rpc.SyncStatusTracker, // NEW — observational only: feeds getsyncstatus
 ) {
 	logger.Info("[%s] Block sync loop started (state=%s)", nodeID, syncState.String())
+
+	// observeSync publishes this loop's ALREADY-COMPUTED view of the world to
+	// the wallet-facing getsyncstatus provider (see src/rpc/syncstatus.go).
+	// It only READS *syncState under the same mutex the loop's own
+	// transitions use, takes no result the loop acts on, and must be called
+	// only while syncStateMu is NOT held (the closure locks it itself).
+	observeSync := func(highestPeerHeight uint64, reachablePeers int) {
+		syncStateMu.Lock()
+		state := *syncState
+		syncStateMu.Unlock()
+		tracker.Observe(rpc.SyncStatus{
+			Syncing:                state == SyncStateSyncing,
+			CurrentHeight:          bc.GetBlockCount(),
+			HighestKnownPeerHeight: highestPeerHeight,
+			PeerCount:              reachablePeers,
+			State:                  state.String(),
+		})
+	}
 
 	const (
 		maxBatchSize        uint64 = 500
@@ -718,6 +744,7 @@ func runBlockSyncLoop(
 				}
 			}
 			syncStateMu.Unlock()
+			observeSync(0, 0) // [observational] no peers known → target unknown
 			select {
 			case <-ctx.Done():
 				return
@@ -758,6 +785,10 @@ func runBlockSyncLoop(
 				bestPeerAddr = addr
 			}
 		}
+		// [observational] Publish this pass's already-computed view: highest
+		// reachable peer tip + how many peers answered. No branch below
+		// consults this; getsyncstatus reads it.
+		observeSync(networkTip, reachablePeers)
 
 		if reachablePeers == 0 {
 			logger.Warn("[%s] No peers reachable (tried %d peers) — backing off before retry",
@@ -975,6 +1006,7 @@ func runBlockSyncLoop(
 				}
 			}
 			syncStateMu.Unlock()
+			observeSync(networkTip, reachablePeers) // [observational] post-transition state
 			// ★ FIX: Don't return — enter periodic sync check mode. The network
 			// may produce blocks later. We keep checking every 10 seconds so a
 			// node that joined early (before any blocks were mined) automatically
@@ -1005,6 +1037,7 @@ func runBlockSyncLoop(
 				}
 			}
 			syncStateMu.Unlock()
+			observeSync(networkTip, reachablePeers) // [observational] post-transition state
 			// Stay in loop, re-check periodically for new blocks
 			logger.Info("[%s] Monitoring for new blocks — will re-check every 10s", nodeID)
 			select {

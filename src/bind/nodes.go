@@ -510,6 +510,14 @@ func StartNode(
 	rpcServer := rpc.NewServer(nil, bc, sphincsMgr)
 	logger.Info("RPC server created (synchronous mode)")
 
+	// getsyncstatus provider: runBlockSyncLoop publishes observational
+	// snapshots into this tracker (see rpc.SetSyncStatusProvider and the
+	// observeSync call sites in helpers.go). Registered here — before any
+	// listener serves — under the same set-once-before-serving contract as
+	// SetTxRelay below.
+	syncStatusTracker := rpc.NewSyncStatusTracker()
+	rpcServer.SetSyncStatusProvider(syncStatusTracker.Get)
+
 	// SECTION 7 — network node manager
 	// ── Parse TCP/UDP addresses first (needed for local node + DHT) ──
 	tcpPort := "30303"
@@ -1356,7 +1364,7 @@ func StartNode(
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		runBlockSyncLoop(ctx, bc, cons, currentNodeID, peerAddrsFunc, &syncState, &syncStateMu, progress)
+		runBlockSyncLoop(ctx, bc, cons, currentNodeID, peerAddrsFunc, &syncState, &syncStateMu, progress, syncStatusTracker)
 	}()
 
 	// SECTION 13 — genesis verification (after sync loop has run)

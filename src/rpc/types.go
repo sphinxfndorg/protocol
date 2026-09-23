@@ -94,6 +94,15 @@ type Server struct {
 	// Set once during node startup, before the transport listener serves
 	// traffic, so plain field access is race-free.
 	txRelay func(*types.Transaction)
+
+	// Sync-status provider for the read-only getsyncstatus method (see
+	// syncstatus.go). bind.StartNode wires it — via SetSyncStatusProvider —
+	// to a SyncStatusTracker that runBlockSyncLoop observes; the handler
+	// treats nil as "never wired" and reports an honest UNKNOWN/syncing=true
+	// rather than a completed sync. Same set-once-before-serving contract as
+	// txRelay: written before any listener exists, read only by handlers
+	// that can only run after, so plain field access is race-free.
+	syncStatusProvider func() (SyncStatus, bool)
 }
 
 // AuthConfig holds authentication configuration

@@ -1561,13 +1561,17 @@ func StartNodeWithOptions(
 	// in-process restart possible (previously none of the listeners or
 	// databases was ever closed).
 	(&nodeShutdown{
-		consensus:   cons,
-		cancelCtx:   cancelCtx,
-		p2pListener: tcpListener,
-		walletRPC:   walletRPCServer,
-		httpSrv:     httpSrv,
-		dht:         dhtInstance,
-		wait:        &wg,
+		consensus:    cons,
+		stateMachine: bc.GetStateMachine(),
+		mempool:      bc.GetMempool(),
+		tpsMonitor:   bc.GetTPSMonitor(),
+		rpcServer:    rpcServer,
+		cancelCtx:    cancelCtx,
+		p2pListener:  tcpListener,
+		walletRPC:    walletRPCServer,
+		httpSrv:      httpSrv,
+		dht:          dhtInstance,
+		wait:         &wg,
 		flush: func() {
 			flushNodeState(bc, currentNodeID, currentAddress)
 		},

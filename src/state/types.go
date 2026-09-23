@@ -68,6 +68,9 @@ type StateMachine struct {
 	stateCh   chan *StateSnapshot
 	commitCh  chan *CommitProof
 	timeoutCh chan struct{}
+	stopCh    chan struct{}
+	stopOnce  sync.Once
+	wg        sync.WaitGroup
 
 	// Final state tracking for replication
 	finalStates []*FinalStateInfo

@@ -30,6 +30,8 @@ import (
 	logger "github.com/sphinxfndorg/protocol/src/console"
 	"github.com/sphinxfndorg/protocol/src/dht"
 	"github.com/sphinxfndorg/protocol/src/http"
+	"github.com/sphinxfndorg/protocol/src/pool"
+	storage "github.com/sphinxfndorg/protocol/src/state"
 	"github.com/sphinxfndorg/protocol/src/transport"
 )
 
@@ -76,15 +78,19 @@ func waitForShutdown(ctx context.Context, stop <-chan struct{}, sigCh <-chan os.
 // are set by StartNodeWithOptions as each resource is created; a nil field means
 // "this node never created it" and is skipped.
 type nodeShutdown struct {
-	consensus   *consensus.Consensus
-	cancelCtx   context.CancelFunc
-	p2pListener net.Listener
-	walletRPC   *transport.TCPServer
-	httpSrv     *http.Server
-	dht         *dht.DHT
-	wait        *sync.WaitGroup
-	flush       func()
-	databases   []io.Closer
+	consensus    *consensus.Consensus
+	stateMachine *storage.StateMachine
+	mempool      *pool.Mempool
+	tpsMonitor   interface{ Stop() }
+	rpcServer    interface{ StopGarbageCollection() }
+	cancelCtx    context.CancelFunc
+	p2pListener  net.Listener
+	walletRPC    *transport.TCPServer
+	httpSrv      *http.Server
+	dht          *dht.DHT
+	wait         *sync.WaitGroup
+	flush        func()
+	databases    []io.Closer
 }
 
 // run performs the ordered teardown. The ordering is the point:
@@ -115,6 +121,20 @@ func (s *nodeShutdown) run() {
 		if err := s.consensus.Stop(); err != nil {
 			logger.Warn("Consensus shutdown error: %v", err)
 		}
+	}
+	if s.mempool != nil {
+		s.mempool.Stop()
+	}
+	if s.stateMachine != nil {
+		if err := s.stateMachine.Stop(); err != nil {
+			logger.Warn("State machine shutdown error: %v", err)
+		}
+	}
+	if s.tpsMonitor != nil {
+		s.tpsMonitor.Stop()
+	}
+	if s.rpcServer != nil {
+		s.rpcServer.StopGarbageCollection()
 	}
 	if s.p2pListener != nil {
 		if err := s.p2pListener.Close(); err != nil {

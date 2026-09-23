@@ -13,21 +13,21 @@ import (
 
 // BlockHeader represents the metadata for a block in the blockchain.
 type BlockHeader struct {
-	Version    uint64   `json:"version"`     // Block version
-	Block      uint64   `json:"nblock"`      // The position of the block in the blockchain (index)
-	Height     uint64   `json:"height"`      // Block height (same as Block)
-	Timestamp  int64    `json:"timestamp"`   // The timestamp when the block is mined
-	ParentHash []byte   `json:"parent_hash"` // Hash of the previous block (main chain continuity)
-	Hash       []byte   `json:"hash"`        // This block's hash
-	Difficulty *big.Int `json:"difficulty"`  // Difficulty level of mining the block
-	Nonce      string   `json:"nonce"`       // The nonce used in mining (CHANGED to string)
-	TxsRoot    []byte   `json:"txs_root"`    // Merkle root of the transactions in the block
-	StateRoot  []byte   `json:"state_root"`  // Merkle root of the state (EVM-like state)
-	GasLimit   *big.Int `json:"gas_limit"`   // The maximum gas that can be used in the block
-	GasUsed    *big.Int `json:"gas_used"`    // The actual gas used by the transactions
-	UnclesHash []byte   `json:"uncles_hash"` // Hash of the uncles (references side blocks)
-	ExtraData  []byte   `json:"extra_data"`  // Extra data field for additional information
-	Miner      []byte   `json:"miner"`       // Miner address (20 bytes)
+	Version    uint64   `json:"version"`              // Block version
+	Block      uint64   `json:"nblock"`               // The position of the block in the blockchain (index)
+	Height     uint64   `json:"height"`               // Block height (same as Block)
+	Timestamp  int64    `json:"timestamp"`            // The timestamp when the block is mined
+	ParentHash []byte   `json:"parent_hash"`          // Hash of the previous block (main chain continuity)
+	Hash       []byte   `json:"hash"`                 // This block's hash
+	Difficulty *big.Int `json:"difficulty"`           // Difficulty level of mining the block
+	Nonce      string   `json:"nonce"`                // The nonce used in mining (CHANGED to string)
+	TxsRoot    []byte   `json:"txs_root"`             // Merkle root of the transactions in the block
+	StateRoot  []byte   `json:"state_root"`           // Merkle root of the state (EVM-like state)
+	GasLimit   *big.Int `json:"gas_limit"`            // The maximum gas that can be used in the block
+	GasUsed    *big.Int `json:"gas_used"`             // The actual gas used by the transactions
+	UnclesHash []byte   `json:"uncles_hash"`          // Hash of the uncles (references side blocks)
+	ExtraData  []byte   `json:"extra_data"`           // Extra data field for additional information
+	Miner      []byte   `json:"miner"`                // Miner address (20 bytes)
 	LogsBloom  []byte   `json:"logs_bloom,omitempty"` // 256-byte Bloom filter over block addresses/tx IDs
 	// NEW: PoS signature fields
 	ProposerSignature []byte `json:"proposer_signature"` // Signature by the block proposer
@@ -231,6 +231,8 @@ type TPSMonitor struct {
 	txsPerBlock     []uint64
 
 	firstBlockRecorded atomic.Bool
+	stopCh             chan struct{}
+	stopOnce           sync.Once
 }
 
 // AccountState represents the state of a single account.

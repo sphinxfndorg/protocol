@@ -44,6 +44,7 @@ func NewStateMachine(storage *Storage, nodeID string, validators []string) *Stat
 		stateCh:      make(chan *StateSnapshot, 100),
 		commitCh:     make(chan *CommitProof, 100),
 		timeoutCh:    make(chan struct{}, 10),
+		stopCh:       make(chan struct{}),
 		finalStates:  make([]*FinalStateInfo, 0),
 	}
 
@@ -110,16 +111,19 @@ func (sm *StateMachine) Start() error {
 	log.Printf("State machine replication started for node %s", sm.nodeID)
 
 	// Start handlers
-	go sm.handleOperations()
-	go sm.handleStateUpdates()
-	go sm.handleCommits()
-	go sm.replicationLoop()
+	sm.wg.Add(4)
+	go func() { defer sm.wg.Done(); sm.handleOperations() }()
+	go func() { defer sm.wg.Done(); sm.handleStateUpdates() }()
+	go func() { defer sm.wg.Done(); sm.handleCommits() }()
+	go func() { defer sm.wg.Done(); sm.replicationLoop() }()
 
 	return nil
 }
 
 // Stop halts the state machine replication
 func (sm *StateMachine) Stop() error {
+	sm.stopOnce.Do(func() { close(sm.stopCh) })
+	sm.wg.Wait()
 	log.Printf("State machine replication stopped for node %s", sm.nodeID)
 	return nil
 }
@@ -280,14 +284,18 @@ func mapMessageTypeToStatus(messageType string) string {
 }
 
 func (sm *StateMachine) syncFinalStates() {
-	if sm.consensus == nil {
+	sm.mu.RLock()
+	cons := sm.consensus
+	sm.mu.RUnlock()
+
+	if cons == nil {
 		logger.Debug("Cannot sync final states: consensus engine is nil")
 		return
 	}
 
-	sm.consensus.ForcePopulateAllSignatures()
+	cons.ForcePopulateAllSignatures()
 
-	rawSignatures := sm.consensus.GetConsensusSignatures()
+	rawSignatures := cons.GetConsensusSignatures()
 	sigs, ok := rawSignatures.([]*consensus.ConsensusSignature)
 	if !ok {
 		logger.Error("Invalid signature type returned from consensus")
@@ -998,33 +1006,50 @@ func (sm *StateMachine) replicationLoop() {
 			sm.syncFinalStates() // Sync with consensus layer
 		case <-sm.timeoutCh:
 			sm.handleTimeout()
+		case <-sm.stopCh:
+			return
 		}
 	}
 }
 
 func (sm *StateMachine) handleOperations() {
-	for op := range sm.opCh {
-		if err := sm.processOperation(op); err != nil {
-			log.Printf("Failed to process operation: %v", err)
-			continue
+	for {
+		select {
+		case <-sm.stopCh:
+			return
+		case op := <-sm.opCh:
+			if err := sm.processOperation(op); err != nil {
+				log.Printf("Failed to process operation: %v", err)
+				continue
+			}
 		}
 	}
 }
 
 func (sm *StateMachine) handleStateUpdates() {
-	for snapshot := range sm.stateCh {
-		if err := sm.applyStateSnapshot(snapshot); err != nil {
-			log.Printf("Failed to apply state snapshot: %v", err)
-			continue
+	for {
+		select {
+		case <-sm.stopCh:
+			return
+		case snapshot := <-sm.stateCh:
+			if err := sm.applyStateSnapshot(snapshot); err != nil {
+				log.Printf("Failed to apply state snapshot: %v", err)
+				continue
+			}
 		}
 	}
 }
 
 func (sm *StateMachine) handleCommits() {
-	for proof := range sm.commitCh {
-		if err := sm.applyCommitProof(proof); err != nil {
-			log.Printf("Failed to apply commit proof: %v", err)
-			continue
+	for {
+		select {
+		case <-sm.stopCh:
+			return
+		case proof := <-sm.commitCh:
+			if err := sm.applyCommitProof(proof); err != nil {
+				log.Printf("Failed to apply commit proof: %v", err)
+				continue
+			}
 		}
 	}
 }

@@ -45,6 +45,7 @@ func NewServer(messageCh chan *security.Message, blockchain *core.Blockchain, sp
 		requestTimeout: 30 * time.Second,
 		maxRequestSize: 1024 * 1024, // 1 MB
 		pagination:     DefaultPaginationConfig(),
+		gcStopCh:       make(chan struct{}),
 	}
 	server.handler = NewJSONRPCHandler(server)
 	// Start garbage collection always (it runs in a separate goroutine)
@@ -280,9 +281,19 @@ func (s *Server) StartGarbageCollection() {
 	go func() {
 		ticker := time.NewTicker(time.Second * 5)
 		defer ticker.Stop()
-		for range ticker.C {
-			s.queryManager.GC()
-			s.store.GC()
+		for {
+			select {
+			case <-ticker.C:
+				s.queryManager.GC()
+				s.store.GC()
+			case <-s.gcStopCh:
+				return
+			}
 		}
 	}()
+}
+
+// StopGarbageCollection releases the server's background cleanup worker.
+func (s *Server) StopGarbageCollection() {
+	s.gcStopOnce.Do(func() { close(s.gcStopCh) })
 }

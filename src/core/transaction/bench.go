@@ -22,16 +22,28 @@ func NewTPSMonitor(windowDuration time.Duration) *TPSMonitor {
 		tpsHistory:      make([]float64, 0),
 		maxHistorySize:  1000,
 		txsPerBlock:     make([]uint64, 0),
+		stopCh:          make(chan struct{}),
 	}
 	// Background ticker for TPS updates AND window finalization
 	go func() {
 		ticker := time.NewTicker(1 * time.Second)
-		for range ticker.C {
-			tm.updateTPS()              // Update current TPS for display
-			tm.finalizeWindowIfNeeded() // Finalize window and update peak if needed
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				tm.updateTPS()              // Update current TPS for display
+				tm.finalizeWindowIfNeeded() // Finalize window and update peak if needed
+			case <-tm.stopCh:
+				return
+			}
 		}
 	}()
 	return tm
+}
+
+// Stop releases the monitor's background ticker.
+func (tm *TPSMonitor) Stop() {
+	tm.stopOnce.Do(func() { close(tm.stopCh) })
 }
 
 // RecordTransaction records a new transaction for TPS calculation

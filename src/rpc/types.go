@@ -103,6 +103,9 @@ type Server struct {
 	// txRelay: written before any listener exists, read only by handlers
 	// that can only run after, so plain field access is race-free.
 	syncStatusProvider func() (SyncStatus, bool)
+
+	gcStopCh   chan struct{}
+	gcStopOnce sync.Once
 }
 
 // AuthConfig holds authentication configuration

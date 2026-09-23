@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
 
 	"github.com/gorilla/websocket"
 	security "github.com/sphinxfndorg/protocol/src/handshake"
@@ -30,6 +31,13 @@ type TCPServer struct {
 	connections map[string]net.Conn                // Map of node address (e.g., 127.0.0.1:30307) to connection
 	encKeys     map[string]*security.EncryptionKey // Map of node address to encryption key
 	mu          sync.Mutex
+
+	// stopped is set by Stop before the listener is closed, and consulted by
+	// the accept loop. Without it, closing the listener makes Accept return
+	// "use of closed network connection" immediately and forever, so the loop
+	// spun at 100% CPU logging the same error — a hot loop that was latent only
+	// because nothing used to call Stop on this server.
+	stopped atomic.Bool
 }
 
 // WebSocketServer manages WebSocket connections.

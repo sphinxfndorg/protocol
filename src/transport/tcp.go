@@ -71,6 +71,14 @@ func (s *TCPServer) Start() error {
 		for {
 			conn, err := listener.Accept()
 			if err != nil {
+				if s.stopped.Load() {
+					// Stop() closed the listener: this is the normal end of the
+					// accept loop, NOT a failure. Returning here is essential —
+					// without it the loop would spin at full speed logging
+					// "use of closed network connection" forever.
+					log.Printf("TCP server on %s accept loop stopped", s.address)
+					return
+				}
 				s.handshake.Metrics.Errors.WithLabelValues("tcp").Inc()
 				log.Printf("TCP accept error on %s: %v", s.address, err)
 				continue
@@ -222,10 +230,16 @@ func (s *TCPServer) handleConnection(conn net.Conn, nodeAddr string) {
 }
 
 // Stop closes the TCP server.
+//
+// Idempotent: the stopped flag is set BEFORE the listener is closed, so the
+// accept loop observes shutdown even when it sees the closed-listener error
+// first (see Start). A second Stop is a no-op rather than an error.
 func (s *TCPServer) Stop() error {
+	if s.stopped.Swap(true) {
+		return nil
+	}
 	if s.listener != nil {
-		err := s.listener.Close()
-		if err != nil {
+		if err := s.listener.Close(); err != nil {
 			return fmt.Errorf("failed to close TCP listener on %s: %v", s.address, err)
 		}
 		log.Printf("TCP server on %s stopped", s.address)

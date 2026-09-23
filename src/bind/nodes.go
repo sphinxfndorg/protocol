@@ -15,6 +15,7 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
 	"os"
@@ -167,6 +168,17 @@ func ParseRoles(rolesStr string, numNodes int) []network.NodeRole {
 // after startup, or funds sent to it) before it can be admitted as a
 // validator by peers. It is never a substitute for balance verification —
 // see stakeValidatorFromRewardAddress in helpers.go.
+// startNodeFn is the seam StartNode calls. It exists so a test can prove the
+// wrapper forwards exactly the zero NodeOptions — the CLI-identical gate —
+// without booting a node (see lifecycle_test.go).
+var startNodeFn = StartNodeWithOptions
+
+// StartNode runs a full node with the CLI's host integration: no programmatic
+// stop channel, the process-wide console renderer, and the live dashboard.
+//
+// It is precisely StartNodeWithOptions(..., NodeOptions{}). Every host-specific
+// branch inside StartNodeWithOptions is false for the zero value, so this path
+// is byte-for-byte the behaviour the CLI has always had.
 func StartNode(
 	dataDir string,
 	nodeConfig network.NodePortConfig,
@@ -175,6 +187,25 @@ func StartNode(
 	networkType string,
 	seeds string,
 	rewardAddress string,
+) error {
+	return startNodeFn(dataDir, nodeConfig, totalNodes, nodeIndex, vdfParams, networkType, seeds, rewardAddress, NodeOptions{})
+}
+
+// StartNodeWithOptions is StartNode plus the two things a host process needs
+// that a terminal does not provide: a programmatic stop signal and ownership of
+// the log stream (see NodeOptions). With NodeOptions{} it IS StartNode.
+//
+// A nil return therefore means "ran and shut down cleanly", not "still
+// running": the caller decides what happens next (quit, restart, report).
+func StartNodeWithOptions(
+	dataDir string,
+	nodeConfig network.NodePortConfig,
+	totalNodes, nodeIndex int,
+	vdfParams *consensus.VDFParams,
+	networkType string,
+	seeds string,
+	rewardAddress string,
+	opts NodeOptions,
 ) error {
 
 	// ════════════════════════════════════════════════════════════════════
@@ -185,11 +216,26 @@ func StartNode(
 	common.SetDataDir(dataDir)
 
 	// ── Create interactive dashboard ──
+	//
+	// A host (NodeOptions) may take over the log stream and/or ask for no live
+	// dashboard at all. Both are process-wide console switches, flipped BEFORE
+	// the renderer is first used so no live region can be created behind the
+	// host's back. With the zero NodeOptions neither is touched, so this is
+	// exactly the CLI's renderer and dashboard.
+	if opts.LogWriter != nil {
+		logger.SetDefaultWriter(opts.LogWriter)
+	}
+	if opts.DisableDashboard {
+		logger.DisableLiveRegion()
+	}
+
 	r := logger.Default()
 	log := logger.NewLogger(r)
 	progress := logger.NewBlockchainProgress(r, log)
 	progress.Status().SetTitle("SPHINX Node")
-	progress.StartNodeStartup()
+	if !opts.DisableDashboard {
+		progress.StartNodeStartup()
+	}
 	defer progress.Stop()
 
 	// Let core.CreateBlock report block production / merkle root / state
@@ -197,8 +243,20 @@ func StartNode(
 	// invokes it (solo mining, PBFT leader loop, ...). See
 	// core.SetUIProgress for why this crosses the bind -> core package
 	// boundary as a registration call rather than a constructor argument.
-	core.SetUIProgress(progress)
+	//
+	// With the dashboard disabled we pass nil deliberately: core then falls
+	// back to its plain logger.Info lines instead of animating.
+	if opts.DisableDashboard {
+		core.SetUIProgress(nil)
+	} else {
+		core.SetUIProgress(progress)
+	}
 	defer core.SetUIProgress(nil)
+
+	if !opts.isZero() {
+		logger.Info("[HOST] Starting node embedded in a host process (stop channel: %t, log writer: %t, dashboard: %t)",
+			opts.Stop != nil, opts.LogWriter != nil, !opts.DisableDashboard)
+	}
 
 	logger.Info("=== STARTING NODE ===")
 
@@ -509,6 +567,14 @@ func StartNode(
 
 	rpcServer := rpc.NewServer(nil, bc, sphincsMgr)
 	logger.Info("RPC server created (synchronous mode)")
+
+	// getsyncstatus provider: runBlockSyncLoop publishes observational
+	// snapshots into this tracker (see rpc.SetSyncStatusProvider and the
+	// observeSync call sites in helpers.go). Registered here — before any
+	// listener serves — under the same set-once-before-serving contract as
+	// SetTxRelay below.
+	syncStatusTracker := rpc.NewSyncStatusTracker()
+	rpcServer.SetSyncStatusProvider(syncStatusTracker.Get)
 
 	// SECTION 7 — network node manager
 	// ── Parse TCP/UDP addresses first (needed for local node + DHT) ──
@@ -1301,11 +1367,15 @@ func StartNode(
 		}
 	}
 
+	// The server object is built HERE (it only wires routes; nothing is bound
+	// until Start) so the shutdown path holds a reference to Stop(). Start()
+	// itself is non-blocking — it spawns gin's own listener goroutine — so
+	// running it in a goroutine merely preserves the previous launch shape.
+	httpMsgCh := make(chan *security.Message, 100)
+	httpSrv := http.NewServer(httpListenAddr, httpMsgCh, bc, nil)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		msgCh := make(chan *security.Message, 100)
-		httpSrv := http.NewServer(httpListenAddr, msgCh, bc, nil)
 		logger.Info("JSON-RPC listening on http://%s", httpListenAddr)
 		if err := httpSrv.Start(); err != nil {
 			logger.Error("HTTP server error: %v", err)
@@ -1356,7 +1426,7 @@ func StartNode(
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		runBlockSyncLoop(ctx, bc, cons, currentNodeID, peerAddrsFunc, &syncState, &syncStateMu, progress)
+		runBlockSyncLoop(ctx, bc, cons, currentNodeID, peerAddrsFunc, &syncState, &syncStateMu, progress, syncStatusTracker)
 	}()
 
 	// SECTION 13 — genesis verification (after sync loop has run)
@@ -1468,15 +1538,41 @@ func StartNode(
 	logger.Info("Press Ctrl+C to stop")
 
 	// SECTION 16 — graceful shutdown
+	//
+	// Three equivalent sources: SIGINT/SIGTERM (the CLI), opts.Stop (a host
+	// process such as the GUI), or the node context. signal.Stop removes this
+	// registration on the way out, so a stopped node leaves no live handler
+	// behind — which matters when the same process starts another node.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh
+	defer signal.Stop(sigCh)
 
-	logger.Info("Shutdown signal received — stopping node %d…", nodeIndex+1)
-	cons.Stop()
-	cancelCtx()
-	wg.Wait()
-	flushNodeState(bc, currentNodeID, currentAddress)
+	reason := waitForShutdown(ctx, opts.Stop, sigCh)
+	if reason == shutdownBySignal {
+		// Unchanged CLI wording.
+		logger.Info("Shutdown signal received — stopping node %d…", nodeIndex+1)
+	} else {
+		logger.Info("Shutdown requested (%s) — stopping node %d…", reason, nodeIndex+1)
+	}
+
+	// Ordered teardown — context → consensus → transports → DHT → wait →
+	// flush → databases. See nodeShutdown.run for why each step is in that
+	// position; every resource is released explicitly, which is what makes an
+	// in-process restart possible (previously none of the listeners or
+	// databases was ever closed).
+	(&nodeShutdown{
+		consensus:   cons,
+		cancelCtx:   cancelCtx,
+		p2pListener: tcpListener,
+		walletRPC:   walletRPCServer,
+		httpSrv:     httpSrv,
+		dht:         dhtInstance,
+		wait:        &wg,
+		flush: func() {
+			flushNodeState(bc, currentNodeID, currentAddress)
+		},
+		databases: []io.Closer{mainDatabase, stateDatabase},
+	}).run()
 
 	logger.Info("Node %d stopped cleanly", nodeIndex+1)
 	return nil

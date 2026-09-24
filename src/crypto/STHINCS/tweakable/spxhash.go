@@ -93,7 +93,7 @@ func spxHashExpand(domain byte, outLen int, parts ...[]byte) []byte {
 		seed = append(seed, p...)
 	}
 
-	base := common.SpxHash(seed) // 32 bytes, v2-backed, deterministic (ProtocolSalt)
+	base := common.SpxHashUncached(seed) // 32 bytes, v2-backed, deterministic (ProtocolSalt) — no cache lookup, see GetHashUncached
 	if base == nil {
 		// common.SpxHash only returns nil on internal hasher construction
 		// failure (see getSpxHasher); that's an unrecoverable environment

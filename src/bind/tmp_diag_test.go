@@ -2,6 +2,7 @@ package bind
 
 import (
 	"bytes"
+	"os"
 	"testing"
 	"time"
 
@@ -11,6 +12,23 @@ import (
 	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/sthincs"
 	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/tweakable"
 )
+
+// diagEnvVar enables the expensive measurement test below. It is diagnostic
+// scaffolding, not a correctness check: TestTmpCountAndCost runs a full
+// SPHINCS+ keygen, sign and verify, which costs minutes on a race-enabled CI
+// runner and was single-handedly pushing the src/bind package past the default
+// 10m go test timeout. Run it explicitly with:
+//
+//	SPXHASH_DIAG=1 go test ./src/bind/ -run TestTmpCountAndCost -v
+const diagEnvVar = "SPXHASH_DIAG"
+
+// requireDiag skips a measurement test unless it was explicitly requested.
+func requireDiag(t *testing.T) {
+	t.Helper()
+	if os.Getenv(diagEnvVar) != "1" {
+		t.Skipf("diagnostic measurement test: set %s=1 to run", diagEnvVar)
+	}
+}
 
 // tweakCounter wraps the active tweakable hash and counts calls per function.
 type tweakCounter struct {
@@ -51,6 +69,8 @@ func (c *tweakCounter) snapshot() (hmsg, prf, f, h, tl int) {
 }
 
 func TestTmpCountAndCost(t *testing.T) {
+	requireDiag(t)
+
 	// --- 1. Real per-call cost of SpxHash on distinct (cache-missing) inputs.
 	const n = 100
 	start := time.Now()

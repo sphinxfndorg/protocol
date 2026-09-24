@@ -75,3 +75,21 @@ func SpxHash(data []byte) []byte {
 	}
 	return hasher.GetHash(data)
 }
+
+// SpxHashUncached is SpxHash without the LRU cache lookup/store. Same
+// instance, same key, byte-identical output — it just skips the cache-key
+// derivation and cache Get/Put, which cost a full extra hash pass over data
+// for no benefit when the caller already knows this exact input won't repeat
+// (see SphinxHash.GetHashUncached's doc comment for why that matters).
+//
+// The shared spxHasher singleton's cache stays reserved for callers that
+// DO see repeated inputs; routing one-off callers through this method
+// instead of SpxHash also avoids evicting that singleton's genuinely
+// reusable entries with cache lines that were never going to hit again.
+func SpxHashUncached(data []byte) []byte {
+	hasher, err := getSpxHasher()
+	if err != nil {
+		return nil
+	}
+	return hasher.GetHashUncached(data)
+}

@@ -224,6 +224,31 @@ func (s *SphinxHash) GetHash(data []byte) []byte {
 	return hash
 }
 
+// GetHashUncached computes the hash of data directly, skipping the LRU
+// cache entirely — no cacheKey derivation, no Get, no Put.
+//
+// Use this instead of GetHash when the caller already knows the lookup
+// cannot hit: STHINCS's tweakable-hash hot loop (F/H/PRF/T_l) is the
+// motivating case — every call there carries a distinct ADRS, so the
+// cache's hit rate is ~0%, yet GetHash's cacheKey step still pays for a
+// full extra SHA-256 pass over the input on every call to compute a key
+// that will never find anything (see the "Stop paying the cache-key
+// derivation on uncacheable calls" finding in the STHINCS benchmark
+// README). hashData already does 2 full-input hash passes (branch A's
+// inner SHA-256, branch B's SHAKE256); cacheKey adds a 3rd, structurally
+// identical to branch A, purely to build a key for a cache that can't
+// help here. Skipping it removes that 3rd pass — roughly a third of the
+// full-input hashing work on this path — without changing the digest
+// itself: GetHashUncached(data) and GetHash(data) return byte-identical
+// output, this just never looks anything up or stores anything.
+//
+// Do not use this for call sites that DO see repeated inputs (e.g. a
+// Merkle tree with reused leaf values, or SpxHash's own package-level
+// singleton serving arbitrary callers) — those want GetHash's cache.
+func (s *SphinxHash) GetHashUncached(data []byte) []byte {
+	return s.hashData(data)
+}
+
 // Read reads from the hash data into p.
 func (s *SphinxHash) Read(p []byte) (n int, err error) {
 	hash := s.GetHash(s.data)

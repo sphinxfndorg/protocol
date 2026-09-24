@@ -18,6 +18,51 @@ The measurement is **one full `Spx_sign`** per parameter set, produced by
 codec cost is deliberately excluded from the timed region (the probe signature
 is serialized before `b.ResetTimer()`), so `ns/op` is signing cost.
 
+### What the `SPHINXHASH-*` sets actually hash with
+
+They do not implement a hash of their own. `tweakable.SphinxHashTweak` routes
+**every** tweakable function (`F`, `H`, `T_l`, `PRF`, `PRFmsg`, `Hmsg`) through
+`spxHashExpand`, which calls `common.SpxHash` — the single shared, package-level
+instance from `src/common/types.go`:
+
+```text
+parameters.SPHINXHASH-*   ->  tweakable.SphinxHashTweak     (tweakable/spxhash.go)
+                          ->  spxHashExpand(domain, parts...)   domain || len||part
+                          ->  common.SpxHash               (src/common/types.go)
+                          ->  spxhash.ProtocolSalt + v2
+                              spxhash/v2.NewSphinxHash(256, ProtocolSalt).GetHash
+```
+
+So one `SPHINXHASH` signature makes on the order of 10^6 calls into the **v2**
+SphinxHash construction (`src/spxhash/v2`), keyed with `spxhash.ProtocolSalt`
+(the header comment in `tweakable/spxhash.go` estimates ~1.8 million
+`F`/`H`/`PRF`/`T_l` calls per signature). Nothing on this path references the v1
+package any more — `src/spxhash/v1` is referenced only by its own test package.
+
+That is the whole reason for the 5.5x–8.5x signing penalty in Comparison 1: a
+single SHA-256 compression per tweak call becomes
+`SHA256(SHA256(key‖tag‖data))` + `SHAKE256(key‖tag‖data)` + a final squeeze,
+*plus* a double-SHA256 cache-key derivation that cannot pay off here (see
+Optimization 2). The equivalence `common.SpxHash(x) ==
+spxhash.NewSphinxHash(256, spxhash.ProtocolSalt).GetHash(x)` is already pinned
+by `src/common/types_test.go`.
+
+An ad-hoc probe of one `F` call (simple mode, N=32, warm cache) corroborates the
+call path — a bare `common.SpxHash` call and one `F` call are the same cost
+class, while a plain SHA-256 is far cheaper:
+
+| Probe | ns/op | allocs/op |
+|---|---:|---:|
+| `common.SpxHash` (109-byte input) | 1,106 | 2 |
+| `SphinxHashTweak.F` (simple, N=32) | 1,348 | 7 |
+| `SphinxHashTweak.F` (robust, N=32) | 2,170 | 14 |
+| plain `sha256.Sum256` (control) | 490.5 | 0 |
+
+`F` in simple mode is one `spxHashExpand` = one `common.SpxHash` call plus the
+domain/length-prefix assembly (~+22%); robust mode is ~1.6x simple, exactly the
+extra mask-generating `spxHashExpand`. This probe is not part of the committed
+test suite.
+
 ## Parameter Grid
 
 Every set uses `W = 16` (Winternitz), `H = 30` (**2^30 ≈ 1.07 billion

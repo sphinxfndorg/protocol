@@ -190,15 +190,22 @@ func TestDeployAndWaitFailsOnRejectedDeploy(t *testing.T) {
 // sip721Spec / nonce 8, sip20Spec).
 //
 // These literals are a DRIFT DETECTOR, not proof of correctness: they were
-// generated once from contracts.ContractAddress — the same function the node
-// calls in contracts.Deploy — so they prove the formula has not changed under
-// the binding, and that the nonce it hashes is the signed one. They cannot prove
-// the formula itself is right, because both sides share it. That proof is
+// generated from contracts.ContractAddress — the same function the node calls in
+// contracts.Deploy — so they prove the formula has not changed under the
+// binding, and that the nonce it hashes is the signed one. They cannot prove the
+// formula itself is right, because both sides share it. That proof is
 // DeploySIP721AndWait's registry query-back (confirmDeployed/getcontract), which
 // fails if the node registers the contract anywhere but at this address.
+//
+// Re-pinned after common.SpxHash switched from src/spxhash/hash (v1) to
+// src/spxhash/v2: ContractAddress hashes the deploy's inputs through SpxHash, so
+// the v2 redesign necessarily produced new addresses and the previous literals
+// were stale. The formula and the inputs are unchanged — only the hash backend
+// moved — and the node derives through the identical call, so client and node
+// still agree (TestDeploySIP721BindsTheDerivedAddress covers that directly).
 const (
-	goldenSIP721Address = "SPIF AB08 1D24 1D7F A946 B69A 31CE 476E A092 795D 7FA2 BA6E 67DA 1AAD 23FA FB50 E5AF"
-	goldenSIP20Address  = "SPIF 4367 4289 438E 8058 7F84 5ECE 23EE BD88 CA15 F791 8D1A 168F F03B B270 C2DE 95BA"
+	goldenSIP721Address = "SPIF B877 D970 4C65 05AD 1D32 A9F1 CEE4 0515 8E14 DC68 01E0 4DAF 60C3 6657 8DF6 09EC"
+	goldenSIP20Address  = "SPIF 547E B0E1 EFCA 2A28 E298 A971 2A91 838E 4771 506C D4CA 731E E8F6 7823 44F7 D90D"
 )
 
 func TestDeployDerivedAddressMatchesThePinnedFormula(t *testing.T) {

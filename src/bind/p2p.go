@@ -140,7 +140,9 @@ func requestPeerListSync(peerAddr string, selfNodeID string, selfAddr string, ow
 		return nil, fmt.Errorf("send proof failed: %v", err)
 	}
 
-	// Step 3: read the peer list reply.
+	// Step 3: read the peer list reply. The responder only had to VERIFY our
+	// proof (milliseconds) before replying — unlike key_exchange, the peer
+	// list is not signed — so the ordinary frame deadline is enough here.
 	replyData, err = readFramedMessage(conn)
 	if err != nil {
 		return nil, fmt.Errorf("receive failed: %v", err)

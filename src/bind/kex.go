@@ -103,8 +103,9 @@ func exchangeKeyWithPeerSync(peerAddr string, selfAddr string, nodeID string, ow
 		return nil, fmt.Errorf("send proof failed: %v", err)
 	}
 
-	// Step 3: read the peer's final reply.
-	replyData, err = readFramedMessage(conn)
+	// Step 3: read the peer's final reply. It is signed too (signChallenge),
+	// so allow for the peer's signature computation time.
+	replyData, err = readFramedMessageWithTimeout(conn, handshakeSignTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("receive failed: %v", err)
 	}

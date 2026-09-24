@@ -20,7 +20,6 @@ import (
 	"time"
 
 	"github.com/sphinxfndorg/protocol/src/common"
-	spxhash "github.com/sphinxfndorg/protocol/src/spxhash/hash"
 )
 
 // Config for an IPFS HTTP gateway / API.
@@ -456,11 +455,7 @@ func CIDHash(cid string) string {
 // no sha256 remains in this package's content-commitment paths. It is only a
 // transport framing value, never a consensus commitment.
 func boundaryHash(s string) []byte {
-	h, err := spxhash.NewSphinxHash(256, spxhash.ProtocolSalt)
-	if err != nil {
-		return common.SpxHash([]byte(s))
-	}
-	return h.GetHash([]byte(s))
+	return common.SpxHash([]byte(s))
 }
 
 // multipartBytes builds a multipart form request body with a single file part.

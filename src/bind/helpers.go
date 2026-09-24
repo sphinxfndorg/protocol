@@ -73,10 +73,36 @@ func writeFramedMessage(conn net.Conn, data []byte) error {
 	return nil
 }
 
-// readFramedMessage reads a length-prefixed message from the connection.
+// frameReadTimeout bounds how long an ordinary protocol frame may take to
+// arrive. Ordinary messages (challenges, requests, gossip) are request/reply
+// exchanges a peer can answer without heavy computation, so this stays short.
+const frameReadTimeout = 10 * time.Second
+
+// handshakeSignTimeout bounds reads that must wait for a peer to COMPUTE a
+// SPHINCS+ signature: the auth_proof that answers a challenge, and the signed
+// key_exchange / peer_exchange reply.
+//
+// With the production 128s parameter set a single Spx_sign costs on the order
+// of ten seconds of CPU (measured ~11.4s sign / ~4.5s keygen on one modern
+// laptop), while verification costs only milliseconds. frameReadTimeout is
+// therefore too short for these reads: an honest peer that is still signing
+// would be dropped mid-handshake on all but the fastest hardware. The generous
+// bound only ever delays a genuinely silent/stalled connection, and each
+// connection is served by its own goroutine.
+const handshakeSignTimeout = 60 * time.Second
+
+// readFramedMessage reads a length-prefixed message from the connection using
+// the ordinary frame deadline. Use readFramedMessageWithTimeout for reads that
+// have to wait for a peer's signature computation.
 func readFramedMessage(conn net.Conn) ([]byte, error) {
+	return readFramedMessageWithTimeout(conn, frameReadTimeout)
+}
+
+// readFramedMessageWithTimeout reads a length-prefixed message from the
+// connection, failing if a complete frame does not arrive within timeout.
+func readFramedMessageWithTimeout(conn net.Conn, timeout time.Duration) ([]byte, error) {
 	// Read 4-byte big-endian length prefix
-	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	conn.SetReadDeadline(time.Now().Add(timeout))
 	var lenBuf [4]byte
 	if _, err := io.ReadFull(conn, lenBuf[:]); err != nil {
 		return nil, fmt.Errorf("reading length prefix: %w", err)

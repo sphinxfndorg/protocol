@@ -7,7 +7,7 @@ package common
 import (
 	"sync"
 
-	spxhash "github.com/sphinxfndorg/protocol/src/spxhash/hash"
+	spxhash "github.com/sphinxfndorg/protocol/src/spxhash/v2"
 )
 
 // Params represents the configuration for SphinxHash.
@@ -27,26 +27,31 @@ var spxParams = Params{
 // The previous implementation passed the input data itself as the salt
 // argument to NewSphinxHash, falling back to a hardcoded literal
 // "sphinx-default-salt" only when data was empty. Using data as its own salt
-// is not a harmless default — tracing it through generateSalt shows it
-// reduces to argon2.IDKey(data, data, ...), i.e. data used as both password
-// and salt. That is exactly the anti-pattern spxhash.go's FIX #2 already
-// eliminated one layer down; routing it back in through NewSphinxHash's salt
-// parameter reintroduces it. It also meant a brand-new SphinxHash instance —
-// and therefore a full 19 MiB / 2-iteration Argon2id salt derivation — was
-// built on every single call, since no two distinct inputs ever shared a
-// salt to reuse, making the per-instance LRU cache useless.
+// is not a harmless default — under the original (v1) Argon2id-based
+// construction it reduced to argon2.IDKey(data, data, ...), i.e. data used
+// as both password and salt, the same anti-pattern spxhash.go's FIX #2
+// already eliminated one layer down. It also meant a brand-new SphinxHash
+// instance was built on every single call, since no two distinct inputs
+// ever shared a salt to reuse, making the per-instance LRU cache useless.
 //
-// Fix: use spxhash.ProtocolSalt, the fixed, public, non-secret salt
+// Fix: use spxhash.ProtocolSalt, the fixed, public, non-secret key
 // spxhash/hash already defines for exactly this purpose (see params.go) —
 // every node derives it independently, so hashes stay reproducible across
-// the network without needing data-dependent or ad hoc salts. The instance
-// is constructed once and reused, so repeated calls with the same data now
-// actually hit the LRU cache instead of re-deriving Argon2id from scratch.
+// the network without needing data-dependent or ad hoc keys. The instance is
+// constructed once and reused, so repeated calls with the same data now
+// actually hit the LRU cache instead of recomputing.
 //
-// GetHash only reads s.salt/s.saltEntropy (fixed at construction) and uses
-// its own mutex-guarded LRU cache, so sharing this single instance across
-// concurrent callers is safe as long as callers only ever invoke SpxHash
-// (never Write/Read/Sum/Reset, which would mutate the shared instance's
+// v2 REDESIGN NOTE: spxhash/hash dropped Argon2id entirely (see spxhash.go)
+// — hashData is now three fast hash calls, no per-call KDF — so reusing this
+// instance is no longer about avoiding an expensive Argon2id re-derivation.
+// It still matters for two cheaper reasons: (1) it keeps the LRU cache warm
+// across calls instead of starting a fresh, empty one every time, and (2) it
+// avoids re-copying/re-validating the key on each call. GetHash only reads
+// s.key (fixed at construction, a single field in v2 — v1's separate
+// s.salt/s.saltEntropy pair no longer exists) and uses its own
+// mutex-guarded LRU cache, so sharing this single instance across concurrent
+// callers is safe as long as callers only ever invoke SpxHash (never
+// Write/Read/Sum/Reset, which would mutate the shared instance's
 // accumulated data buffer).
 var (
 	spxHasher     *spxhash.SphinxHash

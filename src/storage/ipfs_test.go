@@ -4,10 +4,13 @@
 package storage
 
 import (
+	"bytes"
 	"net/http"
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/sphinxfndorg/protocol/src/common"
 )
 
 // TestDefaultConfigEnvOverrides verifies DefaultConfig honours the env
@@ -104,5 +107,21 @@ func TestNormalizeIPFSAddr(t *testing.T) {
 	c := NewClient(Config{IPFSAddr: "http://127.0.0.1.5001"})
 	if c.cfg.IPFSAddr != "http://127.0.0.1:5001" {
 		t.Fatalf("NewClient did not normalize ipfs addr: %q", c.cfg.IPFSAddr)
+	}
+}
+
+// TestBoundaryHashUsesCanonicalSpxHash verifies that multipart boundary
+// derivation delegates to common.SpxHash and remains deterministic.
+func TestBoundaryHashUsesCanonicalSpxHash(t *testing.T) {
+	input := "metadata.jsonboundary"
+	first := boundaryHash(input)
+	if len(first) != 32 {
+		t.Fatalf("boundary hash length: want 32 bytes, got %d", len(first))
+	}
+	if expected := common.SpxHash([]byte(input)); !bytes.Equal(first, expected) {
+		t.Fatalf("boundary hash does not use common.SpxHash: got %x, want %x", first, expected)
+	}
+	if second := boundaryHash(input); !bytes.Equal(first, second) {
+		t.Fatalf("boundary hash is not deterministic: first %x, second %x", first, second)
 	}
 }

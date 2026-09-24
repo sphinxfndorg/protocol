@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"testing"
 
-	spxhash "github.com/sphinxfndorg/protocol/src/spxhash/hash"
+	spxhash "github.com/sphinxfndorg/protocol/src/spxhash/v2"
 )
 
 // TestSpxHashBasic tests basic SpxHash functionality with various inputs.

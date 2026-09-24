@@ -1,1 +1,5 @@
-src/spxhash/testvc/test_output.log filter=lfs diff=lfs merge=lfs -text
+# Large test-vector logs are stored in Git LFS. The pattern is recursive so it
+# keeps matching after the spxhash tree was restructured into v1/ and v2/
+# (the previous non-recursive path let a 149 MB log be committed as a plain
+# blob, which GitHub rejects on push).
+src/spxhash/**/testvc/test_output.log filter=lfs diff=lfs merge=lfs -text

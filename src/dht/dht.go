@@ -25,6 +25,7 @@ import (
 
 	"github.com/sphinxfndorg/protocol/src/rpc"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 // Constants for DHT configuration and timing
@@ -61,11 +62,15 @@ var (
 // NewDHT creates a new Distributed Hash Table instance
 // This initializes the Kademlia-based DHT for peer discovery and data storage
 func NewDHT(cfg Config, logger *zap.Logger) (*DHT, error) {
+	// DHT discovery is a high-volume subsystem. Restrict its logger to errors
+	// and above so routine queue/debug traffic stays out of the node console.
+	dhtLogger := logger.WithOptions(zap.IncreaseLevel(zapcore.ErrorLevel))
+
 	// Generate a random node ID for this DHT node
 	nodeID := network.GetRandomNodeID()
 
 	// Create a new UDP connection for DHT communication
-	conn, err := newConn(cfg, logger)
+	conn, err := newConn(cfg, dhtLogger)
 	if err != nil {
 		return nil, err
 	}
@@ -86,7 +91,7 @@ func NewDHT(cfg Config, logger *zap.Logger) (*DHT, error) {
 		timeoutCh:   make(chan timeout, 16),                                                  // Channel for timeout events
 		loopbackCh:  make(chan rpc.Message, 16),                                              // Channel for loopback messages
 		stopper:     syncutil.NewStopper(),                                                   // Stopper for graceful shutdown
-		log:         logger,                                                                  // Logger instance
+		log:         dhtLogger,                                                               // Logger instance
 	}, nil
 }
 

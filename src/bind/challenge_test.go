@@ -206,7 +206,16 @@ func sendTestFrame(t *testing.T, conn net.Conn, msgType string, payload any) {
 // security.Message envelope.
 func readTestFrame(t *testing.T, conn net.Conn) security.Message {
 	t.Helper()
-	raw, err := readFramedMessage(conn)
+	return readTestFrameWithin(t, conn, frameReadTimeout)
+}
+
+// readTestFrameWithin is readTestFrame with an explicit read deadline. Reads
+// that must wait for the handler to COMPUTE a signature — the key_exchange
+// reply is signed, so it costs a full Spx_sign (~11s with the production
+// parameter set) — need handshakeSignTimeout rather than frameReadTimeout.
+func readTestFrameWithin(t *testing.T, conn net.Conn, timeout time.Duration) security.Message {
+	t.Helper()
+	raw, err := readFramedMessageWithTimeout(conn, timeout)
 	if err != nil {
 		t.Fatalf("read frame: %v", err)
 	}
@@ -395,8 +404,9 @@ func TestChallengeHandlerFlowsGateAdmission(t *testing.T) {
 		sendTestFrame(t, client, "auth_proof", authProofMsg{Signature: proof})
 
 		// The reply write blocks on the pipe until we read it, so read
-		// before waiting for the handler to finish.
-		reply := readTestFrame(t, client)
+		// before waiting for the handler to finish. The handler signs this
+		// reply (signChallenge), so allow for its signature computation time.
+		reply := readTestFrameWithin(t, client, handshakeSignTimeout)
 		if reply.Type != "key_exchange" {
 			t.Fatalf("expected key_exchange reply after valid proof, got %q", reply.Type)
 		}

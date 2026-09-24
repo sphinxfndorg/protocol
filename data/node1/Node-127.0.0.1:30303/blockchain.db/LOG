@@ -1,6 +1,0 @@
-=============== Sep 24, 2026 (WIB) ===============
-16:30:26.708227 log@legend F·NumFile S·FileSize N·Entry C·BadEntry B·BadBlock Ke·KeyError D·DroppedEntry L·Level Q·SeqNum T·TimeElapsed
-16:30:26.733659 db@open opening
-16:30:26.739291 version@stat F·[] S·0B[] Sc·[]
-16:30:26.760832 db@janitor F·2 G·0
-16:30:26.762100 db@open done T·28.389675ms

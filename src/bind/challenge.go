@@ -101,8 +101,12 @@ func sendAuthChallenge(conn net.Conn, nonce []byte) error {
 
 // readAuthProof reads the auth_proof frame that must answer a challenge and
 // returns the carried signature.
+//
+// The proof is a SPHINCS+ signature the peer has to COMPUTE after receiving
+// the challenge, so this read uses handshakeSignTimeout rather than the
+// ordinary frame deadline (see helpers.go).
 func readAuthProof(conn net.Conn) ([]byte, error) {
-	proofData, err := readFramedMessage(conn)
+	proofData, err := readFramedMessageWithTimeout(conn, handshakeSignTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("read proof: %w", err)
 	}

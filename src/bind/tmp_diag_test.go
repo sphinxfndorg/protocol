@@ -10,7 +10,6 @@ import (
 	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/address"
 	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/sthincs"
 	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/tweakable"
-	spxhash "github.com/sphinxfndorg/protocol/src/spxhash/hash"
 )
 
 // tweakCounter wraps the active tweakable hash and counts calls per function.
@@ -53,18 +52,14 @@ func (c *tweakCounter) snapshot() (hmsg, prf, f, h, tl int) {
 
 func TestTmpCountAndCost(t *testing.T) {
 	// --- 1. Real per-call cost of SpxHash on distinct (cache-missing) inputs.
-	hasher, err := spxhash.NewSphinxHash(256, spxhash.ProtocolSalt)
-	if err != nil {
-		t.Fatal(err)
-	}
 	const n = 100
 	start := time.Now()
 	for i := 0; i < n; i++ {
 		input := []byte{byte(i >> 8), byte(i), 's', 'p', 'x', 'k'}
-		_ = hasher.GetHash(input)
+		_ = common.SpxHash(input)
 	}
 	perCall := time.Since(start) / n
-	t.Logf("SpxHash GetHash (unique inputs, cache miss): %v per call", perCall)
+	t.Logf("common.SpxHash (unique inputs, cache miss): %v per call", perCall)
 
 	// --- 2. Count tweakable-hash calls in keygen / sign / verify.
 	cfg, err := config.NewSTHINCSParameters()

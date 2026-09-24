@@ -1,7 +1,7 @@
 // Copyright (c) 2024-present Sphinx Core Dev
 // MIT License https://opensource.org/license/mit
 
-// go/src/crypto/STHINCS/address/shake256.go
+// go/src/crypto/STHINCS/tweakable/shake256.go
 package tweakable
 
 import (
@@ -51,15 +51,21 @@ func (h *Shake256Tweak) PRFmsg(SKprf []byte, OptRand []byte, M []byte) []byte {
 }
 
 // Tweakable hash function F
+//
+// Robust masks tmp with a SHAKE256 bitmask before hashing. Any other Variant
+// value is treated as Simple (tmp is hashed as-is) — never as "no input", so
+// tmp always reaches the hash.
 func (h *Shake256Tweak) F(PKseed []byte, adrs *address.ADRS, tmp []byte) []byte {
-	var M1 []byte
+	M1 := tmp
 
 	if h.Variant == Robust {
-		bitmask := generateBitmask(PKseed, adrs, 8*len(tmp))
+		// The mask is exactly len(tmp) BYTES. (This used to request
+		// 8*len(tmp) bytes — a bits/bytes mix-up that squeezed 8x more SHAKE
+		// output than was ever used. SHAKE is an XOF, so the first len(tmp)
+		// bytes are identical either way: outputs and signatures are unchanged.)
+		bitmask := generateBitmask(PKseed, adrs, len(tmp))
 		M1 = make([]byte, len(tmp))
 		_ = subtle.XORBytes(M1, tmp, bitmask)
-	} else if h.Variant == Simple {
-		M1 = tmp
 	}
 
 	output := make([]byte, h.N)
@@ -81,8 +87,10 @@ func (h *Shake256Tweak) T_l(PKseed []byte, adrs *address.ADRS, tmp []byte) []byt
 	return h.F(PKseed, adrs, tmp)
 }
 
-func generateBitmask(PKseed []byte, adrs *address.ADRS, messageLength int) []byte {
-	output := make([]byte, messageLength)
+// generateBitmask squeezes exactly `length` bytes of mask from
+// SHAKE256(PKseed || ADRS).
+func generateBitmask(PKseed []byte, adrs *address.ADRS, length int) []byte {
+	output := make([]byte, length)
 	hash := sha3.NewShake256()
 	hash.Write(PKseed)
 	hash.Write(adrs.GetBytes())

@@ -68,6 +68,15 @@ func getSpxHasher() (*spxhash.SphinxHash, error) {
 
 // SpxHash hashes the given data using the SphinxHash algorithm with the
 // predefined parameters and the protocol's canonical, deterministic salt.
+//
+// SECURITY: do NOT pass secret material (private keys, seeds, PRF inputs)
+// through SpxHash. It goes through a shared LRU cache, so
+//   - a cache hit returns measurably faster than a miss, which leaks whether
+//     that exact input was hashed recently (a timing side channel), and
+//   - the cache retains outputs derived from the input in process memory.
+//
+// Use SpxHashUncached for secret or one-off inputs (STHINCS's tweakable
+// hashes do).
 func SpxHash(data []byte) []byte {
 	hasher, err := getSpxHasher()
 	if err != nil {
@@ -81,6 +90,10 @@ func SpxHash(data []byte) []byte {
 // derivation and cache Get/Put, which cost a full extra hash pass over data
 // for no benefit when the caller already knows this exact input won't repeat
 // (see SphinxHash.GetHashUncached's doc comment for why that matters).
+//
+// It is also the right choice for secret inputs: with no cache lookup, its
+// timing does not depend on whether the input was seen before, and nothing
+// derived from the input is retained in the shared cache.
 //
 // The shared spxHasher singleton's cache stays reserved for callers that
 // DO see repeated inputs; routing one-off callers through this method

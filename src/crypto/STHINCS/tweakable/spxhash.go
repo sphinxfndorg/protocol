@@ -26,32 +26,37 @@ import (
 // address-independent: Spx_verify accepted a signature made under one key
 // as valid under a completely different key. Every function below absorbs
 // every one of its arguments — none of this input-independence can come
-// back.
+// back. (tweakable_test.go checks this for every backend, and
+// sthincs_test.go checks cross-message and cross-key verification.)
 //
 // UNIFIED DESIGN (v2 supersedes the old call-frequency split):
 //
 // This type used to split its six functions across two different backends:
 // Hmsg/PRFmsg (called once per signature) went through common.SpxHash,
-// while F/H/PRF/T_l (called ~1.8 MILLION times per signature, across WOTS+
-// chains, XMSS trees, and FORS leaves) used a separate, hand-rolled
+// while F/H/PRF/T_l (on the order of a million calls per signature, across
+// WOTS+ chains, XMSS trees, and FORS leaves) used a separate, hand-rolled
 // SHA-512/256 + SHAKE256 "fast core" instead — because common.SpxHash was,
 // at the time, backed by v1's Argon2id-based SphinxHash (19 MiB, t=2),
-// measured at ~38ms per call. At 1.8M calls with no cache reuse (every call
-// here uses a distinct ADRS, so the shared instance's LRU cache almost never
-// hit), that projected to ~19 HOURS per signature — using common.SpxHash for
-// the hot loop was simply not viable.
+// measured at ~38ms per call. With no cache reuse (every call here uses a
+// distinct ADRS, so the shared instance's LRU cache almost never hit), that
+// projected to ~19 HOURS per signature — using common.SpxHash for the hot
+// loop was simply not viable.
 //
-// common.SpxHash is now backed by spxhash/hash's v2 construction (double
-// SHA-256 + SHAKE256, see spxhash/hash/spxhash.go) — no Argon2id, no KDF, ~3
-// fast hash calls per digest instead of a memory-hard derivation. Measured
-// on this machine that's low-microsecond, not tens of milliseconds: at 1.8M
-// calls, roughly 3 SECONDS per signature (see the benchmark comparison
-// above this file's history), not 19 hours. The reason for the two-backend
-// split is gone, so every function below now goes through the same
-// common.SpxHash-backed helper, spxHashExpand. This means every tweak
-// function — Hmsg, PRF, PRFmsg, F, H, T_l — is now genuinely
-// SphinxHash-branded (SIPS-0001), not just the two that used to be called
-// once per signature.
+// The hash package's v2 construction (double SHA-256 + SHAKE256, see
+// spxhash/hash/spxhash.go) has no Argon2id and no KDF: ~3 fast hash calls
+// per digest, low-microsecond instead of tens of milliseconds. The reason
+// for the two-backend split is gone, so every function below now goes
+// through the same helper, spxHashExpand, which calls
+// common.SpxHashUncached. Every tweak function — Hmsg, PRF, PRFmsg, F, H,
+// T_l — is therefore genuinely SphinxHash-branded (SIPS-0001).
+//
+// MEASURED COST: the per-signature cost is NOT a flat "calls x per-call
+// cost": the call count scales with N, K, D, and logT, and the Robust
+// variants make two hash calls (mask + hash) per F/H/T_l. Measured with
+// BenchmarkSpxSignConstructors before the GetHashUncached change, the
+// SPHINXHASH sets ranged from ~355 ms (128f-simple) to ~24.5 s
+// (256s-robust) per signature. Re-run the benchmark rather than
+// extrapolating from this comment.
 //
 // If you're tempted to reintroduce a separate fast path because a benchmark
 // looked slow: check whether spxhash/hash's own construction changed under
@@ -65,8 +70,8 @@ type SphinxHashTweak struct {
 }
 
 // Domain separation tags, one per tweakable function, so no two of them can
-// ever produce a colliding transcript into common.SpxHash for the same raw
-// arguments.
+// ever produce a colliding transcript into common.SpxHashUncached for the
+// same raw arguments.
 const (
 	domainHmsg   byte = 0x01
 	domainPRF    byte = 0x02
@@ -77,14 +82,19 @@ const (
 	domainMask   byte = 0x07
 )
 
-// spxHashExpand hashes domain||length-prefixed(parts) with common.SpxHash
-// (v2-backed: SHA-256 double-hash + SHAKE256, see spxhash/hash/spxhash.go),
-// then expands that 32-byte result via SHAKE256 to exactly outLen bytes.
-// Length-prefixing every field makes the encoding unambiguous — without it,
-// spxHashExpand(d, n, "ab", "c") and spxHashExpand(d, n, "a", "bc") would
-// collide.
+// spxHashExpand hashes domain||length-prefixed(parts) with
+// common.SpxHashUncached (v2-backed: SHA-256 double-hash + SHAKE256, see
+// spxhash/hash/spxhash.go), then expands that 32-byte result via SHAKE256 to
+// exactly outLen bytes. Length-prefixing every field makes the encoding
+// unambiguous — without it, spxHashExpand(d, n, "ab", "c") and
+// spxHashExpand(d, n, "a", "bc") would collide.
 func spxHashExpand(domain byte, outLen int, parts ...[]byte) []byte {
-	seed := make([]byte, 0, 1+len(parts)*4)
+	// Exact capacity: one append chain, no regrowth in the hot loop.
+	total := 1
+	for _, p := range parts {
+		total += 4 + len(p)
+	}
+	seed := make([]byte, 0, total)
 	seed = append(seed, domain)
 	for _, p := range parts {
 		var l [4]byte
@@ -95,11 +105,11 @@ func spxHashExpand(domain byte, outLen int, parts ...[]byte) []byte {
 
 	base := common.SpxHashUncached(seed) // 32 bytes, v2-backed, deterministic (ProtocolSalt) — no cache lookup, see GetHashUncached
 	if base == nil {
-		// common.SpxHash only returns nil on internal hasher construction
-		// failure (see getSpxHasher); that's an unrecoverable environment
-		// error, not a per-call condition, so fail loudly rather than
-		// silently degrade signature security.
-		panic("tweakable: common.SpxHash returned nil — SphinxHash instance unavailable")
+		// common.SpxHashUncached only returns nil on internal hasher
+		// construction failure (see getSpxHasher); that's an unrecoverable
+		// environment error, not a per-call condition, so fail loudly rather
+		// than silently degrade signature security.
+		panic("tweakable: common.SpxHashUncached returned nil — SphinxHash instance unavailable")
 	}
 	if outLen <= len(base) {
 		out := make([]byte, outLen)
@@ -157,7 +167,7 @@ func (s *SphinxHashTweak) T_l(PKseed []byte, adrs *address.ADRS, tmp []byte) []b
 }
 
 // applyMask implements the Robust/Simple variant switch shared by F, H, T_l.
-// The bitmask itself is now also common.SpxHash-backed (via spxHashExpand),
+// The bitmask itself is also SpxHashUncached-backed (via spxHashExpand),
 // under its own domain tag so it can never be mistaken for an actual F/H/T_l
 // output even when PKseed, adrs, and length happen to match.
 func applyMask(variant string, PKseed []byte, adrs *address.ADRS, tmp []byte) []byte {

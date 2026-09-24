@@ -1,7 +1,7 @@
 // Copyright (c) 2024-present Sphinx Core Dev
 // MIT License https://opensource.org/license/mit
 
-// go/src/crypto/STHINCS/address/xmss.go
+// go/src/crypto/STHINCS/xmss/xmss.go
 package xmss
 
 import (
@@ -104,9 +104,16 @@ func treehash(params *parameters.Parameters, SKseed []byte, startIndex int, targ
 			adrs.SetTreeIndex((adrs.GetTreeIndex() - 1) / 2)
 
 			// Parent = H(left_child || right_child)
-			// Order matters: left child first (popped from stack), then current node
+			// Order matters: left child first (popped from stack), then current node.
+			//
+			// Build the concatenation in a fresh buffer. append(leftNode, node...)
+			// would write into leftNode's spare capacity (hash outputs are often
+			// sliced from larger arrays, e.g. sha256.Sum(nil)[:N]) and can alias
+			// memory that something else still holds.
 			leftNode := stack.Pop().Node
-			combined := append(leftNode, node...) // left || right
+			combined := make([]byte, 0, len(leftNode)+len(node))
+			combined = append(combined, leftNode...)
+			combined = append(combined, node...) // left || right
 			node = params.Tweak.H(PKseed, adrs, combined)
 
 			// Parent is one level higher in the tree

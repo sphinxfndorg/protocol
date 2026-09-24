@@ -44,10 +44,10 @@ jobs:
       - name: Run go vet
         run: go vet ./...
 
+      # NOTE: the default `go test` timeout is 10m PER PACKAGE. src/bind's
+      # SPHINCS+ crypto tests legitimately need ~10m under -race on their own,
+      # so the ceiling is raised to 30m to leave headroom on slower runners.
       - name: Run tests with race detection
-        # The default go test timeout is 10m PER PACKAGE. The SPHINCS+-heavy
-        # crypto tests in src/bind legitimately need ~10m on their own under
-        # -race, so raise the ceiling to leave headroom on slower runners.
         run: go test -race -v -timeout 30m ./...
 
       - name: Verify build

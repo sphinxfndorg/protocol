@@ -7,7 +7,6 @@ package sthincs
 import (
 	"crypto/rand"
 	"fmt"
-	"math"
 
 	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/address"
 	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/fors"
@@ -46,8 +45,74 @@ func (s *SPHINCS_SIG) GetSIG_HT() *hypertree.HTSignature {
 	return s.SIG_HT
 }
 
+// Zeroize overwrites the secret parts of the key (SKseed, SKprf) in place.
+// Call it when you are done with a secret key. The public halves (PKseed,
+// PKroot) are left intact. Note that any serialized copy of the key (see
+// SerializeSK) is a separate buffer that the caller must wipe itself, and
+// that Go cannot guarantee no other copy exists (swap, core dumps, etc.).
+func (sk *SPHINCS_SK) Zeroize() {
+	if sk == nil {
+		return
+	}
+	clear(sk.SKseed)
+	clear(sk.SKprf)
+}
+
+// bitMask returns a mask with the low `bits` bits set (bits in 0..64).
+func bitMask(bits int) uint64 {
+	if bits <= 0 {
+		return 0
+	}
+	if bits >= 64 {
+		return ^uint64(0)
+	}
+	return (uint64(1) << uint(bits)) - 1
+}
+
+// splitDigest splits the Hmsg output into (FORS message digest, tree index,
+// leaf index), exactly as in the SPHINCS+ specification:
+//
+//	md       = digest[0 : ceil(K*A / 8)]
+//	idx_tree = toInt(next ceil((H - H/D) / 8) bytes) mod 2^(H - H/D)
+//	idx_leaf = toInt(next ceil((H/D) / 8) bytes)     mod 2^(H/D)
+//
+// toInt is big-endian over the actual byte slice. The slice must NOT be
+// copied left-aligned into a fixed-size buffer before masking: doing that
+// shifts the value into the high bits, and the low-bit mask then zeroes
+// it, which makes every index 0 (a previous version of this file had that
+// bug in both sign and verify, so every signature reused tree 0 / leaf 0).
+func splitDigest(params *parameters.Parameters, digest []byte) (md []byte, idxTree uint64, idxLeaf int, err error) {
+	hPrime := params.H / params.D
+	treeBits := params.H - hPrime
+	leafBits := hPrime
+
+	mdBytes := (params.K*params.A + 7) / 8
+	treeBytes := (treeBits + 7) / 8
+	leafBytes := (leafBits + 7) / 8
+
+	if treeBytes > 8 {
+		return nil, 0, 0, fmt.Errorf("tree index needs %d bytes, max supported is 8", treeBytes)
+	}
+	if leafBytes > 4 {
+		return nil, 0, 0, fmt.Errorf("leaf index needs %d bytes, max supported is 4", leafBytes)
+	}
+
+	total := mdBytes + treeBytes + leafBytes
+	if len(digest) < total {
+		return nil, 0, 0, fmt.Errorf("message digest too short: need %d bytes, have %d (increase MessageDigestLength)", total, len(digest))
+	}
+
+	md = digest[:mdBytes]
+	treeSlice := digest[mdBytes : mdBytes+treeBytes]
+	leafSlice := digest[mdBytes+treeBytes : total]
+
+	idxTree = util.BytesToUint64(treeSlice) & bitMask(treeBits)
+	idxLeaf = int(util.BytesToUint64(leafSlice) & bitMask(leafBits))
+
+	return md, idxTree, idxLeaf, nil
+}
+
 // Spx_keygen generates a SPHINCS+ key pair
-// Fixed: Returns error
 func Spx_keygen(params *parameters.Parameters) (*SPHINCS_SK, *SPHINCS_PK, error) {
 	if params == nil {
 		return nil, nil, fmt.Errorf("nil parameters provided")
@@ -88,11 +153,21 @@ func Spx_keygen(params *parameters.Parameters) (*SPHINCS_SK, *SPHINCS_PK, error)
 	return sk, pk, nil
 }
 
-// Spx_sign generates a SPHINCS+ signature
-// Fixed: Returns error
+// Spx_sign generates a SPHINCS+ signature.
+//
+// Before returning, the signature is verified against the key's own public
+// half (a "sign-then-verify" self-check). A transient fault (bit flip,
+// glitched hash) during signing otherwise yields an invalid signature that
+// can leak information about the secret key; with the self-check such a
+// signature is discarded and an error is returned instead. Cost: one
+// verification, which is small next to signing.
 func Spx_sign(params *parameters.Parameters, M []byte, SK *SPHINCS_SK) (*SPHINCS_SIG, error) {
-	if params == nil || M == nil || SK == nil {
+	if params == nil || params.Tweak == nil || M == nil || SK == nil {
 		return nil, fmt.Errorf("nil parameters provided")
+	}
+	if len(SK.SKseed) != params.N || len(SK.SKprf) != params.N ||
+		len(SK.PKseed) != params.N || len(SK.PKroot) != params.N {
+		return nil, fmt.Errorf("invalid secret key: every component must be exactly %d bytes", params.N)
 	}
 
 	// init
@@ -112,67 +187,12 @@ func Spx_sign(params *parameters.Parameters, M []byte, SK *SPHINCS_SK) (*SPHINCS
 		R: R,
 	}
 
-	// compute message digest and index
+	// compute message digest and derive FORS digest + tree/leaf indices
 	digest := params.Tweak.Hmsg(R, SK.PKseed, SK.PKroot, M)
 
-	// Calculate sizes for each part
-	tmp_md_bytes := int(math.Floor(float64(params.K*params.A+7) / 8))
-	tmp_idx_tree_bytes := int(math.Floor(float64(params.H-params.H/params.D+7) / 8))
-	tmp_idx_leaf_bytes := int(math.Floor(float64(params.H/params.D+7)) / 8)
-
-	// Check if digest is large enough
-	total_needed := tmp_md_bytes + tmp_idx_tree_bytes + tmp_idx_leaf_bytes
-	if len(digest) < total_needed {
-		// Pad the digest if it's too small
-		padded := make([]byte, total_needed)
-		copy(padded, digest)
-		// Fill the rest with a deterministic pattern
-		for i := len(digest); i < total_needed; i++ {
-			padded[i] = byte(i % 256)
-		}
-		digest = padded
-	}
-
-	// Now safely extract the parts
-	var tmp_md, tmp_idx_tree, tmp_idx_leaf []byte
-
-	if tmp_md_bytes > 0 {
-		end := min(tmp_md_bytes, len(digest))
-		tmp_md = digest[:end]
-	}
-
-	if tmp_idx_tree_bytes > 0 {
-		start := min(tmp_md_bytes, len(digest))
-		end := min(tmp_md_bytes+tmp_idx_tree_bytes, len(digest))
-		if start < end {
-			tmp_idx_tree = digest[start:end]
-		}
-	}
-
-	if tmp_idx_leaf_bytes > 0 {
-		start := min(tmp_md_bytes+tmp_idx_tree_bytes, len(digest))
-		end := min(tmp_md_bytes+tmp_idx_tree_bytes+tmp_idx_leaf_bytes, len(digest))
-		if start < end {
-			tmp_idx_leaf = digest[start:end]
-		}
-	}
-
-	// Convert to integers with proper bounds checking
-	var idx_tree uint64
-	var idx_leaf int
-
-	if len(tmp_idx_tree) > 0 {
-		// Ensure we don't read past the buffer
-		var tmp [8]byte
-		copy(tmp[:], tmp_idx_tree)
-		idx_tree = util.BytesToUint64(tmp[:]) & (math.MaxUint64 >> (64 - (params.H - params.H/params.D)))
-	}
-
-	if len(tmp_idx_leaf) > 0 {
-		// Ensure we don't read past the buffer
-		var tmp [4]byte
-		copy(tmp[:], tmp_idx_leaf)
-		idx_leaf = int(util.BytesToUint32(tmp[:]) & (math.MaxUint32 >> (32 - params.H/params.D)))
+	tmp_md, idx_tree, idx_leaf, err := splitDigest(params, digest)
+	if err != nil {
+		return nil, fmt.Errorf("digest split failed: %w", err)
 	}
 
 	// FORS sign
@@ -181,9 +201,11 @@ func Spx_sign(params *parameters.Parameters, M []byte, SK *SPHINCS_SK) (*SPHINCS
 	adrs.SetType(address.FORS_TREE)
 	adrs.SetKeyPairAddress(idx_leaf)
 
-	// This ensures that we avoid side effects modifying PK
+	// Work on private copies so nothing below can modify the caller's key,
+	// and wipe the secret copy as soon as we are done with it.
 	SKseed := make([]byte, params.N)
 	copy(SKseed, SK.SKseed)
+	defer clear(SKseed)
 	PKseed := make([]byte, params.N)
 	copy(PKseed, SK.PKseed)
 
@@ -206,76 +228,53 @@ func Spx_sign(params *parameters.Parameters, M []byte, SK *SPHINCS_SK) (*SPHINCS
 	}
 	SIG.SIG_HT = htSig
 
+	// Fault-attack countermeasure: never release a signature that does not
+	// verify under our own public key.
+	selfPK := &SPHINCS_PK{PKseed: SK.PKseed, PKroot: SK.PKroot}
+	if !Spx_verify(params, M, SIG, selfPK) {
+		return nil, fmt.Errorf("signature self-check failed (possible fault during signing); signature discarded")
+	}
+
 	return SIG, nil
 }
 
-// Spx_verify verifies a SPHINCS+ signature
-// Fixed: Returns bool (no error) for compatibility, but logs errors internally
-// For production, consider changing to (bool, error)
-func Spx_verify(params *parameters.Parameters, M []byte, SIG *SPHINCS_SIG, PK *SPHINCS_PK) bool {
+// Spx_verify verifies a SPHINCS+ signature.
+// Returns bool (no error) for compatibility; any internal error is treated
+// as a failed verification. For production, consider changing to (bool, error).
+//
+// Signatures are attacker-controlled input, so verification is hardened:
+// every length that the caller supplies is checked up front, and a recover()
+// converts any panic caused by a malformed signature into a plain "invalid"
+// result instead of crashing the process (remote DoS on a node).
+func Spx_verify(params *parameters.Parameters, M []byte, SIG *SPHINCS_SIG, PK *SPHINCS_PK) (valid bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			valid = false
+		}
+	}()
+
+	if params == nil || params.Tweak == nil || M == nil || SIG == nil || PK == nil {
+		return false
+	}
+	if len(PK.PKseed) != params.N || len(PK.PKroot) != params.N {
+		return false
+	}
+
 	// init
 	adrs := new(address.ADRS)
 	R := SIG.GetR()
 	SIG_FORS := SIG.GetSIG_FORS()
 	SIG_HT := SIG.GetSIG_HT()
+	if len(R) != params.N || SIG_FORS == nil || SIG_HT == nil {
+		return false
+	}
 
-	// compute message digest and index
+	// compute message digest and derive FORS digest + tree/leaf indices
 	digest := params.Tweak.Hmsg(R, PK.PKseed, PK.PKroot, M)
 
-	tmp_md_bytes := int(math.Floor(float64(params.K*params.A+7) / 8))
-	tmp_idx_tree_bytes := int(math.Floor(float64(params.H-params.H/params.D+7) / 8))
-	tmp_idx_leaf_bytes := int(math.Floor(float64(params.H/params.D+7)) / 8)
-
-	// Check if digest is large enough
-	total_needed := tmp_md_bytes + tmp_idx_tree_bytes + tmp_idx_leaf_bytes
-	if len(digest) < total_needed {
-		// Pad the digest if it's too small
-		padded := make([]byte, total_needed)
-		copy(padded, digest)
-		// Fill the rest with a deterministic pattern
-		for i := len(digest); i < total_needed; i++ {
-			padded[i] = byte(i % 256)
-		}
-		digest = padded
-	}
-
-	// Now safely extract the parts
-	var tmp_md, tmp_idx_tree, tmp_idx_leaf []byte
-
-	if tmp_md_bytes > 0 {
-		end := min(tmp_md_bytes, len(digest))
-		tmp_md = digest[:end]
-	}
-
-	if tmp_idx_tree_bytes > 0 {
-		start := min(tmp_md_bytes, len(digest))
-		end := min(tmp_md_bytes+tmp_idx_tree_bytes, len(digest))
-		if start < end {
-			tmp_idx_tree = digest[start:end]
-		}
-	}
-
-	if tmp_idx_leaf_bytes > 0 {
-		start := min(tmp_md_bytes+tmp_idx_tree_bytes, len(digest))
-		end := min(tmp_md_bytes+tmp_idx_tree_bytes+tmp_idx_leaf_bytes, len(digest))
-		if start < end {
-			tmp_idx_leaf = digest[start:end]
-		}
-	}
-
-	var idx_tree uint64
-	var idx_leaf int
-
-	if len(tmp_idx_tree) > 0 {
-		var tmp [8]byte
-		copy(tmp[:], tmp_idx_tree)
-		idx_tree = uint64(util.BytesToUint64(tmp[:]) & (math.MaxUint64 >> (64 - (params.H - params.H/params.D))))
-	}
-
-	if len(tmp_idx_leaf) > 0 {
-		var tmp [4]byte
-		copy(tmp[:], tmp_idx_leaf)
-		idx_leaf = int(util.BytesToUint32(tmp[:]) & (math.MaxUint32 >> (32 - params.H/params.D)))
+	tmp_md, idx_tree, idx_leaf, err := splitDigest(params, digest)
+	if err != nil {
+		return false
 	}
 
 	// compute FORS public key
@@ -284,7 +283,8 @@ func Spx_verify(params *parameters.Parameters, M []byte, SIG *SPHINCS_SIG, PK *S
 	adrs.SetType(address.FORS_TREE)
 	adrs.SetKeyPairAddress(idx_leaf)
 
-	// This ensures that we avoid side effects modifying PK
+	// Private copies (lengths are exactly N, checked above) so nothing below
+	// can modify the caller's public key.
 	PKseed := make([]byte, params.N)
 	copy(PKseed, PK.PKseed)
 	PKroot := make([]byte, params.N)
@@ -292,18 +292,16 @@ func Spx_verify(params *parameters.Parameters, M []byte, SIG *SPHINCS_SIG, PK *S
 
 	PK_FORS, err := fors.Fors_pkFromSig(params, SIG_FORS, tmp_md, PKseed, adrs)
 	if err != nil {
-		// Verification failed due to error
 		return false
 	}
 
 	// verify HT signature
 	adrs.SetType(address.TREE)
 
-	valid, err := hypertree.Ht_verify(params, PK_FORS, SIG_HT, PKseed, idx_tree, idx_leaf, PKroot)
+	ok, err := hypertree.Ht_verify(params, PK_FORS, SIG_HT, PKseed, idx_tree, idx_leaf, PKroot)
 	if err != nil {
-		// Verification failed due to error
 		return false
 	}
 
-	return valid
+	return ok
 }

@@ -1,7 +1,7 @@
 // Copyright (c) 2024-present Sphinx Core Dev
 // MIT License https://opensource.org/license/mit
 
-// go/src/crypto/STHINCS/address/sha256.go
+// go/src/crypto/STHINCS/tweakable/sha256.go
 package tweakable
 
 import (
@@ -50,23 +50,32 @@ func (h *Sha256Tweak) PRFmsg(SKprf []byte, OptRand []byte, M []byte) []byte {
 }
 
 // Tweakable hash function F
+//
+// Robust masks tmp with an MGF1 bitmask before hashing. Any other Variant
+// value is treated as Simple (tmp is hashed as-is) — never as "no input", so
+// tmp always reaches the hash.
 func (h *Sha256Tweak) F(PKseed []byte, adrs *address.ADRS, tmp []byte) []byte {
-	var M1 []byte
 	compressedADRS := compressADRS(adrs)
 
+	M1 := tmp
 	if h.Variant == Robust {
-		bitmask := mgf1sha256(append(PKseed, compressedADRS...), len(tmp))
+		// Build the MGF1 seed in a fresh slice. append(PKseed, ...) would write
+		// the ADRS bytes into PKseed's spare capacity whenever cap > len,
+		// mutating the caller's backing array (and racing across goroutines
+		// that share one PKseed).
+		seed := make([]byte, 0, len(PKseed)+len(compressedADRS))
+		seed = append(seed, PKseed...)
+		seed = append(seed, compressedADRS...)
+		bitmask := mgf1sha256(seed, len(tmp))
 		M1 = make([]byte, len(tmp))
 		_ = subtle.XORBytes(M1, tmp, bitmask)
-	} else if h.Variant == Simple {
-		M1 = tmp
 	}
 
-	bytes := make([]byte, 64-h.N)
+	pad := make([]byte, 64-h.N)
 
 	hash := sha256.New()
 	hash.Write(PKseed)
-	hash.Write(bytes)
+	hash.Write(pad)
 	hash.Write(compressedADRS)
 	hash.Write(M1)
 	return hash.Sum(nil)[:h.N]

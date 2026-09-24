@@ -30,17 +30,26 @@ import (
 //     attacker must break BOTH primitives, not just the weaker one, to
 //     produce two distinct inputs with the same SphinxHash output.
 //
-// Pre-image resistance is explicitly OUT of scope for this version. v1 spent
-// most of its runtime (two Argon2id calls plus a 1000-round SHAKE256 mixing
-// loop) hardening pre-image search, which this redesign deliberately does
-// not pay for. What's left is 3 fast hash calls per digest instead of ~2000+
-// hash/Argon2 operations, and no external Argon2 dependency.
+// Pre-image resistance is not a DESIGN GOAL of this version (v1 spent most of
+// its runtime on Argon2id and a 1000-round mixing loop hardening pre-image
+// search, which this redesign deliberately does not pay for). That is a
+// statement about what the construction is argued to provide, not a claim
+// that it is weak: it still ends in 256-bit primitives, and callers such as
+// STHINCS (whose WOTS+ chains rely on one-wayness) should not read "out of
+// scope" as "safe to break". What's left is 3 fast hash calls per digest
+// instead of ~2000+ hash/Argon2 operations, and no external Argon2
+// dependency.
 //
 // DESIGN
 //
 //	A   = SHA256(SHA256(key || 0x01 || data))     // Bitcoin-style double hash
 //	B   = SHAKE256(key || 0x02 || data), 32 bytes // independent of A
 //	out = SHAKE256(0x03 || A || B), Size() bytes  // concatenate, then squeeze
+//
+// Inputs larger than 1 MB are first compressed to a 64-byte prehash and then
+// run through the same construction under DIFFERENT domain tags (0x11/0x12,
+// prehash tag 0x10) so a large input can never collide with a small input
+// that happens to equal its prehash. See hashData.
 //
 // Why this gets both properties:
 //
@@ -97,17 +106,35 @@ import (
 // requires a coordinated protocol version bump, not a drop-in swap.
 // =============================================================================
 
-// Domain-separation tags. Distinct, fixed single-byte prefixes make H1, H2,
-// and the final compression independent functions of (key, data) even
-// though all three are ultimately built from the same inputs. Without these,
-// an attacker could try to relate the branches to each other; with them,
-// each branch is a differently-labeled instance of its primitive.
+// Domain-separation tags. Distinct, fixed single-byte prefixes make the two
+// branches and the final compression independent functions of (key, data)
+// even though all three are ultimately built from the same inputs. Without
+// these, an attacker could try to relate the branches to each other; with
+// them, each branch is a differently-labeled instance of its primitive.
+//
+// The key is fixed per instance, so "key || tag || ..." is unambiguous: the
+// tag always sits at the same offset, and inputs under different tags can
+// never produce the same transcript.
 var (
-	domainH1    = []byte{0x01} // HMAC-SHA256 branch
-	domainH2    = []byte{0x02} // SHAKE256 branch
+	domainH1    = []byte{0x01} // branch A tag: double SHA-256
+	domainH2    = []byte{0x02} // branch B tag: SHAKE256
 	domainFinal = []byte{0x03} // final compress/expand step
 	domainCache = []byte{0x00} // cache-key derivation (kept disjoint from 0x01-0x03)
+
+	// Large-input path (> maxHashInputSize). The 64-byte prehash that
+	// replaces the data must NOT be indistinguishable from a genuine 64-byte
+	// input: the key is public, so anyone can compute the prehash of a big
+	// file, and without separate tags hash(bigFile) == hash(prehash(bigFile))
+	// — a trivial second preimage. Separate tags make the two transcripts
+	// differ at the tag byte.
+	domainPre     = []byte{0x10} // prehash absorb tag
+	domainH1Large = []byte{0x11} // branch A tag for prehashed input
+	domainH2Large = []byte{0x12} // branch B tag for prehashed input
 )
+
+// maxHashInputSize is the largest input hashed directly; anything bigger is
+// prehashed with a streaming SHAKE256 pass so memory stays bounded.
+const maxHashInputSize = 1 << 20 // 1 MB
 
 // NewSphinxHash creates a new, DETERMINISTIC SphinxHash with a specific bit
 // size for the hash.
@@ -119,10 +146,11 @@ var (
 // GetHash(data) always returns the same bytes, no matter which instance or
 // process computed it.
 //
-// v2 REDESIGN: key is used directly as the HMAC/SHAKE key — there is no KDF
-// step (v1 ran this through Argon2id). A nil/empty key is still rejected: a
-// deterministic hasher is meaningless without a fixed key, and callers that
-// actually want per-instance randomness should call NewSphinxHashKeyed.
+// v2 REDESIGN: key is used directly as the prefix key for the SHA-256 and
+// SHAKE256 branches — there is no KDF step (v1 ran this through Argon2id). A
+// nil/empty key is still rejected: a deterministic hasher is meaningless
+// without a fixed key, and callers that actually want per-instance
+// randomness should call NewSphinxHashKeyed.
 func NewSphinxHash(bitSize int, key []byte) (*SphinxHash, error) {
 	if bitSize != 256 && bitSize != 384 && bitSize != 512 {
 		return nil, fmt.Errorf("spxhash: unsupported bitSize %d (must be 256, 384, or 512)", bitSize)
@@ -242,6 +270,8 @@ func (s *SphinxHash) GetHash(data []byte) []byte {
 // itself: GetHashUncached(data) and GetHash(data) return byte-identical
 // output, this just never looks anything up or stores anything.
 //
+// Safe for concurrent use: it only reads s.key and s.bitSize.
+//
 // Do not use this for call sites that DO see repeated inputs (e.g. a
 // Merkle tree with reused leaf values, or SpxHash's own package-level
 // singleton serving arbitrary callers) — those want GetHash's cache.
@@ -281,12 +311,19 @@ func (s *SphinxHash) Reset() {
 // length-extension resistance and dual (SHA-256 + SHAKE256) collision
 // resistance without a KDF or a mixing-round loop.
 func (s *SphinxHash) hashData(data []byte) []byte {
+	tagA, tagB := domainH1, domainH2
+
 	// Large-payload path (e.g. a fallback CID over a >1 MB file): pre-absorb
 	// with a streaming SHAKE256 pass so memory stays bounded. This mirrors
 	// v1's large-input handling but without the Argon2 step.
-	const maxHashInputSize = 1 << 20 // 1 MB
+	//
+	// The prehash is keyed and domain-tagged, and the A/B branches below then
+	// run under their own "large" tags, so hash(bigInput) can never equal
+	// hash(x) for any small input x — including x = the prehash itself.
 	if len(data) > maxHashInputSize {
 		pre := sha3.NewShake256()
+		pre.Write(domainPre)
+		pre.Write(s.key)
 		const writeChunk = 1 << 18 // 256 KiB per Write
 		for off := 0; off < len(data); off += writeChunk {
 			end := off + writeChunk
@@ -295,12 +332,12 @@ func (s *SphinxHash) hashData(data []byte) []byte {
 			}
 			pre.Write(data[off:end])
 		}
-		pre.Write(s.key)
 		digest := make([]byte, 64)
 		if _, err := pre.Read(digest); err != nil {
 			panic(fmt.Sprintf("spxhash: failed to read large-input prehash: %v", err))
 		}
 		data = digest
+		tagA, tagB = domainH1Large, domainH2Large
 	}
 
 	// A: SHA256(SHA256(key || tag || data)) — Bitcoin-style double hash, 32
@@ -309,7 +346,7 @@ func (s *SphinxHash) hashData(data []byte) []byte {
 	// never exposes.
 	innerA := sha256.New()
 	innerA.Write(s.key)
-	innerA.Write(domainH1)
+	innerA.Write(tagA)
 	innerA.Write(data)
 	a := sha256.Sum256(innerA.Sum(nil))
 
@@ -318,7 +355,7 @@ func (s *SphinxHash) hashData(data []byte) []byte {
 	// own regardless of keying).
 	shakeB := sha3.NewShake256()
 	shakeB.Write(s.key)
-	shakeB.Write(domainH2)
+	shakeB.Write(tagB)
 	shakeB.Write(data)
 	b := make([]byte, 32)
 	if _, err := shakeB.Read(b); err != nil {

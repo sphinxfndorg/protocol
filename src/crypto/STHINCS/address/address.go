@@ -330,9 +330,12 @@ func (adrs *ADRS) GetType() int {
 	return int(typeUint32)
 }
 
-// GetTreeAddress returns the tree address as integer
+// GetTreeAddress returns the tree address as integer.
+//
+// TreeAddress is a 12-byte big-endian field (see SetTreeAddress, which uses
+// util.ToByte(a, 12)), so the value a uint64 can hold lives in its LOW 8
+// bytes, [4:12]. This used to read bytes [0:8], which returned tree>>32 —
+// i.e. always 0 for every tree index these parameter sets produce.
 func (adrs *ADRS) GetTreeAddress() int {
-	treeAddressBytes := adrs.TreeAddress[:]
-	treeAddressUint64 := binary.BigEndian.Uint64(treeAddressBytes)
-	return int(treeAddressUint64)
+	return int(binary.BigEndian.Uint64(adrs.TreeAddress[4:12]))
 }

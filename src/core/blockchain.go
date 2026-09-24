@@ -873,14 +873,14 @@ func (bc *Blockchain) StoreChainState(nodes []*storage.NodeInfo) error {
 			}
 			policy := bc.ActivePolicy()
 			chainState.BurnState = &storage.BurnState{
-				BurnAddress:         common.DefaultBurnAddress,
-				BurnedNSPX:          burnedNSPX.String(),
-				BurnedSPX:           new(big.Float).Quo(new(big.Float).SetInt(burnedNSPX), new(big.Float).SetInt(big.NewInt(1e18))).Text('f', 18),
-				CirculatingNSPX:     circulatingNSPX.String(),
-				CirculatingSPX:      new(big.Float).Quo(new(big.Float).SetInt(circulatingNSPX), new(big.Float).SetInt(big.NewInt(1e18))).Text('f', 18),
-				FeeBurnBPS:          policy.BurnFeeBPS,
+				BurnAddress:        common.DefaultBurnAddress,
+				BurnedNSPX:         burnedNSPX.String(),
+				BurnedSPX:          new(big.Float).Quo(new(big.Float).SetInt(burnedNSPX), new(big.Float).SetInt(big.NewInt(1e18))).Text('f', 18),
+				CirculatingNSPX:    circulatingNSPX.String(),
+				CirculatingSPX:     new(big.Float).Quo(new(big.Float).SetInt(circulatingNSPX), new(big.Float).SetInt(big.NewInt(1e18))).Text('f', 18),
+				FeeBurnBPS:         policy.BurnFeeBPS,
 				BlockRewardBurnBPS: policy.BlockRewardBurnBPS,
-				UpdatedAt:           common.GetTimeService().GetCurrentTimeInfo().ISOUTC,
+				UpdatedAt:          common.GetTimeService().GetCurrentTimeInfo().ISOUTC,
 			}
 		}
 	}
@@ -2172,7 +2172,8 @@ func (bc *Blockchain) initializeChain() error {
 	// First, try to get the latest block
 	latestBlock, err := bc.storage.GetLatestBlock()
 	if err != nil {
-		logger.Warn("Warning: Could not load initial state: %v", err)
+		// No chain stored yet is the expected first-boot case, not a problem.
+		logger.Debug("Could not load initial state: %v", err)
 
 		// Create genesis block
 		logger.Info("No existing chain found, creating genesis block")
@@ -2419,7 +2420,11 @@ func (bc *Blockchain) GetBlockByNumber(height uint64) *types.Block {
 	// Fall back to storage
 	block, err := bc.storage.GetBlockByHeight(height)
 	if err != nil {
-		logger.Warn("Error getting block by height %d: %v", height, err)
+		if bc.lateJoiner && len(bc.chain) == 0 {
+			logger.Debug("Error getting block by height %d during late-joiner genesis sync: %v", height, err)
+		} else {
+			logger.Warn("Error getting block by height %d: %v", height, err)
+		}
 		return nil
 	}
 	return block

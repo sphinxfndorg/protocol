@@ -403,7 +403,7 @@ func runSendTxCmd(args []string) error {
 func runGetBalanceCmd(args []string) error {
 	fs := flag.NewFlagSet("get-balance", flag.ExitOnError)
 
-	rpcURL := fs.String("rpc", "http://127.0.0.1:8545", "JSON-RPC endpoint")
+	rpcURL := fs.String("rpc", "127.0.0.1:8700", "wallet JSON-RPC address (host:port)")
 	address := fs.String("address", "", "Address to query (required)")
 
 	if err := fs.Parse(args); err != nil {

@@ -207,26 +207,29 @@ func SendTransaction(opts SendTxOptions) error {
 	return nil
 }
 
-// GetBalance queries the balance of an address via HTTP JSON-RPC
+// GetBalance queries the balance of an address via the canonical wallet
+// JSON-RPC method.
 func GetBalance(opts GetBalanceOptions) error {
 	logger := getLogger()
 	logger.Infof("Querying balance for address: %s", opts.Address)
 
-	var balanceHex string
-	err := CallRPC(opts.RPCURL, "sphinx_getBalance", []interface{}{opts.Address, "latest"}, &balanceHex)
+	var response struct {
+		Balance string `json:"balance"`
+	}
+	raw, err := rpc.CallRPC(opts.RPCURL, "getbalance", []interface{}{opts.Address}, 30)
 	if err != nil {
-		return fmt.Errorf("failed to get balance: %v", err)
+		return fmt.Errorf("failed to get balance: %w", err)
+	}
+	if err := json.Unmarshal(raw, &response); err != nil {
+		return fmt.Errorf("failed to decode balance response: %w", err)
 	}
 
-	balanceHex = strings.TrimPrefix(balanceHex, "0x")
-	balanceBig := new(big.Int)
-	balanceBig, ok := balanceBig.SetString(balanceHex, 16)
+	balanceNSPX, ok := new(big.Int).SetString(response.Balance, 10)
 	if !ok {
-		return fmt.Errorf("failed to parse balance: %s", balanceHex)
+		return fmt.Errorf("failed to parse balance: %s", response.Balance)
 	}
-
 	spxBalance := new(big.Float).Quo(
-		new(big.Float).SetInt(balanceBig),
+		new(big.Float).SetInt(balanceNSPX),
 		new(big.Float).SetFloat64(1e18),
 	)
 

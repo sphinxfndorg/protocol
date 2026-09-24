@@ -1215,7 +1215,7 @@ func (bc *Blockchain) GetCheckpointMessage() (*consensus.CheckpointMessage, erro
 	defer bc.lock.RUnlock()
 
 	if len(bc.chain) == 0 {
-		logger.Error("GetCheckpointMessage: no blocks in chain")
+		logger.Debug("GetCheckpointMessage: no local chain yet; checkpoint unavailable until genesis sync")
 		return nil, errors.New("no blocks in chain")
 	}
 
@@ -1282,8 +1282,8 @@ func (bc *Blockchain) ApplyCheckpointFromPeer(cp *consensus.CheckpointMessage) e
 	defer bc.lock.Unlock()
 
 	if len(bc.chain) == 0 {
-		logger.Error("ApplyCheckpointFromPeer: no chain to apply checkpoint to")
-		return errors.New("no chain to apply checkpoint to")
+		logger.Debug("ApplyCheckpointFromPeer: no local chain yet; ignoring checkpoint until genesis sync")
+		return nil
 	}
 
 	// Verify genesis hash matches
@@ -1333,8 +1333,19 @@ func (bc *Blockchain) SyncCheckpoints(peerAddress string) error {
 
 	cp, err := bc.rpcCaller.GetCheckpoint(peerAddress)
 	if err != nil {
-		logger.Error("SyncCheckpoints: failed to get checkpoint from peer: %v", err)
-		return errors.New("failed to get checkpoint from peer")
+		// ★ FIX: expected, non-fatal, and retried by the caller. This is
+		// reached whenever a configured peer's wallet/JSON-RPC listener is not
+		// up yet — the normal case while a same-box network is starting, since
+		// every node dials the others on first boot. At ERROR level it meant
+		// every node printed "dial 127.0.0.1:8701: connect: connection
+		// refused" as a hard failure during a completely healthy startup, and
+		// the runCheckpointSyncLoop caller (which retries every 30s and owns
+		// the user-visible outcome) already logs the real result. Keep the
+		// peer address in the message so a persistent failure is still
+		// diagnosable at Debug, and return a descriptive error for callers to
+		// decide how loudly to report it.
+		logger.Debug("SyncCheckpoints: could not reach peer %s: %v", peerAddress, err)
+		return fmt.Errorf("failed to get checkpoint from peer %s: %w", peerAddress, err)
 	}
 
 	return bc.ApplyCheckpointFromPeer(cp)
@@ -1474,10 +1485,11 @@ func (bc *Blockchain) CreateBlock() (block *types.Block, err error) {
 			return nil, fmt.Errorf("failed to select transactions: %w", err)
 		}
 	} else {
-		// Dump full pool state so we can tell whether the mempool is truly
-		// empty or transactions are stuck mid-pipeline (broadcast/validation).
+		// Idle-block dump. Expected on a quiet devnet (a 10s block interval
+		// with no traffic), so keep it at debug level rather than warning on
+		// every produced empty block.
 		broadcast, validating, pending, invalid, all := bc.mempool.MempoolSnapshot()
-		logger.Warn("Mempool pendingPool empty — snapshot: broadcast=%d validating=%d pending=%d invalid=%d all=%d",
+		logger.Debug("Mempool pendingPool empty — snapshot: broadcast=%d validating=%d pending=%d invalid=%d all=%d",
 			broadcast, validating, pending, invalid, all)
 	}
 

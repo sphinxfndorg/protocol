@@ -7,7 +7,6 @@ package security
 import (
 	"crypto/rand"
 	"crypto/sha512"
-	"encoding/hex"
 	"errors"
 	"io"
 	"log"
@@ -72,8 +71,11 @@ func PerformKEM(conn net.Conn, isInitiator bool) (*EncryptionKey, error) {
 		}
 	}
 
-	// Log the derived X25519 shared secret (first 16 bytes shown)
-	log.Printf("X25519 shared: %s", hex.EncodeToString(xShared[:16]))
+	// SECURITY: never log key material. The derived shared secret is
+	// sufficient to decrypt all session traffic; printing even a prefix of it
+	// to stdout discloses it to every log collector and terminal scrollback.
+	// Log only the fact and size of the derivation.
+	log.Printf("X25519 shared secret derived (%d bytes)", len(xShared))
 
 	// ----------- Kyber768 Post-Quantum KEM -----------
 	scheme := kyber768.Scheme() // Use Kyber768 from CIRCL
@@ -131,8 +133,8 @@ func PerformKEM(conn net.Conn, isInitiator bool) (*EncryptionKey, error) {
 		kemShared = shared
 	}
 
-	// Log the Kyber768 shared secret (first 16 bytes shown)
-	log.Printf("Kyber768 shared: %s", hex.EncodeToString(kemShared[:16]))
+	// SECURITY: never log key material (see the X25519 note above).
+	log.Printf("Kyber768 shared secret derived (%d bytes)", len(kemShared))
 
 	// ----------- Combine X25519 and Kyber Shared Secrets -----------
 	combined := append(xShared, kemShared...) // Concatenate both secrets

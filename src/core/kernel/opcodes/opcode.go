@@ -298,9 +298,9 @@ func ExecuteOp(op OpCode, stack *Stack, memory []byte, code []byte, pc *uint64) 
 	// SphinxHash (0x10) - Custom hash function for Sphinx protocol
 	// Used for commitment generation and Merkle tree operations
 	// This implementation uses the spxhash package for the custom Sphinx hash
-	// The hash is computed on the input data from the stack
+	// The hash is computed on the input data read from linear memory.
 	case SphinxHash:
-		return executeSphinxHashOp(stack)
+		return executeSphinxHashOp(stack, memory)
 
 	// SHA3_256 (0x11) - SHA3-256 hash function
 	// Used for commitment verification: commitment = SHA3_256(sigBytes || pkBytes || timestamp || nonce || message)
@@ -503,27 +503,43 @@ func ExecuteOp(op OpCode, stack *Stack, memory []byte, code []byte, pc *uint64) 
 // SphinxHash is a combination of SHA2-256 and SHAKE256, optimized for large data sizes (>1MB)
 // It is faster than standard hash functions for processing large amounts of data
 //
-// The function pops a size parameter from the stack, creates a zero-filled buffer of that size,
-// computes the Sphinx hash using common.SpxHash, and pushes the first 8 bytes of the result
+// The function reads the actual input bytes from the VM's linear memory. It
+// pops a memory pointer and a size (in that stack order: size on top), hashes
+// memory[ptr : ptr+size] with common.SpxHash, and pushes the first 8 bytes of
+// the result as a uint64.
 //
-// Performance note: For large data sizes (>1MB), SphinxHash is designed to be efficient
-// and faster than SHA3-256 or SHAKE256 alone due to its internal optimization.
+// SECURITY: the previous implementation ignored memory entirely and hashed a
+// zero-filled buffer of the requested size, so every call with the same size
+// produced the same "hash". Consensus signing used this as the byte string a
+// SPHINCS+ signature commits to, which made every proposal/vote/timeout of a
+// given length share one constant digest — signatures were effectively bound
+// to nothing and could be replayed across heights, views and phases. Reading
+// the real bytes is what makes the digest content-dependent.
 //
 // Stack operation:
 //
-//	Before: ... [size]
+//	Before: ... [ptr] [size]
 //	After:  ... [hash_prefix] (first 8 bytes of hash as uint64)
-func executeSphinxHashOp(stack *Stack) error {
+func executeSphinxHashOp(stack *Stack, memory []byte) error {
 	// Pop the size parameter from the stack (number of bytes to hash)
 	size, err := stack.Pop()
 	if err != nil {
 		return err // Stack underflow - no size parameter
 	}
 
-	// Create a byte slice of the specified size filled with zeros
-	// This is the input data for the Sphinx hash function
-	// For large sizes (>1MB), SphinxHash internally processes this efficiently
-	data := make([]byte, size)
+	// Pop the pointer to the input data in linear memory.
+	ptr, err := stack.Pop()
+	if err != nil {
+		return err // Stack underflow - no data pointer
+	}
+
+	// Bounds-check before slicing so malformed bytecode cannot panic the node.
+	if ptr > uint64(len(memory)) || size > uint64(len(memory)) || ptr+size > uint64(len(memory)) {
+		return fmt.Errorf("sphinx hash out of bounds: ptr=%d size=%d mem_len=%d", ptr, size, len(memory))
+	}
+
+	// The actual input data, read from VM memory (NOT a zero buffer).
+	data := memory[ptr : ptr+size]
 
 	// Compute the Sphinx hash using common.SpxHash
 	// SpxHash combines SHA2-256 and SHAKE256 for optimal performance

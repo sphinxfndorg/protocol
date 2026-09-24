@@ -5,11 +5,15 @@
 package main
 
 import (
+	"fmt"
+	"os"
+
 	"github.com/sphinxfndorg/protocol/src/cli/utils"
 )
 
 func main() {
 	if err := utils.Execute(); err != nil {
-		panic(err)
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
 }

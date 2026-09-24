@@ -13,6 +13,7 @@ import (
 	"fmt"
 
 	"github.com/holiman/uint256"
+	common "github.com/sphinxfndorg/protocol/src/common"
 	logger "github.com/sphinxfndorg/protocol/src/console"
 	svm "github.com/sphinxfndorg/protocol/src/core/kernel/opcodes"
 	vmachine "github.com/sphinxfndorg/protocol/src/core/kernel/vm"
@@ -62,6 +63,25 @@ func (s *SigningService) RegisterPublicKey(nodeID string, publicKey *sthincs.SPH
 	// Store the public key associated with the node ID
 	s.publicKeyRegistry[nodeID] = publicKey
 	fmt.Printf("Registered public key for node %s\n", nodeID)
+}
+
+// GetRegisteredPublicKey returns the public key already bound to nodeID, if
+// any. Peer admission (src/bind) uses this to enforce node_id ↔ key binding:
+// the first handshaked key for an identity pins it, and any later handshake
+// claiming the same node_id with a different key is rejected before
+// RegisterPublicKey can overwrite the binding.
+func (s *SigningService) GetRegisteredPublicKey(nodeID string) (*sthincs.SPHINCS_PK, bool) {
+	s.registryMutex.RLock()
+	defer s.registryMutex.RUnlock()
+
+	if s.publicKeyRegistry == nil {
+		return nil, false
+	}
+	pk, ok := s.publicKeyRegistry[nodeID]
+	if !ok || pk == nil {
+		return nil, false
+	}
+	return pk, true
 }
 
 // BytesToUint256 converts a byte slice to uint256.Int.
@@ -436,7 +456,7 @@ func (s *SigningService) SignProposal(proposal *Proposal) error {
 		return fmt.Errorf("failed to hash proposal: %w", err)
 	}
 
-	logger.Info("SIGNING PROPOSAL for node %s - Hash (from VM): %x", s.nodeID, dataHash)
+	logger.Info("SIGNING PROPOSAL for node %s - Hash: %x", s.nodeID, dataHash)
 
 	// Sign the hash
 	signedData, err := s.SignMessage(dataHash)
@@ -507,7 +527,7 @@ func (s *SigningService) SignVote(vote *Vote) error {
 		return fmt.Errorf("failed to hash vote: %w", err)
 	}
 
-	logger.Info("SIGNING VOTE for node %s - Hash (from VM): %x", s.nodeID, dataHash)
+	logger.Info("SIGNING VOTE for node %s - Hash: %x", s.nodeID, dataHash)
 
 	signature, err := s.SignMessage(dataHash)
 	if err != nil {
@@ -525,8 +545,29 @@ func (s *SigningService) SignVote(vote *Vote) error {
 }
 
 // VerifyVote verifies a vote signature using VM.
-// This ensures that a vote was actually signed by the claimed voter.
+// This ensures that a vote was actually signed by the claimed voter, AND that
+// the signature is bound to this exact vote (view + block hash + voter id).
+//
+// Content binding matters: the raw SPHINCS+ signature only proves "the holder
+// of voterID's key signed SignedMessage.Data". Without recomputing that Data
+// from the vote's own fields, a signature captured for one (view, block) could
+// be replayed verbatim as a vote for any other block at any height.
 func (s *SigningService) VerifyVote(vote *Vote) (bool, error) {
+	signedMsg, err := DeserializeSignedMessage(vote.Signature)
+	if err != nil {
+		return false, fmt.Errorf("failed to deserialize vote signature: %w", err)
+	}
+
+	expectedDigest, err := s.serializeVoteForSigning(vote)
+	if err != nil {
+		return false, fmt.Errorf("failed to hash vote: %w", err)
+	}
+	if !bytes.Equal(signedMsg.Data, expectedDigest) {
+		logger.Warn("Vote signature data mismatch — rejecting replay for voter %s (view=%d, block=%s)",
+			vote.VoterID, vote.View, vote.BlockHash)
+		return false, fmt.Errorf("vote signature does not bind to vote content")
+	}
+
 	// Verify the cryptographic signature using the voter's public key
 	valid, err := s.VerifySignature(vote.Signature, vote.VoterID)
 	if err != nil {
@@ -536,8 +577,7 @@ func (s *SigningService) VerifyVote(vote *Vote) (bool, error) {
 	// Log success with signature hash for traceability
 	if valid {
 		// Deserialize to get signature hash for logging
-		signedMsg, err := DeserializeSignedMessage(vote.Signature)
-		if err == nil && len(signedMsg.SignatureHash) > 0 {
+		if len(signedMsg.SignatureHash) > 0 {
 			sigHashHex := hex.EncodeToString(signedMsg.SignatureHash)
 			logger.Info("Valid vote signature from %s (signature hash: %s...)",
 				vote.VoterID, sigHashHex[:min(16, len(sigHashHex))])
@@ -559,7 +599,7 @@ func (s *SigningService) SignTimeout(timeout *TimeoutMsg) error {
 		return fmt.Errorf("failed to hash timeout: %w", err)
 	}
 
-	logger.Info("SIGNING TIMEOUT for node %s - Hash (from VM): %x", s.nodeID, dataHash)
+	logger.Info("SIGNING TIMEOUT for node %s - Hash: %x", s.nodeID, dataHash)
 
 	signature, err := s.SignMessage(dataHash)
 	if err != nil {
@@ -571,8 +611,24 @@ func (s *SigningService) SignTimeout(timeout *TimeoutMsg) error {
 }
 
 // VerifyTimeout verifies a timeout signature using VM.
-// This ensures that a timeout message was actually signed by the claimed voter.
+// This ensures that a timeout message was actually signed by the claimed voter,
+// and that the signature is bound to this exact timeout (view + voter + time).
 func (s *SigningService) VerifyTimeout(timeout *TimeoutMsg) (bool, error) {
+	signedMsg, err := DeserializeSignedMessage(timeout.Signature)
+	if err != nil {
+		return false, fmt.Errorf("failed to deserialize timeout signature: %w", err)
+	}
+
+	expectedDigest, err := s.serializeTimeoutForSigning(timeout)
+	if err != nil {
+		return false, fmt.Errorf("failed to hash timeout: %w", err)
+	}
+	if !bytes.Equal(signedMsg.Data, expectedDigest) {
+		logger.Warn("Timeout signature data mismatch — rejecting replay for voter %s (view=%d)",
+			timeout.VoterID, timeout.View)
+		return false, fmt.Errorf("timeout signature does not bind to timeout content")
+	}
+
 	// Verify the cryptographic signature using the voter's public key
 	valid, err := s.VerifySignature(timeout.Signature, timeout.VoterID)
 	if err != nil {
@@ -581,9 +637,7 @@ func (s *SigningService) VerifyTimeout(timeout *TimeoutMsg) (bool, error) {
 
 	// Log success with signature hash for traceability
 	if valid {
-		// Deserialize to get signature hash for logging
-		signedMsg, err := DeserializeSignedMessage(timeout.Signature)
-		if err == nil && len(signedMsg.SignatureHash) > 0 {
+		if len(signedMsg.SignatureHash) > 0 {
 			sigHashHex := hex.EncodeToString(signedMsg.SignatureHash)
 			logger.Info("Valid timeout signature from %s (signature hash: %s...)",
 				timeout.VoterID, sigHashHex[:min(16, len(sigHashHex))])
@@ -595,50 +649,32 @@ func (s *SigningService) VerifyTimeout(timeout *TimeoutMsg) (bool, error) {
 	return valid, nil
 }
 
-// executeSphinxHashInVM executes the SphinxHash opcode in the VM and returns the hash
-func (s *SigningService) executeSphinxHashInVM(data []byte) ([]byte, error) {
-	// Build bytecode: Push data, execute SphinxHash, result is on stack
-	vmBytecode := []byte{}
+// sphinxHashConsensusMessage computes the full 256-bit SphinxHash digest of
+// the exact bytes a consensus signature must commit to.
+//
+// It deliberately does NOT go through the VM's SphinxHash opcode. That opcode
+// surfaces only the first 64 bits of the hash as a uint64 on the VM stack
+// (see executeSphinxHashOp), which is not collision-resistant enough to bind a
+// signature to its (view, block, phase) context: an attacker who finds a
+// 64-bit collision could replay one consensus signature as another. Signing and
+// verification both call this helper, so the signed digest is the full 32-byte
+// hash of the message bytes, domain-separated by message type.
+func sphinxHashConsensusMessage(messageType string, message []byte) ([]byte, error) {
+	// Length-prefix the domain separator so the concatenation can never be
+	// ambiguous: type "VOTE" + payload "X" must not collide with
+	// type "VOTEX" + payload "".
+	payload := make([]byte, 0, 1+len(messageType)+len(message))
+	payload = append(payload, byte(len(messageType)&0xFF))
+	payload = append(payload, messageType...)
+	payload = append(payload, message...)
 
-	// Push data length
-	vmBytecode = append(vmBytecode, byte(svm.PUSH4))
-	vmBytecode = append(vmBytecode, uint32ToBytes(uint32(len(data)))...)
-
-	// Push data pointer (memory location 0)
-	vmBytecode = append(vmBytecode, byte(svm.PUSH4))
-	vmBytecode = append(vmBytecode, uint32ToBytes(0)...)
-
-	// Execute SphinxHash - pushes first 8 bytes of hash as uint64
-	vmBytecode = append(vmBytecode, byte(svm.SphinxHash))
-
-	// Setup memory with input data
-	memoryLayout := make([]byte, len(data))
-	copy(memoryLayout[0:], data)
-
-	// Create and run VM
-	vm := vmachine.NewVM(vmBytecode)
-	if err := vm.SetMemoryBytes(0, memoryLayout); err != nil {
-		return nil, fmt.Errorf("failed to set memory: %w", err)
+	digest := common.SpxHash(payload)
+	if len(digest) == 0 {
+		return nil, fmt.Errorf("sphinx hash returned an empty digest")
 	}
-	if err := vm.Run(); err != nil {
-		return nil, fmt.Errorf("VM execution failed: %w", err)
-	}
-
-	// Get result from stack (first 8 bytes as uint64)
-	result, err := vm.GetResult()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get result: %w", err)
-	}
-
-	// Convert uint64 to 8-byte slice
-	hash8Bytes := make([]byte, 8)
-	for i := 0; i < 8; i++ {
-		hash8Bytes[7-i] = byte(result >> (i * 8))
-	}
-
-	// For a full 32-byte hash, we'd need multiple calls or a different approach
-	// For signing, 8 bytes is sufficient for uniqueness
-	return hash8Bytes, nil
+	out := make([]byte, len(digest))
+	copy(out, digest)
+	return out, nil
 }
 
 // serializeProposalForSigning creates a deterministic byte string from a proposal.
@@ -700,30 +736,32 @@ func (s *SigningService) serializeProposalForSigning(proposal *Proposal) ([]byte
 	logger.Info("PROPOSAL SIGNING MESSAGE (view=%d, height=%d): %s",
 		proposal.View, tb.Header.Height, signingMsg)
 
-	// Execute SphinxHash in VM on the canonical message
-	return s.executeSphinxHashInVM([]byte(signingMsg))
+	// Hash the canonical message with a domain separator so a proposal
+	// signature can never be replayed as a vote (or vice versa).
+	return sphinxHashConsensusMessage("proposal", []byte(signingMsg))
 }
 
 // serializeVoteForSigning creates a deterministic byte string from a vote.
-// Uses VM execution with SphinxHash opcode.
+// The vote binds to its view, the block hash of the block being voted for, and
+// the voter ID, all hashed into a full SphinxHash digest.
 func (s *SigningService) serializeVoteForSigning(vote *Vote) ([]byte, error) {
 	dataStr := fmt.Sprintf("VOTE:%d:%s:%s",
 		vote.View,
 		vote.BlockHash,
 		vote.VoterID)
 
-	return s.executeSphinxHashInVM([]byte(dataStr))
+	return sphinxHashConsensusMessage("vote", []byte(dataStr))
 }
 
 // serializeTimeoutForSigning creates a deterministic byte string from a timeout.
-// Uses VM execution with SphinxHash opcode.
+// The timeout binds to its view, the voter ID, and the timeout timestamp.
 func (s *SigningService) serializeTimeoutForSigning(timeout *TimeoutMsg) ([]byte, error) {
 	dataStr := fmt.Sprintf("TIMEOUT:%d:%s:%d",
 		timeout.View,
 		timeout.VoterID,
 		timeout.Timestamp)
 
-	return s.executeSphinxHashInVM([]byte(dataStr))
+	return sphinxHashConsensusMessage("timeout", []byte(dataStr))
 }
 
 // GetPublicKey returns the public key for this node as bytes.

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -106,15 +107,25 @@ func NewLevelDB(path string) (*DB, error) {
 		return nil, fmt.Errorf("failed to create parent directory for LevelDB at %s: %w", path, err)
 	}
 
-	// Attempt to open the database with retry logic
-	// Multiple attempts to handle temporary issues like stale locks
+	// Attempt to open the database with retry logic.
+	//
+	// SECURITY/SAFETY: we deliberately do NOT delete the LevelDB LOCK file
+	// before opening. goleveldb uses it as an OS advisory lock (flock), which
+	// the kernel releases automatically when the owning process exits — so an
+	// unclean shutdown never leaves a lock that blocks the next open. Deleting
+	// the LOCK file unconditionally therefore buys nothing on the recovery path
+	// and is actively dangerous: if a live process still holds the database
+	// (or the same process already opened this path), removing its lock lets a
+	// second handle open the same files and corrupt them.
+	//
+	// Callers that need BOTH a raw *leveldb.DB and a *DB wrapper for the same
+	// path must therefore open it once and reuse the handle via
+	// NewLevelDBWithHandle — a second OpenFile on the same path fails with
+	// EAGAIN ("resource temporarily unavailable").
+	//
+	// If OpenFile fails because the database really is locked, we surface an
+	// error instead of stealing the lock.
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		// Remove stale lock file before attempting to open
-		// This helps recover from previous unclean shutdowns
-		if err := removeLockFile(path); err != nil {
-			logger.Warn("Failed to remove lock file for LevelDB at %s on attempt %d: %v", path, attempt, err)
-		}
-
 		// Attempt to open the LevelDB database
 		// ErrorIfExist: false allows opening existing database
 		db, err := leveldb.OpenFile(path, &opt.Options{ErrorIfExist: false})
@@ -125,6 +136,19 @@ func NewLevelDB(path string) (*DB, error) {
 				db:    db,             // Underlying LevelDB instance
 				mutex: sync.RWMutex{}, // Read-write mutex for thread safety
 			}, nil
+		}
+
+		// A lock conflict is NOT transient: the flock is held by a live
+		// process (or another handle in this one). Retrying cannot clear it,
+		// and falling through to leveldb.RecoverFile would be worse than
+		// useless — it rewrites the manifest/table files of a database
+		// someone else is actively using. Fail fast with an actionable
+		// message instead.
+		if isLevelDBLockedError(err) {
+			logger.Error("LevelDB at %s is locked by another live process (or another open handle in this process); "+
+				"refusing to remove the lock file or run recovery. Stop the other process (or point this node at a "+
+				"different data directory) and retry.", path)
+			return nil, fmt.Errorf("leveldb at %s is locked: %w", path, err)
 		}
 
 		// Log failure for this attempt
@@ -154,30 +178,42 @@ func NewLevelDB(path string) (*DB, error) {
 	}, nil
 }
 
-// removeLockFile removes the LevelDB LOCK file if it exists.
-// Parameters:
-//   - path: Database directory path
+// NewLevelDBWithHandle wraps an ALREADY-OPEN goleveldb handle in a *DB, using
+// the same directory path for bookkeeping.
 //
-// Returns: Error if removal fails (except when file doesn't exist)
-func removeLockFile(path string) error {
-	// Construct path to the lock file
-	lockFile := filepath.Join(path, "LOCK")
-
-	// Check if lock file exists
-	if _, err := os.Stat(lockFile); os.IsNotExist(err) {
-		// Lock file doesn't exist, nothing to remove
-		return nil
+// It exists because some callers need two views of one database: the raw
+// *leveldb.DB (e.g. sign.NewSTHINCSManager persists SPHINCS+ keys directly
+// through it) and this package's *DB wrapper for the same path. Opening the
+// path twice is not allowed — goleveldb holds an exclusive OS lock on the
+// database directory, so the second OpenFile fails with EAGAIN ("resource
+// temporarily unavailable"), and stealing that lock by deleting the LOCK file
+// is exactly what NewLevelDB refuses to do for safety.
+//
+// The caller keeps ownership of the handle's lifetime: this does not close it.
+func NewLevelDBWithHandle(path string, handle *leveldb.DB) (*DB, error) {
+	if handle == nil {
+		return nil, fmt.Errorf("nil LevelDB handle for %s", path)
 	}
+	return &DB{
+		db:    handle,
+		mutex: sync.RWMutex{},
+	}, nil
+}
 
-	// Attempt to remove the lock file
-	if err := os.Remove(lockFile); err != nil {
-		// Failed to remove lock file
-		return fmt.Errorf("failed to remove lock file at %s: %w", lockFile, err)
+// isLevelDBLockedError reports whether err is goleveldb's "database is locked
+// by another process/handle" failure. On Unix that surfaces as EAGAIN, whose
+// message is "resource temporarily unavailable"; goleveldb's own sentinel is
+// storage.ErrLocked ("leveldb/storage: locked"). Both are checked without
+// importing the storage sub-package, because the raw syscall error is what
+// OpenFile actually returns here (verified on darwin/linux).
+func isLevelDBLockedError(err error) bool {
+	if err == nil {
+		return false
 	}
-
-	// Successfully removed stale lock file
-	logger.Info("Removed stale lock file at %s", lockFile)
-	return nil
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "resource temporarily unavailable") ||
+		strings.Contains(msg, "leveldb: locked") ||
+		strings.Contains(msg, "leveldb/storage: locked")
 }
 
 // Close closes the LevelDB instance.
@@ -275,8 +311,9 @@ func (d *DB) Get(key string) ([]byte, error) {
 	data, err := d.GetQuiet(key)
 	if err != nil {
 		if err == ErrNotFound {
-			// Key doesn't exist in database
-			logger.Warn("Key %s not found in LevelDB", key)
+			// Key doesn't exist in database. This is the normal case for
+			// optional records on a fresh chain, so log at debug.
+			logger.Debug("Key %s not found in LevelDB", key)
 			// Keep the historical message text, and wrap ErrNotFound so
 			// callers can branch on the cause instead of the string.
 			return nil, fmt.Errorf("key %s not found in LevelDB: %w", key, ErrNotFound)

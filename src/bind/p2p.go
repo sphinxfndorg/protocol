@@ -68,8 +68,23 @@ func startP2PServer(name string, server *p2p.Server, readyCh chan<- struct{}, er
 }
 
 // requestPeerListSync asks a single peer "who else do you know about?".
-func requestPeerListSync(peerAddr string, selfNodeID string, selfAddr string) (*peerExchangeMsg, error) {
-	request := peerExchangeMsg{NodeID: selfNodeID, Address: selfAddr}
+//
+// The request is challenge-response authenticated: the responder only
+// returns its peer list after our signature over the responder-chosen nonce
+// (covering our node ID, genesis hash and empty reward field) verifies
+// under the public key we present. A responder that will not challenge us
+// is treated as unauthenticated and its reply is refused.
+func requestPeerListSync(peerAddr string, selfNodeID string, selfAddr string, ownGenesisHash string, signingService *consensus.SigningService) (*peerExchangeMsg, error) {
+	ownPK, err := signingService.GetPublicKey()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get own public key: %v", err)
+	}
+	request := peerExchangeMsg{
+		NodeID:      selfNodeID,
+		Address:     selfAddr,
+		PublicKey:   ownPK,
+		GenesisHash: ownGenesisHash,
+	}
 	requestBytes, err := json.Marshal(request)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal peer exchange request: %v", err)
@@ -90,7 +105,43 @@ func requestPeerListSync(peerAddr string, selfNodeID string, selfAddr string) (*
 		return nil, fmt.Errorf("send failed: %v", err)
 	}
 
+	// Step 1: expect the responder's challenge before any peer list.
 	replyData, err := readFramedMessage(conn)
+	if err != nil {
+		return nil, fmt.Errorf("receive failed: %v", err)
+	}
+	var challenge security.Message
+	if err := json.Unmarshal(replyData, &challenge); err != nil {
+		return nil, fmt.Errorf("decode failed: %v", err)
+	}
+	if challenge.Type != "auth_challenge" {
+		return nil, fmt.Errorf("peer %s did not challenge the peer exchange request (got %q)", peerAddr, challenge.Type)
+	}
+	var ch authChallengeMsg
+	if err := json.Unmarshal(challenge.Data, &ch); err != nil {
+		return nil, fmt.Errorf("decode challenge failed: %v", err)
+	}
+	if len(ch.Nonce) != challengeNonceLen {
+		return nil, fmt.Errorf("peer %s sent an invalid challenge nonce (len=%d)", peerAddr, len(ch.Nonce))
+	}
+
+	// Step 2: prove key possession over the challenge.
+	proof, err := signChallenge(signingService, ch.Nonce, selfNodeID, ownGenesisHash, "")
+	if err != nil {
+		return nil, err
+	}
+	proofBytes, _ := json.Marshal(authProofMsg{Signature: proof})
+	proofMsg := security.Message{Type: "auth_proof", Data: proofBytes}
+	encodedProof, err := proofMsg.Encode()
+	if err != nil {
+		return nil, fmt.Errorf("encode proof failed: %v", err)
+	}
+	if err := writeFramedMessage(conn, encodedProof); err != nil {
+		return nil, fmt.Errorf("send proof failed: %v", err)
+	}
+
+	// Step 3: read the peer list reply.
+	replyData, err = readFramedMessage(conn)
 	if err != nil {
 		return nil, fmt.Errorf("receive failed: %v", err)
 	}
@@ -166,19 +217,22 @@ func discoverAndRegisterPeers(
 			}
 			visited[addr] = true
 
-			kx, err := exchangeKeyWithPeerSync(addr, selfNodeID, ownRewardAddress, core.GetGenesisHash(), signingService, sthincsParams)
+			kx, err := exchangeKeyWithPeerSync(addr, selfAddr, selfNodeID, ownRewardAddress, core.GetGenesisHash(), signingService, sthincsParams)
 			if err != nil {
 				logger.Warn("discoverAndRegisterPeers: key exchange with %s failed: %v", addr, err)
 				continue
 			}
+			// The key exchange is challenge-response authenticated, so the
+			// identity that answered at addr is proven — register it in the
+			// address book now (p2p dial-back admission is scheduled there).
+			onPeerDiscovered(kx.NodeID, addr)
 			if kx.RewardAddress != "" && onPeerStakeClaim != nil {
 				onPeerStakeClaim(kx.NodeID, kx.RewardAddress)
 			}
 
-			pex, err := requestPeerListSync(addr, selfNodeID, selfAddr)
+			pex, err := requestPeerListSync(addr, selfNodeID, selfAddr, core.GetGenesisHash(), signingService)
 			if err != nil {
 				logger.Warn("discoverAndRegisterPeers: peer exchange with %s failed: %v", addr, err)
-				onPeerDiscovered(addrToNodeIDFallback(addr), addr)
 				totalFound++
 				totalConnected++
 				progress.UpdatePeerDiscovery(totalFound, totalConnected)
@@ -186,7 +240,9 @@ func discoverAndRegisterPeers(
 			}
 
 			if pex.NodeID != "" {
-				onPeerDiscovered(pex.NodeID, addr)
+				if pex.NodeID != kx.NodeID {
+					logger.Warn("discoverAndRegisterPeers: peer at %s claimed %s in PEX but %s in key exchange — PEX identity ignored", addr, pex.NodeID, kx.NodeID)
+				}
 				totalFound++
 				totalConnected++
 				progress.UpdatePeerDiscovery(totalFound, totalConnected)
@@ -209,8 +265,4 @@ func discoverAndRegisterPeers(
 
 	progress.CompletePeerDiscovery(totalConnected)
 	logger.Info("discoverAndRegisterPeers: discovery complete, contacted %d address(es) total", len(visited)-1)
-}
-
-func addrToNodeIDFallback(addr string) string {
-	return fmt.Sprintf("Node-%s", addr)
 }

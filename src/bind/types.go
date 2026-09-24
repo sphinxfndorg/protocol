@@ -113,13 +113,27 @@ type knownPeerInfo struct {
 // peerKeyExchangeMsg is the payload sent over the wire during the
 // post-connect public-key handshake.
 //
+// Admission is challenge-response gated: the receiver first issues an
+// auth_challenge nonce, the sender signs challengePayload(nonce, NodeID,
+// GenesisHash, RewardAddress), and only a verified proof leads to
+// RegisterPublicKey or any admission side effect (see challenge.go).
+//
+// Address is the sender's ADVERTISED LISTENING address (host:port). Only its
+// port is trusted on receipt: the receiver combines it with the connection's
+// source IP (derivePeerListenAddr), so a remote peer can never redirect the
+// dial to an arbitrary host, and the ephemeral source port of the inbound
+// connection is never recorded as the peer's address.
+//
 // RewardAddress is the SPIF wallet address the peer claims stake against.
-// It is NOT trusted on its own — the recipient looks up the address's real
-// on-chain balance via SetStakeFromBalance before granting any validator
-// weight. Sending a bogus or empty address just means the peer registers
-// as a known network peer with zero stake; it does not grant validator
-// status. This is what makes peer admission permissionless-safe: showing
-// up on the wire is enough to be gossiped to, but never enough to vote.
+// It is covered by the challenge signature above — the same proof that
+// authenticates the node identity also commits to this claim — and the
+// recipient additionally looks up the address's real on-chain balance via
+// SetStakeFromBalance before granting any validator weight. One funded
+// reward address admits at most one node ID (rewardClaimLedger). Sending a
+// bogus or empty address just means the peer registers as a known network
+// peer with zero stake; it does not grant validator status. This is what
+// makes peer admission permissionless-safe: showing up on the wire is enough
+// to be gossiped to, but never enough to vote.
 //
 // GenesisHash is the peer's claimed genesis block hash. It is verified
 // against the local genesis hash during key exchange. If the hashes differ,
@@ -127,19 +141,43 @@ type knownPeerInfo struct {
 // nodes bootstrap from different genesis configurations. A peer with a
 // different genesis is on a fundamentally incompatible chain and must never
 // be admitted to the gossip graph or validator set.
+//
+// Signature is the peer's proof of key possession: the reply side's
+// response to the receiver-chosen challenge nonce (same payload rules as
+// above). It must verify under PublicKey before that key is registered.
 type peerKeyExchangeMsg struct {
 	NodeID        string `json:"node_id"`
 	PublicKey     []byte `json:"public_key"`
 	RewardAddress string `json:"reward_address,omitempty"`
 	GenesisHash   string `json:"genesis_hash,omitempty"`
+	Address       string `json:"address,omitempty"`
+	Signature     []byte `json:"signature,omitempty"`
 }
 
 // peerExchangeMsg is the payload sent over the wire when a node asks a peer
-// "who else do you know about?"
+// "who else do you know about?".
+//
+// The requester's half (NodeID, Address, PublicKey, GenesisHash) is
+// challenge-response authenticated exactly like key_exchange: the responder
+// only serves Peers after the requester's auth_proof verifies. Peers is
+// therefore only populated in replies.
 type peerExchangeMsg struct {
-	NodeID  string          `json:"node_id"`
-	Address string          `json:"address"`
-	Peers   []knownPeerInfo `json:"peers"`
+	NodeID      string          `json:"node_id"`
+	Address     string          `json:"address"`
+	PublicKey   []byte          `json:"public_key,omitempty"`
+	GenesisHash string          `json:"genesis_hash,omitempty"`
+	Peers       []knownPeerInfo `json:"peers,omitempty"`
+}
+
+// authChallengeMsg is the receiver-chosen challenge sent before any
+// admission: the sender must sign challengePayload over this nonce.
+type authChallengeMsg struct {
+	Nonce []byte `json:"nonce"`
+}
+
+// authProofMsg carries the sender's response to an auth_challenge.
+type authProofMsg struct {
+	Signature []byte `json:"signature"`
 }
 
 // phase2InitState tracks Phase 2 initialization state.

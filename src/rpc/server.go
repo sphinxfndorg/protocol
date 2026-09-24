@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/sphinxfndorg/protocol/src/core"
@@ -21,13 +22,22 @@ import (
 	"github.com/syndtr/goleveldb/leveldb"
 )
 
-// NewServer creates a new RPC server instance.
-// NewServer creates a new RPC server instance with SPHINCS manager
+// NewServer creates a new RPC server instance using the legacy process-relative
+// artifact database path. Callers that have a node data directory should use
+// NewServerWithArtifactPath so independent nodes do not contend for one
+// process-relative LevelDB lock.
 func NewServer(messageCh chan *security.Message, blockchain *core.Blockchain, sphincsManager *sign.STHINCSManager) *Server {
+	return NewServerWithArtifactPath(messageCh, blockchain, sphincsManager, "")
+}
+
+// NewServerWithArtifactPath creates an RPC server whose persistent NFT artifact
+// store is rooted at artifactPath. An empty path preserves the historical
+// ./artifact-db behavior for callers that do not provide node storage.
+func NewServerWithArtifactPath(messageCh chan *security.Message, blockchain *core.Blockchain, sphincsManager *sign.STHINCSManager, artifactPath string) *Server {
 	metrics := NewMetrics()
 
-	// Initialize persistent artifact storage (no TTL — artifacts are durable)
-	artifactDB, err := initArtifactDB()
+	// Initialize persistent artifact storage (no TTL — artifacts are durable).
+	artifactDB, err := initArtifactDB(artifactPath)
 	if err != nil {
 		log.Printf("rpc.Server: Failed to open artifact DB: %v — artifacts will use ephemeral store", err)
 		artifactDB = nil
@@ -56,30 +66,57 @@ func NewServer(messageCh chan *security.Message, blockchain *core.Blockchain, sp
 	return server
 }
 
+// Artifact databases are shared per path within a process. A single global
+// handle is incorrect for multiple node servers in one process, while opening
+// the same path repeatedly would hit LevelDB's exclusive lock. The map keeps
+// both properties: independent node paths are independent databases, and a
+// repeated server for one path reuses its existing handle.
+var (
+	artifactDBMu     sync.Mutex
+	artifactDBByPath = make(map[string]*leveldb.DB)
+	artifactDBErr    = make(map[string]error)
+)
+
 // initArtifactDB opens (creating if needed) the LevelDB backing store for NFT
-// artifacts. The directory is created with 0755 if it doesn't exist. The DB
-// path is resolved under the node's data directory so it survives restarts.
-func initArtifactDB() (*leveldb.DB, error) {
-	dbPath := filepath.Join(".", "artifact-db")
-	if err := os.MkdirAll(dbPath, 0755); err != nil {
-		return nil, fmt.Errorf("create artifact db directory %s: %w", dbPath, err)
+// artifacts. An empty path retains the historical ./artifact-db location.
+func initArtifactDB(artifactPath string) (*leveldb.DB, error) {
+	if artifactPath == "" {
+		artifactPath = filepath.Join(".", "artifact-db")
 	}
-	db, err := leveldb.OpenFile(dbPath, nil)
+	artifactPath = filepath.Clean(artifactPath)
+
+	artifactDBMu.Lock()
+	defer artifactDBMu.Unlock()
+	if db, ok := artifactDBByPath[artifactPath]; ok {
+		return db, artifactDBErr[artifactPath]
+	}
+	if err, ok := artifactDBErr[artifactPath]; ok {
+		return nil, err
+	}
+
+	if err := os.MkdirAll(artifactPath, 0755); err != nil {
+		err = fmt.Errorf("create artifact db directory %s: %w", artifactPath, err)
+		artifactDBErr[artifactPath] = err
+		return nil, err
+	}
+	db, err := leveldb.OpenFile(artifactPath, nil)
 	if err != nil {
-		return nil, fmt.Errorf("open artifact db at %s: %w", dbPath, err)
+		err = fmt.Errorf("open artifact db at %s: %w", artifactPath, err)
+		artifactDBErr[artifactPath] = err
+		return nil, err
 	}
+	artifactDBByPath[artifactPath] = db
 	return db, nil
 }
 
-// Close releases resources held by the server, including the persistent
-// artifact database. It is safe to call Close multiple times.
+// Close releases resources held by the server.
+//
+// Artifact database handles are shared per resolved path for the lifetime of
+// the process. This keeps independent node paths independent while allowing an
+// in-process restart to reuse its existing handle. The OS releases the handle
+// and lock when the process exits; it is safe to call Close multiple times.
 func (s *Server) Close() {
-	if s.artifactDB != nil {
-		if err := s.artifactDB.Close(); err != nil {
-			log.Printf("rpc.Server: Error closing artifact DB: %v", err)
-		}
-		s.artifactDB = nil
-	}
+	s.artifactDB = nil
 }
 
 // SetTxRelay wires the outbound transaction gossip relay used by

@@ -34,8 +34,9 @@ func NewEncryptionKey(sharedSecret []byte) (*EncryptionKey, error) {
 		return nil, err
 	}
 
-	// Log derived encryption key (only first 16 bytes shown for debugging)
-	log.Printf("Derived encryption key with shared secret: %s", hex.EncodeToString(sharedSecret[:16]))
+	// SECURITY: do not log key material. The AES-GCM key derived here decrypts
+	// the session; its bytes must never reach stdout/logs.
+	log.Printf("AES-256-GCM session key derived (%d bytes)", len(sharedSecret))
 
 	// Return a new EncryptionKey object
 	return &EncryptionKey{

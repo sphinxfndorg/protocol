@@ -20,6 +20,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -53,6 +54,28 @@ import (
 type ConnPool struct {
 	connections map[string]net.Conn
 	mu          sync.Mutex
+}
+
+const sameBoxDHTUDPPortOffset = 1000
+
+// sameBoxDHTUDPPort returns the deterministic UDP port used by a same-box
+// node's Kademlia instance. The public seed syntax is a TCP address, so using
+// its TCP port as a UDP router port cannot work. In localhost test mode, every
+// node derives the same mapping without changing TCP key exchange or PEX.
+func sameBoxDHTUDPPort(tcpAddr string) (int, error) {
+	_, portStr, err := net.SplitHostPort(tcpAddr)
+	if err != nil {
+		return 0, fmt.Errorf("invalid TCP address %q for DHT port derivation: %w", tcpAddr, err)
+	}
+	tcpPort, err := strconv.Atoi(portStr)
+	if err != nil {
+		return 0, fmt.Errorf("invalid TCP port %q for DHT port derivation: %w", portStr, err)
+	}
+	udpPort := tcpPort + sameBoxDHTUDPPortOffset
+	if udpPort < 1 || udpPort > 65535 {
+		return 0, fmt.Errorf("derived DHT UDP port %d from TCP port %d is out of range", udpPort, tcpPort)
+	}
+	return udpPort, nil
 }
 
 // Get retrieves a live connection from the pool, or nil if none exists.
@@ -338,24 +361,37 @@ func StartNodeWithOptions(
 		}
 	}
 
-	// ★ FIX: synthCount determines whether we generate static peer addresses.
+	// ★ FIX: synthCount determines how many static peer addresses we generate
+	// and, critically, how many validator IDs core.NewBlockchain seeds into the
+	// on-chain validator set.
 	// - real-device mode (public IP): synthCount = 1, peers via seeds/DHT
 	// - custom loopback ports with --nodes/--node-index AND --seeds: synthCount = totalNodes
 	//   (peers are derived from the custom port using nodeIndex offset)
-	// - custom loopback ports with --nodes/--node-index but NO --seeds: synthCount = 1
-	//   (bootstrap node — must enter SOLO_MODE, not wait for nonexistent peers)
+	// - custom loopback ports with --nodes/--node-index but NO --seeds: synthCount = totalNodes
+	//   (bootstrap node — same validator set as its peers; it must NOT mine
+	//    solo, which is now gated on totalNodes<=1 in runBlockProductionLoop)
 	// - custom loopback ports with no --nodes: synthCount = 1, no static peers
 	// - legacy same-box (no --tcp-addr): synthCount = totalNodes, hardcoded 32307+
+	//
+	// ★ FIX (#1 validator-set split): the bootstrap node (no --seeds) used to
+	// collapse synthCount to 1 "to enter solo mode". That gave the bootstrap
+	// node a validator set containing only itself (1/1 validators, 32 SPX)
+	// while every node that joined via --seeds used the full set (3/3, 96 SPX).
+	// The two sides then computed different leaders and stake totals, each
+	// rejected the other's proposal as "invalid leader", and the chain
+	// deadlocked. Keeping synthCount = totalNodes here gives every node the
+	// identical genesis validator set, which is the only way leader election and
+	// quorum math can agree.
+	if totalNodes < 1 {
+		totalNodes = 1
+	}
 	synthCount := totalNodes
 	if usingRealAddress {
 		synthCount = 1
 		nodeIndex = 0
 	}
-	// Bootstrap node (no --seeds) must use solo mode regardless of --nodes.
-	// Without this, synthCount=3 makes it use P2P consensus manager, and the
-	// sync loop blocks forever waiting for peers that don't exist yet.
-	if seeds == "" && synthCount > 1 {
-		synthCount = 1
+	// The bootstrap node is always index 0 in the same-box devnet.
+	if seeds == "" && !usingRealAddress {
 		nodeIndex = 0
 	}
 
@@ -406,6 +442,20 @@ func StartNodeWithOptions(
 		return fmt.Errorf("failed to create node directories: %w", err)
 	}
 
+	// ★ ONE HANDLE PER PATH. goleveldb holds an exclusive OS lock (flock) on a
+	// database directory, and that lock is NOT re-entrant across separate
+	// os.Open calls — not even inside a single process. Opening the same path
+	// twice therefore fails with EAGAIN ("resource temporarily unavailable"),
+	// and database.NewLevelDB now refuses to paper over that by deleting the
+	// LOCK file (see its comment: unlinking LOCK while another handle has the
+	// database open is how two writers end up on one set of files).
+	//
+	// This node needs the raw *leveldb.DB for the main database (the STHINCS
+	// manager persists SPHINCS+ keys through it, below) AND the database.DB
+	// wrapper for the same directory, so it opens it once and wraps that
+	// handle. The state database is only ever used through the wrapper — the
+	// second, unused raw handle that used to be opened here was dead code that
+	// existed solely to be closed again.
 	mainDBPath := common.GetLevelDBPath(currentAddress)
 	db, err := leveldb.OpenFile(mainDBPath, nil)
 	if err != nil {
@@ -414,13 +464,8 @@ func StartNodeWithOptions(
 	defer db.Close()
 
 	stateDBPath := common.GetStateDBPath(currentAddress)
-	stateLevelDB, err := leveldb.OpenFile(stateDBPath, nil)
-	if err != nil {
-		return fmt.Errorf("failed to open state DB: %w", err)
-	}
-	defer stateLevelDB.Close()
 
-	mainDatabase, err := database.NewLevelDB(mainDBPath)
+	mainDatabase, err := database.NewLevelDBWithHandle(mainDBPath, db)
 	if err != nil {
 		return fmt.Errorf("failed to create main database: %w", err)
 	}
@@ -565,8 +610,9 @@ func StartNodeWithOptions(
 	}
 	logger.Info("Self public key size: %d bytes", len(pkBytes))
 
-	rpcServer := rpc.NewServer(nil, bc, sphincsMgr)
-	logger.Info("RPC server created (synchronous mode)")
+	artifactPath := filepath.Join(common.GetBlockchainDataDir(currentAddress), "artifact-db")
+	rpcServer := rpc.NewServerWithArtifactPath(nil, bc, sphincsMgr, artifactPath)
+	logger.Info("RPC server created (synchronous mode); artifact DB path: %s", artifactPath)
 
 	// getsyncstatus provider: runBlockSyncLoop publishes observational
 	// snapshots into this tracker (see rpc.SetSyncStatusProvider and the
@@ -590,10 +636,24 @@ func StartNodeWithOptions(
 		tcpPort = fmt.Sprintf("%d", 32307+nodeIndex)
 	}
 
-	udpPort := nodeConfig.UDPPort
-	if udpPort == "" {
-		udpPort = fmt.Sprintf("%d", 32308+nodeIndex)
+	// Same-box DHT ports are derived from the node's TCP port so a plain TCP
+	// seed can be translated to the actual UDP router without carrying a second
+	// address in the key-exchange message. Public/real-device seeds retain
+	// their existing UDP-port semantics.
+	udpPort := ""
+	udpPortNum := 32308 + nodeIndex
+	if !usingRealAddress {
+		derived, err := sameBoxDHTUDPPort(currentAddress)
+		if err != nil {
+			return fmt.Errorf("derive same-box DHT UDP port: %w", err)
+		}
+		udpPortNum = derived
+	} else if nodeConfig.UDPPort != "" {
+		if p, err := strconv.Atoi(nodeConfig.UDPPort); err == nil {
+			udpPortNum = p
+		}
 	}
+	udpPort = strconv.Itoa(udpPortNum)
 
 	localHost, _, err := net.SplitHostPort(currentAddress)
 	if err != nil || localHost == "" {
@@ -608,13 +668,6 @@ func StartNodeWithOptions(
 	// UDP port, giving the NodeManager true Kademlia iterative lookups
 	// instead of relying solely on static seeds + PEX gossip.
 	// ════════════════════════════════════════════════════════════════════
-	udpPortNum := 32308 + nodeIndex
-	if nodeConfig.UDPPort != "" {
-		if p, err := strconv.Atoi(nodeConfig.UDPPort); err == nil {
-			udpPortNum = p
-		}
-	}
-
 	localUDPAddr := &net.UDPAddr{IP: net.ParseIP(localHost), Port: udpPortNum}
 
 	// Parse seed addresses into UDP router addresses for DHT join
@@ -630,8 +683,23 @@ func StartNodeWithOptions(
 				continue
 			}
 			if h, p, err := net.SplitHostPort(seed); err == nil {
-				sp, _ := strconv.Atoi(p)
-				dhtRouters = append(dhtRouters, net.UDPAddr{IP: net.ParseIP(h), Port: sp})
+				tcpPort, convErr := strconv.Atoi(p)
+				if convErr != nil {
+					logger.Warn("Ignoring DHT seed %q with invalid TCP port: %v", seed, convErr)
+					continue
+				}
+				routerPort := tcpPort
+				if !usingRealAddress {
+					derived, deriveErr := sameBoxDHTUDPPort(net.JoinHostPort(h, p))
+					if deriveErr != nil {
+						logger.Warn("Ignoring DHT seed %q: %v", seed, deriveErr)
+						continue
+					}
+					routerPort = derived
+				}
+				router := net.UDPAddr{IP: net.ParseIP(h), Port: routerPort}
+				dhtRouters = append(dhtRouters, router)
+				logger.Info("DHT seed %s translated to router %s", seed, router.String())
 			}
 		}
 	}
@@ -686,11 +754,23 @@ func StartNodeWithOptions(
 			if j == nodeIndex {
 				continue
 			}
+			_, peerTCPPort, tcpErr := net.SplitHostPort(networkAddresses[j])
+			if tcpErr != nil {
+				return fmt.Errorf("parse same-box peer TCP address %s: %w", networkAddresses[j], tcpErr)
+			}
+			peerUDPPort := fmt.Sprintf("%d", 32308+j)
+			if !usingRealAddress {
+				derived, deriveErr := sameBoxDHTUDPPort(networkAddresses[j])
+				if deriveErr != nil {
+					return fmt.Errorf("derive DHT UDP port for same-box peer %s: %w", networkAddresses[j], deriveErr)
+				}
+				peerUDPPort = strconv.Itoa(derived)
+			}
 			peerNode := network.NewNode(
 				networkAddresses[j],
 				"127.0.0.1",
-				fmt.Sprintf("%d", 32307+j),
-				fmt.Sprintf("%d", 32308+j),
+				peerTCPPort,
+				peerUDPPort,
 				false,
 				network.RoleValidator,
 				mainDatabase,
@@ -842,6 +922,11 @@ func StartNodeWithOptions(
 		validatorAddressMap[currentNodeID] = rewardAddress
 	}
 
+	// rewardClaims enforces "one funded reward address admits at most one
+	// node ID" on runtime peer-admission claims (helpers.go). Our own
+	// address is pre-bound so a remote peer can never claim it.
+	rewardClaims := newRewardClaimLedger()
+
 	logger.Info("=== SELF-STAKE FROM REWARD ADDRESS ===")
 	if rewardAddress != "" {
 		selfRewardAddr := rewardAddress
@@ -849,9 +934,10 @@ func StartNodeWithOptions(
 			selfRewardAddr = normalized
 		}
 		bc.SetValidatorRewardAddress(currentNodeID, selfRewardAddr)
+		rewardClaims.bindSelf(selfRewardAddr, currentNodeID)
 		logger.Info("[%s] Block rewards / gas fees will route to %s", currentNodeID, selfRewardAddr)
 
-		if !stakeValidatorFromRewardAddress(bc, cons, currentNodeID, currentNodeID, rewardAddress) {
+		if !stakeValidatorFromRewardAddress(bc, cons, currentNodeID, currentNodeID, rewardAddress, rewardClaims) {
 			logger.Info("[%s] Reward address %s has no verifiable/sufficient balance yet — self-bootstrapping at minimum stake", currentNodeID, rewardAddress)
 			if vs := cons.GetValidatorSet(); vs != nil {
 				minSPX := vs.GetMinStakeSPX()
@@ -961,10 +1047,110 @@ func StartNodeWithOptions(
 	peerRegistry := make(map[string]string)
 
 	// registeredPeers tracks which peer IDs have already had their
-	// one-time side effects (AddNode/p2pMgr.AddPeer/stake grant) applied.
+	// one-time address-book side effects applied.
 	// This is intentionally a separate set from peerRegistry — see above.
 	var registeredMu sync.Mutex
 	registeredPeers := make(map[string]bool)
+
+	// dialbackMu guards the dial-back admission state below.
+	var dialbackMu sync.Mutex
+	dialbackPending := make(map[string]bool)
+	dialbackVerified := make(map[string]bool)
+
+	// admitVerifiedPeer records a completed handshake to peerAddr and admits
+	// the peer to the p2pMgr transport. It must ONLY be called after a full
+	// key exchange with that exact address succeeded and the peer's identity
+	// matched the claim (ensureDialbackAdmitted enforces both; the startup
+	// key-exchange loops satisfy them by construction).
+	admitVerifiedPeer := func(peerNodeID, peerAddr string) {
+		if peerNodeID == "" || peerAddr == "" || peerAddr == currentAddress {
+			return
+		}
+		dialbackMu.Lock()
+		already := dialbackVerified[peerNodeID]
+		dialbackVerified[peerNodeID] = true
+		dialbackMu.Unlock()
+		if already {
+			return
+		}
+		if p2pMgr != nil {
+			p2pMgr.AddPeer(peerNodeID, peerAddr)
+		}
+		logger.Info("[%s] Peer %s admitted to the P2P transport after successful handshake to %s",
+			currentNodeID, peerNodeID, peerAddr)
+	}
+
+	// registerPeerStakeClaim is invoked when a peer's key-exchange reply
+	// carries a reward address (see helpers.go). It is the ONLY function in
+	// this file allowed to grant validator status to a remote peer, and it
+	// only does so after stakeValidatorFromRewardAddress independently (a)
+	// checks the address's on-chain balance and (b) pins the funded address
+	// to this one node ID in rewardClaims — the claim itself, though covered
+	// by the peer's verified challenge signature, is never trusted alone.
+	// Transport admission (p2pMgr.AddPeer) is deliberately NOT done here; it
+	// is owned exclusively by ensureDialbackAdmitted below.
+	registerPeerStakeClaim := func(peerNodeID, rewardAddress string) {
+		if peerNodeID == "" || rewardAddress == "" {
+			return
+		}
+		stakeValidatorFromRewardAddress(bc, cons, currentNodeID, peerNodeID, rewardAddress, rewardClaims)
+	}
+
+	// ensureDialbackAdmitted is the ONLY path that adds peers to p2pMgr,
+	// and only after a full key-exchange handshake (challenge-response
+	// included) to the DERIVED address has succeeded and the identity that
+	// answers that address matches the claim:
+	//
+	//   - Address book (peerRegistry) may be fed by remote claims — it is
+	//     discovery data only.
+	//   - p2pMgr is the consensus broadcast list, and every p2pMgr member is
+	//     reported to consensus as an ACTIVE VALIDATOR
+	//     (network.p2pConsensusNode.GetRole), which directly inflates
+	//     getTotalNodes()/quorum floors and the leader-rotation roster.
+	//     Nothing unverified may enter it.
+	//   - The dial-back also proves address ↔ node_id binding: an attacker
+	//     who claims a victim's identity gets an address on the attacker's
+	//     own IP (only the port is claimed), and the victim's real node
+	//     answering that address with a different ID is rejected.
+	ensureDialbackAdmitted := func(peerNodeID, peerAddr string) {
+		if peerNodeID == "" || peerAddr == "" || peerAddr == currentAddress {
+			return
+		}
+		dialbackMu.Lock()
+		if dialbackVerified[peerNodeID] || dialbackPending[peerNodeID] {
+			dialbackMu.Unlock()
+			return
+		}
+		dialbackPending[peerNodeID] = true
+		dialbackMu.Unlock()
+
+		go func() {
+			kx, err := exchangeKeyWithPeerSync(peerAddr, currentAddress, currentNodeID, rewardAddress, core.GetGenesisHash(), signingService, sthincsParams)
+			dialbackMu.Lock()
+			delete(dialbackPending, peerNodeID)
+			dialbackMu.Unlock()
+			if err != nil {
+				logger.Warn("[%s] Dial-back handshake to %s failed — %s stays in the address book only (a later discovery event may retry): %v",
+					currentNodeID, peerAddr, peerNodeID, err)
+				return
+			}
+			if kx.NodeID != peerNodeID {
+				logger.Warn("[%s] Address %s answered as %s, not the claimed %s — rejecting address binding",
+					currentNodeID, peerAddr, kx.NodeID, peerNodeID)
+				// Drop the bogus address-book binding created from the claim.
+				peerRegistryMu.Lock()
+				if peerRegistry[peerNodeID] == peerAddr {
+					delete(peerRegistry, peerNodeID)
+				}
+				peerRegistryMu.Unlock()
+				return
+			}
+			admitVerifiedPeer(peerNodeID, peerAddr)
+			if kx.RewardAddress != "" {
+				registerPeerStakeClaim(kx.NodeID, kx.RewardAddress)
+			}
+		}()
+	}
 
 	registerDiscoveredPeer := func(peerNodeID, peerAddr string) {
 		if peerNodeID == "" || peerAddr == "" || peerAddr == currentAddress {
@@ -975,6 +1161,12 @@ func StartNodeWithOptions(
 		peerCount := len(peerRegistry)
 		peerRegistryMu.Unlock()
 
+		// Kick (or retry) dial-back verification BEFORE the one-time dedup
+		// below: address book first, p2p transport only after the handshake
+		// to this address succeeds. Repeated discovery events for the same
+		// peer act as retries when a previous attempt failed.
+		ensureDialbackAdmitted(peerNodeID, peerAddr)
+
 		registeredMu.Lock()
 		already := registeredPeers[peerNodeID]
 		registeredPeers[peerNodeID] = true
@@ -983,58 +1175,24 @@ func StartNodeWithOptions(
 			return
 		}
 
-		logger.Info("Discovered new peer %s at %s — registering as network peer", peerNodeID, peerAddr)
+		logger.Info("Discovered new peer %s at %s — address book only until dial-back succeeds", peerNodeID, peerAddr)
 
 		host, port, err := net.SplitHostPort(peerAddr)
 		if err != nil {
 			logger.Warn("Discovered peer %s has unparseable address %s: %v", peerNodeID, peerAddr, err)
 			host, port = peerAddr, ""
 		}
-		if peerNode := network.NewNode(peerAddr, host, port, "", false, network.RoleValidator, mainDatabase); peerNode != nil {
+		// RoleNone: discovered peers are discovery/address-book entries, not
+		// validators. consensus never sees nodeMgr nodes (it reads p2pMgr),
+		// and NodeManager.SelectValidator requires RoleValidator — either
+		// way a RoleNone entry is excluded from quorum/rotation math.
+		if peerNode := network.NewNode(peerAddr, host, port, "", false, network.RoleNone, mainDatabase); peerNode != nil {
 			nodeMgr.AddNode(peerNode)
-		}
-		if p2pMgr != nil {
-			p2pMgr.AddPeer(peerNodeID, peerAddr)
 		}
 
 		// Update dashboard with peer count
 		progress.CheckNetworkHealth(true, peerCount)
 
-		// ★ FIX: Grant minimum stake to the peer as a validator immediately.
-		// Previously, validator status was only granted by registerPeerStakeClaim,
-		// which requires a non-empty reward-address from the peer's key-exchange
-		// reply AND a verified on-chain balance. In test/devnet mode (no
-		// --reward-address flag), both conditions fail, so every peer is
-		// permanently excluded from the validator set — each node sees only
-		// itself as a validator (32 SPX), PBFT quorum is permanently impossible,
-		// and "100% quorum" reports are fraudulent (each node voting alone).
-		//
-		// Granting minimum stake here is safe because:
-		//   1. This is a permissioned network — every peer is operator-configured.
-		//   2. registerPeerStakeClaim (when a reward address IS available) will
-		//      STILL run later and upgrade the stake via SetStakeFromBalance.
-		//   3. Phase 2 initialization (initializePhase2Stakes) also re-verifies
-		//      actual balances after block 1 and can correct the stake upward.
-		if vs := cons.GetValidatorSet(); vs != nil {
-			minSPX := vs.GetMinStakeSPX()
-			if err := vs.AddValidator(peerNodeID, minSPX); err != nil {
-				logger.Warn("[%s] Failed to grant minimum stake to discovered peer %s: %v", currentNodeID, peerNodeID, err)
-			} else {
-				logger.Info("[%s] Granted minimum stake (%d SPX) to discovered peer %s", currentNodeID, minSPX, peerNodeID)
-			}
-		}
-	}
-
-	// registerPeerStakeClaim is invoked when a peer's key-exchange reply
-	// carries a reward address (see helpers.go). It is the ONLY function in
-	// this file allowed to grant validator status to a remote peer, and it
-	// only does so after stakeValidatorFromRewardAddress independently
-	// verifies that address's balance — the claim itself is never trusted.
-	registerPeerStakeClaim := func(peerNodeID, rewardAddress string) {
-		if peerNodeID == "" || rewardAddress == "" {
-			return
-		}
-		stakeValidatorFromRewardAddress(bc, cons, currentNodeID, peerNodeID, rewardAddress)
 	}
 
 	getKnownPeers := func() []knownPeerInfo {
@@ -1242,16 +1400,123 @@ func StartNodeWithOptions(
 		return len(peerRegistry)
 	}
 
-	// effectivePeerCount is deliberately stricter than knownPeerCount: a
-	// configured seed is contactable, but not an active validator until it has
-	// completed discovery/key exchange.
-	effectivePeerCount := func() int {
-		// peerRegistry is an address book and intentionally includes static
-		// seed/config entries before their process is reachable. Only peers
-		// that completed discovery/key exchange are live participants.
+	// discoveredPeerCount is the OLD meaning of "effective" peers: peers that
+	// completed discovery/key exchange at least once. It says nothing about
+	// whether the peer can receive a PBFT proposal yet, so it is only used
+	// for startup log lines. Consensus gating uses effectivePeerCount below.
+	discoveredPeerCount := func() int {
 		registeredMu.Lock()
 		defer registeredMu.Unlock()
 		return len(registeredPeers)
+	}
+
+	// ★ FIX (chain stuck at height 0 / first proposal lost): effectivePeerCount
+	// used to return len(registeredPeers) — "this peer has done a key exchange
+	// with me" — and runBlockProductionLoop treated that as "this validator can
+	// take part in PBFT". On a fresh 3-node devnet the followers need 60-75s
+	// after their first key exchange to finish startup (each SPHINCS+
+	// challenge/response costs ~9s), install genesis from the bootstrap node
+	// and open their sync gate. The bootstrap node saw "3 validators known"
+	// ~1s after the third node's first contact, proposed block 1 immediately,
+	// and that proposal reached followers that had no genesis yet, so it was
+	// silently dropped. Nothing re-sends it, so the round only recovered after
+	// the 90s commit timeout + a view change.
+	//
+	// A peer now counts only when it answers get_blocks with ChainReady=true
+	// (genesis installed; on followers this happens strictly after cons.Start,
+	// and just before their PBFT sync gate opens) continuously for
+	// peerReadySettle. The settle window covers the ~4s between "genesis
+	// installed" and "sync gate open" on a follower — it is a heuristic; the
+	// proper fix is a consensus-ready flag in the get_blocks reply.
+	const (
+		peerReadyProbeInterval = 2 * time.Second
+		peerReadySettle        = 6 * time.Second
+	)
+	var peerReadyMu sync.Mutex
+	peerReadySince := make(map[string]time.Time) // addr -> first continuous "ready" probe
+	peerProbeInFlight := make(map[string]bool)   // addr -> a probe goroutine is still running
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(peerReadyProbeInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+
+			peerRegistryMu.Lock()
+			addrs := make([]string, 0, len(peerRegistry))
+			for _, a := range peerRegistry {
+				if a != "" && a != currentAddress {
+					addrs = append(addrs, a)
+				}
+			}
+			peerRegistryMu.Unlock()
+
+			for _, addr := range addrs {
+				peerReadyMu.Lock()
+				busy := peerProbeInFlight[addr]
+				if !busy {
+					peerProbeInFlight[addr] = true
+				}
+				peerReadyMu.Unlock()
+				if busy {
+					continue
+				}
+				go func(addr string) {
+					resp, err := requestBlocksFromPeer(addr, 0, 0)
+					ready := err == nil && resp != nil && resp.ChainReady
+
+					peerReadyMu.Lock()
+					delete(peerProbeInFlight, addr)
+					if ready {
+						if _, ok := peerReadySince[addr]; !ok {
+							peerReadySince[addr] = time.Now()
+							logger.Debug("[%s] Peer %s has genesis — starting readiness settle window", currentNodeID, addr)
+						}
+					} else {
+						delete(peerReadySince, addr)
+					}
+					peerReadyMu.Unlock()
+				}(addr)
+			}
+		}
+	}()
+
+	// effectivePeerCount = registered peers that are also READY to receive
+	// consensus messages (see the FIX above). This is what
+	// runBlockProductionLoop's validator-count gate reads.
+	effectivePeerCount := func() int {
+		registeredMu.Lock()
+		ids := make([]string, 0, len(registeredPeers))
+		for id := range registeredPeers {
+			ids = append(ids, id)
+		}
+		registeredMu.Unlock()
+
+		peerRegistryMu.Lock()
+		addrs := make([]string, 0, len(ids))
+		for _, id := range ids {
+			if a, ok := peerRegistry[id]; ok && a != "" {
+				addrs = append(addrs, a)
+			}
+		}
+		peerRegistryMu.Unlock()
+
+		now := time.Now()
+		peerReadyMu.Lock()
+		defer peerReadyMu.Unlock()
+		ready := 0
+		for _, a := range addrs {
+			if since, ok := peerReadySince[a]; ok && now.Sub(since) >= peerReadySettle {
+				ready++
+			}
+		}
+		return ready
 	}
 
 	if knownPeerCount() > 0 {
@@ -1261,14 +1526,56 @@ func StartNodeWithOptions(
 
 	if knownPeerCount() > 0 {
 		logger.Info("=== EXCHANGING PUBLIC KEYS (SYNC) BEFORE CONSENSUS ===")
+
+		// ★ FIX (slow follower startup): every exchangeKeyWithPeerSync costs
+		// ~9s (a SPHINCS+ signature on each side). The two loops below used
+		// to exchange with the SAME peers again and again — once during seed
+		// discovery, once here in the same-box loop, once more in the
+		// discovered-peer loop (plus a background dial-back). Each follower
+		// spent ~40s of its 60-75s startup repeating handshakes that had
+		// already succeeded, which is exactly the window in which the
+		// bootstrap node was already proposing. Exchanging once per address
+		// is sufficient: the responder pins node_id<->key on the first
+		// verified handshake and a repeat is a no-op for it.
+		exchangedAddrs := make(map[string]bool)
+		addrAlreadyVerified := func(addr string) bool {
+			peerRegistryMu.Lock()
+			var ids []string
+			for id, a := range peerRegistry {
+				if a == addr {
+					ids = append(ids, id)
+				}
+			}
+			peerRegistryMu.Unlock()
+			dialbackMu.Lock()
+			defer dialbackMu.Unlock()
+			for _, id := range ids {
+				if dialbackVerified[id] {
+					return true
+				}
+			}
+			return false
+		}
+
 		for _, addr := range networkAddresses {
 			if addr == currentAddress {
 				continue
 			}
+			if exchangedAddrs[addr] || addrAlreadyVerified(addr) {
+				logger.Info("Key exchange with %s already completed — skipping repeat handshake", addr)
+				exchangedAddrs[addr] = true
+				continue
+			}
 			logger.Info("Exchanging keys with same-box peer: %s", addr)
-			if kx, err := exchangeKeyWithPeerSync(addr, currentNodeID, rewardAddress, core.GetGenesisHash(), signingService, sthincsParams); err != nil {
+			if kx, err := exchangeKeyWithPeerSync(addr, currentAddress, currentNodeID, rewardAddress, core.GetGenesisHash(), signingService, sthincsParams); err != nil {
 				logger.Warn("Failed to exchange keys with %s: %v", addr, err)
 			} else {
+				exchangedAddrs[addr] = true
+				// The handshake to addr just succeeded — that satisfies the
+				// dial-back requirement, so admit the transport entry directly
+				// (registerDiscoveredPeer would otherwise schedule a
+				// redundant dial-back to the same address).
+				admitVerifiedPeer(kx.NodeID, addr)
 				// Register the peer's node ID and address from the key exchange
 				registerDiscoveredPeer(kx.NodeID, addr)
 				if kx.RewardAddress != "" {
@@ -1283,11 +1590,20 @@ func StartNodeWithOptions(
 		}
 		peerRegistryMu.Unlock()
 		for _, addr := range discoveredAddrs {
+			if exchangedAddrs[addr] || addrAlreadyVerified(addr) {
+				logger.Info("Key exchange with %s already completed — skipping repeat handshake", addr)
+				continue
+			}
 			logger.Info("Exchanging keys with discovered peer: %s", addr)
-			if kx, err := exchangeKeyWithPeerSync(addr, currentNodeID, rewardAddress, core.GetGenesisHash(), signingService, sthincsParams); err != nil {
+			if kx, err := exchangeKeyWithPeerSync(addr, currentAddress, currentNodeID, rewardAddress, core.GetGenesisHash(), signingService, sthincsParams); err != nil {
 				logger.Warn("Failed to exchange keys with %s: %v", addr, err)
-			} else if kx.RewardAddress != "" {
-				registerPeerStakeClaim(kx.NodeID, kx.RewardAddress)
+			} else {
+				exchangedAddrs[addr] = true
+				admitVerifiedPeer(kx.NodeID, addr)
+				registerDiscoveredPeer(kx.NodeID, addr)
+				if kx.RewardAddress != "" {
+					registerPeerStakeClaim(kx.NodeID, kx.RewardAddress)
+				}
 			}
 		}
 		logger.Info("Key exchange completed with all known peers")
@@ -1305,8 +1621,10 @@ func StartNodeWithOptions(
 			peerRegistry[validatorIDs[i]] = addr
 			logger.Info("[%s] Pre-registered same-box peer: %s at %s", currentNodeID, validatorIDs[i], addr)
 		}
+	} else if totalNodes <= 1 {
+		logger.Info("[%s] No --seeds — single-node mode; no peers pre-registered (will enter SOLO_MODE)", currentNodeID)
 	} else {
-		logger.Info("[%s] No --seeds — bootstrap node, no peers pre-registered (will enter SOLO_MODE)", currentNodeID)
+		logger.Info("[%s] No --seeds — bootstrap node; no peers pre-registered, waiting for %d ready validators before proposing", currentNodeID, totalNodes)
 	}
 
 	logger.Info("=== VERIFYING KEY SERIALIZATION ROUND-TRIP ===")
@@ -1519,7 +1837,7 @@ func StartNodeWithOptions(
 	logger.Info("TCP (wallet/JSON-RPC): %s", rpcListenAddr)
 	logger.Info("HTTP: http://127.0.0.1:%d", httpPort)
 
-	knownPeers := effectivePeerCount()
+	knownPeers := discoveredPeerCount()
 	switch {
 	case knownPeers == 0:
 		logger.Info("Mode: SOLO (no peers yet — waiting for connections)")

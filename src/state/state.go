@@ -269,9 +269,10 @@ func NewStorage(dataDir string) (*Storage, error) {
 		logger.Warn("Could not load block index: %v", err)
 	}
 
-	// Load TPS metrics
+	// Load TPS metrics. A missing file on first start is expected (the store
+	// is initialized fresh below), so this stays at debug level.
 	if err := storage.loadTPSMetrics(); err != nil {
-		logger.Warn("Could not load TPS metrics: %v", err)
+		logger.Debug("Could not load TPS metrics: %v", err)
 		storage.initializeTPSMetrics()
 	}
 
@@ -607,7 +608,8 @@ func (s *Storage) loadTPSMetrics() error {
 
 	// Check if file exists
 	if _, err := os.Stat(tpsFile); os.IsNotExist(err) {
-		logger.Info("No TPS metrics file found at %s, starting fresh", tpsFile)
+		// First run: there is simply no persisted metrics file yet.
+		logger.Debug("No TPS metrics file found at %s, starting fresh", tpsFile)
 		return fmt.Errorf("TPS metrics file does not exist")
 	}
 

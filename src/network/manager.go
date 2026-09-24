@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"strings"
+	"strconv"
 	"sync"
 	"time"
 
@@ -1077,36 +1077,67 @@ func (nm *NodeManager) logDistance(distance NodeID) int {
 //
 // Returns: Slice of closest peers
 func (nm *NodeManager) FindClosestPeers(targetID NodeID, k int) []*Peer {
-	// Acquire read lock for thread safety
-	nm.mu.RLock()
-	defer nm.mu.RUnlock()
+	// This method may add newly discovered nodes and peer records, so it needs
+	// the write lock. Do not call GetNodeByKademliaID while holding it (that
+	// helper takes the read lock); use the map directly below.
+	nm.mu.Lock()
+	defer nm.mu.Unlock()
 
 	// Use DHT interface to find nearest nodes
 	remotes := nm.DHT.KNearest(targetID)
 	result := make([]*Peer, 0, k)
 
 	// Process each remote node from DHT
+	// DHT addresses are UDP addresses. Use the local node's actual UDP/TCP
+	// offset when translating a discovered router into a TCP peer: custom
+	// same-box mode uses +1000, while legacy same-box mode uses +1.
+	tcpPortOffset := 1
+	for _, local := range nm.nodes {
+		if local == nil || !local.IsLocal {
+			continue
+		}
+		_, tcpPort, tcpErr := net.SplitHostPort(local.Address)
+		udpPort, udpErr := strconv.Atoi(local.UDPPort)
+		tcpNum, tcpNumErr := strconv.Atoi(tcpPort)
+		if tcpErr == nil && udpErr == nil && tcpNumErr == nil && udpPort > tcpNum {
+			tcpPortOffset = udpPort - tcpNum
+		}
+		break
+	}
+
 	for _, remote := range remotes {
+		// KNearest includes the local DHT node. It is not a remote peer and
+		// must not be converted into a self-connection.
+		if nm.DHT != nil && remote.NodeID == nm.DHT.SelfNodeID() {
+			continue
+		}
+
 		// Try to find existing node by Kademlia ID
-		node := nm.GetNodeByKademliaID(remote.NodeID)
+		var node *Node
+		for _, candidate := range nm.nodes {
+			if candidate != nil && candidate.KademliaID == remote.NodeID {
+				node = candidate
+				break
+			}
+		}
 		if node == nil {
-			// Create new node from remote information
-			// Parse remote.Address (format: "IP:port") to extract IP and port
-			addrParts := strings.Split(remote.Address.String(), ":")
-			if len(addrParts) != 2 {
-				log.Printf("FindClosestPeers: Invalid remote address format %s", remote.Address.String())
+			// Create a new node from the DHT's UDP address. Derive its TCP
+			// address using the same-box offset calculated above.
+			tcpPort := remote.Address.Port - tcpPortOffset
+			if tcpPort < 1 {
+				log.Printf("FindClosestPeers: invalid TCP port derived from DHT address %s", remote.Address.String())
 				continue
 			}
-			port := addrParts[1] // Port number as string
-			ip := addrParts[0]
+			ip := remote.Address.IP.String()
 
 			// Create new node instance
 			node = &Node{
 				ID:         fmt.Sprintf("Node-%s", remote.NodeID.String()[:8]), // Generate node ID from Kademlia ID
 				KademliaID: remote.NodeID,
-				Address:    fmt.Sprintf("%s:%d", ip, remote.Address.Port-1), // Assume TCP port is UDP port - 1
+				Address:    net.JoinHostPort(ip, strconv.Itoa(tcpPort)),
 				IP:         ip,
-				UDPPort:    port, // Store port number as string
+				Port:       strconv.Itoa(tcpPort),
+				UDPPort:    strconv.Itoa(remote.Address.Port),
 				Status:     NodeStatusActive,
 				Role:       RoleNone,
 				LastSeen:   time.Now(),

@@ -23,6 +23,7 @@ import (
 	sign "github.com/sphinxfndorg/protocol/src/core/sthincs/sign/backend"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
 	"github.com/sphinxfndorg/protocol/src/policy"
+	"github.com/sphinxfndorg/protocol/src/rpc"
 )
 
 // abiRPC adapts this package's callRPC to abi.RPCClient, so the shared
@@ -274,35 +275,40 @@ func decodeKeyBytes(value string) ([]byte, error) {
 	return hex.DecodeString(value)
 }
 
-// GetBalance queries the balance of an address
+// GetBalance queries the balance of an address over the wallet JSON-RPC
+// transport. The REST/HTTP explorer does not serve JSON-RPC.
 func GetBalance(opts GetBalanceOptions) error {
 	logger.Info("Querying balance for address: %s", opts.Address)
 
-	var balanceHex string
-	// Using spx_getBalance
-	err := callRPC(opts.RPCURL, "spx_getBalance", []interface{}{opts.Address, "latest"}, &balanceHex)
+	raw, err := rpc.CallRPC(opts.RPCURL, "getbalance", []interface{}{opts.Address}, 30)
 	if err != nil {
-		return fmt.Errorf("failed to get balance: %v", err)
+		return fmt.Errorf("failed to get balance: %w", err)
 	}
 
-	// Convert from hex to decimal
-	balanceHex = strings.TrimPrefix(balanceHex, "0x")
-	if balanceHex == "" {
-		balanceHex = "0"
+	var response struct {
+		Address  string `json:"address"`
+		Balance  string `json:"balance"`
+		Pending  string `json:"pending"`
+		Unlocked string `json:"unlocked"`
 	}
-	balanceBig := new(big.Int)
-	balanceBig, ok := balanceBig.SetString(balanceHex, 16)
+	if err := json.Unmarshal(raw, &response); err != nil {
+		return fmt.Errorf("failed to decode balance response: %w", err)
+	}
+	balanceText := strings.TrimSpace(response.Balance)
+	if balanceText == "" {
+		balanceText = "0"
+	}
+	balanceNSPX, ok := new(big.Int).SetString(balanceText, 10)
 	if !ok {
-		return fmt.Errorf("failed to parse balance: %s", balanceHex)
+		return fmt.Errorf("failed to parse balance: %s", balanceText)
 	}
-
-	// Convert from nSPX to SPX (1 SPX = 10^18 nSPX)
 	spxBalance := new(big.Float).Quo(
-		new(big.Float).SetInt(balanceBig),
+		new(big.Float).SetInt(balanceNSPX),
 		new(big.Float).SetFloat64(1e18),
 	)
 
-	logger.Info("Balance for %s: %.6f SPX", opts.Address, spxBalance)
+	logger.Info("Balance for %s: %.6f SPX (confirmed=%s nSPX, pending=%s nSPX, unlocked=%s nSPX)",
+		opts.Address, spxBalance, balanceText, response.Pending, response.Unlocked)
 	return nil
 }
 

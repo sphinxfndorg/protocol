@@ -147,12 +147,12 @@ func evictCommitCertificate(blockHash string) {
 }
 
 // attestationsMeetStakeQuorum reports whether the distinct validator IDs
-// named in atts collectively hold at least 2/3 of total validator-set stake,
-// mirroring hasQuorum's threshold math. This runs in addition to (not
-// instead of) the per-attestation signature verification in
-// HandleCommitCertificate — it rejects certificates that are cryptographically
-// valid but assembled from too small a set of (legitimately) attesting
-// validators to actually represent quorum.
+// named in atts collectively hold strictly more than 2/3 of total
+// validator-set stake, mirroring hasQuorum's threshold math (meetsStakeQuorum).
+// This runs in addition to (not instead of) the per-attestation signature
+// verification in HandleCommitCertificate — it rejects certificates that are
+// cryptographically valid but assembled from too small a set of (legitimately)
+// attesting validators to actually represent quorum.
 func (c *Consensus) attestationsMeetStakeQuorum(atts []*types.Attestation) bool {
 	if len(atts) == 0 {
 		return false
@@ -188,9 +188,7 @@ func (c *Consensus) attestationsMeetStakeQuorum(atts []*types.Attestation) bool 
 		}
 	}
 
-	requiredStake := new(big.Int).Mul(totalStake, big.NewInt(2))
-	requiredStake.Div(requiredStake, big.NewInt(3))
-	return staked.Cmp(requiredStake) >= 0
+	return meetsStakeQuorum(staked, totalStake)
 }
 
 // verifyAttestationSignature confirms that att.ValidatorID genuinely

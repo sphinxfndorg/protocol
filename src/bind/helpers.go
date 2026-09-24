@@ -103,6 +103,17 @@ func readFramedMessage(conn net.Conn) ([]byte, error) {
 // ("127.0.0.1:8600").
 const baseWalletRPCPort = 8700
 
+// peerWaitLogInterval rate-limits the two "waiting for peers" messages in this
+// file: runBlockSyncLoop's "No peers reachable" WARN and
+// runBlockProductionLoop's "Sync in progress" INFO heartbeat. Both are emitted
+// from retry/poll loops that run for as long as a node waits on peers which
+// simply are not up yet — the normal state during a same-box network's startup
+// race, and again whenever a peer process dies. Unthrottled they produced
+// 20-40 near-identical lines a minute, burying the actionable lines around
+// them. 30s keeps an operator informed without the flood, and the limiter's
+// "(+N suppressed)" suffix preserves the count of folded attempts.
+const peerWaitLogInterval = 30 * time.Second
+
 // walletRPCAddressForNode returns the wallet/JSON-RPC listener address of the
 // same-box peer with the given node index.
 //
@@ -138,6 +149,10 @@ func runCheckpointSyncLoop(
 	// SECTION 11a), so we translate before dialing. Returns true once at least
 	// one peer answered.
 	syncFromPeers := func() bool {
+		if bc.GetLatestBlock() == nil {
+			logger.Debug("[%s] No local chain yet; skipping checkpoint sync until genesis is installed", nodeID)
+			return false
+		}
 		if len(networkAddresses) <= 1 {
 			return false
 		}
@@ -175,7 +190,7 @@ func runCheckpointSyncLoop(
 				syncedOnce = syncFromPeers()
 			}
 
-			if cons == nil || !cons.IsLeader() {
+			if cons == nil || !cons.IsLeader() || bc.GetLatestBlock() == nil {
 				continue
 			}
 
@@ -246,29 +261,15 @@ func watchAndUpdateStakes(
 // to a minimum-stake grant on lookup failure — insufficient or unverifiable
 // balance means the candidate is simply not added as a validator.
 //
-// This is the single source of truth for "does this ID get to vote", used
-// both by genesis Phase 2 bulk initialization and by runtime peer admission
-// after key exchange. There must be exactly one such function; having two
-// copies of this logic is how the two paths drifted apart before (one
-// checked balance, the other blindly granted minimum stake to anyone who
-// dialed in).
+// The balance check itself lives in verifyRewardBalance — the single source
+// of truth for "is this reward address funded enough to stake", used both by
+// genesis Phase 2 bulk initialization and by runtime peer admission after
+// key exchange. There must be exactly one such check; having two copies of
+// this logic is how the two paths drifted apart before (one checked balance,
+// the other blindly granted minimum stake to anyone who dialed in).
 func stakeIfSufficientBalance(vs *consensus.ValidatorSet, stateDB pool.StateDB, selfNodeID, validatorID, rewardAddress string) bool {
-	if vs == nil || stateDB == nil || validatorID == "" || rewardAddress == "" {
-		return false
-	}
-
-	address := rewardAddress
-	if normalized, err := common.NormalizeSPIFAddress(rewardAddress); err == nil {
-		address = normalized
-	}
-
-	balanceNSPX, err := stateDB.GetBalance(address)
-	if err != nil {
-		logger.Info("[%s] Cannot verify balance for %s (%s): %v — not admitted as validator", selfNodeID, validatorID, address, err)
-		return false
-	}
-	if balanceNSPX == nil || !vs.IsValidStakeAmount(balanceNSPX) {
-		logger.Info("[%s] %s (%s) balance below minimum stake — not admitted as validator", selfNodeID, validatorID, address)
+	balanceNSPX, address, ok := verifyRewardBalance(vs, stateDB, selfNodeID, validatorID, rewardAddress)
+	if !ok {
 		return false
 	}
 
@@ -280,13 +281,113 @@ func stakeIfSufficientBalance(vs *consensus.ValidatorSet, stateDB pool.StateDB, 
 	return true
 }
 
+// verifyRewardBalance reads rewardAddress's on-chain balance against an
+// already-open stateDB and reports whether it meets the minimum stake. It
+// returns the normalized address alongside the balance so callers can use
+// the exact same key for bookkeeping (e.g. the reward-claim ledger).
+// Insufficient or unverifiable balance means the candidate is simply not
+// admitted — there is deliberately no minimum-stake fallback here.
+func verifyRewardBalance(vs *consensus.ValidatorSet, stateDB pool.StateDB, selfNodeID, validatorID, rewardAddress string) (*big.Int, string, bool) {
+	if vs == nil || stateDB == nil || validatorID == "" || rewardAddress == "" {
+		return nil, "", false
+	}
+
+	address := rewardAddress
+	if normalized, err := common.NormalizeSPIFAddress(rewardAddress); err == nil {
+		address = normalized
+	}
+
+	balanceNSPX, err := stateDB.GetBalance(address)
+	if err != nil {
+		logger.Info("[%s] Cannot verify balance for %s (%s): %v — not admitted as validator", selfNodeID, validatorID, address, err)
+		return nil, address, false
+	}
+	if balanceNSPX == nil || !vs.IsValidStakeAmount(balanceNSPX) {
+		logger.Info("[%s] %s (%s) balance below minimum stake — not admitted as validator", selfNodeID, validatorID, address)
+		return nil, address, false
+	}
+	return balanceNSPX, address, true
+}
+
+// rewardClaimLedger enforces "one funded reward address admits at most one
+// node ID" on the runtime peer-admission path. Ownership of an address is
+// proven to the extent the admission challenge provides: the claimed address
+// is covered by the peer's challenge-response signature (the same proof that
+// authenticates its node identity), and the address must hold a real
+// on-chain balance. The ledger then pins address → node ID so a second,
+// different node ID can never be staked against the same funded address.
+//
+// The local operator's own address is pre-bound with bindSelf so a remote
+// peer can never claim it.
+type rewardClaimLedger struct {
+	mu     sync.Mutex
+	owners map[string]string // normalized reward address -> node ID
+}
+
+func newRewardClaimLedger() *rewardClaimLedger {
+	return &rewardClaimLedger{owners: make(map[string]string)}
+}
+
+// normalizeRewardAddress canonicalizes a reward address for ledger keys.
+func normalizeRewardAddress(addr string) string {
+	if normalized, err := common.NormalizeSPIFAddress(addr); err == nil {
+		return normalized
+	}
+	return addr
+}
+
+// reserve records addr -> nodeID. It returns allowed=false when a DIFFERENT
+// node ID already owns the address (the caller must reject the claim), and
+// fresh=true when this call created the reservation (so the caller can
+// release it if the subsequent stake update fails).
+func (l *rewardClaimLedger) reserve(addr, nodeID string) (allowed, fresh bool) {
+	if l == nil || addr == "" || nodeID == "" {
+		return false, false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	key := normalizeRewardAddress(addr)
+	if owner, exists := l.owners[key]; exists {
+		if owner != nodeID {
+			return false, false
+		}
+		return true, false // already bound to this same node ID
+	}
+	l.owners[key] = nodeID
+	return true, true
+}
+
+// release undoes a fresh reservation (only while this node still owns it).
+func (l *rewardClaimLedger) release(addr, nodeID string) {
+	if l == nil || addr == "" {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	key := normalizeRewardAddress(addr)
+	if owner, exists := l.owners[key]; exists && owner == nodeID {
+		delete(l.owners, key)
+	}
+}
+
+// bindSelf pre-assigns the local operator's reward address to this node so a
+// remote peer can never claim it.
+func (l *rewardClaimLedger) bindSelf(addr, nodeID string) {
+	l.reserve(addr, nodeID)
+}
+
 // stakeValidatorFromRewardAddress is the runtime entry point used after a
 // peer's key-exchange reply carries a reward address (see helpers.go
 // discoverAndRegisterPeers / handleIncomingConn). It opens its own StateDB
 // handle for a single check — appropriate for the "one peer just showed up"
 // case, unlike the bulk genesis path in initializePhase2Stakes which reuses
 // one already-open handle across every validator.
-func stakeValidatorFromRewardAddress(bc *core.Blockchain, cons *consensus.Consensus, selfNodeID, validatorID, rewardAddress string) bool {
+//
+// The claim itself is never trusted: it must have been covered by the
+// peer's verified challenge signature upstream (see challenge.go), the
+// address must hold a real on-chain balance (verifyRewardBalance), and —
+// via claims — one funded reward address can admit at most one node ID.
+func stakeValidatorFromRewardAddress(bc *core.Blockchain, cons *consensus.Consensus, selfNodeID, validatorID, rewardAddress string, claims *rewardClaimLedger) bool {
 	if bc == nil || cons == nil {
 		return false
 	}
@@ -301,7 +402,27 @@ func stakeValidatorFromRewardAddress(bc *core.Blockchain, cons *consensus.Consen
 	}
 	defer stateDB.Close()
 
-	return stakeIfSufficientBalance(vs, stateDB, selfNodeID, validatorID, rewardAddress)
+	balanceNSPX, address, ok := verifyRewardBalance(vs, stateDB, selfNodeID, validatorID, rewardAddress)
+	if !ok {
+		return false
+	}
+
+	// One funded reward address → at most one node ID.
+	allowed, fresh := claims.reserve(address, validatorID)
+	if !allowed {
+		logger.Info("[%s] Reward address %s is already bound to another node ID — rejecting stake claim from %s", selfNodeID, address, validatorID)
+		return false
+	}
+
+	if err := vs.SetStakeFromBalance(validatorID, balanceNSPX); err != nil {
+		if fresh {
+			claims.release(address, validatorID)
+		}
+		logger.Warn("[%s] Failed to stake %s from verified balance: %v", selfNodeID, validatorID, err)
+		return false
+	}
+	logger.Info("[%s] Validator %s admitted with verified stake from %s", selfNodeID, validatorID, address)
+	return true
 }
 
 // ============================================================================
@@ -549,6 +670,11 @@ func requestBlocksFromPeer(peerAddr string, fromHeight, toHeight uint64) (*GetBl
 		return nil, fmt.Errorf("dial failed: %w", err)
 	}
 	defer conn.Close()
+	// ★ FIX: no read deadline existed, so a peer that accepted the connection
+	// but never answered (e.g. blocked behind the leader's chain lock while it
+	// signs a block) parked this call — and the sync loop / readiness prober
+	// behind it — forever.
+	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
 
 	msg := security.Message{Type: "get_blocks", Data: reqBytes}
 	encodedMsg, err := msg.Encode()
@@ -675,6 +801,13 @@ func runBlockSyncLoop(
 	lastPeerRefresh := time.Now()
 	peerFailureCount := make(map[string]int)
 
+	// noPeerSyncLog rate-limits the "No peers reachable" line emitted in the
+	// retry branch below. Keyed per node so one node's retries can never
+	// suppress another's (the same-box devnet and the bind tests run several
+	// nodes inside one process). See the branch for why the cadence needs a
+	// bound at all.
+	noPeerSyncLog := logger.Limited("bind:no-peers:"+nodeID, peerWaitLogInterval)
+
 	// resyncOnDivergenceCount prevents infinite recovery loops: if we've
 	// already attempted recovery this many times in a single sync-loop
 	// lifetime, we stop trying and let the operator intervene.
@@ -791,8 +924,22 @@ func runBlockSyncLoop(
 		observeSync(networkTip, reachablePeers)
 
 		if reachablePeers == 0 {
-			logger.Warn("[%s] No peers reachable (tried %d peers) — backing off before retry",
-				nodeID, len(peerAddrs))
+			// ★ FIX: this is the one actionable line when a node is waiting
+			// for peers that are not up yet (e.g. node 2/3 of a same-box
+			// devnet still booting, or a crashed peer), so name the addresses
+			// that were tried. It previously reported only "tried 3 peers",
+			// which told an operator nothing — the addresses here are the P2P
+			// gossip ports, i.e. the ones that must have a listener for the
+			// other node to be considered up. Throttled through
+			// logger.Limited(peerWaitLogInterval): the backoff below starts
+			// at 1s and doubles, so this branch is hit on every retry and an
+			// unthrottled WARN flooded the first minute of a healthy startup
+			// race. The limiter appends "(+N suppressed)", so the operator
+			// can still see how many attempts happened inside the window.
+			noPeerSyncLog.Warn("[%s] No peers reachable — tried %d (%s); backing off before retry (is the other node running?)",
+				nodeID, len(peerAddrs), strings.Join(peerAddrs, ", "))
+			logger.Debug("[%s] No peers reachable — tried %d (%s)",
+				nodeID, len(peerAddrs), strings.Join(peerAddrs, ", "))
 			consecutiveFailures++
 			currentRetryInterval = time.Duration(float64(currentRetryInterval) * backoffMultiplier)
 			if currentRetryInterval > maxRetryInterval {
@@ -1285,13 +1432,27 @@ func runBlockProductionLoop(
 	// ──────────────────────────────────────────────────────────────────────
 	// SYNC STATE GATE: A node in SYNCING state must NOT participate in PBFT.
 	// ──────────────────────────────────────────────────────────────────────
+	// ★ FIX: this loop polls the sync state every 3s for as long as the node
+	// is catching up — including the very common "the peers I was configured
+	// with are not up yet" case, which can last minutes. It used to print its
+	// INFO heartbeat on every poll (~20 identical lines a minute), which
+	// buried the single actionable line produced by the block sync loop
+	// ("No peers reachable — tried N (...)") and made a healthy, waiting node
+	// look like it was spinning. The per-node limiter keeps the first line
+	// plus one per peerWaitLogInterval ("(+N suppressed)" shows how many
+	// polls were folded in); every poll still leaves a Debug line, and the
+	// dashboard's consensus status ("PAUSED — synchronizing", set above) is
+	// the live indicator.
+	syncWaitLog := logger.Limited("bind:sync-wait:"+nodeID, peerWaitLogInterval)
 	for {
 		syncStateMu.Lock()
 		currentSyncState := *syncState
 		syncStateMu.Unlock()
 
 		if currentSyncState == SyncStateSyncing {
-			logger.Info("[%s] Sync in progress — waiting to catch up before joining PBFT (state=%s)",
+			syncWaitLog.Info("[%s] Sync in progress — waiting to catch up before joining PBFT (state=%s)",
+				nodeID, currentSyncState.String())
+			logger.Debug("[%s] Sync in progress — waiting to catch up before joining PBFT (state=%s)",
 				nodeID, currentSyncState.String())
 			select {
 			case <-ctx.Done():
@@ -1320,8 +1481,16 @@ func runBlockProductionLoop(
 		break
 	}
 
-	// ── SOLO MODE (no peers) ──
-	if isBootstrapNode && effectiveValidatorCount() == 1 {
+	// ── SOLO MODE (single-node network only) ──
+	// Solo mining exists solely for a genuine single-node network
+	// (totalNodes <= 1). In a multi-node deployment the bootstrap node must
+	// wait for its peers to connect and then produce PBFT-attested blocks:
+	// mining solo first was producing an unattested chain (previously blocks
+	// 2..N) that late joiners accepted via the "solo-mined before PBFT —
+	// skipping quorum check" path, letting it become canonical ahead of the
+	// real consensus chain. The PBFT gate below already waits for
+	// `--nodes`-sized validator sets; this stops the branch that bypassed it.
+	if isBootstrapNode && totalNodes <= 1 && effectiveValidatorCount() == 1 {
 		logger.Info("[%s] SOLO MODE — bootstrap node, no peers detected yet, mining blocks independently", nodeID)
 		progress.SetConsensusStatus("ACTIVE — solo mining")
 
@@ -1437,18 +1606,22 @@ func runBlockProductionLoop(
 		progress.SetConsensusStatus("PAUSED — insufficient validators")
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
+		validatorWaitLog := logger.Limited("bind:validator-wait:"+nodeID, peerWaitLogInterval)
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+				// effectiveValidatorCount() counts only peers that are READY
+				// (genesis installed + settled, see effectivePeerCount in
+				// nodes.go), not merely peers that completed a key exchange.
 				if effectiveValidatorCount() >= 3 {
-					logger.Info("[%s] %d validators now known — starting PBFT block production",
+					logger.Info("[%s] %d validators now known and ready — starting PBFT block production",
 						nodeID, effectiveValidatorCount())
 					progress.SetConsensusStatus("ACTIVE — validating")
 					goto startPBFT
 				}
-				logger.Info("[%s] Waiting for validators (%d/3 minimum)…", nodeID, effectiveValidatorCount())
+				validatorWaitLog.Info("[%s] Waiting for validators to be ready (%d/3 minimum)…", nodeID, effectiveValidatorCount())
 			}
 		}
 	}
@@ -1492,6 +1665,10 @@ startPBFT:
 	if latestBlock != nil {
 		currentHeight = latestBlock.GetHeight()
 	}
+
+	// ★ FIX: PBFT rounds can begin now. Restart the view-change clock so time
+	// spent waiting for peers to boot isn't counted against the first round.
+	cons.MarkRoundStart()
 
 	logger.Info("[%s] Starting PBFT consensus. Current height: %d", nodeID, currentHeight)
 
@@ -1670,12 +1847,19 @@ startPBFT:
 		wrapped := core.NewBlockHelper(newBlock)
 
 		signingService := cons.GetSigningService()
-		if signingService != nil {
+		// ★ FIX: bc.CreateBlock() already signs the header (executor.go,
+		// cs.SignBlockHeader) — the same SignBlock call, over the same hash.
+		// Signing again here cost a second ~5s SPHINCS+ signature on every
+		// proposal, on the critical path before the proposal is even
+		// broadcast. Only sign if CreateBlock could not.
+		if signingService != nil && len(newBlock.Header.ProposerSignature) == 0 {
 			if err := signingService.SignBlock(wrapped); err != nil {
 				logger.Error("[%s] Failed to sign block header: %v", nodeID, err)
 				continue
 			}
 			logger.Info("[%s] Block header signed", nodeID)
+		} else if signingService != nil {
+			logger.Debug("[%s] Block header already signed by CreateBlock — skipping duplicate signature", nodeID)
 		}
 
 		proposalSlot := proposalView
@@ -1721,7 +1905,11 @@ startPBFT:
 
 		logger.Info("[%s] Block proposed and broadcast, waiting for consensus...", nodeID)
 
-		commitTimeout := time.After(60 * time.Second)
+		// Wait for this round to commit. The budget must exceed the cost of a
+		// full round of SPHINCS+ signatures (block header + proposal + prepare
+		// + commit, roughly 4×5s plus verification and network margin) or the
+		// leader gives up mid-round and the round is thrown away.
+		commitTimeout := time.After(90 * time.Second)
 		commitTicker := time.NewTicker(1 * time.Second)
 
 		committed := false
@@ -1731,7 +1919,14 @@ startPBFT:
 				commitTicker.Stop()
 				return
 			case <-commitTimeout:
-				logger.Warn("[%s] Timeout waiting for block commitment at height %d", nodeID, currentHeight+1)
+				// Advance the view. Re-proposing under the same view re-elects
+				// the same leader and reproduces the same non-committing round
+				// forever (the observed height-13 stall). Bumping the view
+				// changes the RANDAO seed, so the next round can elect a
+				// different proposer and make progress.
+				logger.Warn("[%s] Timeout waiting for block commitment at height %d — advancing view to re-elect a leader",
+					nodeID, currentHeight+1)
+				cons.StartViewChange()
 				committed = true
 			case <-commitTicker.C:
 				latest := bc.GetLatestBlock()

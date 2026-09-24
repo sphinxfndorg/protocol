@@ -15,14 +15,12 @@
 package dht
 
 import (
-	"encoding/json"
 	"math/rand"
 	"net"
 	"strconv"
 	"time"
 
 	"github.com/lni/goutils/syncutil"
-	security "github.com/sphinxfndorg/protocol/src/handshake"
 	"github.com/sphinxfndorg/protocol/src/network"
 
 	"github.com/sphinxfndorg/protocol/src/rpc"
@@ -603,47 +601,26 @@ func (d *DHT) sendMessage(m rpc.Message, addr net.UDPAddr) {
 		return
 	}
 
-	// encodedMsg is a raw binary buffer (magic number + length + payload +
-	// BLAKE3 hash), not JSON text. Data is json.RawMessage, so it must hold
-	// valid JSON — assigning the binary bytes directly made the outer
-	// json.Marshal below fail with "invalid character ... looking for
-	// beginning of value" as soon as a byte like 0xEF appeared.
-	// json.Marshal of a []byte auto-encodes it as a base64 JSON string
-	// (matching how bind.go's "rpc" case round-trips raw bytes through
-	// Message.Data), so marshal encodedMsg instead of assigning it directly.
-	b64Msg, err := json.Marshal(encodedMsg)
-	if err != nil {
-		d.log.Error("Failed to base64/JSON-encode message payload", zap.Error(err))
-		return
-	}
+	// The receiver validates the framed binary packet directly (magic,
+	// payload size, payload, BLAKE3 hash). Wrapping it in a JSON
+	// security.Message makes the first bytes '{', so verifyReceivedMessage
+	// rejects every join/query packet before DHT processing.
+	req := sendReq{Addr: addr, Msg: m, EncodedData: encodedMsg}
 
-	// Wrap in security message for encryption/integrity
-	secMsg := &security.Message{Type: "rpc", Data: b64Msg}
-	encodedData, err := secMsg.Encode()
-	if err != nil {
-		d.log.Error("Failed to encode security message", zap.Error(err))
-		return
-	}
-
-	// Create send request
-	req := sendReq{Addr: addr, Msg: m, EncodedData: encodedData}
-
-	// Check if this is a loopback message (to self)
+	// Do not send a DHT query to ourselves. KNearest intentionally includes
+	// self as a bootstrap candidate, but queuing that packet back into the local
+	// event loop creates a self-query storm (and can fill loopbackCh) instead
+	// of discovering a remote node.
 	if d.toLocalNode(addr) {
-		select {
-		case d.loopbackCh <- m:
-			// Loopback message sent
-		default:
-			d.log.Warn("loopbackCh full, dropping message")
-		}
-	} else {
-		// Send to remote node
-		select {
-		case d.sendMsgCh <- req:
-			// Message queued for sending
-		default:
-			d.log.Warn("sendMsgCh full, dropping message")
-		}
+		return
+	}
+
+	// Send to remote node.
+	select {
+	case d.sendMsgCh <- req:
+		// Message queued for sending
+	default:
+		d.log.Warn("sendMsgCh full, dropping message")
 	}
 }
 

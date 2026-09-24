@@ -418,9 +418,15 @@ func (c *Consensus) HandleCheckpointMessage(data []byte, fromNodeID string) erro
 		return fmt.Errorf("blockchain not available")
 	}
 
-	// Check if peer is ahead
+	// Check if peer is ahead. An empty late-joiner has no local chain to
+	// compare against yet; the block-sync loop will install genesis first and a
+	// later checkpoint will be handled normally.
 	latest := c.blockChain.GetLatestBlock() // FIX: blockChain
-	if latest != nil && cp.TipHeight <= latest.GetHeight() {
+	if latest == nil {
+		logger.Debug("Ignoring checkpoint from %s until local genesis is installed", fromNodeID)
+		return nil
+	}
+	if cp.TipHeight <= latest.GetHeight() {
 		// Peer is not ahead or equal, ignore
 		return nil
 	}

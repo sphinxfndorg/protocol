@@ -8,7 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
-	"strings"
+	"sort"
 	"sync"
 
 	"github.com/sphinxfndorg/protocol/src/consensus"
@@ -89,29 +89,65 @@ func handleIncomingConn(
 			logger.Warn("[%s] Failed to unmarshal key exchange: %v", selfID, err)
 			return
 		}
+		if err := validatePeerGenesisHash(kx.GenesisHash, core.GetGenesisHash()); err != nil {
+			logger.Warn("[%s] Rejecting key exchange from %s: %v", selfID, kx.NodeID, err)
+			return
+		}
+		if kx.NodeID == "" {
+			logger.Warn("[%s] Rejecting key exchange with empty node ID", selfID)
+			return
+		}
 
 		pk, err := sthincs.DeserializePK(sthincsParams, kx.PublicKey)
 		if err != nil {
 			logger.Warn("[%s] Failed to deserialize public key: %v", selfID, err)
 			return
 		}
-		signingService.RegisterPublicKey(kx.NodeID, pk)
-		logger.Info("[%s] Registered public key from %s", selfID, kx.NodeID)
 
-		if onPeerDiscovered != nil && kx.NodeID != "" {
-			var peerAddr string
-			if strings.HasPrefix(kx.NodeID, "Node-") {
-				peerAddr = strings.TrimPrefix(kx.NodeID, "Node-")
-			} else {
-				peerAddr = kx.NodeID
-			}
+		// PROOF OF KEY POSSESSION: issue a receiver-chosen nonce and verify
+		// the sender's signature over (nonce || node_id || genesis_hash ||
+		// reward_address) BEFORE RegisterPublicKey or any admission side
+		// effect. verifyAndRegisterPeerKey also enforces node_id <-> key
+		// binding (first verified handshake pins the identity).
+		nonce, err := newChallengeNonce()
+		if err != nil {
+			logger.Warn("[%s] Failed to create admission challenge: %v", selfID, err)
+			return
+		}
+		if err := sendAuthChallenge(conn, nonce); err != nil {
+			logger.Warn("[%s] Failed to send admission challenge to %s: %v", selfID, kx.NodeID, err)
+			return
+		}
+		proofSig, err := readAuthProof(conn)
+		if err != nil {
+			logger.Warn("[%s] Rejecting key exchange from %s: no valid challenge proof: %v", selfID, kx.NodeID, err)
+			return
+		}
+		if err := verifyAndRegisterPeerKey(sthincsParams, signingService, pk, nonce,
+			kx.NodeID, kx.GenesisHash, kx.RewardAddress, proofSig); err != nil {
+			logger.Warn("[%s] Rejecting key exchange from %s: %v", selfID, kx.NodeID, err)
+			return
+		}
+		logger.Info("[%s] Verified key possession for %s", selfID, kx.NodeID)
+
+		// Dialable address = connection IP + the peer's CLAIMED listening
+		// port (never the ephemeral source port of this connection). The
+		// address goes into the address book only; p2pMgr admission happens
+		// later, after OUR dial-back handshake to this address succeeds
+		// (see ensureDialbackAdmitted in nodes.go).
+		peerAddr, deriveErr := derivePeerListenAddr(conn.RemoteAddr(), kx.Address)
+		if deriveErr != nil {
+			logger.Warn("[%s] %s proved its key but has no dialable address (%v) — recording key only", selfID, kx.NodeID, deriveErr)
+		} else if onPeerDiscovered != nil {
 			onPeerDiscovered(kx.NodeID, peerAddr)
 		}
 
 		// A reward address only ever results in a *verified* stake check
-		// downstream (see stakeValidatorFromRewardAddress) — receiving one
-		// here never grants validator status by itself.
-		if onPeerStakeClaim != nil && kx.RewardAddress != "" {
+		// downstream (see stakeValidatorFromRewardAddress) — and here it is
+		// additionally covered by the challenge signature just verified, so
+		// the claim is bound to the authenticated node identity. Receiving
+		// one never grants validator status by itself.
+		if onPeerStakeClaim != nil && kx.RewardAddress != "" && deriveErr == nil {
 			onPeerStakeClaim(kx.NodeID, kx.RewardAddress)
 		}
 
@@ -120,7 +156,21 @@ func handleIncomingConn(
 			logger.Error("[%s] Failed to get own public key: %v", selfID, err)
 			return
 		}
-		reply := peerKeyExchangeMsg{NodeID: selfID, PublicKey: ownPKBytes, RewardAddress: ownRewardAddress}
+		// The reply must itself prove OUR key possession, otherwise the
+		// dialing side would be registering an unauthenticated key.
+		replySig, err := signChallenge(signingService, nonce, selfID, core.GetGenesisHash(), ownRewardAddress)
+		if err != nil {
+			logger.Error("[%s] Failed to sign key exchange reply: %v", selfID, err)
+			return
+		}
+		reply := peerKeyExchangeMsg{
+			NodeID:        selfID,
+			PublicKey:     ownPKBytes,
+			RewardAddress: ownRewardAddress,
+			GenesisHash:   core.GetGenesisHash(),
+			Address:       selfAddr,
+			Signature:     replySig,
+		}
 		replyBytes, _ := json.Marshal(reply)
 		replyMsg := security.Message{Type: "key_exchange", Data: replyBytes}
 		encodedReply, _ := replyMsg.Encode()
@@ -135,17 +185,74 @@ func handleIncomingConn(
 			return
 		}
 
-		if onPeerDiscovered != nil && req.NodeID != "" && req.Address != "" {
-			onPeerDiscovered(req.NodeID, req.Address)
+		// The peer list is served ONLY after the requester passes the same
+		// challenge-response used by key exchange. Nothing — not even the
+		// requester's address book entry — happens before the proof
+		// verifies.
+		if req.NodeID == "" {
+			logger.Warn("[%s] Peer exchange request with empty node ID — peer list withheld", selfID)
+			return
+		}
+		if len(req.PublicKey) == 0 {
+			logger.Warn("[%s] Peer exchange request from %s carries no public key — peer list withheld", selfID, req.NodeID)
+			return
+		}
+		if err := validatePeerGenesisHash(req.GenesisHash, core.GetGenesisHash()); err != nil {
+			logger.Warn("[%s] Rejecting peer exchange from %s: %v", selfID, req.NodeID, err)
+			return
+		}
+
+		nonce, err := newChallengeNonce()
+		if err != nil {
+			logger.Warn("[%s] Failed to create PEX challenge: %v", selfID, err)
+			return
+		}
+		if err := sendAuthChallenge(conn, nonce); err != nil {
+			logger.Warn("[%s] Failed to send PEX challenge to %s: %v", selfID, req.NodeID, err)
+			return
+		}
+		proofSig, err := readAuthProof(conn)
+		if err != nil {
+			logger.Warn("[%s] Peer exchange from %s failed challenge — peer list withheld: %v", selfID, req.NodeID, err)
+			return
+		}
+		reqPK, err := sthincs.DeserializePK(sthincsParams, req.PublicKey)
+		if err != nil {
+			logger.Warn("[%s] Peer exchange from %s has an unusable public key — peer list withheld: %v", selfID, req.NodeID, err)
+			return
+		}
+		// PEX requests carry no reward address, so the signed payload uses
+		// the empty reward field (see challengePayload).
+		if err := verifyAndRegisterPeerKey(sthincsParams, signingService, reqPK, nonce,
+			req.NodeID, req.GenesisHash, "", proofSig); err != nil {
+			logger.Warn("[%s] Peer exchange from %s failed challenge — peer list withheld: %v", selfID, req.NodeID, err)
+			return
+		}
+
+		// Requester authenticated: record its dialable address (connection
+		// IP + claimed listening port; address book only — p2pMgr admission
+		// still requires OUR dial-back, see ensureDialbackAdmitted).
+		if onPeerDiscovered != nil {
+			if peerAddr, dErr := derivePeerListenAddr(conn.RemoteAddr(), req.Address); dErr == nil {
+				onPeerDiscovered(req.NodeID, peerAddr)
+			} else {
+				logger.Warn("[%s] Peer %s passed the challenge but has no dialable address: %v", selfID, req.NodeID, dErr)
+			}
 		}
 
 		var knownPeers []knownPeerInfo
 		if getKnownPeers != nil {
 			knownPeers = getKnownPeers()
 		}
+		// Deterministic order and a bounded list size.
+		sort.Slice(knownPeers, func(i, j int) bool { return knownPeers[i].NodeID < knownPeers[j].NodeID })
+		const maxPeerExchangePeers = 64
+		if len(knownPeers) > maxPeerExchangePeers {
+			knownPeers = knownPeers[:maxPeerExchangePeers]
+		}
 
-		logger.Info("[%s] Peer exchange request from %s (%s) — sharing %d known peer(s)",
-			selfID, req.NodeID, req.Address, len(knownPeers))
+		logger.Info("[%s] Peer exchange request from %s passed the challenge — sharing %d known peer(s)",
+			selfID, req.NodeID, len(knownPeers))
 
 		reply := peerExchangeMsg{NodeID: selfID, Address: selfAddr, Peers: knownPeers}
 		replyBytes, err := json.Marshal(reply)
@@ -251,7 +358,8 @@ func handleIncomingConn(
 		}
 		logger.Info("[%s] Accepted gossiped transaction %s into mempool", selfID, gossipedTx.ID)
 
-	case "proposal", "prepare", "vote", "timeout", "randao_sync", "sync_request", "sync_response":
+	case "proposal", "prepare", "vote", "timeout", "randao_sync", "sync_request", "sync_response",
+		"prepare_certificate", "commit_certificate":
 		if p2pMgr == nil {
 			logger.Warn("[%s] P2P manager is nil, cannot handle consensus message", selfID)
 			return

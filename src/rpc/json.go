@@ -403,6 +403,10 @@ func (h *JSONRPCHandler) registerMethods() {
 	h.methods["verifymessage"] = h.verifyMessage
 	h.methods["getrawtransaction"] = h.getRawTransaction
 	h.methods["getbalance"] = h.getBalance
+	// Compatibility aliases for older wallet/CLI clients. Keep getbalance as
+	// the canonical method name.
+	h.methods["sphinx_getBalance"] = h.getBalance
+	h.methods["spx_getBalance"] = h.getBalance
 	h.methods["gettransactionhistory"] = h.getTransactionHistory
 	h.methods["getsupplystatus"] = h.getSupplyStatus
 	h.methods["getcheckpoint"] = h.getCheckpoint

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"time"
 
@@ -22,6 +23,12 @@ import (
 )
 
 func NewServer(address string, messageCh chan *security.Message, blockchain *core.Blockchain, readyCh chan struct{}) *Server {
+	// Gin defaults to debug mode, which dumps every route and logs per-request
+	// debug output. Honour an explicit GIN_MODE if the operator set one,
+	// otherwise run in release mode so normal node operation stays quiet.
+	if os.Getenv(gin.EnvGinMode) == "" {
+		gin.SetMode(gin.ReleaseMode)
+	}
 	r := gin.Default()
 	s := &Server{
 		address:    address,

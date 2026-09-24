@@ -218,7 +218,7 @@ func NewConsensus(
 		nodeManager:          nodeManager,                       // Manages peer connections
 		blockChain:           blockchain,                        // Reference to blockchain storage
 		signingService:       signingService,                    // Handles cryptographic signatures
-		currentView:          0,                                 // Current consensus view (round)
+		currentView:          1,                                 // First PBFT round is view 1
 		currentHeight:        0,                                 // Current blockchain height
 		phase:                PhaseIdle,                         // Current consensus phase
 		quorumFraction:       0.67,                              // 2/3 majority requirement
@@ -294,6 +294,19 @@ func (c *Consensus) Start() error {
 	go c.syncLoop()
 
 	return nil
+}
+
+// MarkRoundStart tells the engine that PBFT rounds can actually begin now
+// (the block-production loop has passed its "enough READY validators" gate).
+// It restarts the round-activity clock so the automatic view-change timer
+// does not fire against time this node spent waiting for peers to boot.
+// Before this, the timer started at construction: a node that waited ~45s for
+// its peers hit "No new blocks for 20s", signed a timeout (~5s) and pushed the
+// whole network into a view change just as the first proposal was in flight.
+func (c *Consensus) MarkRoundStart() {
+	c.mu.Lock()
+	c.lastRoundActivity = common.GetTimeService().Now()
+	c.mu.Unlock()
 }
 
 // GetNodeID returns the node's identifier
@@ -994,10 +1007,56 @@ func (c *Consensus) GetCurrentHeight() uint64 {
 	return c.currentHeight
 }
 
+// ── Consensus timing constants ─────────────────────────────────────────────
+// These must all comfortably exceed one full signing round: with SphinxHash
+// SPHINCS+ signing, a round costs roughly four sequential 4–5s signatures
+// (block header + proposal + prepare vote + commit vote), i.e. ~25–30s. Timers
+// shorter than that fire in the middle of a round, invalidate in-flight
+// signatures and prevent the round from ever completing.
+const (
+	// roundActivityWindow is how long a round may go without any observed
+	// progress (proposal accepted, prepare/commit vote sent or received)
+	// before the automatic view-change timer is allowed to advance the view.
+	roundActivityWindow = 90 * time.Second
+
+	// stalledRoundThreshold is the no-progress window after which a view
+	// change is FORCED even if the phase is not Idle and votes are pending.
+	// This is what lets a genuinely deadlocked round (e.g. two competing
+	// blocks with votes for both) recover instead of spinning forever.
+	stalledRoundThreshold = 45 * time.Second
+
+	// viewChangeRateLimit throttles view changes so a burst of timers cannot
+	// skip several views at once. Must exceed a full signing round.
+	viewChangeRateLimit = 30 * time.Second
+
+	// staleSignatureTTL is how long a consensus signature for a block that is
+	// not (yet) in local storage is retained before being garbage-collected.
+	// It must exceed a full signing round so proposal/vote signatures are not
+	// deleted while the commit quorum that needs them is still forming.
+	staleSignatureTTL = 120 * time.Second
+)
+
 // shouldPreventViewChange determines if view change should be blocked due to active consensus
 func (c *Consensus) shouldPreventViewChange() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+
+	now := common.GetTimeService().Now()
+
+	// A view change is a recovery mechanism for an active round. At genesis,
+	// before the first proposal arrives, PhaseIdle with no round state is
+	// normal: the leader may still be creating and signing block 1. Do not
+	// treat that idle state as a stalled round and advance the view early.
+	activeRound := c.proposalInFlight ||
+		c.phase != PhaseIdle ||
+		c.lockedBlock != nil ||
+		c.preparedBlock != nil ||
+		len(c.receivedVotes) > 0 ||
+		len(c.prepareVotes) > 0
+	if activeRound && !c.lastRoundActivity.IsZero() && now.Sub(c.lastRoundActivity) >= stalledRoundThreshold {
+		return false
+	}
+
 	// Block view change if a proposal is currently being validated.
 	// Without this, the view timer can fire (and advance currentView)
 	// while processProposal is still mid-verification — e.g. waiting on
@@ -1007,24 +1066,23 @@ func (c *Consensus) shouldPreventViewChange() bool {
 	if c.proposalInFlight {
 		return true
 	}
-	// Block view change if we're in prepare phases
+	// Block view change while in prepare phases.
 	if c.phase == PhasePrePrepared || c.phase == PhasePrepared {
 		return true
 	}
-	// Block view change if we have pending votes
+	// Block view change while the current round still has votes in flight.
 	if len(c.receivedVotes) > 0 || len(c.prepareVotes) > 0 {
 		return true
 	}
-	if c.currentHeight > 0 && common.GetTimeService().Now().Sub(c.lastBlockTime) < 15*time.Second {
+	if c.currentHeight > 0 && now.Sub(c.lastBlockTime) < 15*time.Second {
 		return true
 	}
-	// FIX: Use a fixed 30-second window instead of c.timeout.
-	// c.timeout may be set to values like 1 hour by callers (e.g. nodes.go
-	// called cons.SetTimeout(1 * time.Hour)), which caused shouldPreventViewChange
-	// to return true for 60 minutes after every round, permanently blocking
-	// all view-changes and freezing the chain after block 1.
-	const roundActivityWindow = 30 * time.Second
-	if !c.lastRoundActivity.IsZero() && common.GetTimeService().Now().Sub(c.lastRoundActivity) < roundActivityWindow {
+	// FIX: Use a fixed window instead of c.timeout. c.timeout may be set to
+	// values like 1 hour by callers (e.g. nodes.go called
+	// cons.SetTimeout(1 * time.Hour)), which caused shouldPreventViewChange to
+	// return true for 60 minutes after every round, permanently blocking all
+	// view-changes and freezing the chain after block 1.
+	if !c.lastRoundActivity.IsZero() && now.Sub(c.lastRoundActivity) < roundActivityWindow {
 		return true
 	}
 	return false
@@ -1032,24 +1090,40 @@ func (c *Consensus) shouldPreventViewChange() bool {
 
 // consensusLoop is the main loop that manages view change timeouts
 func (c *Consensus) consensusLoop() {
-	// Create timer for view change timeout - use a reasonable timeout
+	// Polling interval for the automatic view-change check. It must be long
+	// enough that a normal round (several sequential ~4-5s SPHINCS+
+	// signatures) can finish without the timer firing mid-round, but short
+	// enough that a stalled round recovers promptly. shouldPreventViewChange
+	// additionally suppresses the change while progress is recent, and forces
+	// it once stalledRoundThreshold has elapsed with no progress.
+	const viewPollInterval = 20 * time.Second
 	timeout := c.timeout
-	if timeout > 30*time.Second {
-		timeout = 10 * time.Second // Cap at 10 seconds for responsiveness
+	if timeout < 15*time.Second || timeout > 30*time.Second {
+		timeout = viewPollInterval
 	}
 	viewTimer := time.NewTimer(timeout)
 	defer viewTimer.Stop()
 
-	// was: 30 * time.Second — too slow relative to a 15s round-stall timeout,
-	// letting one dead round's leftovers poison the next round's reconciliation.
-	cleanupTicker := time.NewTicker(5 * time.Second)
+	// Stale-signature cleanup cadence. The TTL itself (staleSignatureTTL) is
+	// what protects in-flight signatures; this only controls how often we scan.
+	cleanupTicker := time.NewTicker(15 * time.Second)
 	defer cleanupTicker.Stop()
 
 	for {
 		select {
 		case <-viewTimer.C:
+			// ★ FIX: a node whose PBFT sync gate is still closed is not
+			// participating in consensus, so it must not start view changes.
+			// The bootstrap node used to fire "No new blocks for 20s" while it
+			// was still waiting for peers, signed a timeout (~5s SPHINCS+),
+			// bumped itself to view 1, and broadcast it; followers replayed
+			// that stale timeout on startup and jumped views for no reason.
+			if !c.IsSyncReady() {
+				viewTimer.Reset(timeout)
+				continue
+			}
 			if c.shouldPreventViewChange() {
-				viewTimer.Reset(10 * time.Second)
+				viewTimer.Reset(timeout)
 				continue
 			}
 
@@ -1064,7 +1138,7 @@ func (c *Consensus) consensusLoop() {
 					c.mu.Lock()
 					c.currentHeight = chainBlock.GetHeight()
 					c.mu.Unlock()
-					viewTimer.Reset(10 * time.Second)
+					viewTimer.Reset(timeout)
 					continue
 				}
 			}
@@ -1072,7 +1146,7 @@ func (c *Consensus) consensusLoop() {
 			// No new block within the timeout window — trigger view change.
 			logger.Info("⏰ No new blocks for %v, checking view change...", timeout)
 			c.startViewChange()
-			viewTimer.Reset(10 * time.Second)
+			viewTimer.Reset(timeout)
 
 		case <-cleanupTicker.C:
 			c.CleanupStaleSignatures()
@@ -1265,10 +1339,22 @@ func (c *Consensus) CleanupStaleSignatures() {
 		// Check if block exists in storage
 		block := c.blockChain.GetBlockByHash(sig.BlockHash)
 		if block == nil {
-			// Don't remove signatures for blocks that are still being processed
-			// Only remove if the signature is older than 8 seconds
+			// Don't remove signatures for blocks that are still being
+			// processed. The TTL must exceed a full signing round: with slow
+			// SPHINCS+ signing, proposal/prepare/commit signatures are created
+			// seconds apart, and deleting them after only a few seconds (the
+			// old 8s TTL) removed proposal signatures before the commit quorum
+			// that needed them could form — the votes for a height then never
+			// finished and the chain stalled.
 			sigTime, err := time.Parse(time.RFC3339, sig.Timestamp)
-			if err == nil && time.Since(sigTime) > 8*time.Second {
+			if err != nil {
+				// Unparseable timestamp — treat as recent rather than deleting
+				// a signature we cannot age, and log the malformed value.
+				logger.Debug("Keeping signature for block %s with unparseable timestamp %q", sig.BlockHash[:min(16, len(sig.BlockHash))], sig.Timestamp)
+				cleaned = append(cleaned, sig)
+				continue
+			}
+			if time.Since(sigTime) > staleSignatureTTL {
 				logger.Info("Removing stale signature for block %s (height=%d, type=%s, age=%v)",
 					sig.BlockHash[:16], sig.BlockHeight, sig.MessageType, time.Since(sigTime))
 				removedCount++
@@ -1392,6 +1478,57 @@ func (c *Consensus) updateLeaderStatusRoundRobin() {
 	c.isLeader = (expectedLeader == c.nodeID)
 }
 
+// deferredProposalKeys de-duplicates deferProposalUntilSyncReady goroutines
+// (a leader may broadcast the same proposal more than once). Keyed by
+// nodeID|view|blockHash so several nodes in one process never collide.
+var deferredProposalKeys sync.Map
+
+// deferProposalUntilSyncReady re-queues a proposal that arrived before this
+// node's PBFT sync gate opened. It waits (bounded by staleSignatureTTL — after
+// that the round is long dead) for IsSyncReady, then pushes the original,
+// still-signed proposal back onto proposalCh. Must not be called with the
+// proposal's fields being mutated concurrently; processProposal only reads
+// them after this point.
+func (c *Consensus) deferProposalUntilSyncReady(p *Proposal) {
+	if p == nil || p.Block == nil {
+		return
+	}
+	key := fmt.Sprintf("%s|%d|%s", c.nodeID, p.View, p.Block.GetHash())
+	if _, loaded := deferredProposalKeys.LoadOrStore(key, struct{}{}); loaded {
+		return
+	}
+	go func() {
+		defer deferredProposalKeys.Delete(key)
+		ticker := time.NewTicker(500 * time.Millisecond)
+		defer ticker.Stop()
+		deadline := time.NewTimer(staleSignatureTTL)
+		defer deadline.Stop()
+		for {
+			select {
+			case <-c.ctx.Done():
+				return
+			case <-deadline.C:
+				logger.Warn("Deferred proposal for view %d block %s expired before sync gate opened",
+					p.View, p.Block.GetHash())
+				return
+			case <-ticker.C:
+				if !c.IsSyncReady() {
+					continue
+				}
+				select {
+				case c.proposalCh <- p:
+					logger.Info("Sync gate open — replaying deferred proposal for height %d (view %d) from %s",
+						p.Block.GetHeight(), p.View, p.ProposerID)
+				default:
+					logger.Warn("proposalCh full — dropping deferred proposal for view %d block %s",
+						p.View, p.Block.GetHash())
+				}
+				return
+			}
+		}
+	}()
+}
+
 // processProposal validates and processes an incoming block proposal.
 // Leader validation uses electedLeaderID set by UpdateLeaderStatus, so
 // follower nodes accept the same RANDAO-elected winner the leader elected itself as.
@@ -1462,8 +1599,18 @@ func (c *Consensus) processProposal(proposal *Proposal) {
 	// but do not enter validation yet: without a local tip it can only produce
 	// a misleading warning and cannot safely vote anyway.
 	if !c.IsSyncReady() {
-		logger.Debug("Deferring proposal for height %d from %s until sync gate opens",
-			proposal.Block.GetHeight(), proposal.ProposerID)
+		// ★ FIX (first proposal lost on a fresh network): this used to log at
+		// Debug and return, and nothing ever replayed the proposal. The only
+		// replay path (FastForward) needs a synced block to commit first — on
+		// a fresh network still at genesis there is none — and it re-queues a
+		// Proposal with no signature, which the mandatory-signature check
+		// below rejects anyway. So a proposal that arrived while this node was
+		// still installing genesis was simply gone; the round only recovered
+		// after a 90s commit timeout plus a view change. Re-queue the ORIGINAL
+		// signed proposal as soon as the sync gate opens.
+		logger.Info("Deferring proposal for height %d (view %d) from %s until sync gate opens",
+			proposal.Block.GetHeight(), proposal.View, proposal.ProposerID)
+		c.deferProposalUntilSyncReady(proposal)
 		return
 	}
 
@@ -2244,7 +2391,20 @@ func (c *Consensus) ForcePopulateAllSignatures() {
 	c.signatureMutex.Lock()
 	defer c.signatureMutex.Unlock()
 
-	logger.Info("Force populating all consensus signatures")
+	// ★ FIX: this runs on the state machine's 2-second replication tick for
+	// the entire life of the node (see state/smr.go's syncFinalStates). With
+	// an empty signature set — an idle node, or one that is still syncing,
+	// which is the case for most of a node's uptime — it still logged the two
+	// INFO lines below on every tick: "Force populating all consensus
+	// signatures" / "Force population completed for 0 signatures", i.e. ~60
+	// lines a minute of pure noise that buried real startup diagnostics.
+	// Nothing needs populating and nothing is worth an operator's attention
+	// when the set is empty.
+	if len(c.consensusSignatures) == 0 {
+		return
+	}
+
+	logger.Debug("Force populating %d consensus signatures", len(c.consensusSignatures))
 
 	// Process each signature
 	for i, sig := range c.consensusSignatures {
@@ -2292,11 +2452,11 @@ func (c *Consensus) ForcePopulateAllSignatures() {
 			}
 		}
 
-		logger.Info("Signature %d: block=%s, merkle=%s->%s, status=%s->%s",
+		logger.Debug("Signature %d: block=%s, merkle=%s->%s, status=%s->%s",
 			i, sig.BlockHash, originalMerkleRoot, sig.MerkleRoot, originalStatus, sig.Status)
 	}
 
-	logger.Info("Force population completed for %d signatures", len(c.consensusSignatures))
+	logger.Debug("Force population completed for %d signatures", len(c.consensusSignatures))
 }
 
 // GetConsensusSignatures returns a copy of all consensus signatures
@@ -2659,6 +2819,24 @@ func (c *Consensus) processTimeout(timeout *TimeoutMsg) {
 
 	// If timeout is for a higher view, perform view change.
 	if timeout.View > c.currentView {
+		// ★ FIX (round destroyed mid-flight): a single peer's timeout used to
+		// call resetConsensusState() unconditionally, wiping preparedBlock,
+		// phase and every collected prepare/commit vote — even when THIS node
+		// was in the middle of a healthy round. Observed on a fresh 3-node
+		// devnet: node 2's 20s timer fired 0.4s before the leader's proposal
+		// arrived; its timeout (signed for ~5s) reached the leader and node 3
+		// while both were collecting prepare votes, reset them to phase=0, and
+		// the round could never complete ("votes=2/2, phase=0, prepared=false",
+		// commit votes ignored). Block 1 then waited ~95s for the next view.
+		// Same rule startViewChange already applies to our OWN timer: while a
+		// round is active and not stalled, do not abandon it.
+		now := common.GetTimeService().Now()
+		stalled := !c.lastRoundActivity.IsZero() && now.Sub(c.lastRoundActivity) >= stalledRoundThreshold
+		if (c.phase == PhasePrePrepared || c.phase == PhasePrepared) && !stalled {
+			logger.Info("Ignoring view-change request to view %d from %s: round in progress (phase=%v, last activity %v ago)",
+				timeout.View, timeout.VoterID, c.phase, now.Sub(c.lastRoundActivity))
+			return
+		}
 		logger.Info("View change requested to view %d by %s", timeout.View, timeout.VoterID)
 		c.currentView = timeout.View
 		c.lastViewChange = common.GetTimeService().Now()
@@ -2808,6 +2986,28 @@ func (c *Consensus) voteForBlock(blockHash string, view uint64) {
 		c.nodeID, blockHash, blockToVote.GetHeight(), view)
 }
 
+// meetsStakeQuorum reports whether `voted` stake is strictly more than 2/3 of
+// `total` stake — the BFT quorum condition.
+//
+// The comparison is STRICT (voted*3 > total*2), not >=. With three equal-stake
+// validators, exactly two votes are exactly 2/3 of the stake, and two such
+// quorums can intersect in a single validator: if that validator is Byzantine
+// it can sign both, which is enough to justify two conflicting commits under
+// f=1. Requiring strictly more than 2/3 forces quorums to overlap by more than
+// f validators, which is what actually preserves safety.
+//
+// All quorum checks (commit, prepare, and certificate attestation) must use
+// this one helper so a block cannot be prepared under one threshold and
+// committed under another.
+func meetsStakeQuorum(voted, total *big.Int) bool {
+	if voted == nil || total == nil || total.Sign() <= 0 {
+		return false
+	}
+	lhs := new(big.Int).Mul(voted, big.NewInt(3)) // voted * 3
+	rhs := new(big.Int).Mul(total, big.NewInt(2)) // total * 2
+	return lhs.Cmp(rhs) > 0
+}
+
 // hasQuorum checks if a block has achieved commit quorum based on stake weight
 func (c *Consensus) hasQuorum(blockHash string) bool {
 	// Get votes for this block
@@ -2853,12 +3053,8 @@ func (c *Consensus) hasQuorum(blockHash string) bool {
 		return false
 	}
 
-	// Calculate required stake (2/3 of total)
-	requiredStake := new(big.Int).Mul(totalStake, big.NewInt(2))
-	requiredStake.Div(requiredStake, big.NewInt(3))
-
-	// Check if quorum achieved
-	hasQuorum := totalStakeVoted.Cmp(requiredStake) >= 0
+	// Check if quorum achieved — strictly more than 2/3 of total stake.
+	hasQuorum := meetsStakeQuorum(totalStakeVoted, totalStake)
 
 	// Log quorum details if achieved
 	if hasQuorum && totalStakeVoted.Cmp(big.NewInt(0)) > 0 {
@@ -2906,11 +3102,8 @@ func (c *Consensus) hasPrepareQuorum(blockHash string) bool {
 		return false
 	}
 
-	// Calculate required stake (2/3 of total)
-	requiredStake := new(big.Int).Mul(totalStake, big.NewInt(2))
-	requiredStake.Div(requiredStake, big.NewInt(3))
-
-	return totalStakeVoted.Cmp(requiredStake) >= 0
+	// Strictly more than 2/3 of total stake must have voted to prepare.
+	return meetsStakeQuorum(totalStakeVoted, totalStake)
 }
 
 // getValidatorStake returns the stake amount for a validator
@@ -3351,23 +3544,36 @@ func (c *Consensus) startViewChange() {
 
 	c.mu.Lock()
 
+	now := common.GetTimeService().Now()
+
+	// A round that has made no progress for stalledRoundThreshold is dead
+	// (e.g. two competing blocks with votes for both). In that case a view
+	// change must be allowed even though the phase is not Idle — otherwise
+	// the phase guard below wedges the node forever and the chain never
+	// recovers. resetConsensusState() below clears the dead round's state.
+	stalled := !c.lastRoundActivity.IsZero() && now.Sub(c.lastRoundActivity) >= stalledRoundThreshold
+
 	// Check conditions for view change
-	if c.phase != PhaseIdle {
+	if c.phase != PhaseIdle && !stalled {
 		logger.Info("View change skipped - not in idle phase (phase=%v)", c.phase)
 		c.mu.Unlock()
 		return
 	}
+	if c.phase != PhaseIdle {
+		logger.Warn("Forcing view change out of stalled round (phase=%v, no progress for %v) — clearing round state",
+			c.phase, now.Sub(c.lastRoundActivity))
+	}
 
 	// ========== FIX: Increase rate limit ==========
-	if common.GetTimeService().Now().Sub(c.lastViewChange) < 10*time.Second {
+	if now.Sub(c.lastViewChange) < viewChangeRateLimit {
 		logger.Info("View change skipped - rate limited (last view change was %v ago)",
-			time.Since(c.lastViewChange))
+			now.Sub(c.lastViewChange))
 		c.mu.Unlock()
 		return
 	}
 	// ==============================================
 
-	if c.currentHeight > 0 && common.GetTimeService().Now().Sub(c.lastBlockTime) < 15*time.Second {
+	if c.currentHeight > 0 && now.Sub(c.lastBlockTime) < 15*time.Second {
 		logger.Info("View change skipped - recent block committed")
 		c.mu.Unlock()
 		return
@@ -3679,6 +3885,15 @@ func (c *Consensus) SetSyncReady(ready bool) {
 	old := atomic.SwapInt32(&c.syncReady, v)
 	if int32(v) != old {
 		logger.Info("Node %s PBFT participation gate: syncReady=%v", c.nodeID, ready)
+	}
+	if ready && old == 0 {
+		// The idle-at-genesis watchdog uses lastRoundActivity as its grace
+		// period. Start that period when this node first becomes eligible to
+		// participate; otherwise time spent booting/syncing can make the
+		// watchdog manufacture a view change before the first proposal.
+		c.mu.Lock()
+		c.lastRoundActivity = common.GetTimeService().Now()
+		c.mu.Unlock()
 	}
 }
 

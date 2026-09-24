@@ -48,9 +48,10 @@ func NewStateMachine(storage *Storage, nodeID string, validators []string) *Stat
 		finalStates:  make([]*FinalStateInfo, 0),
 	}
 
-	// Load initial state
+	// Load initial state. On a first-ever start there is nothing to load, which
+	// is expected and not worth a warning.
 	if err := sm.loadInitialState(); err != nil {
-		logger.Warn("Could not load initial state: %v", err)
+		logger.Debug("Could not load initial state: %v", err)
 		sm.createInitialState()
 	}
 

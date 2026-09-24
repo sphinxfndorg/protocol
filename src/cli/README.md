@@ -13,10 +13,10 @@ Sphinx uses a **hybrid** of static seeds, peer exchange (PEX), and Kademlia DHT 
 | EIP-1459 DNS discovery (`enrtree://`) | Authenticated bootstrap via DNS TXT records | ✅ Implemented (`p2p/seed` package resolves DNS trees) |
 | Static seed addresses (`--seeds=IP:PORT`) | Plain TCP bootstrap | ✅ Implemented |
 | Peer exchange (PEX) — "ask a peer who they know" | Gossip-based peer list sharing | ✅ Implemented (`requestPeerListSync` / `discoverAndRegisterPeers`) |
-| Kademlia DHT iterative lookup / routing | Ethereum-style discv4/discv5 | ✅ **Wired up** — `StartNode` creates a `dht.DHT` instance bound to the node's UDP port, seeded with `--seeds` addresses as routers, and passes it to `NodeManager` for `FindClosestPeers` / iterative routing |
+| Kademlia DHT iterative lookup / routing | Ethereum-style discv4/discv5 | ✅ **Wired up** — `StartNode` creates a `dht.DHT` instance bound to the node's deterministic same-box UDP port (TCP port + 1000), translates same-box TCP seeds to matching UDP routers, and passes it to `NodeManager` for `FindClosestPeers` / iterative routing |
 
 **What this means in practice:**  
-Sphinx bootstraps via DNS tree or static seeds (like Ethereum), discovers peers-of-peers via PEX gossip (like Bitcoin), and additionally performs Kademlia iterative lookups against the routing table (like Ethereum's discv4). The `--seeds` addresses serve a dual role: they are used both as plain TCP bootstrap targets for the initial key exchange + block sync, and as UDP router addresses for the DHT join request. On a real device network, the routing table fills organically as the DHT processes ping/pong/find-node responses.
+Sphinx bootstraps via DNS tree or static seeds (like Ethereum), discovers peers-of-peers via PEX gossip (like Bitcoin), and additionally performs Kademlia iterative lookups against the routing table (like Ethereum's discv4). The `--seeds` addresses are used as plain TCP bootstrap targets for initial key exchange and block sync. In the localhost test mode, a seed's TCP port is deterministically translated to its same-box DHT UDP port (TCP + 1000), so `30303` becomes DHT router `31303`; public-device deployments retain their configured UDP-port behavior. On a real device network, the routing table fills organically as the DHT processes ping/pong/find-node responses.
 
 ---
 
@@ -46,20 +46,36 @@ When the very first node starts:
    - Any peer connection
    - PBFT quorum
    - Validator approval
-4. Node-A immediately starts mining **block 1** and subsequent blocks **solo** (without PBFT)
+4. What happens next depends on the configured network size:
+   - With `totalNodes <= 1` (for example, a genuine single-node run), the node enters solo mode and mines blocks without PBFT.
+   - With `--nodes=3` in the seed-based localhost flow, the node creates genesis but waits for the configured validators to connect and become ready before proposing block 1. It does **not** mine a solo chain in this mode.
+
+For the recommended three-node flow:
 
 ```
-Node-A starts
+Bootstrap node starts
   ↓
 No existing chain found
   ↓
 Create genesis block (trusted setup, no quorum needed)
   ↓
-Mine block 1 (solo mode, no peers required)
+Wait for the other validators to connect and install genesis
   ↓
-Mine block 2, 3, 4... (solo mode)
+Wait until the configured validators are ready
   ↓
-Wait for other nodes to join
+Start PBFT and propose block 1
+```
+
+A single-node run still follows the trusted-genesis path and can mine solo:
+
+```
+Single-node start
+  ↓
+Create genesis block
+  ↓
+Enter SOLO_MODE
+  ↓
+Mine blocks independently
 ```
 
 ### Why Genesis Is Trusted
@@ -195,7 +211,7 @@ This ensures nodes stay synchronized without restarting, even after temporary ne
 PBFT only activates when **3 or more validators** are connected:
 
 ```
-1 validator (Node-A alone):
+1 validator (a genuine single-node run):
   → Solo mode: mine blocks independently via CommitBlock
   → No PBFT voting needed
 
@@ -211,7 +227,7 @@ PBFT only activates when **3 or more validators** are connected:
   → All subsequent blocks use PBFT
 ```
 
-> **Fixed:** The handoff from solo mining to PBFT is now coordinated rather than racy. Node-A (the bootstrap node) explicitly **stops solo mining → syncs to the latest confirmed tip → then enters PBFT** once the third validator connects. Previously, the bootstrap node could keep mining solo blocks after the validator set reached 3, producing a block that peers never voted on — this is the mechanism that caused forks like the one in the "Block N parent hash mismatch ... stopping batch" symptom.
+In the `--nodes=3` localhost flow, the bootstrap node does not enter the one-validator solo branch. It creates genesis, waits for the other validators to become ready, and then starts PBFT. Solo mining is reserved for `totalNodes <= 1`; mining solo blocks in a configured multi-node network can create a chain that peers never voted on.
 
 ### Sync State Machine
 
@@ -238,7 +254,7 @@ Nodes discover each other through:
 2. **Seed addresses** (`--seeds=IP:PORT` — plain TCP addresses)
 3. **DNS discovery** (`--seeds=enrtree://...` — EIP-1459 authenticated peer lists)
 
-> **Fixed:** `--nodes=3` on its own no longer pre-registers peers as validators. A bootstrap node started without `--seeds` now stays genuinely solo (no phantom peer entries) until a real peer connects and completes key exchange. `--nodes=3` only tells the node how many validators to expect for PBFT quorum math — it does not add validators by itself.
+> **Fixed:** `--nodes=3` on its own no longer pre-registers peers as validators. A bootstrap node started without `--seeds` does not treat the other configured nodes as connected. In the recommended localhost flow it waits for real peers to complete key exchange, install genesis, and become ready before proposing; only a genuine `totalNodes <= 1` run enters solo mode. `--nodes=3` tells the node how many validators to expect for PBFT quorum math — it does not add validators by itself.
 
 ### Key Exchange Handshake
 
@@ -297,7 +313,7 @@ This approach uses `--seeds=` to point late joiners at the first node. On a real
 | 3 | `127.0.0.1:30305` | `127.0.0.1:8547` | `data/node3` | `2` |
 | 4 | `127.0.0.1:30306` | `127.0.0.1:8548` | `data/node4` | *(none — see below)* |
 
-**Terminal 1 — First validator (creates genesis, mines solo):**
+**Terminal 1 — First validator (creates genesis, then waits for the configured validators):**
 ```bash
 cd Desktop/protocol
 go run src/cli/main.go node --role=validator \
@@ -308,7 +324,7 @@ go run src/cli/main.go node --role=validator \
     --pbft
 ```
 
-**Expected:** Creates genesis, starts mining blocks solo without waiting for peers.
+**Expected:** Creates genesis, waits for nodes 2 and 3 to connect and become ready, then starts PBFT. It does not mine a solo chain in this `--nodes=3` flow.
 
 **Terminal 2 — Second validator (late joiner, connects via --seeds):**
 
@@ -357,6 +373,55 @@ go run src/cli/main.go node --role=validator \
 **Expected:** Syncs full chain from any peer, catches up, joins existing PBFT.
 
 > **Note:** `--nodes=3` is only needed for localhost testing. On real machines with public IPs, omit `--nodes` and `--node-index` — the validator set is discovered dynamically via `--seeds`.
+
+### Testing late-joiner sync against an existing chain
+
+Use this procedure to verify that a node can rejoin after its local state is
+removed while the other validators continue producing blocks. Use the exact
+per-node ports and datadirs from the Quick Test above; do not reuse a datadir
+between nodes.
+
+1. Start all three nodes with the Quick Test commands.
+2. Wait until all three nodes report at least height `5` and confirm their
+   block indexes agree.
+3. Stop only node 3 with `Ctrl+C`. Leave nodes 1 and 2 running.
+4. Wait until nodes 1 and 2 report at least height `8`.
+5. Remove **only** node 3's datadir:
+
+   ```bash
+   rm -rf data/node3
+   ```
+
+   Do not remove `data/node1`, `data/node2`, or the shared repository-level
+   `artifact-db` directory.
+6. Restart node 3 with the same command:
+
+   ```bash
+   cd Desktop/protocol
+   go run src/cli/main.go node --role=validator \
+       --tcp-addr=127.0.0.1:30305 \
+       --http-port=127.0.0.1:8547 \
+       --datadir=data/node3 \
+       --nodes=3 --node-index=2 \
+       --seeds=127.0.0.1:30303 \
+       --pbft
+   ```
+
+7. Verify that node 3 reports genesis installation, catches up to the current
+   tip, and rejoins PBFT. Compare the three `block_index.json` files after the
+   catch-up completes; their block hash-to-height maps must match.
+
+A successful run has no `parent hash mismatch` or `stopping batch` messages,
+and the restarted node's final height is not lower than the other nodes'.
+
+> **Identity note:** A node's SPHINCS+ identity key is stored under its
+> `Node-<address>/keys` directory. A full `rm -rf data/node3` therefore removes
+> the key as well as the chain. The running peers correctly reject the same node
+> ID when it presents a newly generated key, so a datadir-only wipe can verify
+> chain synchronization and index equality but cannot rejoin under the old
+> identity. To test a true restart with the same identity, preserve and restore
+> the node's `keys` directory separately; to rotate identity, start with a new
+> node ID/address instead.
 
 ### Legacy Same-Box Mode (Fixed Ports)
 
@@ -417,7 +482,7 @@ While any node is running:
 
 ```bash
 go run src/cli/main.go get-balance \
-    --rpc http://127.0.0.1:8545 \
+    --rpc 127.0.0.1:8700 \
     --address 0000000000000000000000000000000000000001
 ```
 
@@ -435,7 +500,8 @@ rm -rf data/
 
 | Scenario | Expected Result |
 |----------|----------------|
-| Node-A starts alone | Creates genesis, mines blocks solo (no PBFT) |
+| Node-A starts with `--nodes=3` | Creates genesis, waits for the configured validators, then starts PBFT |
+| Node-A starts as a genuine single-node run | Creates genesis and mines blocks solo (no PBFT) |
 | Node-B joins 5 min later | Downloads genesis + all blocks from A |
 | Node-C joins 10 min later | Downloads genesis + all blocks, PBFT activates |
 | Node-D joins 1 hour later | Downloads full chain, joins existing PBFT |
@@ -463,7 +529,7 @@ Six fixes across `nodes.go` and `helpers.go` address this:
 | `nodes.go` | The Legacy Same-Box fallback logic could still activate during seed-based (`--seeds=`) runs, interfering with peer discovery | Scoped so seed-based mode and Legacy Same-Box Mode no longer cross-interfere — **re-verify this one against a fresh test run**, since the exact condition wasn't fully confirmed against logs at the time of writing |
 | `helpers.go` | Bootstrap node could keep mining solo blocks after the 3rd validator joined, racing with the new PBFT round | Solo mining stops → node syncs to tip → then enters PBFT, as an explicit sequence |
 
-**Net effect:** the "Quick Test: Seed-Based Mode" flow below is the flow these fixes were built for — Terminal 1 stays genuinely solo with no `--seeds`, Terminals 2 and 3 join via `--seeds=127.0.0.1:30303`, and all three nodes should now converge on `validators=3` with real 2-of-3 PBFT quorum, instead of each silently voting alone.
+**Net effect:** the "Quick Test: Seed-Based Mode" flow below is the flow these fixes were built for — with `--nodes=3`, Terminal 1 creates genesis and waits for real peers to become ready, Terminals 2 and 3 join via `--seeds=127.0.0.1:30303`, and all three nodes converge on `validators=3` with real 2-of-3 PBFT quorum. A genuine single-node run (`totalNodes <= 1`) remains the only path that mines solo.
 
 If you re-run the Quick Test commands below, confirm in the logs that all three nodes report `validators=3` (not `validators=1`), that no `parent hash mismatch` messages appear, and that view changes settle rather than climbing rapidly.
 

@@ -1,7 +1,11 @@
 // Copyright (c) 2024-present Sphinx Core Dev
 // MIT License https://opensource.org/license/mit
 
-// go/src/spxhash/testvc/test_test.go
+// go/src/spxhash/v2/testvc/spxhash_v2_test.go
+//
+// NOTE: this file must keep the _test.go suffix. As spxhash_test_v2.go (no
+// _test.go suffix) it was treated as an ordinary source file and go test
+// reported "[no test files]", silently running none of the tests below.
 package spxhash_test
 
 import (
@@ -52,8 +56,9 @@ var fixedSalt = []byte("SPXHASH_TEST_VECTOR_SALT_2024")
 //
 // v2 REDESIGN: `hash` values below were regenerated against the v2
 // construction (double-SHA256 + SHAKE256 concatenation combiner, see
-// spxhash.go) — they will NOT match a v1 SphinxHash. `keyedHash` (raw
-// HMAC-SHA-512/256) and `deriveKey` (raw HKDF-SHA-512/256) are computed
+// spxhash_v2.go) — they will NOT match a v1 SphinxHash. They are asserted in
+// TestVectors, so a change to the construction fails the build. `keyedHash`
+// (raw HMAC-SHA-512/256) and `deriveKey` (raw HKDF-SHA-512/256) are computed
 // directly against testVectorKey/testVectorContext in this file, independent
 // of the SphinxHash package, so they are unaffected by the redesign and were
 // left unchanged.
@@ -200,6 +205,16 @@ func TestVectors(t *testing.T) {
 	for _, vec := range vectors {
 		computedHash := computeHash(vec.inputLen, f)
 
+		// Verify the computed digest against the pinned expected vector
+		// before printing it. This is what makes the run a real test-vector
+		// check rather than just a digest printer: a mismatch means the v2
+		// construction (its domain tags, combiner, or key handling) changed
+		// in a way that breaks consensus-critical reproducibility.
+		if computedHash != vec.hash {
+			t.Errorf("inputLen=%d: vector mismatch\n  got:  %s\n  want: %s",
+				vec.inputLen, computedHash, vec.hash)
+		}
+
 		// Print hash line
 		hashLine := fmt.Sprintf("inputLen: %d, hash: %s", vec.inputLen, computedHash)
 		fmt.Println(hashLine)
@@ -325,12 +340,25 @@ func BenchmarkSpxHash(b *testing.B) {
 
 	for _, vec := range vectors {
 		b.Run(fmt.Sprintf("inputLen=%d", vec.inputLen), func(b *testing.B) {
-			// Warm up the cache
-			computeHash(vec.inputLen, f)
+			input := generateInput(vec.inputLen)
+			b.ReportAllocs()
 			b.ResetTimer()
 
+			// Measure the actual hash computation with a cold cache: a fresh
+			// instance per op, so each iteration pays the full v2 cost
+			// (double-SHA256 + SHAKE256 combiner + final squeeze) plus the
+			// LRU insert, exactly like the first GetHash call a caller makes.
+			//
+			// Deliberately NOT routed through computeHash: that helper
+			// memoizes by inputLen in the module-level hashCache, and its
+			// cached branch prints to stdout, so benching it would measure
+			// this file's cache and fmt.Print, not spxhash.
 			for i := 0; i < b.N; i++ {
-				computeHash(vec.inputLen, nil)
+				s, err := hash.NewSphinxHash(256, fixedSalt)
+				if err != nil {
+					b.Fatalf("NewSphinxHash: %v", err)
+				}
+				s.GetHash(input)
 			}
 
 			// Print benchmark result
@@ -346,6 +374,61 @@ func BenchmarkSpxHash(b *testing.B) {
 	}
 
 	footer := "--- PASS: BenchmarkSpxHash"
+	fmt.Println(footer)
+	fileMu.Lock()
+	fmt.Fprintln(f, footer)
+	fileMu.Unlock()
+}
+
+// BenchmarkSpxHashCached measures the repeated-query path: one instance is
+// reused for the same input, so the digest is served out of that instance's
+// LRU cache instead of being recomputed.
+//
+// Note that a cache "hit" is not free: GetHash derives the cache key from the
+// full input on every call (two SHA-256 passes, see cacheKey in spxhash.go),
+// so the hit path still scales with input length. It removes the SHAKE256
+// branch and the final squeeze, not all the work.
+func BenchmarkSpxHashCached(b *testing.B) {
+	filename := filepath.Join(".", "vectorsoutput.txt")
+	f, err := os.OpenFile(filename, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		b.Fatalf("Failed to open vectorsoutput.txt: %v", err)
+	}
+	defer f.Close()
+
+	header := "=== RUN   BenchmarkSpxHashCached"
+	fmt.Println(header)
+	fileMu.Lock()
+	fmt.Fprintln(f, header)
+	fileMu.Unlock()
+
+	for _, vec := range vectors {
+		b.Run(fmt.Sprintf("inputLen=%d", vec.inputLen), func(b *testing.B) {
+			input := generateInput(vec.inputLen)
+			s, err := hash.NewSphinxHash(256, fixedSalt)
+			if err != nil {
+				b.Fatalf("NewSphinxHash: %v", err)
+			}
+			s.GetHash(input) // prime the LRU cache
+			b.ReportAllocs()
+			b.ResetTimer()
+
+			for i := 0; i < b.N; i++ {
+				s.GetHash(input)
+			}
+
+			result := fmt.Sprintf(
+				"BenchmarkSpxHashCached/inputLen=%d-%d %d %f ns/op",
+				vec.inputLen, runtime.NumCPU(), b.N, float64(b.Elapsed().Nanoseconds())/float64(b.N),
+			)
+			fmt.Println(result)
+			fileMu.Lock()
+			fmt.Fprintln(f, result)
+			fileMu.Unlock()
+		})
+	}
+
+	footer := "--- PASS: BenchmarkSpxHashCached"
 	fmt.Println(footer)
 	fileMu.Lock()
 	fmt.Fprintln(f, footer)

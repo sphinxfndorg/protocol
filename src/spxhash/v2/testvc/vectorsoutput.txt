@@ -1,0 +1,103 @@
+=== RUN   TestPrintHashes
+Using opcode: SphinxHash=0x10
+inputLen: 0, hash: 9e9bc2e34f1d3da65fdb52b36c80918fee908bf367cfdbdc6dc87988a26acba5
+<vector inputLen=0 hash=9e9bc2e34f1d3da65fdb52b36c80918fee908bf367cfdbdc6dc87988a26acba5 keyedHash=c098615604bb025f47999595c04e030f364e5435a7577d7ababb03a271e9989e deriveKey=be538a2f83a53f6d4665e56557f43acf90ba82f97fa5d7bf746be24370054ca0>
+Using opcode: SphinxHash=0x10
+inputLen: 1, hash: da4cb911569fe117213087cbbfb056b16b82376d4449f3c1dba7c0e597d1b814
+<vector inputLen=1 hash=da4cb911569fe117213087cbbfb056b16b82376d4449f3c1dba7c0e597d1b814 keyedHash=ea27697ab40a291b93dc90c1618337974d06462882918405420871911fcb29ec deriveKey=be538a2f83a53f6d4665e56557f43acf90ba82f97fa5d7bf746be24370054ca0>
+Using opcode: SphinxHash=0x10
+inputLen: 1023, hash: d858517d03f20da691682fc90f3649e21df846a5f7f8b6e5f3b9d5e74c7a8ebe
+<vector inputLen=1023 hash=d858517d03f20da691682fc90f3649e21df846a5f7f8b6e5f3b9d5e74c7a8ebe keyedHash=8002a9d0715ee58d3e796d0a2474c7eaefb5d38544d2e7ca4e1c636b9e2ddfce deriveKey=3e9251161692adb640c8dd76685c50c048297fe3360828e16c912f429c397bab>
+Using opcode: SphinxHash=0x10
+inputLen: 1024, hash: 05afa62fba53e9da77cf4e24b6964221e7a400faf1a255de6465e304b8dd4a54
+<vector inputLen=1024 hash=05afa62fba53e9da77cf4e24b6964221e7a400faf1a255de6465e304b8dd4a54 keyedHash=a5e689a6065c86606c29be00b70d9fb777ef8273c212a8caa574dd51dd39a714 deriveKey=353ff083ae5cbbe9ccb806be665e3136ebd78bfb3fe82103b249934127a53f9f>
+Using opcode: SphinxHash=0x10
+inputLen: 2048, hash: be20b69a1691a8b42933e71b93eb694f961fe9b1921b980e6b57a6530d20ff86
+<vector inputLen=2048 hash=be20b69a1691a8b42933e71b93eb694f961fe9b1921b980e6b57a6530d20ff86 keyedHash=1b8dbedc8bb976b4a5b5eae089397f6c0db4f3ece3159b917774ee6e2a26d6d1 deriveKey=7f9ea132acaf84f492804b9dc11f0e08f8fa38907394ea9a1094b52568eb0acf>
+Using opcode: SphinxHash=0x10
+inputLen: 4096, hash: a4db67bf23b223a2917b0c56cc1fd9db39336fbfb0035a78b17b50131c5d5557
+<vector inputLen=4096 hash=a4db67bf23b223a2917b0c56cc1fd9db39336fbfb0035a78b17b50131c5d5557 keyedHash=950c63a2454e97c3a12e78804c23c65944436b53b1f513fbf72d874f22446995 deriveKey=3c4416bedf98988efd9a0ce301d7317c4548d95514e680d334727ab98167ae00>
+--- PASS: TestPrintHashes (0.00s)
+=== RUN   BenchmarkSpxHash
+BenchmarkSpxHash/inputLen=0-8 1 31601.000000 ns/op
+BenchmarkSpxHash/inputLen=0-8 100 3014.610000 ns/op
+BenchmarkSpxHash/inputLen=0-8 10000 3567.281900 ns/op
+BenchmarkSpxHash/inputLen=0-8 671661 2567.596755 ns/op
+BenchmarkSpxHash/inputLen=0-8 934699 2781.380637 ns/op
+BenchmarkSpxHash/inputLen=1-8 1 24924.000000 ns/op
+BenchmarkSpxHash/inputLen=1-8 100 2698.600000 ns/op
+BenchmarkSpxHash/inputLen=1-8 10000 3028.923500 ns/op
+BenchmarkSpxHash/inputLen=1-8 790088 2762.530156 ns/op
+BenchmarkSpxHash/inputLen=1023-8 1 52301.000000 ns/op
+BenchmarkSpxHash/inputLen=1023-8 100 11446.140000 ns/op
+BenchmarkSpxHash/inputLen=1023-8 10000 11568.899800 ns/op
+BenchmarkSpxHash/inputLen=1023-8 207358 11482.821844 ns/op
+BenchmarkSpxHash/inputLen=1024-8 1 101274.000000 ns/op
+BenchmarkSpxHash/inputLen=1024-8 100 11994.400000 ns/op
+BenchmarkSpxHash/inputLen=1024-8 10000 11520.947600 ns/op
+BenchmarkSpxHash/inputLen=1024-8 208221 11491.079497 ns/op
+BenchmarkSpxHash/inputLen=2048-8 1 50802.000000 ns/op
+BenchmarkSpxHash/inputLen=2048-8 100 19704.800000 ns/op
+BenchmarkSpxHash/inputLen=2048-8 10000 20618.322600 ns/op
+BenchmarkSpxHash/inputLen=2048-8 116371 20686.869658 ns/op
+BenchmarkSpxHash/inputLen=4096-8 1 92820.000000 ns/op
+BenchmarkSpxHash/inputLen=4096-8 100 39225.730000 ns/op
+BenchmarkSpxHash/inputLen=4096-8 10000 38515.126500 ns/op
+BenchmarkSpxHash/inputLen=4096-8 62304 38547.909235 ns/op
+--- PASS: BenchmarkSpxHash
+=== RUN   BenchmarkSpxHashCached
+BenchmarkSpxHashCached/inputLen=0-8 1 2800.000000 ns/op
+BenchmarkSpxHashCached/inputLen=0-8 100 668.660000 ns/op
+BenchmarkSpxHashCached/inputLen=0-8 10000 621.090200 ns/op
+BenchmarkSpxHashCached/inputLen=0-8 1000000 579.729726 ns/op
+BenchmarkSpxHashCached/inputLen=0-8 4139488 603.013215 ns/op
+BenchmarkSpxHashCached/inputLen=1-8 1 32814.000000 ns/op
+BenchmarkSpxHashCached/inputLen=1-8 100 538.360000 ns/op
+BenchmarkSpxHashCached/inputLen=1-8 10000 555.081200 ns/op
+BenchmarkSpxHashCached/inputLen=1-8 1000000 580.576825 ns/op
+BenchmarkSpxHashCached/inputLen=1-8 4133155 580.225278 ns/op
+BenchmarkSpxHashCached/inputLen=1023-8 1 5690.000000 ns/op
+BenchmarkSpxHashCached/inputLen=1023-8 100 3144.410000 ns/op
+BenchmarkSpxHashCached/inputLen=1023-8 10000 3466.363600 ns/op
+BenchmarkSpxHashCached/inputLen=1023-8 691435 3451.216667 ns/op
+BenchmarkSpxHashCached/inputLen=1024-8 1 4526.000000 ns/op
+BenchmarkSpxHashCached/inputLen=1024-8 100 5193.590000 ns/op
+BenchmarkSpxHashCached/inputLen=1024-8 10000 3354.099000 ns/op
+BenchmarkSpxHashCached/inputLen=1024-8 714584 3423.624666 ns/op
+BenchmarkSpxHashCached/inputLen=2048-8 1 7128.000000 ns/op
+BenchmarkSpxHashCached/inputLen=2048-8 100 5777.040000 ns/op
+BenchmarkSpxHashCached/inputLen=2048-8 10000 6228.426800 ns/op
+BenchmarkSpxHashCached/inputLen=2048-8 385051 6179.070619 ns/op
+BenchmarkSpxHashCached/inputLen=4096-8 1 16877.000000 ns/op
+BenchmarkSpxHashCached/inputLen=4096-8 100 11079.130000 ns/op
+BenchmarkSpxHashCached/inputLen=4096-8 10000 11609.359700 ns/op
+BenchmarkSpxHashCached/inputLen=4096-8 206647 11748.671846 ns/op
+--- PASS: BenchmarkSpxHashCached
+=== RUN   BenchmarkSHA512_256
+BenchmarkSHA512_256/inputLen=0-8 1 8868.000000 ns/op
+BenchmarkSHA512_256/inputLen=0-8 100 448.150000 ns/op
+BenchmarkSHA512_256/inputLen=0-8 10000 355.980000 ns/op
+BenchmarkSHA512_256/inputLen=0-8 1000000 329.310898 ns/op
+BenchmarkSHA512_256/inputLen=0-8 7286740 329.257958 ns/op
+BenchmarkSHA512_256/inputLen=1-8 1 5918.000000 ns/op
+BenchmarkSHA512_256/inputLen=1-8 100 370.500000 ns/op
+BenchmarkSHA512_256/inputLen=1-8 10000 324.638400 ns/op
+BenchmarkSHA512_256/inputLen=1-8 1000000 332.937933 ns/op
+BenchmarkSHA512_256/inputLen=1-8 7207435 333.984058 ns/op
+BenchmarkSHA512_256/inputLen=1023-8 1 3362.000000 ns/op
+BenchmarkSHA512_256/inputLen=1023-8 100 2096.870000 ns/op
+BenchmarkSHA512_256/inputLen=1023-8 10000 2272.396100 ns/op
+BenchmarkSHA512_256/inputLen=1023-8 1000000 2326.268349 ns/op
+BenchmarkSHA512_256/inputLen=1024-8 1 3399.000000 ns/op
+BenchmarkSHA512_256/inputLen=1024-8 100 2130.130000 ns/op
+BenchmarkSHA512_256/inputLen=1024-8 10000 2261.328500 ns/op
+BenchmarkSHA512_256/inputLen=1024-8 1000000 2241.177978 ns/op
+BenchmarkSHA512_256/inputLen=2048-8 1 5474.000000 ns/op
+BenchmarkSHA512_256/inputLen=2048-8 100 4500.750000 ns/op
+BenchmarkSHA512_256/inputLen=2048-8 10000 4122.546700 ns/op
+BenchmarkSHA512_256/inputLen=2048-8 581395 4137.047254 ns/op
+BenchmarkSHA512_256/inputLen=4096-8 1 27848.000000 ns/op
+BenchmarkSHA512_256/inputLen=4096-8 100 10129.710000 ns/op
+BenchmarkSHA512_256/inputLen=4096-8 10000 7836.525700 ns/op
+BenchmarkSHA512_256/inputLen=4096-8 306054 7932.417011 ns/op
+--- PASS: BenchmarkSHA512_256

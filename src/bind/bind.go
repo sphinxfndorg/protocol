@@ -14,6 +14,7 @@ import (
 	"github.com/sphinxfndorg/protocol/src/consensus"
 	logger "github.com/sphinxfndorg/protocol/src/console"
 	"github.com/sphinxfndorg/protocol/src/core"
+	multisig "github.com/sphinxfndorg/protocol/src/core/musig"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
 	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/parameters"
 	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/sthincs"
@@ -348,8 +349,11 @@ func handleIncomingConn(
 			logger.Warn("[%s] Failed to unmarshal gossiped transaction: %v", selfID, err)
 			return
 		}
-		if !gossipedTx.IsSystemTransaction() && !gossipedTx.HasFullAuthBundle() {
-			logger.Warn("[%s] Gossiped transaction rejected: missing full SPHINCS auth bundle", selfID)
+		// Relayed into a block above genesis: the block-0 unsigned exemption
+		// never applies, so every gossiped transaction needs a full bundle —
+		// or a custody witness when the sender is a registered custody address.
+		if !gossipedTx.HasFullAuthBundle() && !multisig.HasSpendWitnessShape(gossipedTx.Sender, gossipedTx.MultiSigWitness) {
+			logger.Warn("[%s] Gossiped transaction rejected: missing full SPHINCS auth bundle or custody witness", selfID)
 			return
 		}
 		if err := bc.AddTransaction(&gossipedTx); err != nil {

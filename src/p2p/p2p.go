@@ -20,6 +20,7 @@ import (
 
 	"github.com/sphinxfndorg/protocol/src/consensus"
 	"github.com/sphinxfndorg/protocol/src/core"
+	multisig "github.com/sphinxfndorg/protocol/src/core/musig"
 	database "github.com/sphinxfndorg/protocol/src/core/state"
 	params "github.com/sphinxfndorg/protocol/src/core/sthincs/config"
 	key "github.com/sphinxfndorg/protocol/src/core/sthincs/key/backend"
@@ -347,8 +348,13 @@ func (s *Server) handleMessages() {
 			// Assign sender/receiver roles
 			s.assignTransactionRoles(&tx)
 
-			if !tx.IsSystemTransaction() && !tx.HasFullAuthBundle() {
-				log.Printf("Transaction rejected: missing full SPHINCS auth bundle")
+			// Gossiped transactions are destined for a block above genesis, so
+			// the block-0 unsigned exemption never applies here: every gossiped
+			// transaction must carry a full SPHINCS auth bundle, or — when the
+			// sender is a registered custody policy address — an M-of-N
+			// custody witness.
+			if !tx.HasFullAuthBundle() && !multisig.HasSpendWitnessShape(tx.Sender, tx.MultiSigWitness) {
+				log.Printf("Transaction rejected: missing full SPHINCS auth bundle or custody witness")
 				continue
 			}
 
@@ -1106,8 +1112,11 @@ func (s *Server) validateTransaction(tx *types.Transaction) error {
 	if tx == nil {
 		return errors.New("nil transaction")
 	}
-	if !tx.IsSystemTransaction() && !tx.HasFullAuthBundle() {
-		return errors.New("missing full SPHINCS transaction auth bundle")
+	// Destined for a block above genesis: the block-0 unsigned exemption never
+	// applies, so a full auth bundle — or a custody witness for a registered
+	// custody address — is mandatory.
+	if !tx.HasFullAuthBundle() && !multisig.HasSpendWitnessShape(tx.Sender, tx.MultiSigWitness) {
+		return errors.New("missing full SPHINCS transaction auth bundle or custody witness")
 	}
 
 	// Select a validator node from available nodes

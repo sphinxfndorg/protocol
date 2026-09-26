@@ -14,6 +14,7 @@ import (
 
 	"github.com/sphinxfndorg/protocol/src/common"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
+	"github.com/sphinxfndorg/protocol/src/policy"
 	storage "github.com/sphinxfndorg/protocol/src/state"
 )
 
@@ -61,6 +62,33 @@ func minimalGenesisState() *GenesisState {
 		},
 		InitialValidators: []*GenesisValidator{},
 	}
+}
+
+// genesisPart is one transaction allocationsToTxList is expected to emit.
+type genesisPart struct {
+	receiver string
+	amount   *big.Int
+}
+
+// expectedGenesisParts mirrors allocationsToTxList under the sold + escrow
+// model: the always-liquid direct slice pays the recipient, then the escrowed
+// remainder pays policy.CGEEscrowAddress, in allocation order. Tests assert
+// against this rather than allocation[i], because one allocation can now
+// produce two transactions.
+func expectedGenesisParts(allocs []*GenesisAllocation) []genesisPart {
+	var parts []genesisPart
+	for _, a := range allocs {
+		if a == nil || a.BalanceNSPX == nil || a.BalanceNSPX.Sign() <= 0 {
+			continue
+		}
+		if d := policy.CGEGenesisDirectAmount(a.Label, a.BalanceNSPX); d.Sign() > 0 {
+			parts = append(parts, genesisPart{a.Address, d})
+		}
+		if e := policy.CGEGenesisEscrowAmount(a.Label, a.BalanceNSPX); e.Sign() > 0 {
+			parts = append(parts, genesisPart{policy.CGEEscrowAddress, e})
+		}
+	}
+	return parts
 }
 
 // newMinimalBlockchain builds a *Blockchain containing only the storage layer
@@ -421,17 +449,17 @@ func TestBuildBlock_ParentHashZero(t *testing.T) {
 	}
 }
 
-// TestBuildBlock_BodyPopulated — one transaction per allocation.
+// TestBuildBlock_BodyPopulated — one or two transactions per allocation: the
+// always-liquid direct slice plus, for escrowed categories, the escrow slice.
 // This guards the core bug: txs_list was always empty before the fix.
 func TestBuildBlock_BodyPopulated(t *testing.T) {
 	gs := minimalGenesisState()
 	block := gs.BuildBlock()
 
-	wantTxCount := len(gs.Allocations) // 2
+	wantTxCount := len(expectedGenesisParts(gs.Allocations))
 	gotTxCount := len(block.Body.TxsList)
 	if gotTxCount != wantTxCount {
-		t.Errorf("txs_list length: want %d (one per allocation), got %d",
-			wantTxCount, gotTxCount)
+		t.Errorf("txs_list length: want %d, got %d", wantTxCount, gotTxCount)
 	}
 }
 
@@ -460,28 +488,37 @@ func TestBuildBlock_TxSenderIsVault(t *testing.T) {
 	}
 }
 
-// TestBuildBlock_TxReceiversMatchAllocations — receiver[i] == allocation[i].Address.
+// TestBuildBlock_TxReceiversMatchAllocations — each transaction's receiver is
+// the CGE destination for its slice: the recipient itself for the liquid direct
+// slice, or policy.CGEEscrowAddress for the escrowed remainder.
 func TestBuildBlock_TxReceiversMatchAllocations(t *testing.T) {
 	gs := minimalGenesisState()
 	block := gs.BuildBlock()
 
+	want := expectedGenesisParts(gs.Allocations)
+	if len(block.Body.TxsList) != len(want) {
+		t.Fatalf("txs_list length: want %d, got %d", len(want), len(block.Body.TxsList))
+	}
 	for i, tx := range block.Body.TxsList {
-		want := gs.Allocations[i].Address
-		if tx.Receiver != want {
-			t.Errorf("txs_list[%d].Receiver: want %q, got %q", i, want, tx.Receiver)
+		if tx.Receiver != want[i].receiver {
+			t.Errorf("txs_list[%d].Receiver: want %q, got %q", i, want[i].receiver, tx.Receiver)
 		}
 	}
 }
 
-// TestBuildBlock_TxAmountsMatchAllocations — amount[i] == allocation[i].BalanceNSPX.
+// TestBuildBlock_TxAmountsMatchAllocations — each transaction's amount is the
+// direct or escrowed slice of its allocation, in the same order.
 func TestBuildBlock_TxAmountsMatchAllocations(t *testing.T) {
 	gs := minimalGenesisState()
 	block := gs.BuildBlock()
 
+	want := expectedGenesisParts(gs.Allocations)
+	if len(block.Body.TxsList) != len(want) {
+		t.Fatalf("txs_list length: want %d, got %d", len(want), len(block.Body.TxsList))
+	}
 	for i, tx := range block.Body.TxsList {
-		want := gs.Allocations[i].BalanceNSPX
-		if tx.Amount.Cmp(want) != 0 {
-			t.Errorf("txs_list[%d].Amount: want %s, got %s", i, want.String(), tx.Amount.String())
+		if tx.Amount.Cmp(want[i].amount) != 0 {
+			t.Errorf("txs_list[%d].Amount: want %s, got %s", i, want[i].amount.String(), tx.Amount.String())
 		}
 	}
 }
@@ -566,9 +603,8 @@ func TestApplyGenesis_BodyContainsAllocations(t *testing.T) {
 	genesisBlock := bc.chain[0]
 	bc.lock.RUnlock()
 
-	if len(genesisBlock.Body.TxsList) != len(gs.Allocations) {
-		t.Errorf("txs_list length: want %d, got %d",
-			len(gs.Allocations), len(genesisBlock.Body.TxsList))
+	if want := len(expectedGenesisParts(gs.Allocations)); len(genesisBlock.Body.TxsList) != want {
+		t.Errorf("txs_list length: want %d, got %d", want, len(genesisBlock.Body.TxsList))
 	}
 }
 

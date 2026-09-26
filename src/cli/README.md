@@ -94,13 +94,14 @@ The genesis block is compiled into the binary. Every node produces the **same ge
 
 When a second node starts:
 
-1. Node-B detects it has no local blockchain data
+1. Node-B detects it has no local blockchain data and enters **late-joiner mode** (`Late-joiner mode: skipping ExecuteGenesisBlock()… will sync genesis+blocks from peers`)
 2. It connects to Node-A (or any seed peer) via TCP
 3. It performs a **key exchange** that includes genesis hash verification
-4. It requests the genesis block from Node-A
-5. It requests all missing blocks in **batches of 500**
-6. Each block is verified before being committed locally
-7. Once caught up, Node-B enters **periodic monitoring mode**
+4. If blocks already exist on the network, it requests genesis + all missing blocks in **batches of 500** and verifies each one before committing
+5. If no blocks exist yet, there is nothing to download: it registers as a validator and participates in the **first PBFT round** from genesis onward
+6. Once at the tip it enters **periodic monitoring mode**
+
+> ⚠️ **Which of step 4/step 5 you get depends on the node's validator-set size, not on timing.** With the same-box harness the set size comes from `--nodes`, so a joiner must use the *same* `--nodes` as the rest of the network — see the growth-limit warning in the Quick Test section. A node started with the default `--nodes=1` believes it is a one-validator network, cannot resolve any other validator's attestations, and can never verify a downloaded block.
 
 ```
 Node-B starts (late joiner)
@@ -111,13 +112,10 @@ Connect to seed peer (Node-A)
   ↓
 Key exchange + genesis hash verification
   ↓
-Request genesis block from peer
-  ↓
-Request blocks 1→N in batches of 500
-  ↓
-Verify each block (parent hash, attestations, continuity)
-  ↓
-Commit verified blocks locally
+Blocks already committed on the network?
+  ├─ yes → request genesis + blocks 1→N in batches of 500,
+  │        verify (parent hash, attestation quorum, continuity), commit
+  └─ no  → join the first PBFT round at genesis and follow it forward
   ↓
 Reach CAUGHT_UP state
   ↓
@@ -129,18 +127,21 @@ Wait for more validators (need ≥3 for PBFT)
 ### Node-C Joins (Same Behavior)
 
 Node-C follows the exact same process as Node-B:
-- Downloads genesis from any reachable peer
-- Downloads all missing blocks
-- Verifies and commits each block
+- Verifies genesis hash with any reachable peer
+- If blocks already exist, downloads and verifies them; otherwise joins the PBFT round at genesis
 - Catches up to the network tip
 
 ### Node-D, E, F...N Join (Years Later)
 
-Every subsequent node behaves identically:
+Every subsequent node behaves identically, **provided it is configured with the network's validator-set size** (same-box harness: the same `--nodes`, and its own `--node-index`):
+
 - The sync loop **never gives up** — it retries with exponential backoff (up to 5 minutes)
 - It tries all known peers until one responds
-- It downloads the entire chain from genesis to tip
-- It enters periodic monitoring after catching up
+- It downloads the chain from genesis to tip (in 500-block batches) and enters periodic monitoring after catching up
+
+> ⚠️ **The retry loop will keep retrying a chain it can never accept.** If the joiner's effective validator set is larger than what the historical blocks attest, every batch is rejected with
+> `Block 1 failed attestation quorum check: block 1 attestation quorum not met: 96.00 / 160.00 SPX attested (need ≥ 106.67)`
+> and the node stays at height `0` forever. This is the growth limit documented in the Quick Test section (3 → 4 validators works; 4 → 5 does not).
 
 ---
 
@@ -306,12 +307,25 @@ This approach uses `--seeds=` to point late joiners at the first node. On a real
 
 **Before you open any terminals, write down the mapping below and keep it visible.** Every value in the "changes per node" columns must be different in every terminal — this is the table that would have caught the `--datadir` mix-up:
 
-| Terminal | `--tcp-addr` | `--http-port` | `--datadir` | `--node-index` |
-|----------|-------------|---------------|-------------|----------------|
-| 1 | `127.0.0.1:30303` | `127.0.0.1:8545` | `data/node1` | `0` |
-| 2 | `127.0.0.1:30304` | `127.0.0.1:8546` | `data/node2` | `1` |
-| 3 | `127.0.0.1:30305` | `127.0.0.1:8547` | `data/node3` | `2` |
-| 4 | `127.0.0.1:30306` | `127.0.0.1:8548` | `data/node4` | *(none — see below)* |
+| Terminal | `--tcp-addr` | `--http-port` | wallet RPC (derived) | `--datadir` | `--node-index` |
+|----------|-------------|---------------|----------------------|-------------|----------------|
+| 1 | `127.0.0.1:30303` | `127.0.0.1:8545` | `127.0.0.1:8700` | `data/node1` | `0` |
+| 2 | `127.0.0.1:30304` | `127.0.0.1:8546` | `127.0.0.1:8701` | `data/node2` | `1` |
+| 3 | `127.0.0.1:30305` | `127.0.0.1:8547` | `127.0.0.1:8702` | `data/node3` | `2` |
+| 4 | `127.0.0.1:30306` | `127.0.0.1:8548` | `127.0.0.1:8703` | `data/node4` | `3` |
+| 5 | `127.0.0.1:30307` | `127.0.0.1:8549` | `127.0.0.1:8704` | `data/node5` | `4` |
+| 6 | `127.0.0.1:30308` | `127.0.0.1:8550` | `127.0.0.1:8705` | `data/node6` | `5` |
+| 7 | `127.0.0.1:30309` | `127.0.0.1:8551` | `127.0.0.1:8706` | `data/node7` | `6` |
+| 8 | `127.0.0.1:30310` | `127.0.0.1:8552` | `127.0.0.1:8707` | `data/node8` | `7` |
+
+The **wallet/JSON-RPC port is not a flag** — it is always derived as **`8700 + --node-index`**, and it is the port `--rpc` must target for `get-balance`/`watch-tx`, the port peers use for tip queries and block downloads, and the *first* thing that collides if `--node-index` is missing. It is listed above so you never have to derive it by hand.
+
+> ⚠️ **Always pass `--node-index` on a single machine, and give every node the *same* `--nodes=N`.**
+>
+> - **Omitting `--node-index` defaults it to `0`**, so the node tries to bind wallet RPC `8700` — already held by Terminal 1 — and exits during startup with:
+>   `failed to bind wallet RPC listener on 127.0.0.1:8700: listen tcp 127.0.0.1:8700: bind: address already in use`
+>   If you must run a node without a free `--node-index`, override the derived port explicitly: `--ws-port=127.0.0.1:8710` (any value other than the `127.0.0.1:8600` default is honoured as-is).
+> - **`--nodes` sizes the local validator set for every node on this machine.** `--nodes=N` with `--node-index=i` requires `i < N` (`node-index 3 out of range for 3 nodes` otherwise), and a node started with the default `--nodes=1` believes it is a one-validator network: its validator set stays size 1, so it can never resolve the other validators' attestations and can never verify a downloaded block. Give every node the same `N` — the total number of validators you intend to run.
 
 **Terminal 1 — First validator (creates genesis, then waits for the configured validators):**
 ```bash
@@ -326,9 +340,18 @@ go run src/cli/main.go node --role=validator \
 
 **Expected:** Creates genesis, waits for nodes 2 and 3 to connect and become ready, then starts PBFT. It does not mine a solo chain in this `--nodes=3` flow.
 
-**Terminal 2 — Second validator (late joiner, connects via --seeds):**
+> **Multisig treasury spend — no flags, runs on every node.** The custody watcher starts automatically inside every node's process whenever a multisig policy is provisioned — nothing on the command line and nothing that differs between terminals. The node is never told a destination or amount: it scans `config/spend_proposals/` for spends the custodian quorum has already signed (each file is a complete `multisig spend --dry-run --out` transaction, so destination/amount/nonce live *inside* the signed payload) and broadcasts at most one per cycle, deduped by transaction id. It can never authorize a spend on its own — the node re-verifies the witness at admission.
+>
+> - **Creating a proposal** (an operator action, not the node's): assemble the usual spend and drop it into the proposals directory instead of broadcasting by hand —
+>   `go run src/cli/main.go multisig spend --policy config/escrow_multisig.json --to <addr> --amount-spx <n> --keys-dir data/custody/escrow --rpc 127.0.0.1:8700 --dry-run --out config/spend_proposals/<id>.json`
+>   The next watcher cycle re-verifies it against the **live** policy — sender address, chain id, expiry window, the witness's embedded policy, and a real M-of-N signature check over the exact spend — then broadcasts it.
+> - ⚠️ **`config/spend_proposals/` is a trust boundary, not an inbox.** Anything that can write there can force a broadcast *attempt* of a payment the quorum already signed; protect it like the custodian keys themselves. A malformed or invalid file is logged and skipped, never fatal, so one bad drop cannot block the others.
+> - **Replay-safe:** the watcher dedupes by transaction id — a proposal already broadcast, already on-chain, or already rejected is never resubmitted, and it survives a restart (each candidate is checked against `gettransactionreceipt` before broadcasting).
+> - **Prerequisite:** run `go run src/cli/main.go multisig devnet --role escrow` **before** starting any node, so `config/escrow_multisig.json` exists before genesis is created — the policy's address is what block 0 funds, and every node re-verifies proposals against it. If this file is missing when a node starts, that node logs `no multisig policy at config/escrow_multisig.json — auto multisig spend watcher disabled` and starts normally with the watcher off — it does not fail startup.
+> - **Broadcaster ≠ custodian — no custodian keys on watcher nodes.** A node running the watcher only broadcasts spends the quorum already signed, so it needs **no custodian key files**. `data/custody/escrow/…` belongs only on the machines that *sign* proposals (`multisig devnet` / `message` / `sign` / `combine`); do **not** copy M-of-N of them onto every broadcasting node — that widens the key-distribution surface for a signing authority the watcher never exercises. Startup is gated only on the policy being present and parseable.
+> - **Every terminal is identical** — there's no per-terminal spend configuration to keep in sync. Ctrl+C stops the watcher and the node together; a transient broadcast failure (e.g. this node's RPC not listening yet) is logged and retried next interval, and a fatal loop error logs `auto multisig spend watcher stopped: …` while the node keeps running.
 
-Wait for Node-1 to produce a few blocks, then:
+**Terminal 2 — Second validator (late joiner, connects via --seeds):**
 
 > `--datadir=data/node2` and `--tcp-addr=127.0.0.1:30304` must both differ from Terminal 1 — that's the pairing that gets mixed up most often.
 
@@ -343,7 +366,7 @@ go run src/cli/main.go node --role=validator \
     --pbft
 ```
 
-**Expected:** Downloads genesis + all blocks from Node-1, catches up, enters periodic monitoring.
+**Expected:** Registers as a validator, waits for the other validators to connect, then participates in the PBFT rounds. Since no blocks exist yet, there is nothing to download — the download path only runs for a joiner that arrives after blocks are already committed.
 
 **Terminal 3 — Third validator (PBFT activates):**
 ```bash
@@ -357,22 +380,77 @@ go run src/cli/main.go node --role=validator \
     --pbft
 ```
 
-**Expected:** Syncs, all 3 validators connect, PBFT activates for block 2+.
+**Expected:** Registers as the third validator; once all three are connected, PBFT starts and produces block 1.
 
-**Terminal 4 — Fourth node (joins established network):**
+**Terminal 4 — Fourth validator (joins the network that Terminals 1–3 are already running):**
+
+> **Corrected:** this command previously omitted `--nodes`/`--node-index`, which made the node attempt wallet RPC port `8700` (already held by Terminal 1) and exit with `bind: address already in use`. Pass `--node-index=3` and raise `--nodes` to `4` — see the warning in the table above for why both are required.
+
 ```bash
 cd Desktop/protocol
 go run src/cli/main.go node --role=validator \
     --tcp-addr=127.0.0.1:30306 \
     --http-port=127.0.0.1:8548 \
     --datadir=data/node4 \
+    --nodes=4 --node-index=3 \
     --seeds=127.0.0.1:30303 \
     --pbft
 ```
 
-**Expected:** Syncs full chain from any peer, catches up, joins existing PBFT.
+**Expected:** Binds wallet RPC on `127.0.0.1:8703`, passes key exchange with all three running peers (identical genesis hash), converges on `validators=4` / 128 SPX total stake, downloads blocks `1→N` from any peer and catches up to the tip, then validates (and can itself propose) blocks.
 
-> **Note:** `--nodes=3` is only needed for localhost testing. On real machines with public IPs, omit `--nodes` and `--node-index` — the validator set is discovered dynamically via `--seeds`.
+**Scaling up: an N-node network must be sized up front.**
+
+The set size a node believes in comes from `--nodes`, and every node must agree on it. So the commands above are two *separate* scenarios — do not mix their `--nodes` values:
+
+| Scenario | Terminals 1–3 | Terminal 4 | Result |
+|---|---|---|---|
+| **A — 3-node network** (the Quick Test above) | `--nodes=3` | — | ✅ converged, `validators=3` |
+| **B — grow a running 3-node chain by one** | `--nodes=3` (already running) | `--nodes=4 --node-index=3` | ✅ node 4 syncs and validates |
+| **C — 8-node network, sized up front** | `--nodes=8 --node-index=0..2` | `--nodes=8 --node-index=3..7` | ✅ only variant that scales past 4 |
+
+**Scenario C — all eight nodes, `--nodes=8` on every one of them.** Terminals 1–4 are the same addresses/datadirs as above, but with `--nodes=8 --node-index=0|1|2|3`; Terminals 5–8 are:
+
+```bash
+# Terminal 5
+go run src/cli/main.go node --role=validator \
+    --tcp-addr=127.0.0.1:30307 --http-port=127.0.0.1:8549 \
+    --datadir=data/node5 --nodes=8 --node-index=4 \
+    --seeds=127.0.0.1:30303 --pbft
+
+# Terminal 6
+go run src/cli/main.go node --role=validator \
+    --tcp-addr=127.0.0.1:30308 --http-port=127.0.0.1:8550 \
+    --datadir=data/node6 --nodes=8 --node-index=5 \
+    --seeds=127.0.0.1:30303 --pbft
+
+# Terminal 7
+go run src/cli/main.go node --role=validator \
+    --tcp-addr=127.0.0.1:30309 --http-port=127.0.0.1:8551 \
+    --datadir=data/node7 --nodes=8 --node-index=6 \
+    --seeds=127.0.0.1:30303 --pbft
+
+# Terminal 8
+go run src/cli/main.go node --role=validator \
+    --tcp-addr=127.0.0.1:30310 --http-port=127.0.0.1:8552 \
+    --datadir=data/node8 --nodes=8 --node-index=7 \
+    --seeds=127.0.0.1:30303 --pbft
+```
+
+For N nodes the general rule is: `--node-index = i` (0-based), `--tcp-addr = 127.0.0.1:(30303+i)`, `--http-port = 127.0.0.1:(8545+i)`, wallet RPC auto-derives to `127.0.0.1:(8700+i)`, `--datadir=data/node(i+1)`, and `--nodes=N` on **every** node — with a large enough TCP port range if `i` pushes past `30310`.
+
+> ⚠️ **Growth limit — read this before adding a 5th+ node to a chain that is already producing blocks.** Blocks record the attestations that existed when they were produced. With no per-epoch validator snapshots (`core.SnapshotValidatorSet` has no callers), a syncing node verifies historical blocks against its **current** validator set, so the 2/3 threshold it enforces rises as nodes are added, while old blocks keep their original attestation weight. Measured on this repo:
+>
+> | Scenario | Result |
+> |---|---|
+> | 3 validators running (`--nodes=3`), start node 4 with `--nodes=4 --node-index=3` | ✅ syncs, catches up (old blocks carry 3 × 32 = 96 SPX ≥ 2/3 × 128 = 85.33) |
+> | Same, but start node 4 with `--nodes` omitted | ❌ validator set stays 1 → `0.00 / 32.00 SPX attested (need ≥ 21.33)`, never syncs |
+> | 4 validators running, start node 5 with `--nodes=5 --node-index=4` | ❌ `block 1 attestation quorum not met: 96.00 / 160.00 SPX attested (need ≥ 106.67)` — retries forever, stays at height 0 |
+> | All 5 started together with `--nodes=5 --node-index=0..4` | ✅ all reach the same height, `validators=5`, zero errors |
+>
+> **So: size the network up front** (start every node with `--nodes=N`), or grow only while `2/3 × (new validators × 32) ≤ ` the attestation weight on the oldest block you must verify. Going 3 → 4 works; 4 → 5 does not. Lifting this limitation is a code fix (populate `SnapshotValidatorSet` at epoch transitions so historical blocks verify against the set that actually signed them), not a flag.
+
+> **Note:** `--nodes`/`--node-index` are the same-box harness. On real machines with public IPs, omit both and let `--seeds` + PEX discovery populate the validator set dynamically.
 
 ### Testing late-joiner sync against an existing chain
 
@@ -478,13 +556,24 @@ for d in data/node*; do echo "$d:"; ls "$d"; done
 
 ### Check Balance via RPC
 
-While any node is running:
+While any node is running, query **that node's** wallet RPC port — `8700 + --node-index`, i.e. `8700` for node 1, `8701` for node 2, `8702` for node 3, and so on:
 
 ```bash
+# Node 1 (--node-index=0 → wallet RPC 8700)
 go run src/cli/main.go get-balance \
     --rpc 127.0.0.1:8700 \
     --address 0000000000000000000000000000000000000001
+
+# Node 3 (--node-index=2 → wallet RPC 8702)
+go run src/cli/main.go get-balance \
+    --rpc 127.0.0.1:8702 \
+    --address 0000000000000000000000000000000000000001
 ```
+
+`0000…0001` is the genesis vault: it mints the full supply in block 0 and pays every allocation out of itself in the same block, so it correctly reads `0` afterwards. The CGE escrow `0000…0002` holds the time-locked portion — e.g. `424,999,985 SPX` shortly after genesis, releasing as chain time advances.
+
+> ⚠️ Pointing `--rpc` at the `--http-port` value (`8545`…) fails with
+> `handshake with 127.0.0.1:8547: … i/o timeout` — that listener speaks HTTP, not the handshake-authenticated JSON-RPC wire format `get-balance` needs.
 
 ### Clean Up and Restart
 
@@ -502,15 +591,17 @@ rm -rf data/
 |----------|----------------|
 | Node-A starts with `--nodes=3` | Creates genesis, waits for the configured validators, then starts PBFT |
 | Node-A starts as a genuine single-node run | Creates genesis and mines blocks solo (no PBFT) |
-| Node-B joins 5 min later | Downloads genesis + all blocks from A |
-| Node-C joins 10 min later | Downloads genesis + all blocks, PBFT activates |
-| Node-D joins 1 hour later | Downloads full chain, joins existing PBFT |
-| Node-D joins 1 day later | Same — syncs from any peer |
-| Node-D joins 1 year later | Same — chain can be millions of blocks |
-| Kill Node-B, restart | Resumes from last committed block |
+| Node-B joins 5 min later, same `--nodes` | Joins the PBFT round at genesis (nothing committed yet to download) |
+| Node-C joins 10 min later, same `--nodes` | Same; `validators=3`, PBFT produces block 1 |
+| Node 4 joins while blocks already exist, `--nodes=4 --node-index=3` | Downloads and verifies blocks `1→N`, catches up, validates ✅ |
+| Node 4 joins with the same command but `--nodes` omitted | ❌ validator set stays 1 → `0.00 / 32.00 SPX attested (need ≥ 21.33)`, stuck at height 0 |
+| Node 5 joins a running 4-validator chain, `--nodes=5` | ❌ `96.00 / 160.00 SPX attested (need ≥ 106.67)` on block 1 — sees the growth limit above |
+| All N nodes started together with `--nodes=N` | ✅ All converge, `validators=N`, identical tip |
+| Killing Node-B, restarting with the same datadir | Resumes from last committed block |
 | Disconnect during sync | Resumes from last committed height |
 | Different genesis hash | Connection rejected during key exchange |
 | Network partition | Reconnects and syncs missing blocks |
+| Omitting `--node-index` on a second same-machine node | ❌ startup failure: `bind wallet RPC listener on 127.0.0.1:8700: address already in use` |
 
 ---
 
@@ -532,6 +623,31 @@ Six fixes across `nodes.go` and `helpers.go` address this:
 **Net effect:** the "Quick Test: Seed-Based Mode" flow below is the flow these fixes were built for — with `--nodes=3`, Terminal 1 creates genesis and waits for real peers to become ready, Terminals 2 and 3 join via `--seeds=127.0.0.1:30303`, and all three nodes converge on `validators=3` with real 2-of-3 PBFT quorum. A genuine single-node run (`totalNodes <= 1`) remains the only path that mines solo.
 
 If you re-run the Quick Test commands below, confirm in the logs that all three nodes report `validators=3` (not `validators=1`), that no `parent hash mismatch` messages appear, and that view changes settle rather than climbing rapidly.
+
+---
+
+## Changelog: Quick-Test Tutorial Corrections (measured)
+
+The Quick Test commands were re-run against this tree with three, four and five real
+node processes. Findings, and what was changed in this document:
+
+| # | Symptom (reproduced) | Cause | Doc change |
+|---|----------------------|-------|-----------|
+| 1 | **Terminal 4 exited at startup:** `failed to bind wallet RPC listener on 127.0.0.1:8700: … address already in use` | The tutorial's Terminal 4 omitted `--node-index`; wallet RPC is always derived as `8700 + node-index`, so it defaulted to `0` and collided with Terminal 1 | Terminal 4 now passes `--nodes=4 --node-index=3`; the port table lists the derived wallet-RPC port per node and documents the `--ws-port` override |
+| 2 | A joiner with `--nodes` omitted stayed at `validators=1` and never synced: `0.00 / 32.00 SPX attested (need ≥ 21.33)` | `--nodes=1` tells the node it is a one-validator network, so it can never resolve the other validators' attestations | Added the "always pass `--node-index`, give every node the same `--nodes`" warning next to the port table |
+| 3 | Nodes 2 and 3 documented as "downloads genesis + all blocks", but they never issued a single block request (0 `Syncing blocks` lines) — they reached CAUGHT_UP at height 0 and joined the first PBFT round | Nothing was committed yet when they joined; the download path only runs for a joiner that arrives after blocks exist | Late-joiner section and Expected Behavior table now distinguish "join the PBFT round at genesis" from "download and verify blocks" |
+| 4 | **A 5th node cannot join a running chain:** `block 1 attestation quorum not met: 96.00 / 160.00 SPX attested (need ≥ 106.67)`, stuck at height 0 forever | Blocks carry the attestations that existed when produced, but sync-time verification uses the joiner's *current* validator set, so the 2/3 threshold rises as nodes are added. `core.SnapshotValidatorSet` — which exists exactly to verify historical blocks against the set that signed them — **has no callers**, so `GetValidatorSetAtEpoch` always returns nil and every check falls back to the live set | Documented the measured growth limit (3 → 4 works; 4 → 5 does not) and the "size the network up front with `--nodes=N`" workaround |
+
+Verified-good baseline in the same run: 3-node PBFT converged to `validators=3` and an
+identical tip hash across all three processes; 5 nodes started together with
+`--nodes=5 --node-index=0..4` converged with `validators=5` and zero errors; genesis hash
+matched across every process; `get-balance` reported the CGE escrow at `424,999,985 SPX`
+with the vault correctly drained after block 0.
+
+Still open (code fixes, not documentation): (a) derive a non-colliding wallet-RPC default
+when `--node-index` is absent, and (b) call `SnapshotValidatorSet` at epoch transitions so
+validators can be added to a live network without invalidating historical block
+verification.
 
 ---
 

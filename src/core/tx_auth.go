@@ -14,6 +14,7 @@ import (
 	"sync"
 
 	logger "github.com/sphinxfndorg/protocol/src/console"
+	multisig "github.com/sphinxfndorg/protocol/src/core/musig"
 	key "github.com/sphinxfndorg/protocol/src/core/sthincs/key/backend"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
 )
@@ -40,13 +41,63 @@ func transactionAuthNonce(tx *types.Transaction) []byte {
 	return out
 }
 
-func (bc *Blockchain) validateTransactionAuth(tx *types.Transaction, storeEvidence bool) error {
+// custodyPolicyOwns reports whether sender resolves to a registered M-of-N
+// custody policy (the genesis vault when config/genesis_multisig.json is
+// loaded, or any other custody address).
+//
+// ★ WHY genesis distributions need it: a policy-owned vault must authorize its
+// block-0 distributions exactly like any other custody spend. Without this, the
+// unsigned genesis system-transaction exemption would let a custody vault mint
+// its entire distribution without a single custodian signature — the M-of-N
+// policy would be bypassed on the one block that matters most. With it, such a
+// transaction falls through to the custody path in validateTransactionAuth,
+// which FAILS CLOSED when the witness is missing or below threshold. A vault
+// with no registered policy keeps the legacy unsigned exemption unchanged.
+func custodyPolicyOwns(sender string) bool {
+	_, registered := multisig.LookupPolicy(sender)
+	return registered
+}
+
+// validateTransactionAuth verifies a transaction's authorization at a known
+// block height. Only block 0 may carry unauthorized transactions, and only the
+// genesis allocation set — so a transaction sent from the genesis vault at any
+// later height is authenticated like any other spend.
+//
+// Two authorization forms exist above block 0:
+//
+//	sender resolves to a registered custody policy → M-of-N witness
+//	                                                (multisig.CheckSpendWitness)
+//	anything else                                 → single SPHINCS+ bundle
+//
+// refTime is the sealed block header timestamp, used as the expiry reference
+// for a custody witness. It is never a wall clock, so proposer, verifier and
+// replayer reach the same decision from the same block bytes.
+func (bc *Blockchain) validateTransactionAuth(tx *types.Transaction, height uint64, refTime uint64, storeEvidence bool) error {
 	if tx == nil {
 		return fmt.Errorf("nil transaction")
 	}
-	if tx.IsSystemTransaction() {
+	if tx.IsSystemTransactionAt(height) && !custodyPolicyOwns(tx.Sender) {
 		return nil
 	}
+
+	// The custody path below enforces that a witness is bound to the chain it
+	// authorizes, so publish this node's chain ID first.
+	bc.publishActiveChainID()
+
+	// Custody path: a sender that resolves to a registered custody policy is
+	// authorized by a threshold witness, never by a single key. There is no
+	// fallback — a missing or below-threshold witness is rejected exactly as a
+	// missing bundle is.
+	if custody, err := multisig.CheckSpendWitness(
+		tx.Sender, tx.Receiver, tx.ChainID, tx.Amount, tx.Nonce,
+		tx.MultiSigWitness, refTime,
+	); custody {
+		if err != nil {
+			return fmt.Errorf("transaction %s M-of-N custody auth failed: %w", tx.ID, err)
+		}
+		return nil
+	}
+
 	if !tx.HasFullAuthBundle() {
 		return fmt.Errorf("transaction %s missing full SPHINCS auth bundle", tx.ID)
 	}
@@ -108,11 +159,12 @@ func (bc *Blockchain) validateBlockTransactionAuth(block *types.Block, storeEvid
 	seenSessions := make(map[string]struct{}, n)
 	seenCommitments := make(map[string]struct{}, n)
 
+	refTime := uint64(block.Header.Timestamp)
 	for i, tx := range block.Body.TxsList {
 		if tx == nil {
 			return fmt.Errorf("transaction %d is nil", i)
 		}
-		if tx.IsSystemTransaction() {
+		if tx.IsSystemTransactionAt(block.GetHeight()) && !custodyPolicyOwns(tx.Sender) {
 			continue
 		}
 
@@ -120,6 +172,8 @@ func (bc *Blockchain) validateBlockTransactionAuth(block *types.Block, storeEvid
 		// strconv+concat instead of fmt.Sprintf: this runs once per tx per
 		// block and Sprintf's reflection-based formatting is measurably
 		// slower on the hot path for large blocks.
+		// A custody spend carries an ordinary account nonce, and the witness
+		// binds it, so this applies to custody senders too.
 		accountNonceKey := tx.Sender + ":" + strconv.FormatUint(tx.Nonce, 10)
 		if _, exists := seenAccountNonces[accountNonceKey]; exists {
 			return fmt.Errorf("duplicate account nonce in block: sender=%s nonce=%d transaction=%s",
@@ -127,25 +181,32 @@ func (bc *Blockchain) validateBlockTransactionAuth(block *types.Block, storeEvid
 		}
 		seenAccountNonces[accountNonceKey] = struct{}{}
 
-		sigHashKey := string(tx.SignatureHash)
-		if _, exists := seenSigHashes[sigHashKey]; exists {
-			return fmt.Errorf("duplicate signature hash in block for transaction %s", tx.ID)
-		}
-		seenSigHashes[sigHashKey] = struct{}{}
+		// The remaining guards are SPHINCS-specific replay checks over the
+		// single-key bundle. A custody witness has no bundle, so indexing its
+		// empty SignatureHash/AuthNonce/Commitment would spuriously collide two
+		// custody spends in the same block; those transactions are authorized
+		// (and replay-protected) by the witness instead.
+		if _, custodySender := multisig.LookupPolicy(tx.Sender); !custodySender {
+			sigHashKey := string(tx.SignatureHash)
+			if _, exists := seenSigHashes[sigHashKey]; exists {
+				return fmt.Errorf("duplicate signature hash in block for transaction %s", tx.ID)
+			}
+			seenSigHashes[sigHashKey] = struct{}{}
 
-		sessionKey := string(transactionAuthTimestamp(tx)) + string(transactionAuthNonce(tx))
-		if _, exists := seenSessions[sessionKey]; exists {
-			return fmt.Errorf("duplicate timestamp/nonce in block for transaction %s", tx.ID)
-		}
-		seenSessions[sessionKey] = struct{}{}
+			sessionKey := string(transactionAuthTimestamp(tx)) + string(transactionAuthNonce(tx))
+			if _, exists := seenSessions[sessionKey]; exists {
+				return fmt.Errorf("duplicate timestamp/nonce in block for transaction %s", tx.ID)
+			}
+			seenSessions[sessionKey] = struct{}{}
 
-		commitmentKey := string(tx.Commitment)
-		if _, exists := seenCommitments[commitmentKey]; exists {
-			return fmt.Errorf("duplicate commitment in block for transaction %s", tx.ID)
+			commitmentKey := string(tx.Commitment)
+			if _, exists := seenCommitments[commitmentKey]; exists {
+				return fmt.Errorf("duplicate commitment in block for transaction %s", tx.ID)
+			}
+			seenCommitments[commitmentKey] = struct{}{}
 		}
-		seenCommitments[commitmentKey] = struct{}{}
 
-		if err := bc.validateTransactionAuth(tx, storeEvidence); err != nil {
+		if err := bc.validateTransactionAuth(tx, block.GetHeight(), refTime, storeEvidence); err != nil {
 			return err
 		}
 	}
@@ -155,6 +216,13 @@ func (bc *Blockchain) validateBlockTransactionAuth(block *types.Block, storeEvid
 
 // SignTransaction fills a transaction with the full SPHINCS auth bundle required
 // for mempool admission, P2P gossip, and block validation.
+//
+// Genesis allocation transactions are the only unsigned transactions in the
+// protocol — they carry no key material at all, so there is nothing to sign and
+// they are only ever valid inside block 0. Anything else, including every spend
+// from the genesis vault after block 0, must be signed: the M-of-N vault/escrow
+// custody path supplies that authorization separately from this single-key
+// helper.
 func (bc *Blockchain) SignTransaction(tx *types.Transaction, skBytes, pkBytes []byte) error {
 	if tx == nil {
 		return fmt.Errorf("nil transaction")
@@ -349,7 +417,13 @@ func (bc *Blockchain) RebuildCanonicalReplayEvidence() error {
 			continue
 		}
 		for _, tx := range block.Body.TxsList {
-			if tx == nil || tx.IsSystemTransaction() {
+			if tx == nil || (block.GetHeight() == 0 && tx.IsSystemTransaction()) {
+				continue
+			}
+			// A custody spend is authorized by an M-of-N witness, not by a
+			// single-key bundle, so there is no signature/receipt evidence to
+			// rebuild for it — the witness is reverified from the block.
+			if _, custodySender := multisig.LookupPolicy(tx.Sender); custodySender {
 				continue
 			}
 			if err := bc.sphincsManager.VerifyTransactionAuthStateless(

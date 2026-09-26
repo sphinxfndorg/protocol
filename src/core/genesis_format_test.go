@@ -72,6 +72,72 @@ func TestGenesisAllocationEntryJSONParsesLegacyBareHex(t *testing.T) {
 	}
 }
 
+// TestApplyGenesis_JSONReportsGrossSupply — the audit file must report the
+// genesis supply block 0 actually mints (gross = sold + remainder), with sold
+// and remainder broken out per allocation. Reporting only the remainder made
+// genesis_state.json disagree with the chain by 130,000,000 SPX.
+func TestApplyGenesis_JSONReportsGrossSupply(t *testing.T) {
+	bc := newMinimalBlockchain(t)
+	gs := DefaultGenesisState()
+
+	if err := ApplyGenesis(bc, gs); err != nil {
+		t.Fatalf("ApplyGenesis: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(bc.storage.GetStateDir(), "genesis_state.json"))
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+
+	var snap struct {
+		TotalAllocatedSPX string `json:"total_allocated_spx"`
+		TotalRemainderSPX string `json:"total_remainder_spx"`
+		TotalSoldSPX      string `json:"total_sold_spx"`
+		Allocations       []struct {
+			Label      string `json:"label"`
+			BalanceSPX string `json:"balance_spx"`
+			SoldSPX    string `json:"sold_spx"`
+			GrossSPX   string `json:"gross_spx"`
+		} `json:"allocations"`
+	}
+	if err := json.Unmarshal(raw, &snap); err != nil {
+		t.Fatalf("unmarshal genesis_state.json: %v", err)
+	}
+
+	if snap.TotalAllocatedSPX != "1170000000" {
+		t.Errorf("total_allocated_spx: want 1170000000 (gross minted), got %s", snap.TotalAllocatedSPX)
+	}
+	if snap.TotalSoldSPX != "130000000" {
+		t.Errorf("total_sold_spx: want 130000000, got %s", snap.TotalSoldSPX)
+	}
+	if snap.TotalRemainderSPX != "1040000000" {
+		t.Errorf("total_remainder_spx: want 1040000000, got %s", snap.TotalRemainderSPX)
+	}
+
+	byLabel := map[string][3]string{}
+	for _, a := range snap.Allocations {
+		byLabel[a.Label] = [3]string{a.BalanceSPX, a.SoldSPX, a.GrossSPX}
+	}
+	for _, tc := range []struct {
+		label                  string
+		remainder, sold, gross string
+	}{
+		{"Founder", "25000000", "5000000", "30000000"},
+		{"PublicICOPool", "100000000", "90000000", "190000000"},
+		{"Foundation", "300000000", "0", "300000000"},
+		{"Airdrops", "90000000", "0", "90000000"},
+	} {
+		got, ok := byLabel[tc.label]
+		if !ok {
+			t.Errorf("%s: missing from genesis_state.json allocations", tc.label)
+			continue
+		}
+		if got[0] != tc.remainder || got[1] != tc.sold || got[2] != tc.gross {
+			t.Errorf("%s: remainder/sold/gross = %v, want [%s %s %s]",
+				tc.label, got, tc.remainder, tc.sold, tc.gross)
+		}
+	}
+}
+
 // TestGenesisValidatorEntryJSONUsesSPIFPrefix — the validator rows written to
 // genesis_state.json must carry the canonical SPIF display form as well.
 func TestGenesisValidatorEntryJSONUsesSPIFPrefix(t *testing.T) {

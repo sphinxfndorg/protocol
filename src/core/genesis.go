@@ -5,8 +5,8 @@
 package core
 
 import (
-	"encoding/hex"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"math/big"
 	"os"
@@ -17,7 +17,9 @@ import (
 	"github.com/sphinxfndorg/protocol/src/common"
 	"github.com/sphinxfndorg/protocol/src/consensus"
 	logger "github.com/sphinxfndorg/protocol/src/console"
+	multisig "github.com/sphinxfndorg/protocol/src/core/musig"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
+	"github.com/sphinxfndorg/protocol/src/policy"
 )
 
 // NewGenesisValidatorStake converts a whole-SPX amount to the nSPX big.Int
@@ -200,7 +202,10 @@ func (gs *GenesisState) AddValidator(nodeID, address string, stakeInSPX int64, p
 // ----------------------------------------------------------------------------
 
 // allocationToTx converts a single GenesisAllocation into a genesis funding
-// transaction that is placed in the block body.
+// transaction that pays the recipient the FULL allocation amount — the
+// liquid (CGE-unlocked) case. It delegates to allocationPartToTx with
+// receiver = alloc.Address and amount = alloc.BalanceNSPX, so liquid
+// allocations produce byte-identical transactions to the pre-CGE scheme.
 //
 // Convention:
 //   - Sender   : GenesisVaultAddress (vault distributes to allocations)
@@ -208,57 +213,111 @@ func (gs *GenesisState) AddValidator(nodeID, address string, stakeInSPX int64, p
 //   - Amount   : allocation.BalanceNSPX (in nSPX)
 //   - Nonce    : sequential index i, so every transaction is unique
 //   - Timestamp: genesis block timestamp
-//   - ID       : deterministic — hex(SpxHash(address || balance_bytes || nonce_bytes))
+//   - ID       : deterministic — hex(SpxHash(receiver || amount_bytes || nonce_bytes))
 //
 // The ID is fully deterministic so the Merkle root computed from the
 // transaction list always matches the TxsRoot in the block header.
 func allocationToTx(alloc *GenesisAllocation, index uint64, genesisTimestamp int64) *types.Transaction {
-	// Build a deterministic ID from address + balance + index so the same
-	// allocation always produces the same transaction ID on every node.
-	idInput := []byte(alloc.Address)
-	if alloc.BalanceNSPX != nil {
-		idInput = append(idInput, alloc.BalanceNSPX.Bytes()...)
-	}
-	indexBytes := make([]byte, 8)
-	indexBytes[0] = byte(index >> 56)
-	indexBytes[1] = byte(index >> 48)
-	indexBytes[2] = byte(index >> 40)
-	indexBytes[3] = byte(index >> 32)
-	indexBytes[4] = byte(index >> 24)
-	indexBytes[5] = byte(index >> 16)
-	indexBytes[6] = byte(index >> 8)
-	indexBytes[7] = byte(index)
-	idInput = append(idInput, indexBytes...)
+	return allocationPartToTx(alloc.Address, alloc.BalanceNSPX, index, genesisTimestamp)
+}
 
-	txID := hex.EncodeToString(common.SpxHash(idInput))
+// allocationPartToTx builds one genesis funding transaction for a slice of
+// an allocation: it pays `amount` to `receiver` (either the recipient at CGE
+// or policy.CGEEscrowAddress for the locked remainder) with the vault as
+// sender. The allocation itself is not needed — every field of the
+// transaction derives from receiver, amount, index and the genesis
+// timestamp. Both the tx ID and the nonce are derived from the running tx
+// index, so the emitted list stays deterministic and the vault's nonce
+// sequence stays gap-free across every node.
+func allocationPartToTx(receiver string, amount *big.Int, index uint64, genesisTimestamp int64) *types.Transaction {
+	return allocationPartToTxAuthorized(receiver, amount, index, genesisTimestamp, 0, nil)
+}
+
+// allocationPartToTxAuthorized is allocationPartToTx plus the optional M-of-N
+// custody authorization for the slice. chainID binds a witness to one chain and
+// witness is the threshold signature set; both stay zero/nil on the legacy
+// unsigned path, so that transaction still serialises byte-for-byte as before.
+func allocationPartToTxAuthorized(receiver string, amount *big.Int, index uint64, genesisTimestamp int64, chainID uint64, witness *multisig.MultiSigWitness) *types.Transaction {
+	// Deterministic ID from receiver + amount + index: the same funding slice
+	// always produces the same transaction ID on every node, and the same
+	// formula lets core/transaction recognize a genesis funding transaction
+	// from the transaction alone (see Transaction.IsSystemTransaction).
+	txID := types.GenesisAllocationTxID(receiver, amount, index)
 
 	// Copy amount so callers cannot mutate the allocation.
-	amount := new(big.Int)
-	if alloc.BalanceNSPX != nil {
-		amount.Set(alloc.BalanceNSPX)
+	amt := new(big.Int)
+	if amount != nil {
+		amt.Set(amount)
 	}
 
 	return &types.Transaction{
-		ID:        txID,                // Deterministic unique identifier
-		Sender:    GenesisVaultAddress, // Vault distributes to allocations
-		Receiver:  alloc.Address,       // The pre-funded account
-		Amount:    amount,              // Initial balance in nSPX
-		GasLimit:  big.NewInt(0),       // Genesis transactions consume no gas
-		GasPrice:  big.NewInt(0),       // Genesis transactions have zero gas price
-		Nonce:     index,               // Sequential to make each tx unique
-		Timestamp: genesisTimestamp,    // Anchored to genesis time
-		Signature: []byte{},            // No signature for genesis funding transactions
+		ID:              txID,                // Deterministic unique identifier
+		ChainID:         chainID,             // Bound into any custody witness
+		Sender:          GenesisVaultAddress, // Vault distributes to allocations
+		Receiver:        receiver,            // Recipient at CGE, or the CGE escrow
+		Amount:          amt,                 // Slice of the initial balance in nSPX
+		GasLimit:        big.NewInt(0),       // Genesis transactions consume no gas
+		GasPrice:        big.NewInt(0),       // Genesis transactions have zero gas price
+		Nonce:           index,               // Sequential to make each tx unique
+		Timestamp:       genesisTimestamp,    // Anchored to genesis time
+		Signature:       []byte{},            // No single-key signature at genesis
+		MultiSigWitness: witness,             // M-of-N authority when the vault is custody
 	}
 }
 
 // allocationsToTxList converts the complete ordered allocation list into a
 // slice of *types.Transaction suitable for the block body.
+//
+// Each allocation's BalanceNSPX is the CGE remainder (post-sale) for that
+// category. The transaction actually paid out is bigger than that where the
+// category sold coins in a funding round: policy.CGEGenesisDirectAmount adds
+// back the sold amount (always liquid, never escrowed) on top of whatever
+// the remainder's own schedule unlocks at CGE; policy.CGEGenesisEscrowAmount
+// is the remainder's locked portion, unaffected by the sale. So the vault
+// pays sold+unlocked-remainder to the recipient and locked-remainder to
+// policy.CGEEscrowAddress, both in block 0 — the vault still drains
+// completely and gross-per-category (sold + remainder) is conserved.
+//
 // The order of the output slice matches the order of gs.Allocations exactly,
-// which is required for the Merkle root to be deterministic.
+// which is required for the Merkle root to be deterministic; nonces are the
+// running transaction index so the vault's nonce sequence is gap-free.
 func (gs *GenesisState) allocationsToTxList() []*types.Transaction {
-	txs := make([]*types.Transaction, len(gs.Allocations))
-	for i, alloc := range gs.Allocations {
-		txs[i] = allocationToTx(alloc, uint64(i), gs.Timestamp)
+	return gs.allocationsToTxListAuthorized(nil, 0)
+}
+
+// GenesisDistributionAuthorizer returns the M-of-N custody witness that
+// authorizes one genesis distribution slice, identified by nonce (the running
+// transaction index). Returning nil means this vault is not custody-owned and
+// the legacy unsigned genesis exemption applies to that slice.
+type GenesisDistributionAuthorizer func(receiver string, amount *big.Int, nonce uint64) *multisig.MultiSigWitness
+
+// allocationsToTxListAuthorized is allocationsToTxList with optional M-of-N
+// authorization: when auth is non-nil every slice is signed and bound to
+// chainID. The tx list is otherwise identical, so the legacy path (auth == nil,
+// chainID == 0) stays byte-for-byte unchanged.
+func (gs *GenesisState) allocationsToTxListAuthorized(auth GenesisDistributionAuthorizer, chainID uint64) []*types.Transaction {
+	txs := make([]*types.Transaction, 0, len(gs.Allocations))
+	appendPart := func(receiver string, amount *big.Int) {
+		index := uint64(len(txs))
+		var w *multisig.MultiSigWitness
+		if auth != nil {
+			w = auth(receiver, amount, index)
+		}
+		txs = append(txs, allocationPartToTxAuthorized(receiver, amount, index, gs.Timestamp, chainID, w))
+	}
+	for _, alloc := range gs.Allocations {
+		if alloc == nil || alloc.BalanceNSPX == nil || alloc.BalanceNSPX.Sign() <= 0 {
+			continue // nothing to fund (validate() rejects these on-chain)
+		}
+		direct := policy.CGEGenesisDirectAmount(alloc.Label, alloc.BalanceNSPX)
+		escrow := policy.CGEGenesisEscrowAmount(alloc.Label, alloc.BalanceNSPX)
+
+		if direct.Sign() > 0 {
+			appendPart(alloc.Address, direct)
+		}
+		if escrow.Sign() > 0 {
+			appendPart(GetCGEEscrowAddress(), escrow)
+		}
 	}
 	return txs
 }
@@ -267,10 +326,37 @@ func (gs *GenesisState) allocationsToTxList() []*types.Transaction {
 // Block construction
 // ----------------------------------------------------------------------------
 
-// GenesisVaultAddress is the protocol-owned address that receives the entire
-// initial supply as block 0's mining reward. Block 1 then distributes coins
-// from this vault to each allocation address via normal transactions.
-const GenesisVaultAddress = "0000000000000000000000000000000000000001"
+// legacyGenesisVaultAddress is the pre-multisig vault address. It remains the
+// fallback when no genesis_multisig.json policy is configured so existing
+// chains and tests keep byte-identical genesis block 0.
+const legacyGenesisVaultAddress = "0000000000000000000000000000000000000001"
+
+// GenesisVaultAddress is the active vault address. It defaults to the legacy
+// value and is replaced by LoadGenesisVaultPolicy when a genesis multisig
+// policy file is present.
+var GenesisVaultAddress = legacyGenesisVaultAddress
+
+// policyAutoLoadDisabled reports whether this process is a `go test` binary.
+//
+// ★ WHY: config/genesis_multisig.json and config/escrow_multisig.json are
+// auto-loaded at package init, because that is what makes a live node derive
+// its vault/escrow address from the operator's policy file. A developer who
+// has just run the live custody demo (multisig devnet) therefore has those
+// files on disk — and every test that assumes the default addresses would
+// start failing for a reason that has nothing to do with the code under test.
+// Tests that exercise the policy path load it explicitly
+// (LoadGenesisVaultPolicy / LoadEscrowPolicy) and restore the previous state,
+// so skipping only the implicit init-time auto-load keeps both behaviors.
+func policyAutoLoadDisabled() bool {
+	return flag.Lookup("test.v") != nil
+}
+
+func init() {
+	if policyAutoLoadDisabled() {
+		return
+	}
+	InitGenesisVaultAddress()
+}
 
 // BuildBlock builds a genesis block with NO allocation transactions in the body.
 // Coins are minted to GenesisVaultAddress via mintBlockReward when block 0 is
@@ -280,8 +366,23 @@ const GenesisVaultAddress = "0000000000000000000000000000000000000001"
 // the genesis vault to the allocation address. This ensures the TxsRoot in the
 // header matches the actual transaction list.
 func (gs *GenesisState) BuildBlock() *types.Block {
+	return gs.buildBlock(nil, 0)
+}
+
+// BuildBlockWithCustody builds the genesis block where every distribution
+// transaction carries a threshold M-of-N custody witness from auth and is bound
+// to chainID. This is the path a policy-owned genesis vault MUST use: block-0
+// authorization fails closed once the vault resolves to a registered custody
+// policy (see tx_auth.go), so an unsigned distribution set can never be
+// committed. Witnesses are part of the transaction, hence part of block 0's
+// TxsRoot, so every node that replays the block sees the identical authority.
+func (gs *GenesisState) BuildBlockWithCustody(auth GenesisDistributionAuthorizer, chainID uint64) *types.Block {
+	return gs.buildBlock(auth, chainID)
+}
+
+func (gs *GenesisState) buildBlock(auth GenesisDistributionAuthorizer, chainID uint64) *types.Block {
 	// Build transaction list from allocations
-	txs := gs.allocationsToTxList()
+	txs := gs.allocationsToTxListAuthorized(auth, chainID)
 
 	// Create body with the allocation transactions
 	body := types.NewBlockBody(txs, []*types.BlockHeader{}, 0)
@@ -336,7 +437,12 @@ func (gs *GenesisState) BuildBlock() *types.Block {
 			logger.Info("SUCCESS Genesis block signed by %s", signerNodeID)
 		}
 	} else {
-		logger.Warn("BuildBlock: no genesis signer registered — genesis block will be unsigned (call core.SetGenesisSigner before NewBlockchain)")
+		// Not fatal and not unusual: getCachedGenesisBlock() calls
+		// signGenesisIfPossible() on every lookup, so the block is signed as
+		// soon as SetGenesisSigner runs — i.e. moments after this build on a
+		// real node. Log at Info so a normal startup is not painted as a
+		// problem; signGenesisIfPossible still WARNs if signing itself fails.
+		logger.Info("BuildBlock: genesis block built unsigned; it will be signed lazily once SetGenesisSigner is registered")
 	}
 
 	logger.Info("GenesisState.BuildBlock: hash=%s, height=0, vault=%s, txs=%d",
@@ -359,7 +465,7 @@ func (gs *GenesisState) buildAllocationRoot() []byte {
 	}
 
 	// Build the same transaction list that BuildBlock uses so the root matches.
-	genesisTxs := gs.allocationsToTxList()
+	genesisTxs := gs.allocationsToTxListAuthorized(nil, 0)
 	tempBody := types.NewBlockBody(genesisTxs, []*types.BlockHeader{}, 0)
 	tempBlock := types.NewBlock(&types.BlockHeader{}, tempBody)
 	return tempBlock.CalculateTxsRoot()
@@ -552,78 +658,6 @@ func ApplyGenesisWithCachedBlock(bc *Blockchain, gs *GenesisState, cachedBlock *
 	return nil
 }
 
-// ApplyGenesisState credits every genesis allocation into the StateDB and
-// replaces the placeholder StateRoot in the genesis block header with the
-// real Merkle root of all balances.
-//
-// Call this once inside createGenesisBlock(), after ApplyGenesisWithCachedBlock
-// has stored the block.  It is idempotent: if the first allocation address
-// already has a non-zero balance the function returns immediately.
-// ApplyGenesisState credits every genesis allocation and tracks genesis supply
-func ApplyGenesisState(bc *Blockchain, gs *GenesisState) error {
-	if bc == nil || gs == nil {
-		return fmt.Errorf("ApplyGenesisState: nil argument")
-	}
-
-	stateDB, err := bc.newStateDB()
-	if err != nil {
-		return fmt.Errorf("ApplyGenesisState: %w", err)
-	}
-
-	// Idempotency check
-	if len(gs.Allocations) > 0 {
-		bal, err := stateDB.GetBalance(gs.Allocations[0].Address)
-		if err != nil {
-			return fmt.Errorf("ApplyGenesisState: failed to get balance for %s: %w",
-				gs.Allocations[0].Address, err)
-		}
-		if bal.Sign() > 0 {
-			logger.Info("ApplyGenesisState: already applied, skipping")
-			return nil
-		}
-	}
-
-	// Credit every allocation
-	totalMinted := new(big.Int)
-	for _, alloc := range gs.Allocations {
-		if alloc.BalanceNSPX == nil || alloc.BalanceNSPX.Sign() <= 0 {
-			continue
-		}
-		stateDB.SetBalance(alloc.Address, alloc.BalanceNSPX)
-		totalMinted.Add(totalMinted, alloc.BalanceNSPX)
-		logger.Info("ApplyGenesisState: %s nSPX → %s (%s)",
-			alloc.BalanceNSPX.String(), alloc.Address, alloc.Label)
-	}
-
-	// NEW: Set genesis supply in StateDB
-	stateDB.SetGenesisSupply(totalMinted)
-	stateDB.IncrementTotalSupply(totalMinted)
-	// Rewards minted is 0 at genesis
-
-	stateRoot, err := stateDB.Commit()
-	if err != nil {
-		return fmt.Errorf("ApplyGenesisState: commit: %w", err)
-	}
-
-	// Patch the genesis block header
-	bc.lock.Lock()
-	if len(bc.chain) > 0 && bc.chain[0] != nil {
-		bc.chain[0].Header.StateRoot = stateRoot
-		bc.chain[0].FinalizeHash()
-		if storeErr := bc.storage.StoreBlock(bc.chain[0]); storeErr != nil {
-			logger.Warn("ApplyGenesisState: re-store genesis block: %v", storeErr)
-		}
-	}
-	bc.lock.Unlock()
-
-	totalSPX := new(big.Int).Div(totalMinted, big.NewInt(1e18))
-	logger.Info("SUCCESS ApplyGenesisState: %d accounts, %s SPX, state_root=%x",
-		len(gs.Allocations), totalSPX.String(), stateRoot)
-	logger.Info("📊 GENESIS SUPPLY RECORDED: %s nSPX (%s SPX)",
-		totalMinted.String(), totalSPX.String())
-	return nil
-}
-
 // writeGenesisStateFile serialises the GenesisState to a JSON file at
 // <stateDir>/genesis_state.json. The file is created with 0644 permissions.
 //
@@ -634,28 +668,38 @@ func (gs *GenesisState) writeGenesisStateFile(stateDir string) error {
 		return fmt.Errorf("cannot create state dir: %w", err)
 	}
 
-	// Build per-account rows and compute total allocated supply.
-	total := new(big.Int)
+	// Build per-account rows and compute the supply block 0 mints. Each row
+	// breaks the category into: remainder (the CGE schedule input), sold
+	// (always liquid at genesis) and gross (what block 0 actually pays — the
+	// two summed). Reporting the remainder alone would understate the minted
+	// supply by the sold amount and contradict the chain.
+	totalRemainder := new(big.Int)
+	totalSold := new(big.Int)
 	allocEntries := make([]genesisAllocationEntry, len(gs.Allocations))
 	for i, a := range gs.Allocations {
+		remainder := new(big.Int)
 		if a.BalanceNSPX != nil {
-			total.Add(total, a.BalanceNSPX)
+			remainder.Set(a.BalanceNSPX)
 		}
-		// Express balance in both nSPX and whole SPX for human readability.
-		balSPX := new(big.Int)
-		nspxStr := "0"
-		if a.BalanceNSPX != nil {
-			balSPX.Div(a.BalanceNSPX, big.NewInt(1e18))
-			nspxStr = a.BalanceNSPX.String()
-		}
+		sold := cgeSoldNSPX(a.Label)
+		gross := new(big.Int).Add(remainder, sold)
+
+		totalRemainder.Add(totalRemainder, remainder)
+		totalSold.Add(totalSold, sold)
+
+		// Express each figure in both nSPX and whole SPX for readability.
 		allocEntries[i] = genesisAllocationEntry{
 			Address:     a.Address,
-			BalanceNSPX: nspxStr,
-			BalanceSPX:  balSPX.String(),
+			BalanceNSPX: remainder.String(),
+			BalanceSPX:  new(big.Int).Div(remainder, big.NewInt(1e18)).String(),
+			SoldNSPX:    sold.String(),
+			SoldSPX:     new(big.Int).Div(sold, big.NewInt(1e18)).String(),
+			GrossNSPX:   gross.String(),
+			GrossSPX:    new(big.Int).Div(gross, big.NewInt(1e18)).String(),
 			Label:       a.Label,
 		}
 	}
-	totalSPX := new(big.Int).Div(total, big.NewInt(1e18))
+	totalGross := new(big.Int).Add(totalRemainder, totalSold)
 
 	// Build per-validator rows.
 	valEntries := make([]genesisValidatorEntry, len(gs.InitialValidators))
@@ -687,8 +731,12 @@ func (gs *GenesisState) writeGenesisStateFile(stateDir string) error {
 		InitialGasLimit:    gs.InitialGasLimit.String(),
 		Nonce:              gs.Nonce,
 		TotalAllocations:   len(gs.Allocations),
-		TotalAllocatedNSPX: total.String(),
-		TotalAllocatedSPX:  totalSPX.String(),
+		TotalAllocatedNSPX: totalGross.String(),
+		TotalAllocatedSPX:  new(big.Int).Div(totalGross, big.NewInt(1e18)).String(),
+		TotalRemainderNSPX: totalRemainder.String(),
+		TotalRemainderSPX:  new(big.Int).Div(totalRemainder, big.NewInt(1e18)).String(),
+		TotalSoldNSPX:      totalSold.String(),
+		TotalSoldSPX:       new(big.Int).Div(totalSold, big.NewInt(1e18)).String(),
 		TotalValidators:    len(gs.InitialValidators),
 		// Full ordered allocation list — previously missing, now populated.
 		Allocations: allocEntries,
@@ -706,8 +754,11 @@ func (gs *GenesisState) writeGenesisStateFile(stateDir string) error {
 		return fmt.Errorf("write error: %w", err)
 	}
 
-	logger.Info("Genesis state written to %s (%d allocations, total supply %s SPX)",
-		path, len(gs.Allocations), totalSPX.String())
+	logger.Info("Genesis state written to %s (%d allocations, genesis supply %s SPX = %s sold + %s remainder)",
+		path, len(gs.Allocations),
+		new(big.Int).Div(totalGross, big.NewInt(1e18)).String(),
+		new(big.Int).Div(totalSold, big.NewInt(1e18)).String(),
+		new(big.Int).Div(totalRemainder, big.NewInt(1e18)).String())
 	return nil
 }
 

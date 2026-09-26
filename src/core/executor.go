@@ -140,13 +140,46 @@ func (bc *Blockchain) IsDistributionComplete() bool {
 	return complete
 }
 
-// TotalAllocatedNSPX returns the sum of all genesis allocations in nSPX.
+// TotalAllocatedNSPX returns the sum of the genesis allocations' post-sale
+// REMAINDER in nSPX — the 1,040,000,000 SPX that the CGE schedules apply to.
+//
+// ★ It is NOT what block 0 mints. The sold amounts (Angel Round + Public ICO,
+// 130,000,000 SPX) are also paid at genesis, so the gross funded by block 0 is
+// 1,170,000,000 SPX, derived from the block body by genesisVaultFundingNSPX.
+// Do not wire this into a supply or balance display: it underreports genesis
+// supply by exactly the sold amount.
 func TotalAllocatedNSPX() *big.Int {
 	allocs := DefaultGenesisAllocations()
 	total := new(big.Int)
 	for _, a := range allocs {
 		if a.BalanceNSPX != nil {
 			total.Add(total, a.BalanceNSPX)
+		}
+	}
+	return total
+}
+
+// genesisVaultFundingNSPX is the nSPX block 0 will actually pay out from the
+// genesis vault: the sum of every block-0 transaction sent FROM the vault.
+//
+// ★ WHY NOT TotalAllocatedNSPX(): that is the post-sale remainder, and since
+// allocationsToTxList also pays the sold amounts (Angel Round + Public ICO)
+// directly, funding the vault with the remainder left it 130,000,000 SPX short
+// — applyTransactions then aborted genesis with "insufficient balance". Deriving
+// the funding from the block body keeps the vault exactly self-consistent for
+// any genesis state (default or custom) without a second source of truth to
+// keep in sync with allocationsToTxList.
+func genesisVaultFundingNSPX(block *types.Block) *big.Int {
+	total := new(big.Int)
+	if block == nil {
+		return total
+	}
+	for _, tx := range block.Body.TxsList {
+		if tx == nil || tx.Amount == nil {
+			continue
+		}
+		if tx.Sender == GenesisVaultAddress {
+			total.Add(total, tx.Amount)
 		}
 	}
 	return total
@@ -738,7 +771,9 @@ func (bc *Blockchain) mintBlockReward(block *types.Block, stateDB *StateDB) {
 
 	if block.GetHeight() == 0 {
 		// ========== GENESIS BLOCK: Fund the vault and track genesis supply ==========
-		totalAllocated := TotalAllocatedNSPX()
+		// Fund the vault with exactly what this block pays out (sold + remainder),
+		// not the post-sale remainder, so the distribution cannot exceed the vault.
+		totalAllocated := genesisVaultFundingNSPX(block)
 		if totalAllocated.Sign() > 0 {
 			// Set the vault balance directly
 			stateDB.SetBalance(GenesisVaultAddress, totalAllocated)
@@ -971,6 +1006,103 @@ func (bc *Blockchain) distributeEpochStakingRewards(stateDB *StateDB, stakingRew
 	}
 }
 
+// applyCGEReleases releases the CGE (coins event generation) portion of every
+// time-based genesis allocation from policy.CGEEscrowAddress to its
+// recipient, driven purely by the sealed block header timestamp against the
+// genesis timestamp persisted at block 0. It runs inside applyBlockTransitions
+// — the single deterministic hook shared by ExecuteBlock (verification/replay)
+// and previewStateRoot (block creation) — BEFORE the block's transactions, so
+// a recipient can spend freshly released coins in the same block.
+//
+// Determinism discipline (same as the burn-rate roll): every input is either
+// a sealed header field, a committed state value, or a policy code constant —
+// never wall-clock time, never live peer state. The release is a cumulative
+// delta (target unlocked − already released), which makes it idempotent under
+// replay and gap-safe when the chain stalls across a milestone: the first
+// block whose timestamp passes the milestone releases everything missed.
+//
+// Schedules that are not time-based are skipped here: liquid allocations
+// were paid in full at genesis, and module-gated allocations (Development
+// Fund) only move through policy.ReleaseDevelopmentModule. The schedules
+// themselves live in src/policy/cge.go (Coins Event Generation).
+func applyCGEReleases(block *types.Block, stateDB *StateDB) {
+	applyCGEReleasesWithWitness(nil, block, stateDB, witnessRefsFromBlock(block))
+}
+
+func applyCGEReleasesWithWitness(bc *Blockchain, block *types.Block, stateDB *StateDB, witnesses map[string]multisigWitnessRef) {
+	if block == nil || block.Header == nil || stateDB == nil {
+		return
+	}
+
+	// Block 0 only records the timestamp every schedule counts from.
+	if block.GetHeight() == 0 {
+		stateDB.SetCGEGenesisTimestamp(block.Header.Timestamp)
+		return
+	}
+
+	genesisTS := stateDB.GetCGEGenesisTimestamp()
+	if genesisTS == 0 {
+		// Legacy/fallback: the canonical fixed genesis timestamp.
+		genesisTS = CanonicalGenesisTimestamp
+	}
+	elapsed := block.Header.Timestamp - genesisTS
+	if elapsed <= 0 {
+		return
+	}
+
+	for _, alloc := range DefaultGenesisAllocations() {
+		if alloc == nil || alloc.BalanceNSPX == nil || alloc.BalanceNSPX.Sign() <= 0 {
+			continue
+		}
+		sched := policy.CGEScheduleForLabel(alloc.Label)
+		if !sched.IsTimeBased() {
+			continue // liquid (already paid) or module-gated (never by time)
+		}
+
+		target := sched.UnlockedAt(elapsed, alloc.BalanceNSPX)
+		released := stateDB.GetCGEReleased(alloc.Address)
+		if target.Cmp(released) <= 0 {
+			continue
+		}
+		delta := new(big.Int).Sub(target, released)
+
+		// The escrow must hold the delta; a shortfall means the state does
+		// not match the canonical genesis (never expected on a valid chain)
+		// — skip rather than produce a negative balance, and surface it.
+		escrowAddr := policy.CGEEscrowAddress
+		if derived := GetCGEEscrowAddress(); derived != "" {
+			escrowAddr = derived
+		}
+		if escrowEnforced() {
+			w, ok := witnesses[alloc.Address]
+			if !ok || !verifyCGEWitness(bc, w.witness, alloc.Address, delta, block.GetHeight(), uint64(block.Header.Timestamp)) {
+				logger.Warn("applyCGEReleases: missing/invalid multisig witness for %s (%s) — skipping", alloc.Label, alloc.Address)
+				continue
+			}
+		}
+		escrowBal, err := stateDB.GetBalance(escrowAddr)
+		if err != nil {
+			logger.Warn("applyCGEReleases: escrow balance unreadable: %v", err)
+			continue
+		}
+		if escrowBal.Cmp(delta) < 0 {
+			logger.Warn("applyCGEReleases: escrow holds %s nSPX but %s needs %s nSPX (%s) — skipping",
+				escrowBal.String(), alloc.Label, delta.String(), alloc.Address)
+			continue
+		}
+
+		if err := stateDB.Transfer(escrowAddr, alloc.Address, delta); err != nil {
+			logger.Warn("applyCGEReleases: transfer %s (%s): %v", alloc.Label, alloc.Address, err)
+			continue
+		}
+		stateDB.SetCGEReleased(alloc.Address, target)
+
+		logger.Info("CGE RELEASE: %s nSPX → %s (%s), elapsed=%ds, cumulative=%s/%s nSPX, schedule=%s",
+			delta.String(), alloc.Address, alloc.Label, elapsed,
+			target.String(), alloc.BalanceNSPX.String(), sched.String())
+	}
+}
+
 // applyBlockTransitions applies the block's transactions and mints rewards to
 // the given stateDB. This is the shared execution path used by both
 // ExecuteBlock (during commit) and previewStateRoot (during block creation).
@@ -995,6 +1127,14 @@ func (bc *Blockchain) applyBlockTransitions(block *types.Block, stateDB *StateDB
 		prevUsed, prevLimit := stateDB.GetPrevBlockGas()
 		stateDB.SetBurnFeeBPS(p.NextBurnFeeBPS(currentBPS, prevUsed, prevLimit))
 	}
+
+	// Release anything that came due between the genesis timestamp and THIS
+	// block's sealed timestamp (block 0 instead persists the clock origin).
+	// Runs before this block's transactions so recipients can spend freshly
+	// released coins immediately; identical in ExecuteBlock and previewStateRoot.
+	// The authorization witnesses come from the block body itself, so the
+	// proposer's preview and every verifier's replay see the same set.
+	applyCGEReleasesWithWitness(bc, block, stateDB, witnessRefsFromBlock(block))
 
 	// For genesis block, fund the vault BEFORE distributing to allocations.
 	if height == 0 {
@@ -1055,7 +1195,7 @@ func (bc *Blockchain) ExecuteBlock(block *types.Block) ([]byte, error) {
 	return stateRoot, nil
 }
 
-func (bc *Blockchain) previewStateRoot(height uint64, txs []*types.Transaction, proposerID string) []byte {
+func (bc *Blockchain) previewStateRoot(height uint64, txs []*types.Transaction, proposerID string, headerTimestamp int64, witnesses []*types.CGEReleaseWitness) []byte {
 	stateDB, err := bc.newStateDB()
 	if err != nil {
 		logger.Warn("previewStateRoot: failed to open stateDB: %v", err)
@@ -1067,8 +1207,12 @@ func (bc *Blockchain) previewStateRoot(height uint64, txs []*types.Transaction, 
 			Height:     height,
 			Block:      height,
 			ProposerID: proposerID,
+			// The sealed timestamp is a consensus input to applyCGEReleases:
+			// without it the preview would compute no release while the
+			// verifier's ExecuteBlock computes one, and the roots would differ.
+			Timestamp: headerTimestamp,
 		},
-		Body: types.BlockBody{TxsList: txs},
+		Body: types.BlockBody{TxsList: txs, CGEWitnesses: witnesses},
 	}
 
 	// Mirror CreateBlock's gas header fields exactly. The usage-responsive
@@ -1512,7 +1656,6 @@ func (bc *Blockchain) CreateBlock() (block *types.Block, err error) {
 	if bp != nil {
 		bp.UpdateBlockProductionStage("calculating state root")
 	}
-	stateRoot := bc.previewStateRoot(nextHeight, selectedTxs, proposerID)
 
 	// ★ FIX: Use the parent block's timestamp + 1 second as the floor for the
 	// new block's timestamp, rather than always using the local wall clock.
@@ -1521,7 +1664,7 @@ func (bc *Blockchain) CreateBlock() (block *types.Block, err error) {
 	//      child_timestamp), which is a consensus requirement.
 	//   2. All nodes that replay the same sequence of blocks arrive at the
 	//      same timestamps, because the timestamp is derived from the chain
-	//      itself, not from the local clock.
+	//      itself, not the local clock.
 	//   3. During PBFT, the leader's proposed timestamp is used verbatim
 	//      (the block arrives with a timestamp already set). This code path
 	//      is only reached during solo-mining (CreateBlock), where there is
@@ -1530,10 +1673,20 @@ func (bc *Blockchain) CreateBlock() (block *types.Block, err error) {
 	// Previously, each node used its own wall-clock time (common.GetCurrentTimestamp()),
 	// which meant two nodes solo-mining at the same height would produce blocks
 	// with different timestamps → different hashes → permanent fork.
+	//
+	// It is computed BEFORE previewStateRoot because the sealed timestamp is a
+	// consensus input to the CGE release loop: the preview must release exactly
+	// what ExecuteBlock will release on every verifier, or the state roots
+	// diverge at the first scheduled vesting milestone.
 	currentTimestamp := prevBlock.Header.Timestamp + 1
 	if currentTimestamp == 0 {
 		currentTimestamp = time.Now().Unix()
 	}
+
+	// Custodian witnesses staged for exactly this height. They ride in the
+	// block body so verifiers need no local pool and no side channel.
+	blockWitnesses := bc.pendingBlockWitnesses(nextHeight)
+	stateRoot := bc.previewStateRoot(nextHeight, selectedTxs, proposerID, currentTimestamp, blockWitnesses)
 
 	logger.Info("Creating block with timestamp: %d (%s)",
 		currentTimestamp, time.Unix(currentTimestamp, 0).Format(time.RFC3339))
@@ -1565,6 +1718,7 @@ func (bc *Blockchain) CreateBlock() (block *types.Block, err error) {
 	)
 
 	newBody := types.NewBlockBody(selectedTxs, emptyUncles, nextHeight)
+	newBody.CGEWitnesses = blockWitnesses
 	newBlock := types.NewBlock(newHeader, newBody)
 	newBlock.Header.ProposerID = proposerID
 
@@ -1611,6 +1765,12 @@ func (bc *Blockchain) CreateBlock() (block *types.Block, err error) {
 
 	if err := newBlock.ValidateTxsRoot(); err != nil {
 		return nil, fmt.Errorf("created block has inconsistent TxsRoot: %v", err)
+	}
+
+	// The staged witnesses are now committed to this block's body; clear them
+	// so the same authorization can never be attached to a second block.
+	if len(blockWitnesses) > 0 {
+		bc.dropPendingBlockWitnesses(nextHeight)
 	}
 
 	// Cache merkle root in consensus engine

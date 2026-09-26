@@ -294,11 +294,25 @@ type genesisAllocationEntry struct {
 	// Address is the hex-encoded 20- or 32-byte account address without a "0x" prefix.
 	Address string `json:"address"`
 
-	// BalanceNSPX is the initial balance expressed in nSPX (smallest unit).
+	// BalanceNSPX / BalanceSPX are the post-sale REMAINDER of this category:
+	// the amount the CGE schedule applies to. They are NOT what block 0 pays
+	// this address — see GrossNSPX / GrossSPX.
 	BalanceNSPX string `json:"balance_nspx"`
 
-	// BalanceSPX is the initial balance expressed in whole SPX (truncated).
+	// BalanceSPX is the remainder expressed in whole SPX (truncated).
 	BalanceSPX string `json:"balance_spx"`
+
+	// SoldNSPX / SoldSPX are the portion of this category sold in a funding
+	// round (Angel Round + Public ICO). It is minted directly to the recipient
+	// in block 0, always liquid, and never escrowed.
+	SoldNSPX string `json:"sold_nspx"`
+	SoldSPX  string `json:"sold_spx"`
+
+	// GrossNSPX / GrossSPX are what block 0 actually pays this address:
+	// BalanceNSPX (remainder) + SoldNSPX. Summed across categories they equal
+	// the genesis supply that is minted and funded into the vault.
+	GrossNSPX string `json:"gross_nspx"`
+	GrossSPX  string `json:"gross_spx"`
 
 	// Label is a human-readable tag (e.g. "Founders", "Reserve").
 	Label string `json:"label"`
@@ -357,11 +371,19 @@ func (e genesisAllocationEntry) MarshalJSON() ([]byte, error) {
 		Address     string `json:"address"`
 		BalanceNSPX string `json:"balance_nspx"`
 		BalanceSPX  string `json:"balance_spx"`
+		SoldNSPX    string `json:"sold_nspx"`
+		SoldSPX     string `json:"sold_spx"`
+		GrossNSPX   string `json:"gross_nspx"`
+		GrossSPX    string `json:"gross_spx"`
 		Label       string `json:"label"`
 	}{
 		Address:     formatGenesisEntryAddress(e.Address),
 		BalanceNSPX: e.BalanceNSPX,
 		BalanceSPX:  e.BalanceSPX,
+		SoldNSPX:    e.SoldNSPX,
+		SoldSPX:     e.SoldSPX,
+		GrossNSPX:   e.GrossNSPX,
+		GrossSPX:    e.GrossSPX,
 		Label:       e.Label,
 	})
 }
@@ -374,6 +396,10 @@ func (e *genesisAllocationEntry) UnmarshalJSON(data []byte) error {
 		Address     string `json:"address"`
 		BalanceNSPX string `json:"balance_nspx"`
 		BalanceSPX  string `json:"balance_spx"`
+		SoldNSPX    string `json:"sold_nspx"`
+		SoldSPX     string `json:"sold_spx"`
+		GrossNSPX   string `json:"gross_nspx"`
+		GrossSPX    string `json:"gross_spx"`
 		Label       string `json:"label"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
@@ -382,6 +408,10 @@ func (e *genesisAllocationEntry) UnmarshalJSON(data []byte) error {
 	e.Address = parseGenesisEntryAddress(raw.Address)
 	e.BalanceNSPX = raw.BalanceNSPX
 	e.BalanceSPX = raw.BalanceSPX
+	e.SoldNSPX = raw.SoldNSPX
+	e.SoldSPX = raw.SoldSPX
+	e.GrossNSPX = raw.GrossNSPX
+	e.GrossSPX = raw.GrossSPX
 	e.Label = raw.Label
 	return nil
 }
@@ -433,19 +463,29 @@ func (e *genesisValidatorEntry) UnmarshalJSON(data []byte) error {
 // Now includes the full allocation and validator lists so genesis_state.json
 // contains real data rather than blank arrays.
 type genesisStateSnapshot struct {
-	ChainID            uint64 `json:"chain_id"`
-	ChainName          string `json:"chain_name"`
-	Symbol             string `json:"symbol"`
-	Timestamp          string `json:"timestamp"`
-	ExtraData          string `json:"extra_data"`
-	InitialDifficulty  string `json:"initial_difficulty"`
-	InitialGasLimit    string `json:"initial_gas_limit"`
-	Nonce              string `json:"nonce"`
-	TotalAllocations   int    `json:"total_allocations"`
+	ChainID           uint64 `json:"chain_id"`
+	ChainName         string `json:"chain_name"`
+	Symbol            string `json:"symbol"`
+	Timestamp         string `json:"timestamp"`
+	ExtraData         string `json:"extra_data"`
+	InitialDifficulty string `json:"initial_difficulty"`
+	InitialGasLimit   string `json:"initial_gas_limit"`
+	Nonce             string `json:"nonce"`
+	TotalAllocations  int    `json:"total_allocations"`
+	// TotalAllocatedNSPX / TotalAllocatedSPX are the genesis supply block 0
+	// actually mints: the per-category gross (sold + remainder) summed. This is
+	// the figure that must match the funded vault and the recorded genesis
+	// supply — it is deliberately NOT the remainder-only number.
 	TotalAllocatedNSPX string `json:"total_allocated_nspx"`
-	// TotalAllocatedSPX is the same total expressed in whole SPX for readability.
-	TotalAllocatedSPX string `json:"total_allocated_spx"`
-	TotalValidators   int    `json:"total_validators"`
+	TotalAllocatedSPX  string `json:"total_allocated_spx"`
+	// TotalRemainderNSPX / TotalRemainderSPX and TotalSoldNSPX / TotalSoldSPX
+	// break the gross down (gross = remainder + sold) so the audit file is
+	// self-explanatory instead of appearing to contradict the chain.
+	TotalRemainderNSPX string `json:"total_remainder_nspx"`
+	TotalRemainderSPX  string `json:"total_remainder_spx"`
+	TotalSoldNSPX      string `json:"total_sold_nspx"`
+	TotalSoldSPX       string `json:"total_sold_spx"`
+	TotalValidators    int    `json:"total_validators"`
 	// Allocations is the full ordered list of pre-funded accounts.
 	// This was the field that caused genesis_state.json to appear blank.
 	Allocations []genesisAllocationEntry `json:"allocations"`
@@ -483,18 +523,33 @@ type GenesisAllocation struct {
 // AllocationSummary provides a breakdown of the genesis token distribution
 // grouped by label. It is used for logging and the genesis_state.json audit file.
 type AllocationSummary struct {
-	// TotalNSPX is the sum of all allocation balances in nSPX.
+	// TotalNSPX is the sum of the post-sale REMAINDER of every allocation in
+	// nSPX — the input to the CGE schedules, NOT what genesis mints.
 	TotalNSPX *big.Int `json:"total_nspx"`
 
 	// TotalSPX is TotalNSPX divided by 10^18 (whole SPX, truncated).
 	TotalSPX *big.Int `json:"total_spx"`
 
+	// TotalSoldNSPX is the sum of the amounts sold in funding rounds
+	// (Angel Round + Public ICO), paid directly and always liquid at genesis.
+	TotalSoldNSPX *big.Int `json:"total_sold_nspx"`
+
+	// TotalGrossNSPX is TotalNSPX + TotalSoldNSPX: the genesis supply that
+	// block 0 actually mints and funds into the vault.
+	TotalGrossNSPX *big.Int `json:"total_gross_nspx"`
+
 	// Count is the total number of allocation entries.
 	Count int `json:"count"`
 
-	// ByLabel maps each label to the aggregate balance (in nSPX) across all
+	// ByLabel maps each label to the aggregate REMAINDER (in nSPX) across all
 	// allocations sharing that label.
 	ByLabel map[string]*big.Int `json:"by_label"`
+
+	// SoldByLabel maps each label to its aggregate sold amount.
+	SoldByLabel map[string]*big.Int `json:"sold_by_label"`
+
+	// GrossByLabel maps each label to its aggregate gross (remainder + sold).
+	GrossByLabel map[string]*big.Int `json:"gross_by_label"`
 }
 
 // AllocationSet is an in-memory index of genesis allocations keyed by the
@@ -553,13 +608,13 @@ type ChainCheckpoint struct {
 	// is credited to the canonical DEAD address, so its balance is the single
 	// auditable burn total. Circulating = Minted - Burned.
 	Burn struct {
-		Address          string `json:"address"`           // canonical DEAD burn address
-		BurnedNSPX       string `json:"burned_nspx"`       // DEAD balance in nSPX
-		BurnedSPX        string `json:"burned_spx"`        // DEAD balance in whole SPX
-		CirculatingNSPX  string `json:"circulating_nspx"`  // Minted - Burned, in nSPX
-		CirculatingSPX   string `json:"circulating_spx"`   // Minted - Burned, in whole SPX
-		FeeBurnBPS       uint64 `json:"fee_burn_bps"`      // policy fee burn share (BPS)
-		RewardBurnBPS    uint64 `json:"reward_burn_bps"`   // policy block-reward burn share (BPS)
+		Address         string `json:"address"`          // canonical DEAD burn address
+		BurnedNSPX      string `json:"burned_nspx"`      // DEAD balance in nSPX
+		BurnedSPX       string `json:"burned_spx"`       // DEAD balance in whole SPX
+		CirculatingNSPX string `json:"circulating_nspx"` // Minted - Burned, in nSPX
+		CirculatingSPX  string `json:"circulating_spx"`  // Minted - Burned, in whole SPX
+		FeeBurnBPS      uint64 `json:"fee_burn_bps"`     // policy fee burn share (BPS)
+		RewardBurnBPS   uint64 `json:"reward_burn_bps"`  // policy block-reward burn share (BPS)
 	} `json:"burn"`
 
 	// Distribution status - tracks whether genesis allocations have been distributed

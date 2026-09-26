@@ -89,7 +89,10 @@ var (
 // property.
 //
 // One-way and process-wide; intended to be called by the host before it starts
-// a node. The CLI never calls it.
+// a node. The CLI calls it only from `multisig spend --watch`, the one
+// subcommand that owns its own SIGINT shutdown (it must stop after the current
+// cycle instead of exiting mid-broadcast); every other subcommand keeps the
+// default restore-and-exit(130) behaviour.
 func DisableSignalHandler() { signalHandlerDisabled.Store(true) }
 
 // signalHandlerDisabledNow reports whether the installed handler must ignore

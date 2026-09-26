@@ -584,11 +584,22 @@ func (bc *Blockchain) PolicyBlockReward(height uint64) *big.Int {
 }
 
 // ValidateTransactionPolicy enforces governance policy for non-system txs.
+//
+// It is the height-free (ingress) form: a transaction that reaches this path
+// outside block 0 must satisfy policy, so no exemption is granted. Block
+// validation uses ValidateTransactionPolicyAt with the real height.
 func (bc *Blockchain) ValidateTransactionPolicy(tx *types.Transaction) error {
+	return bc.ValidateTransactionPolicyAt(tx, 1)
+}
+
+// ValidateTransactionPolicyAt enforces governance policy for non-system txs at
+// a known block height. Only the genesis allocation transactions inside block 0
+// are exempt.
+func (bc *Blockchain) ValidateTransactionPolicyAt(tx *types.Transaction, height uint64) error {
 	if tx == nil {
 		return fmt.Errorf("nil transaction")
 	}
-	if tx.IsSystemTransaction() {
+	if tx.IsSystemTransactionAt(height) {
 		return nil
 	}
 	if len(tx.Code) > 0 && tx.ToContract != "" {

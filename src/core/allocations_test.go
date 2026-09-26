@@ -8,6 +8,8 @@ import (
 	"encoding/hex"
 	"math/big"
 	"testing"
+
+	"github.com/sphinxfndorg/protocol/src/policy"
 )
 
 // ============================================================================
@@ -94,8 +96,8 @@ func TestDefaultGenesisAllocations_TotalSupply(t *testing.T) {
 		total.Add(total, a.BalanceNSPX)
 	}
 
-	// 1,240,000,000 SPX × 10^18 nSPX/SPX
-	wantNSPX := new(big.Int).Mul(big.NewInt(1_240_000_000), big.NewInt(1e18))
+	// 1,040,000,000 SPX × 10^18 nSPX/SPX
+	wantNSPX := new(big.Int).Mul(big.NewInt(1_040_000_000), big.NewInt(1e18))
 	if total.Cmp(wantNSPX) != 0 {
 		t.Errorf("total supply: want %s nSPX, got %s nSPX", wantNSPX.String(), total.String())
 	}
@@ -136,6 +138,37 @@ func TestDefaultGenesisAllocations_NoDuplicateAddresses(t *testing.T) {
 	}
 }
 
+// TestDefaultGenesisAllocations_RealRecipientAddresses pins the exact mainnet
+// recipient address of every pre-funded account, in order. Addresses are given
+// in canonical raw hex (SPIF prefix/spaces stripped, as stored after
+// construction-time normalisation). Changing any of these changes the
+// allocation Merkle root and therefore the genesis hash — this test guards
+// against accidental drift.
+func TestDefaultGenesisAllocations_RealRecipientAddresses(t *testing.T) {
+	want := []string{
+		"7AB62C1B1E0CEAAA28108B7EBEA23ACE718D412F84BDC3BF5FC14F8F42205FFA", // Founder
+		"991175EA129E8680A36B1A343103E0C3D66F6333973120BA7E7E5FACC45FB3C0", // CoFounder
+		"6AC57C53E6287C19AE5865BC958DCDFC5AAF982689590D117379B2CBD4A85156", // Development
+		"064C84E204356BA407C40825AE2F47807E19DA9600A91111C22BDC615680C7EF", // Contributors
+		"AD198DF96B76F9F72E2DB336AFB46424C4BE01BF45BB8145151A9F249F461890", // Foundation
+		"B7CABAC653D2D7B0D01C189DE6128C6311EBC93B70381E9AC14B57A269BDDB9F", // Campaigns
+		"34062BDA5176B81697193077F7DC1694069D2C6A88A4B7349A98821D0AD952AF", // Airdrops
+		"780D0EFDC57862F180986F02F25CCEA1430CFB7C9460F6C6DE92C34AC3D3591B", // PublicICOPool
+		"171FBCCB61C8B697DAA7FC77088196ED387ED81BCC2FA8EECA413E0FE08D60F0", // Reserve
+	}
+
+	allocs := DefaultGenesisAllocations()
+	if len(allocs) != len(want) {
+		t.Fatalf("DefaultGenesisAllocations: want %d entries, got %d", len(want), len(allocs))
+	}
+	for i, a := range allocs {
+		if a.Address != want[i] {
+			t.Errorf("allocation[%d] (%s): want address %s, got %s",
+				i, a.Label, want[i], a.Address)
+		}
+	}
+}
+
 // TestDefaultGenesisAllocations_CategoryTotals verifies each category carries
 // exactly the SPX amount specified in the tokenomics table.
 func TestDefaultGenesisAllocations_CategoryTotals(t *testing.T) {
@@ -150,15 +183,15 @@ func TestDefaultGenesisAllocations_CategoryTotals(t *testing.T) {
 		label   string
 		wantSPX int64
 	}{
-		{"Founder", 30_000_000},
-		{"CoFounder", 95_000_000},
-		{"Development", 200_000_000},
-		{"Contributors", 90_000_000},
-		{"Foundation", 300_000_000},
-		{"Campaigns", 35_000_000},
-		{"Airdrops", 90_000_000},
-		{"PublicICOPool", 200_000_000},
-		{"Reserve", 200_000_000},
+		{"Founder", policy.CGEFounderSPX},
+		{"CoFounder", policy.CGECoFounderSPX},
+		{"Development", policy.CGEDevelopmentSPX},
+		{"Contributors", policy.CGEContributorsSPX},
+		{"Foundation", policy.CGEFoundationSPX},
+		{"Campaigns", policy.CGECampaignsSPX},
+		{"Airdrops", policy.CGEAirdropsSPX},
+		{"PublicICOPool", policy.CGEPublicICOPoolSPX},
+		{"Reserve", policy.CGEReserveSPX},
 	}
 
 	for _, tc := range cases {
@@ -222,6 +255,48 @@ func TestSummariseAllocations_TotalSPX(t *testing.T) {
 	want := big.NewInt(1_000_000)
 	if s.TotalSPX.Cmp(want) != 0 {
 		t.Errorf("TotalSPX: want %s, got %s", want.String(), s.TotalSPX.String())
+	}
+}
+
+// TestSummariseAllocations_GrossIncludesSold pins the audit split: the summary
+// exposes sold/remainder/gross, and gross (not the remainder) is what block 0
+// mints — reporting the remainder alone understates supply by the sold amount.
+func TestSummariseAllocations_GrossIncludesSold(t *testing.T) {
+	s := SummariseAllocations(DefaultGenesisAllocations())
+	nspx := func(spx int64) *big.Int {
+		return new(big.Int).Mul(big.NewInt(spx), big.NewInt(1e18))
+	}
+
+	if s.TotalNSPX.Cmp(nspx(1_040_000_000)) != 0 {
+		t.Errorf("TotalNSPX (remainder): want 1040000000 SPX, got %s", s.TotalNSPX.String())
+	}
+	if s.TotalSoldNSPX.Cmp(nspx(130_000_000)) != 0 {
+		t.Errorf("TotalSoldNSPX: want 130000000 SPX, got %s", s.TotalSoldNSPX.String())
+	}
+	if s.TotalGrossNSPX.Cmp(nspx(1_170_000_000)) != 0 {
+		t.Errorf("TotalGrossNSPX: want 1170000000 SPX, got %s", s.TotalGrossNSPX.String())
+	}
+
+	for _, tc := range []struct {
+		label                  string
+		remainder, sold, gross int64
+	}{
+		{"Founder", 25_000_000, 5_000_000, 30_000_000},
+		{"CoFounder", 85_000_000, 10_000_000, 95_000_000},
+		{"Development", 150_000_000, 20_000_000, 170_000_000},
+		{"Contributors", 75_000_000, 5_000_000, 80_000_000},
+		{"PublicICOPool", 100_000_000, 90_000_000, 190_000_000},
+		{"Foundation", 300_000_000, 0, 300_000_000},
+	} {
+		if got := s.ByLabel[tc.label]; got == nil || got.Cmp(nspx(tc.remainder)) != 0 {
+			t.Errorf("%s remainder = %v, want %d SPX", tc.label, got, tc.remainder)
+		}
+		if got := s.SoldByLabel[tc.label]; got == nil || got.Cmp(nspx(tc.sold)) != 0 {
+			t.Errorf("%s sold = %v, want %d SPX", tc.label, got, tc.sold)
+		}
+		if got := s.GrossByLabel[tc.label]; got == nil || got.Cmp(nspx(tc.gross)) != 0 {
+			t.Errorf("%s gross = %v, want %d SPX", tc.label, got, tc.gross)
+		}
 	}
 }
 
@@ -447,8 +522,8 @@ func TestAllocationSet_TotalSupplyMatchesDefaultAllocations(t *testing.T) {
 		t.Fatalf("NewAllocationSet: %v", err)
 	}
 
-	// Total genesis supply: 1,240,000,000 SPX
-	want := new(big.Int).Mul(big.NewInt(1_240_000_000), big.NewInt(1e18))
+	// Total genesis supply: 1,040,000,000 SPX
+	want := new(big.Int).Mul(big.NewInt(1_040_000_000), big.NewInt(1e18))
 	if s.TotalSupplyNSPX().Cmp(want) != 0 {
 		t.Errorf("TotalSupplyNSPX mismatch: want %s, got %s",
 			want.String(), s.TotalSupplyNSPX().String())

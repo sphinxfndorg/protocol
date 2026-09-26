@@ -18,6 +18,7 @@ import (
 	"github.com/sphinxfndorg/protocol/src/consensus"
 	"github.com/sphinxfndorg/protocol/src/contracts"
 	"github.com/sphinxfndorg/protocol/src/core"
+	multisig "github.com/sphinxfndorg/protocol/src/core/musig"
 	state "github.com/sphinxfndorg/protocol/src/core/state"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
 	security "github.com/sphinxfndorg/protocol/src/handshake"
@@ -1123,15 +1124,28 @@ func (h *JSONRPCHandler) sendRawTransaction(params interface{}) (interface{}, er
 		tx.ID = tx.Hash()
 	}
 
-	if !tx.IsSystemTransaction() {
+	// An RPC-submitted transaction is destined for a block above genesis, so the
+	// block-0 unsigned exemption cannot apply to it: it must carry a full
+	// SPHINCS auth bundle — or, when the sender is a registered custody
+	// address, an M-of-N custody witness — and be verified before it is relayed
+	// or pooled.
+	custodySpend, custodyErr := multisig.CheckSpendWitness(
+		tx.Sender, tx.Receiver, tx.ChainID, tx.Amount, tx.Nonce, tx.MultiSigWitness, 0,
+	)
+	if custodySpend {
+		if custodyErr != nil {
+			return nil, fmt.Errorf("custody witness verification failed: %w", custodyErr)
+		}
+	} else {
+		if !tx.HasFullAuthBundle() {
+			return nil, errors.New("transaction missing full SPHINCS auth bundle")
+		}
 		if h.server.sphincsManager == nil {
 			return nil, errors.New("SPHINCS manager not available - cannot verify transaction")
 		}
 		if err := h.verifyTransactionLocally(&tx); err != nil {
 			return nil, fmt.Errorf("signature verification failed: %w", err)
 		}
-	} else if !tx.IsSystemTransaction() && !tx.HasFullAuthBundle() {
-		return nil, errors.New("transaction missing full SPHINCS auth bundle")
 	}
 
 	if err := h.server.blockchain.AddTransaction(&tx); err != nil {

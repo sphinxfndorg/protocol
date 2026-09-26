@@ -373,6 +373,74 @@ func (s *StateDB) SetPrevBlockGas(used, limit *big.Int) {
 	s.SetContractValue(policyStatePrevGasLimitKey, []byte(limit.String()))
 }
 
+// ----------------------------------------------------------------------------
+// Deterministic CGE (coins event generation) state
+//
+// The CGE clock's origin (the genesis block timestamp) and the
+// cumulative-released counters live in the same deterministic
+// contract-state namespace as validator stakes and policy state, so they are
+// hashed into the state root and replayed identically from genesis.
+// ----------------------------------------------------------------------------
+
+const (
+	// cgeStateGenesisTsKey persists the timestamp the CGE schedules count
+	// from (block 0's sealed header timestamp). Written once when block 0
+	// executes; read by every later block.
+	cgeStateGenesisTsKey = "cge:genesis_ts"
+	// cgeStateReleasedPrefix prefixes the per-address cumulative amount
+	// already released from policy.CGEEscrowAddress (decimal nSPX string).
+	cgeStateReleasedPrefix = "cge:released:"
+)
+
+// SetCGEGenesisTimestamp persists the genesis block timestamp that every CGE
+// schedule counts from.
+func (s *StateDB) SetCGEGenesisTimestamp(ts int64) {
+	s.SetContractValue(cgeStateGenesisTsKey, []byte(big.NewInt(ts).String()))
+}
+
+// GetCGEGenesisTimestamp returns the persisted genesis timestamp, or 0
+// when block 0 has not written it yet (fresh state, legacy chains — callers
+// fall back to CanonicalGenesisTimestamp).
+func (s *StateDB) GetCGEGenesisTimestamp() int64 {
+	value, err := s.GetContractValue(cgeStateGenesisTsKey)
+	if err != nil || len(value) == 0 {
+		return 0
+	}
+	ts, ok := new(big.Int).SetString(string(value), 10)
+	if !ok || !ts.IsInt64() || ts.Sign() < 0 {
+		return 0
+	}
+	return ts.Int64()
+}
+
+// GetCGEReleased returns the cumulative nSPX already released from
+// policy.CGEEscrowAddress to address. Missing or corrupt records yield zero —
+// the release loop treats that as "nothing released yet".
+func (s *StateDB) GetCGEReleased(address string) *big.Int {
+	if address == "" {
+		return big.NewInt(0)
+	}
+	value, err := s.GetContractValue(cgeStateReleasedPrefix + address)
+	if err != nil || len(value) == 0 {
+		return big.NewInt(0)
+	}
+	released, ok := new(big.Int).SetString(string(value), 10)
+	if !ok || released.Sign() < 0 {
+		return big.NewInt(0)
+	}
+	return released
+}
+
+// SetCGEReleased stages the new cumulative released total for address; the
+// write is committed — and hashed into the state root — together with the
+// block whose timestamp triggered the release.
+func (s *StateDB) SetCGEReleased(address string, amount *big.Int) {
+	if address == "" || amount == nil || amount.Sign() < 0 {
+		return
+	}
+	s.SetContractValue(cgeStateReleasedPrefix+address, []byte(amount.String()))
+}
+
 // ClearValidatorStakes removes all validator stake records from both the
 // pending map and the committed store. Used by state rebuilds so replay
 // recomputes validator stake records from scratch.

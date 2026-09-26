@@ -567,6 +567,10 @@ func (bc *Blockchain) CacheTypeString(cacheType CacheType) string {
 //
 // Returns: Error if transaction addition fails
 func (bc *Blockchain) AddTransaction(tx *types.Transaction) error {
+	// Publish the chain ID before admission so a custody witness bound to a
+	// different chain is rejected at the mempool, not only at commit.
+	bc.publishActiveChainID()
+
 	if err := bc.ValidateTransactionPolicy(tx); err != nil {
 		return err
 	}

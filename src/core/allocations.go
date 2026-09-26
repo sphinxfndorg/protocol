@@ -9,9 +9,11 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math/big"
+	"sort"
 
 	"github.com/sphinxfndorg/protocol/src/common"
 	logger "github.com/sphinxfndorg/protocol/src/console"
+	"github.com/sphinxfndorg/protocol/src/policy"
 )
 
 // ----------------------------------------------------------------------------
@@ -52,7 +54,10 @@ func NewGenesisAllocationSPX(address string, spx int64, label string) *GenesisAl
 
 // NewFounderAlloc is a domain-specific shorthand for the primary founder account.
 // Allocation: 30,000,000 SPX total, with 5,000,000 SPX sold in Angel Round.
-// 25,000,000 SPX remaining — 4-year vesting with 12-month cliff.
+// BalanceNSPX here is the 25,000,000 SPX unsold remainder, escrowed at CGE
+// and released 25% at months 12/24/36/48 (4-year vesting, 12-month cliff).
+// The sold 5,000,000 SPX is paid to the same address as an always-liquid
+// top-up in block 0 (see allocationsToTxList) — it is never escrowed.
 // Includes planned charity allocation.
 // It calls NewGenesisAllocationSPX with the label "Founder".
 func NewFounderAlloc(address string, spx int64) *GenesisAllocation {
@@ -61,7 +66,9 @@ func NewFounderAlloc(address string, spx int64) *GenesisAllocation {
 
 // NewCoFounderAlloc is a domain-specific shorthand for the co-founder accounts.
 // Allocation: 95,000,000 SPX total (4 co-founders), with 10,000,000 SPX sold in Angel Round.
-// 85,000,000 SPX remaining — 4-year vesting with 12-month cliff.
+// BalanceNSPX here is the 85,000,000 SPX unsold remainder, escrowed at CGE
+// and released 25% at months 12/24/36/48. The sold 10,000,000 SPX is paid to
+// the same address as an always-liquid top-up in block 0, never escrowed.
 // Includes planned charity allocation.
 // It calls NewGenesisAllocationSPX with the label "CoFounder".
 func NewCoFounderAlloc(address string, spx int64) *GenesisAllocation {
@@ -69,27 +76,23 @@ func NewCoFounderAlloc(address string, spx int64) *GenesisAllocation {
 }
 
 // NewDevelopmentAlloc is a domain-specific shorthand for the Development Fund.
-// Allocation: 200,000,000 SPX total, with 50,000,000 SPX sold (25%):
-//   - 10,000,000 in Angel Round
-//   - 30,000,000 in Private Sale
-//   - 10,000,000 in Public ICO
-//
-// 150,000,000 SPX remaining — module-based development fund.
-// Paid per completed module (10,000 SPX/module). First 2,000 modules targeted
-// for completion over approximately 2 years.
+// Allocation: 170,000,000 SPX total, with 20,000,000 SPX sold (10M Angel
+// Round + 10M Public ICO). BalanceNSPX here is the 150,000,000 SPX unsold
+// remainder — fully escrowed at CGE, released ONLY via module completion
+// (50,000 SPX/module × 3,000 modules; see ReleaseDevelopmentModule). The
+// sold 20,000,000 SPX is paid to the same address as an always-liquid
+// top-up in block 0, never escrowed and never module-gated.
 // It calls NewGenesisAllocationSPX with the label "Development".
 func NewDevelopmentAlloc(address string, spx int64) *GenesisAllocation {
 	return NewGenesisAllocationSPX(address, spx, "Development")
 }
 
 // NewContributorAlloc is a domain-specific shorthand for contributor accounts.
-// Allocation: 90,000,000 SPX total, with 15,000,000 SPX sold (16.7%):
-//   - 5,000,000 in Angel Round
-//   - 10,000,000 in Private Sale
-//
-// 75,000,000 SPX remaining — milestone-based vesting.
-// Covers: Legal (10M, 2yr), Advisors (15M, 2yr), CSO (15M, 3yr),
-// Partners (25M, milestone), Managers (25M, 2yr).
+// Allocation: 80,000,000 SPX total, with 5,000,000 SPX sold in Angel Round.
+// BalanceNSPX here is the 75,000,000 SPX unsold remainder, escrowed at CGE
+// and released linearly over 36 months with no cliff. The sold 5,000,000 SPX
+// is paid to the same address as an always-liquid top-up in block 0, never
+// escrowed.
 // It calls NewGenesisAllocationSPX with the label "Contributors".
 func NewContributorAlloc(address string, spx int64) *GenesisAllocation {
 	return NewGenesisAllocationSPX(address, spx, "Contributors")
@@ -113,10 +116,9 @@ func NewFoundationAlloc(address string, spx int64) *GenesisAllocation {
 }
 
 // NewCampaignAlloc is a domain-specific shorthand for campaigns and outreach.
-// Allocation: 35,000,000 SPX total, with 20,000,000 SPX sold (57%):
-//   - 20,000,000 in Private Sale
-//
-// 15,000,000 SPX remaining — future marketing and partnerships.
+// Allocation: 15,000,000 SPX — 0% sold (the Private Sale tier that once sold
+// 20,000,000 SPX from a 35,000,000 SPX total has been removed entirely).
+// Liquid at CGE.
 // It calls NewGenesisAllocationSPX with the label "Campaigns".
 func NewCampaignAlloc(address string, spx int64) *GenesisAllocation {
 	return NewGenesisAllocationSPX(address, spx, "Campaigns")
@@ -130,19 +132,20 @@ func NewCampaignAlloc(address string, spx int64) *GenesisAllocation {
 //   - Phase 3: Staking — 25,000,000 SPX (First 10,000 stakers)
 //   - Phase 4: Engagement — 25,000,000 SPX (Governance & referrals)
 //
-// Rules: No vesting, sybil resistance, proof-of-humanity verification,
-// gradual release over 12 months.
+// Escrowed at CGE and released linearly over 12 months (no cliff). Sybil
+// resistance and proof-of-humanity verification are application-layer rules,
+// not part of the CGE release.
 // It calls NewGenesisAllocationSPX with the label "Airdrops".
 func NewAirdropAlloc(address string, spx int64) *GenesisAllocation {
 	return NewGenesisAllocationSPX(address, spx, "Airdrops")
 }
 
 // NewPublicICOPoolAlloc is a domain-specific shorthand for the Public ICO Pool.
-// Allocation: 200,000,000 SPX total, with 100,000,000 SPX sold (50%):
-//   - 10,000,000 in Private Sale
-//   - 90,000,000 in Public ICO
-//
-// 100,000,000 SPX remaining — future public sales.
+// Allocation: 200,000,000 SPX total, with 100,000,000 SPX sold in the public
+// ICO. BalanceNSPX here is the 100,000,000 SPX unsold remainder — genesis
+// pays the sold 100,000,000 SPX back in as an always-liquid top-up (see
+// allocationsToTxList), so the address receives all 200,000,000 SPX in block
+// 0 (no cliff, no vesting for either portion).
 // It calls NewGenesisAllocationSPX with the label "PublicICOPool".
 func NewPublicICOPoolAlloc(address string, spx int64) *GenesisAllocation {
 	return NewGenesisAllocationSPX(address, spx, "PublicICOPool")
@@ -166,127 +169,163 @@ func NewReserveAlloc(address string, spx int64) *GenesisAllocation {
 // order would produce a different allocation Merkle root and therefore a
 // different genesis hash, forking the network.
 //
-// Total genesis supply  : 1,240,000,000 SPX (24.8% of 5B max supply)
+// Each BalanceNSPX below is the UNSOLD remainder of its category — the same
+// figures as before. What changed is how genesis pays them out:
+// allocationsToTxList (genesis.go) now adds each category's sold amount
+// (policy.CGESoldAmountSPX) back in as an always-liquid top-up on top of
+// whatever the remainder's own CGE schedule unlocks, so the sold portion is
+// minted directly to the category's own address in block 0 instead of being
+// delivered by some separate, out-of-band process. The remainder keeps its
+// existing schedule untouched.
 //
-// Distribution:
+//	Category              Remainder (escrow input)  Sold (always liquid)  Gross
+//	──────────────────────────────────────────────────────────────────────────
+//	Founder (Lead)             25,000,000                 5,000,000     30,000,000
+//	Co-founders (4)            85,000,000                10,000,000     95,000,000
+//	Development Fund          150,000,000                20,000,000    170,000,000
+//	Contributors               75,000,000                 5,000,000     80,000,000
+//	SPHINX Foundation         300,000,000                         0    300,000,000
+//	Campaigns                  15,000,000                         0     15,000,000
+//	Community Airdrops         90,000,000                         0     90,000,000
+//	Public ICO Pool           100,000,000                90,000,000    190,000,000
+//	Reserve / Unsold          200,000,000                         0    200,000,000
+//	──────────────────────────────────────────────────────────────────────────
+//	Total                   1,040,000,000               130,000,000  1,170,000,000
 //
-//	Category                    Original      Sold      Remaining    % of Max  Notes
-//	─────────────────────────────────────────────────────────────────────────────────────
-//	Founder (Lead)             30,000,000    5,000,000  25,000,000    0.6%     4yr vesting, 12mo cliff
-//	Co-founders (4)            95,000,000   10,000,000  85,000,000    1.9%     4yr vesting, 12mo cliff
-//	Development Fund          200,000,000   50,000,000 150,000,000    4.0%     Module-based (10k/module)
-//	Contributors               90,000,000   15,000,000  75,000,000    1.8%     Milestone-based vesting
-//	SPHINX Foundation         300,000,000          0   300,000,000    6.0%     Ecosystem grants, liquidity
-//	Campaigns                  35,000,000   20,000,000  15,000,000    0.7%     Marketing & partnerships
-//	Community Airdrops         90,000,000          0    90,000,000    1.8%     Free distribution, 4 phases
-//	Public ICO Pool           200,000,000  100,000,000 100,000,000    4.0%     Future public sales
-//	Reserve / Unsold          200,000,000          0   200,000,000    4.0%     Ecosystem reserve
-//	─────────────────────────────────────────────────────────────────────────────────────
-//	Total                    1,240,000,000  200,000,000 1,040,000,000  24.8%
+// Sold total = Angel Round (30,000,000) + Public ICO (100,000,000).
 //
-// Funding Rounds Sold:
-//   - Angel Round: 30,000,000 SPX @ $0.06 = $1,800,000
-//     Source: Founder (5M) + Co-founders (10M) + Dev Fund (10M) + Contributors (5M)
-//   - Private Sale: 70,000,000 SPX @ $0.24 = $16,800,000
-//     Source: Dev Fund (30M) + Contributors (10M) + Campaigns (20M) + Public ICO Pool (10M)
-//   - Public ICO: 100,000,000 SPX @ $0.36 = $36,000,000
-//     Source: Public ICO Pool (90M) + Dev Fund (10M)
+// CGE — coins event generation (see src/policy/cge.go):
+//   - Every schedule counts from the genesis block timestamp —
+//     CanonicalGenesisTimestamp (2026-07-15 19:33:18 UTC) — never from
+//     wall-clock time. Releases are triggered by sealed block timestamps.
+//   - Locked tokens sit at policy.CGEEscrowAddress and stream to the
+//     recipient as chain time passes; liquid categories (and every sold
+//     amount) are paid in full in block 0.
+//   - Development Fund's remainder never releases on time: a future module
+//     registry calls policy.ReleaseDevelopmentModule (50,000 SPX × 3,000
+//     modules = 150M). Its sold 20,000,000 SPX is liquid at genesis same as
+//     any other sold amount.
+//   - No private-sale tier exists: with it removed there is no intermediate
+//     cliff between angel investors and public investors (public buyers
+//     receive at CGE).
 //
-// Total Raised: $54,600,000
-//
-// Vesting Schedules:
+// Release Schedules (CGE), applied to each category's remainder only —
+// every category's sold amount is always liquid at genesis, regardless of
+// the remainder's schedule:
 //   - Founders (Lead + 4): 4-year vesting, 12-month cliff
 //     Month 12: 25% | Month 24: 25% | Month 36: 25% | Month 48: 25%
-//   - Development Fund: Module-based (10,000 SPX/module, 3,000 modules total)
-//   - Contributors: Role-based vesting (Legal 2yr, Advisors 2yr, CSO 3yr,
-//     Partners milestone, Managers 2yr)
+//   - Development Fund: Module-based (50,000 SPX/module, 3,000 modules)
+//   - Contributors: Linear over 36 months, no cliff
 //   - SPHINX Foundation: Multi-sig wallet (5-of-9), quarterly transparency reports
-//   - Community Airdrops: No vesting, 12-month gradual release
+//   - Community Airdrops: Linear over 12 months, no cliff (sybil resistance
+//     and proof-of-humanity checks are application-layer, not vesting)
+//   - Public ICO Pool: CGE (no cliff, no vesting)
 func DefaultGenesisAllocations() []*GenesisAllocation {
 	return []*GenesisAllocation{
 		// ── Founder (Lead) ─────────────────────────────────────────────────
-		// 30,000,000 SPX total · 5,000,000 sold in Angel Round.
-		// 25,000,000 SPX remaining — 4-year vesting, 12-month cliff.
-		// SUCCESS REAL ADDRESS #1
-		NewFounderAlloc("SPIF F6F6 66A0 F07B B9F1 B9C3 6C0B C497 DEF7 89AC A6B4 A756 4F88 A627 7FCB BFD9 09F8", 30_000_000),
+		// 25,000,000 SPX funded at genesis (unsold remainder of 30,000,000).
+		// Escrowed at CGE — released 25% at months 12/24/36/48.
+		// Amount: policy.CGEFounderSPX. Address below is the canonical
+		// recipient (REAL ADDRESS #1) and stays in core.
+		NewFounderAlloc("SPIF 7AB6 2C1B 1E0C EAAA 2810 8B7E BEA2 3ACE 718D 412F 84BD C3BF 5FC1 4F8F 4220 5FFA", policy.CGEFounderSPX),
 
 		// ── Co-founders (4) ───────────────────────────────────────────────
-		// 95,000,000 SPX total · 10,000,000 sold in Angel Round.
-		// 85,000,000 SPX remaining — 4-year vesting, 12-month cliff.
-		// SUCCESS REAL ADDRESS #2
-		NewCoFounderAlloc("SPIF 42D1 A449 30C6 1EE4 8B85 8E88 E393 BAA1 72D9 5DFF DE0D 5AE4 2B70 E60B 8C71 C2DB", 95_000_000),
+		// 85,000,000 SPX funded at genesis (unsold remainder of 95,000,000).
+		// Escrowed at CGE — released 25% at months 12/24/36/48.
+		// Amount: policy.CGECoFounderSPX. Address below is the canonical
+		// recipient (REAL ADDRESS #2) and stays in core.
+		NewCoFounderAlloc("SPIF 9911 75EA 129E 8680 A36B 1A34 3103 E0C3 D66F 6333 9731 20BA 7E7E 5FAC C45F B3C0", policy.CGECoFounderSPX),
 
 		// ── Development Fund ───────────────────────────────────────────────
-		// 200,000,000 SPX total · 50,000,000 sold (25%):
-		//   Angel: 10M · Private: 30M · Public ICO: 10M.
-		// 150,000,000 SPX remaining — module-based (10,000/module).
-		// SUCCESS REAL ADDRESS #3
-		NewDevelopmentAlloc("SPIF 929F C03E 6D4D D81B F082 5217 A977 EC0B EF78 AAED A28C 4C59 6820 1DEF E1A9 3D8D", 200_000_000),
+		// 150,000,000 SPX funded at genesis — module rewards
+		// (50,000 SPX × 3,000 modules = 150,000,000 exactly).
+		// Fully escrowed; NEVER released by time — only via a future
+		// ReleaseDevelopmentModule call from the module registry.
+		// Amount: policy.CGEDevelopmentSPX. Address below is the canonical
+		// recipient (REAL ADDRESS #3) and stays in core.
+		NewDevelopmentAlloc("SPIF 6AC5 7C53 E628 7C19 AE58 65BC 958D CDFC 5AAF 9826 8959 0D11 7379 B2CB D4A8 5156", policy.CGEDevelopmentSPX),
 
 		// ── Contributors ───────────────────────────────────────────────────
-		// 90,000,000 SPX total · 15,000,000 sold (16.7%):
-		//   Angel: 5M · Private: 10M.
-		// 75,000,000 SPX remaining — milestone-based vesting.
-		// Roles: Legal (10M/2yr) · Advisors (15M/2yr) · CSO (15M/3yr)
-		//        Partners (25M/milestone) · Managers (25M/2yr)
-		// SUCCESS REAL ADDRESS #4
-		NewContributorAlloc("SPIF CA35 9B93 E914 7459 00FC 4EA8 7E44 E4EB 4862 94C9 4031 1940 CEC5 3C37 0CBD 0B7C", 90_000_000),
+		// 75,000,000 SPX funded at genesis (unsold remainder of 90,000,000).
+		// Escrowed at CGE — released linearly over 36 months, no cliff.
+		// Amount: policy.CGEContributorsSPX. Address below is the canonical
+		// recipient (REAL ADDRESS #4) and stays in core.
+		NewContributorAlloc("SPIF 064C 84E2 0435 6BA4 07C4 0825 AE2F 4780 7E19 DA96 00A9 1111 C22B DC61 5680 C7EF", policy.CGEContributorsSPX),
 
 		// ── SPHINX Foundation ──────────────────────────────────────────────
 		// 300,000,000 SPX · 0% sold — fully kept for ecosystem.
 		// Grants: 120M · Liquidity: 60M · R&D: 50M
 		// Partnerships: 30M · Emergency: 20M · Buybacks: 20M (optional)
-		// WARNING REPLACE with real address when available
-		NewFoundationAlloc("5000000000000000000000000000000000000001", 300_000_000),
+		// Liquid at CGE — governed by a 5-of-9 multisig treasury.
+		// Amount: policy.CGEFoundationSPX. Address below is the canonical
+		// treasury (REAL ADDRESS #5) and stays in core.
+		NewFoundationAlloc("SPIF AD19 8DF9 6B76 F9F7 2E2D B336 AFB4 6424 C4BE 01BF 45BB 8145 151A 9F24 9F46 1890", policy.CGEFoundationSPX),
 
 		// ── Campaigns ──────────────────────────────────────────────────────
-		// 35,000,000 SPX total · 20,000,000 sold in Private Sale (57%).
-		// 15,000,000 SPX remaining — future marketing and partnerships.
-		// WARNING REPLACE with real address when available
-		NewCampaignAlloc("6000000000000000000000000000000000000001", 35_000_000),
+		// 15,000,000 SPX funded at genesis (unsold remainder of 35,000,000).
+		// Liquid at CGE — future marketing and partnerships.
+		// Amount: policy.CGECampaignsSPX. Address below is the canonical
+		// recipient (REAL ADDRESS #6) and stays in core.
+		NewCampaignAlloc("SPIF B7CA BAC6 53D2 D7B0 D01C 189D E612 8C63 11EB C93B 7038 1E9A C14B 57A2 69BD DB9F", policy.CGECampaignsSPX),
 
 		// ── Community Airdrops ─────────────────────────────────────────────
 		// 90,000,000 SPX · 0% sold — fully kept.
-		// Phases: Genesis (20M) · Adoption (20M) · Staking (25M) · Engagement (25M)
-		// No vesting · Sybil resistance · 12-month release.
-		// WARNING REPLACE with real address when available
-		NewAirdropAlloc("7000000000000000000000000000000000000001", 90_000_000),
+		// Escrowed at CGE — released linearly over 12 months, no cliff.
+		// Sybil resistance / proof-of-humanity gating is application-layer.
+		// Amount: policy.CGEAirdropsSPX. Address below is the canonical
+		// recipient (REAL ADDRESS #7) and stays in core.
+		NewAirdropAlloc("SPIF 3406 2BDA 5176 B816 9719 3077 F7DC 1694 069D 2C6A 88A4 B734 9A98 821D 0AD9 52AF", policy.CGEAirdropsSPX),
 
 		// ── Public ICO Pool ───────────────────────────────────────────────
-		// 200,000,000 SPX total · 100,000,000 sold (50%):
-		//   Private: 10M · Public ICO: 90M.
-		// 100,000,000 SPX remaining — future public sales.
-		// WARNING REPLACE with real address when available
-		NewPublicICOPoolAlloc("8000000000000000000000000000000000000001", 200_000_000),
+		// 100,000,000 SPX funded at genesis (unsold remainder of 200,000,000;
+		// 100,000,000 sold in the public ICO, delivered outside genesis).
+		// Liquid at CGE — public investors have no cliff, no vesting.
+		// Amount: policy.CGEPublicICOPoolSPX. Address below is the canonical
+		// recipient (REAL ADDRESS #8) and stays in core.
+		NewPublicICOPoolAlloc("SPIF 780D 0EFD C578 62F1 8098 6F02 F25C CEA1 430C FB7C 9460 F6C6 DE92 C34A C3D3 591B", policy.CGEPublicICOPoolSPX),
 
 		// ── Reserve / Unsold ───────────────────────────────────────────────
 		// 200,000,000 SPX · 0% sold.
-		// Reserved for future ecosystem needs, emergencies, and strategic initiatives.
-		// WARNING REPLACE with real address when available
-		NewReserveAlloc("9000000000000000000000000000000000000001", 200_000_000),
+		// Liquid at CGE — future ecosystem needs, emergencies, strategic initiatives.
+		// Amount: policy.CGEReserveSPX. Address below is the canonical
+		// recipient (REAL ADDRESS #9) and stays in core.
+		NewReserveAlloc("SPIF 171F BCCB 61C8 B697 DAA7 FC77 0881 96ED 387E D81B CC2F A8EE CA41 3E0F E08D 60F0", policy.CGEReserveSPX),
 	}
 }
 
 // SummariseAllocations iterates over allocs and returns an AllocationSummary.
 // It does not modify the input slice.
+//
+// BalanceNSPX is the post-sale REMAINDER, so TotalNSPX/ByLabel are the schedule
+// input. This also sums each category's sold-at-genesis amount (always liquid)
+// into TotalSoldNSPX/SoldByLabel and the two into TotalGrossNSPX/GrossByLabel —
+// gross is what block 0 actually mints, so audit output must report that.
 func SummariseAllocations(allocs []*GenesisAllocation) *AllocationSummary {
 	summary := &AllocationSummary{
-		TotalNSPX: new(big.Int),
-		TotalSPX:  new(big.Int),
-		Count:     len(allocs),
-		ByLabel:   make(map[string]*big.Int),
+		TotalNSPX:      new(big.Int),
+		TotalSPX:       new(big.Int),
+		TotalSoldNSPX:  new(big.Int),
+		TotalGrossNSPX: new(big.Int),
+		Count:          len(allocs),
+		ByLabel:        make(map[string]*big.Int),
+		SoldByLabel:    make(map[string]*big.Int),
+		GrossByLabel:   make(map[string]*big.Int),
 	}
 
 	for _, a := range allocs {
 		if a.BalanceNSPX == nil {
 			continue
 		}
-		summary.TotalNSPX.Add(summary.TotalNSPX, a.BalanceNSPX)
+		sold := cgeSoldNSPX(a.Label)
+		gross := new(big.Int).Add(a.BalanceNSPX, sold)
 
-		if _, ok := summary.ByLabel[a.Label]; !ok {
-			summary.ByLabel[a.Label] = new(big.Int)
-		}
-		summary.ByLabel[a.Label].Add(summary.ByLabel[a.Label], a.BalanceNSPX)
+		summary.TotalNSPX.Add(summary.TotalNSPX, a.BalanceNSPX)
+		summary.TotalSoldNSPX.Add(summary.TotalSoldNSPX, sold)
+		summary.TotalGrossNSPX.Add(summary.TotalGrossNSPX, gross)
+
+		accumulateByLabel(summary.ByLabel, a.Label, a.BalanceNSPX)
+		accumulateByLabel(summary.SoldByLabel, a.Label, sold)
+		accumulateByLabel(summary.GrossByLabel, a.Label, gross)
 	}
 
 	// Convert total to whole SPX (truncating any fractional part).
@@ -294,25 +333,62 @@ func SummariseAllocations(allocs []*GenesisAllocation) *AllocationSummary {
 	return summary
 }
 
+// cgeSoldNSPX returns label's sold-at-genesis amount in nSPX (0 if none).
+func cgeSoldNSPX(label string) *big.Int {
+	return new(big.Int).Mul(big.NewInt(policy.CGESoldAmountSPX(label)), big.NewInt(1e18))
+}
+
+// accumulateByLabel adds amount into m[label], creating the entry on first use.
+func accumulateByLabel(m map[string]*big.Int, label string, amount *big.Int) {
+	if _, ok := m[label]; !ok {
+		m[label] = new(big.Int)
+	}
+	m[label].Add(m[label], amount)
+}
+
 // LogAllocationSummary prints a formatted summary of the genesis allocations
 // to the logger. It is called automatically by ApplyGenesis.
+//
+// It reports the GROSS genesis supply (what block 0 mints), with the sold and
+// remainder components broken out per label — reporting the remainder alone
+// would understate the minted supply by the sold amount (130,000,000 SPX) and
+// make the log disagree with the chain.
 func LogAllocationSummary(allocs []*GenesisAllocation) {
 	s := SummariseAllocations(allocs)
+	oneSPX := big.NewInt(1e18)
+	grossSPX := new(big.Int).Div(s.TotalGrossNSPX, oneSPX)
 	logger.Info("=== GENESIS ALLOCATION SUMMARY ===")
-	logger.Info("Total accounts : %d", s.Count)
-	logger.Info("Total supply   : %s SPX  (%s nSPX)", s.TotalSPX.String(), s.TotalNSPX.String())
-	logger.Info("Distribution by label:")
-	for label, amountNSPX := range s.ByLabel {
-		amountSPX := new(big.Int).Div(amountNSPX, big.NewInt(1e18))
-		pct := new(big.Float).Quo(
-			new(big.Float).SetInt(amountSPX),
-			new(big.Float).SetInt(s.TotalSPX),
-		)
-		pct.Mul(pct, big.NewFloat(100))
-		pctF, _ := pct.Float64()
-		logger.Info("  %-20s %15s SPX  (%.2f%%)", label, amountSPX.String(), pctF)
+	logger.Info("Total accounts     : %d", s.Count)
+	logger.Info("Genesis supply     : %s SPX  (%s nSPX)  [what block 0 mints]",
+		grossSPX.String(), s.TotalGrossNSPX.String())
+	logger.Info("  sold (liquid)    : %s SPX", new(big.Int).Div(s.TotalSoldNSPX, oneSPX).String())
+	logger.Info("  remainder (CGE)  : %s SPX", new(big.Int).Div(s.TotalNSPX, oneSPX).String())
+	logger.Info("Distribution by label (remainder + sold = gross):")
+	for _, label := range sortedLabels(s.GrossByLabel) {
+		gross := new(big.Int).Div(s.GrossByLabel[label], oneSPX)
+		remainder := new(big.Int).Div(s.ByLabel[label], oneSPX)
+		sold := new(big.Int).Div(s.SoldByLabel[label], oneSPX)
+		pctF := 0.0
+		if grossSPX.Sign() != 0 {
+			pct := new(big.Float).Quo(new(big.Float).SetInt(gross), new(big.Float).SetInt(grossSPX))
+			pct.Mul(pct, big.NewFloat(100))
+			pctF, _ = pct.Float64()
+		}
+		logger.Info("  %-20s %15s SPX  (remainder %s + sold %s)  (%.2f%%)",
+			label, gross.String(), remainder.String(), sold.String(), pctF)
 	}
 	logger.Info("==================================")
+}
+
+// sortedLabels returns the keys of m in lexicographic order so log output is
+// deterministic (Go map iteration is randomised).
+func sortedLabels(m map[string]*big.Int) []string {
+	labels := make([]string, 0, len(m))
+	for l := range m {
+		labels = append(labels, l)
+	}
+	sort.Strings(labels)
+	return labels
 }
 
 // ----------------------------------------------------------------------------

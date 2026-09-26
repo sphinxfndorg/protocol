@@ -126,6 +126,19 @@ func NewBlockchain(dataDir string, nodeID string, validators []string, networkTy
 	// Store early so createGenesisBlock can read bc.chainParams immediately
 	blockchain.chainParams = chainParams
 
+	// ★ Publish this chain's ID to the custody path NOW, not on the first
+	// block validation. RPC (sendrawtransaction), mempool admission and P2P
+	// relay all evaluate a custody witness before any block exists, and an
+	// unpublished chain ID makes musig.CheckSpendWitness refuse every custody
+	// authorization with ErrActiveChainIDUnset — which is the correct
+	// fail-closed tripwire, but on a live node it rejected every M-of-N spend
+	// with "active chain ID is not published" because nothing had published
+	// one yet. Publishing here (before the deferred-init early return, so
+	// bind.StartNode's WithDeferredInit path is covered too) keeps the
+	// tripwire meaningful for any process without a chain while making an
+	// unset value impossible on a running node.
+	blockchain.publishActiveChainID()
+
 	if options.deferFinish {
 		// Caller still needs to attach its own DB handles (SetStorageDB /
 		// SetStateDB) and then call bc.FinishInit(nodeID) itself.
@@ -1851,7 +1864,7 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 		return fmt.Errorf("CommitBlock: transaction authentication failed: %w: %w", err, consensus.ErrInvalidBlockTx)
 	}
 	for _, tx := range typeBlock.Body.TxsList {
-		if err := bc.ValidateTransactionPolicy(tx); err != nil {
+		if err := bc.ValidateTransactionPolicyAt(tx, typeBlock.GetHeight()); err != nil {
 			return fmt.Errorf("CommitBlock: transaction policy failed: %w: %w", err, consensus.ErrInvalidBlockTx)
 		}
 	}
@@ -2201,6 +2214,26 @@ func (bc *Blockchain) initializeChain() error {
 	return nil
 }
 
+// guardGenesisAuthorization is the hard startup gate for block 0 (see
+// createGenesisBlock). It runs the same authorization check CommitBlock runs,
+// so genesis can never be stored/executed under weaker rules than every later
+// block. A policy-owned vault requires M-of-N witnesses on its distributions;
+// a vault with no registered policy keeps the legacy unsigned exemption.
+//
+// It is extracted from createGenesisBlock so the refusal itself is directly
+// testable — the bootstrapping node is the only one that would otherwise never
+// validate block 0, and a silent pass here means a height-0 fork discovered
+// later by peers.
+func (bc *Blockchain) guardGenesisAuthorization(block *types.Block) error {
+	if block == nil {
+		return nil
+	}
+	if err := bc.validateBlockTransactionAuth(block, false); err != nil {
+		return fmt.Errorf("genesis block failed transaction authorization (refusing to start): %w", err)
+	}
+	return nil
+}
+
 // createGenesisBlock builds and stores the genesis block through GenesisState
 // so that the allocation Merkle root and all header fields are identical across
 // every node in the network.
@@ -2236,21 +2269,37 @@ func (bc *Blockchain) createGenesisBlock() error {
 		return fmt.Errorf("ApplyGenesis failed: %w", err)
 	}
 
-	// DO NOT call ApplyGenesisState here.
-	// genesis.go's BuildBlock() already embeds one distribution transaction
-	// per allocation directly in block 0's body (Sender: GenesisVaultAddress).
-	// There is no separate "block 1" that distributes from the vault — that
-	// model is gone. ApplyGenesisState would set balances directly AND
-	// increment total_supply, which double-counts once ExecuteGenesisBlock
-	// (below) funds the vault and applies those same transactions.
+	// ★ HARD GATE: block 0 must authorize its distributions BEFORE it is
+	// executed. This path deliberately does not go through CommitBlock, so
+	// without this check an unauthorized genesis would be stored and executed
+	// here and only rejected later, when a peer or late joiner validates the
+	// same block — turning a config mistake into a silent height-0 divergence.
+	//
+	// A policy-owned genesis vault requires M-of-N witnesses for every
+	// distribution (tx_auth.custodyPolicyOwns); a vault with no registered
+	// policy keeps the legacy unsigned exemption and passes unchanged. Refusing
+	// to start, loudly, is the only safe failure mode for consensus state.
+	if len(bc.chain) > 0 && bc.chain[0] != nil {
+		if err := bc.guardGenesisAuthorization(bc.chain[0]); err != nil {
+			return err
+		}
+	}
+
+	// Genesis balances are credited ONLY through ExecuteGenesisBlock below.
+	// genesis.go's BuildBlock() embeds the distribution transactions directly
+	// in block 0's body (Sender: GenesisVaultAddress); there is no separate
+	// "block 1" that distributes from the vault, and no direct-balance-credit
+	// path. (The old ApplyGenesisState was deleted for exactly this reason: it
+	// set balances directly AND incremented total_supply, which double-counts
+	// once ExecuteGenesisBlock funds the vault and applies those same txns.)
 	//
 	// ExecuteGenesisBlock is the single authoritative path for crediting
-	// genesis balances: it funds GenesisVaultAddress via mintBlockReward,
-	// then runs applyTransactions on block 0's body to drain the vault into
-	// every allocation address, in the same block. It's idempotent (it
-	// no-ops if the vault already has a balance), so it's safe to call here
-	// even though sync.go's handleVerifying() also calls it for late joiners
-	// after a downloaded genesis is verified.
+	// genesis balances: it funds GenesisVaultAddress via mintBlockReward with
+	// exactly what block 0 pays out, then runs applyTransactions on block 0's
+	// body to drain the vault into every allocation address, in the same block.
+	// It's idempotent (it no-ops once the vault nonce is non-zero), so it's safe
+	// to call here even though sync.go's handleVerifying() also calls it for
+	// late joiners after a downloaded genesis is verified.
 	if err := bc.ExecuteGenesisBlock(); err != nil {
 		return fmt.Errorf("ExecuteGenesisBlock failed: %w", err)
 	}

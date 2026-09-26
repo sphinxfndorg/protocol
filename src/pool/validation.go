@@ -20,6 +20,7 @@ import (
 	"github.com/sphinxfndorg/protocol/src/contracts"
 	svm "github.com/sphinxfndorg/protocol/src/core/kernel/opcodes"
 	vmachine "github.com/sphinxfndorg/protocol/src/core/kernel/vm"
+	multisig "github.com/sphinxfndorg/protocol/src/core/musig"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
 	"github.com/sphinxfndorg/protocol/src/policy"
 )
@@ -52,9 +53,26 @@ func uint64ToBytesPool(n uint64) []byte {
 }
 
 // verifyTransactionSignature uses SVM to verify transaction signature.
+//
+// There is no system-transaction exemption here. A transaction in the mempool
+// can only ever be included in a block above genesis, and the unsigned genesis
+// exemption (Transaction.IsSystemTransactionAt) exists only for block 0. A
+// spend from the genesis vault is therefore an ordinary spend that must carry
+// a full SPHINCS auth bundle — or, when the sender resolves to a registered
+// custody policy, an M-of-N custody witness.
 func (mp *Mempool) verifyTransactionSignature(tx *types.Transaction) error {
-	if tx.IsSystemTransaction() {
-		logger.Debug("Genesis vault transaction %s is trusted, skipping signature verification", tx.ID)
+	// Custody spend: the witness is verified cryptographically here, exactly
+	// as a single-key bundle is. refTime is 0 because ingress has no block to
+	// anchor to — the witness expiry horizon (always measured against the
+	// sealed block header timestamp) is enforced by validateTransactionAuth at
+	// commit time, never from a wall clock.
+	if custody, err := multisig.CheckSpendWitness(
+		tx.Sender, tx.Receiver, tx.ChainID, tx.Amount, tx.Nonce,
+		tx.MultiSigWitness, 0,
+	); custody {
+		if err != nil {
+			return fmt.Errorf("custody witness verification failed: %w", err)
+		}
 		return nil
 	}
 
@@ -714,34 +732,13 @@ func isHexString(s string) bool {
 }
 
 // performValidation executes all validation checks for a transaction.
+//
+// Every transaction admitted here must carry a full SPHINCS auth bundle. The
+// unsigned genesis exemption belongs to block 0 only, and the mempool never
+// feeds block 0 — genesis funding is applied directly to state by
+// ExecuteGenesisBlock, never through the mempool. A spend from the genesis
+// vault is therefore validated exactly like any other spend.
 func (mp *Mempool) performValidation(tx *types.Transaction) error {
-	if tx.IsSystemTransaction() {
-		logger.Debug("Genesis vault transaction %s is trusted, skipping cryptographic verification", tx.ID)
-
-		if err := tx.SanityCheck(); err != nil {
-			return fmt.Errorf("sanity check failed: %w", err)
-		}
-
-		if tx.Sender == "" || tx.Receiver == "" {
-			return errors.New("empty sender or receiver")
-		}
-
-		if tx.Sender == tx.Receiver && !isMintAnchorReturnData(tx.ReturnData) {
-			return fmt.Errorf("sender and receiver are the same (%s)", tx.Sender)
-		}
-
-		if tx.Amount == nil || tx.Amount.Cmp(big.NewInt(0)) <= 0 {
-			return errors.New("invalid amount")
-		}
-
-		currentNonce := mp.getSenderNonceExcluding(tx.Sender, tx.ID) // ★ FIX
-		if err := mp.verifyTransactionNonce(tx, currentNonce); err != nil {
-			return fmt.Errorf("nonce validation failed: %w", err)
-		}
-
-		return nil
-	}
-
 	txSize := mp.CalculateTransactionSize(tx)
 	if txSize > mp.config.MaxTxSize {
 		return fmt.Errorf("transaction size %d exceeds maximum %d bytes", txSize, mp.config.MaxTxSize)

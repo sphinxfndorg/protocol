@@ -176,6 +176,16 @@ func getCachedGenesisBlock() *types.Block {
 		genesisTimestampValue = gs.Timestamp
 		logger.Info("Genesis block computed once: %s at timestamp %d",
 			genesisHashValue, genesisTimestampValue)
+
+		// A policy-owned vault must authorize its block-0 distributions by
+		// M-of-N agreement (GenesisState.BuildBlockWithCustody + tx_auth's
+		// custodyPolicyOwns). The plain BuildBlock() above is unsigned, so once
+		// config/genesis_multisig.json is loaded this block is NOT a valid
+		// genesis block — surface that here instead of letting it fail later as
+		// a confusing block-0 authorization error.
+		if custodyPolicyOwns(GenesisVaultAddress) {
+			logger.Error("genesis vault %s is a custody policy but the genesis block was built UNSIGNED: block-0 distributions require M-of-N witnesses — build block 0 with GenesisState.BuildBlockWithCustody before starting this node", GenesisVaultAddress)
+		}
 	})
 	signGenesisIfPossible(genesisCached)
 	return genesisCached
@@ -253,6 +263,6 @@ func GetMaxSupplyNSPX() *big.Int {
 }
 
 // GetGenesisVaultAddress returns the genesis vault address constant
-func GetGenesisVaultAddress() string {
+func GetGenesisVaultAddressLegacy() string {
 	return GenesisVaultAddress
 }

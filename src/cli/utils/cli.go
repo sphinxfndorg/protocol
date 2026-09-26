@@ -40,6 +40,8 @@ func Execute() error {
 			return runIPFSCmd(os.Args[2:])
 		case "wallet":
 			return runWalletCmd(os.Args[2:])
+		case "multisig":
+			return runMultisigCmd(os.Args[2:])
 		case "help", "--help", "-h":
 			printHelp()
 			return nil
@@ -76,9 +78,40 @@ SUBCOMMANDS
                  local content hash.)
   wallet        Manage ` + common.SPIFPrefix + ` wallets (init, list, burn, send)
               Burn coins: send SPX to ` + common.DEADPrefix + ` ` + common.DefaultBurnAddress + ` (provably unspendable)
+  multisig      M-of-N custody for the genesis vault / CGE escrow
+                  devnet  --role escrow|vault --custodians N --threshold M
+                          (writes the policy JSON the node auto-loads, plus
+                           N custodian key files; run BEFORE starting nodes)
+                  spend   --policy policy.json --to <addr> --amount-spx <n> \\
+                          --keys-dir <dir> --rpc 127.0.0.1:8700 \\
+                          [--verify-rpc 127.0.0.1:8701 ...]
+                          (LIVE: fetches the nonce, signs the canonical spend
+                           message with M of N custodian keys, broadcasts the
+                           witness-authorized transaction, waits for the block,
+                           then prints the recipient balance from every node.
+                           Add --allow-partial to prove a below-threshold
+                           broadcast is rejected.
+                           Add --watch [--interval 10s] to poll the custodial
+                           balance and spend --amount whenever it covers it;
+                           Ctrl-C stops after the current cycle. With
+                           --dry-run, --watch only prints the balance.
+                           Add --dry-run --out <file> to write the signed
+                           transaction (a proposal) for the node's always-on
+                           watcher to broadcast. With --watch and NO
+                           --to/--amount the command BECOMES that watcher in
+                           the foreground: it scans --proposals-dir (default
+                           config/spend_proposals) and broadcasts threshold-
+                           signed proposals, deduped by transaction id.)
+                  create  --pubkey <files...> --threshold M --domain <s> --out policy.json
+                  message --policy policy.json --kind spend|cge-release|dev-module \\
+                          --receiver <addr> --amount-spx <n> --nonce <n> --expiry <unix> \\
+                          --out msg.msg            (builds the exact bytes custodians sign)
+                  sign    --policy policy.json --tx msg.msg --key <keyfile> --out sig.json
+                  combine --policy policy.json --sig sig1.json --sig sig2.json \\
+                          --expiry <unix> --release-time <unix> --out witness.json
 
 TOKENOMICS OVERVIEW
-  Genesis Supply: 1,240,000,000 SPX (24.8% of 5B max supply)
+  Genesis Supply: 1,170,000,000 SPX (23.4% of 5B max supply) — 1,040,000,000 SPX remainder + 130,000,000 SPX sold (Angel Round + Public ICO), both funded in block 0
   Funding Rounds:
     Angel Round: 30,000,000 SPX @ $0.06 = $1.8M
     Private Sale: 70,000,000 SPX @ $0.24 = $16.8M
@@ -193,6 +226,40 @@ func runNodeCmd(args []string) error {
 		return err
 	}
 
+	// Multisig treasury spend broadcast is always on — no flags, no
+	// destination or amount to configure, and no custodian keys. The node
+	// doesn't need to be told what to spend: it scans config/spend_proposals
+	// for spends the custodian quorum already signed (each carries its own
+	// destination/amount/nonce inside the signed payload), re-verifies each
+	// against the live policy, and broadcasts it. It never authorizes a spend
+	// on its own — the node re-verifies the witness at admission too (see
+	// multisig.CheckSpendWitness).
+	//
+	// Genesis distribution and CGE vesting release are separate, already-
+	// automatic flows (block 0 minting and applyCGEReleases respectively);
+	// this watcher does not touch either.
+	var autoSpendArgs []string
+	if _, statErr := os.Stat(custodyRoles["escrow"].OutPath); statErr == nil {
+		// A multisig policy has been provisioned (via "multisig devnet" or
+		// equivalent) — the watcher is expected to work, so an unreadable or
+		// invalid policy is a hard startup error, not a silent no-op. No
+		// custodian keys are required: this node only broadcasts what the
+		// quorum already signed (broadcaster ≠ custodian).
+		const unsetWSPortDefault = "127.0.0.1:8600"
+		walletRPC := *wsPort
+		if walletRPC == "" || walletRPC == unsetWSPortDefault {
+			walletRPC = fmt.Sprintf("127.0.0.1:%d", 8700+*nodeIndex)
+		}
+		spendArgs, err := autoWatchArgs(
+			custodyRoles["escrow"].OutPath, walletRPC, custodyProposalsDir)
+		if err != nil {
+			return err
+		}
+		autoSpendArgs = spendArgs
+	} else {
+		logger.Info("no multisig policy at %s — auto multisig spend watcher disabled (run \"multisig devnet\" to enable treasury spends)", custodyRoles["escrow"].OutPath)
+	}
+
 	// Build the NodePortConfig using network package
 	var nodeConfig network.NodePortConfig
 
@@ -302,6 +369,22 @@ func runNodeCmd(args []string) error {
 	}
 	// For seed-based mode on loopback, keep the user's --nodes value so that
 	// local multi-node tests (e.g., 3 nodes with --seeds=127.0.0.1:30303) work.
+
+	// Threshold-gated multisig watch loop runs alongside the node in THIS
+	// process whenever a multisig policy is provisioned — every node runs
+	// it identically, no flags, no per-terminal configuration. The watcher
+	// may reach its first cycle before this node's wallet RPC is listening;
+	// an unreadable balance is transient and simply retries next interval.
+	if autoSpendArgs != nil {
+		logger.Info("auto multisig spend enabled: %s", strings.Join(autoSpendArgs, " "))
+		go func() {
+			if err := runMultisigSpend(autoSpendArgs); err != nil {
+				logger.Error("auto multisig spend watcher stopped: %v", err)
+			} else {
+				logger.Info("auto multisig spend watcher stopped")
+			}
+		}()
+	}
 
 	var vdfParams *consensus.VDFParams
 

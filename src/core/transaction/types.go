@@ -5,10 +5,15 @@
 package types
 
 import (
+	"encoding/binary"
+	"encoding/hex"
 	"math/big"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/sphinxfndorg/protocol/src/common"
+	multisig "github.com/sphinxfndorg/protocol/src/core/musig"
 )
 
 // BlockHeader represents the metadata for a block in the blockchain.
@@ -52,6 +57,10 @@ type BlockBody struct {
 	UnclesHash []byte         `json:"uncles_hash"` // Hash representing uncles (calculated from uncles)
 	// NEW: Collected validator attestations (optional but recommended)
 	Attestations []*Attestation `json:"attestations,omitempty"`
+	// CGEWitnesses carries the M-of-N custodian witnesses this block consumed
+	// for its CGE escrow releases (empty for every other block). Part of the
+	// body so proposer and verifiers work from identical bytes.
+	CGEWitnesses []*CGEReleaseWitness `json:"cge_witnesses,omitempty"`
 }
 
 // NEW: Attestation struct — each attestation represents a PBFT commit vote
@@ -104,14 +113,104 @@ type Transaction struct {
 	MerkleRootHash []byte `json:"merkle_root_hash,omitempty"` // SPHINCS+ receipt root derived from signature leaves
 	Commitment     []byte `json:"commitment,omitempty"`       // Binding commitment over signature, key, timestamp, nonce, and tx ID
 	Proof          []byte `json:"proof,omitempty"`            // Lightweight consistency proof for the receipt fields
+
+	// MultiSigWitness authorizes a spend from a custody policy address (the
+	// genesis vault, the CGE escrow, or any future custody address). It is an
+	// alternative to the single-key bundle above, not a replacement: a sender
+	// that resolves to a registered policy is authorized by this witness and
+	// only by this witness. Ordinary single-key transactions leave it nil, so
+	// they serialize byte-for-byte as before.
+	MultiSigWitness *multisig.MultiSigWitness `json:"multisig_witness,omitempty"`
 }
 
-const GenesisVaultAddress = "0000000000000000000000000000000000000001"
+// GenesisVaultAddress is the protocol-owned vault address. Genesis allocation
+// transactions are sent from it, and those are the only transactions that are
+// ever valid without an external SPHINCS+ signature. After block 0 the vault is
+// an ordinary account (a multisig policy address) and its spends must be
+// authorized through the normal transaction auth path.
+var GenesisVaultAddress = "0000000000000000000000000000000000000001"
 
-// IsSystemTransaction returns true for protocol-created transactions that are
-// valid without an external SPHINCS+ signature.
+// legacyGenesisVaultAddress is the pre-multisig vault address. Kept so chains
+// built before the vault became a multisig policy address still recognize
+// their own block-0 funding transactions.
+const legacyGenesisVaultAddress = "0000000000000000000000000000000000000001"
+
+// CGEReleaseWitness pairs a CGE escrow-release recipient with the SPHINCS+
+// M-of-N witness that authorizes that release. It travels inside the block
+// body so a verifier can apply the release from the block's own bytes alone —
+// no side channel, no local pool.
+type CGEReleaseWitness struct {
+	Recipient string                   `json:"recipient"`
+	Witness   multisig.MultiSigWitness `json:"witness"`
+}
+
+// GenesisAllocationTxID returns the deterministic identifier of one genesis
+// funding transaction: hex(SpxHash(receiver || amountBytes || index)). This is
+// the single definition of the formula; GenesisState.buildBlock uses it too,
+// so the shape check in IsSystemTransaction can never drift from the IDs the
+// genesis builder actually emits.
+func GenesisAllocationTxID(receiver string, amount *big.Int, index uint64) string {
+	buf := []byte(receiver)
+	if amount != nil {
+		buf = append(buf, amount.Bytes()...)
+	}
+	var indexBytes [8]byte
+	binary.BigEndian.PutUint64(indexBytes[:], index)
+	buf = append(buf, indexBytes[:]...)
+	return hex.EncodeToString(common.SpxHash(buf))
+}
+
+func isGenesisVaultSender(addr string) bool {
+	return addr == GenesisVaultAddress || addr == legacyGenesisVaultAddress
+}
+
+// IsSystemTransaction reports whether tx has exactly the shape of a
+// protocol-created genesis allocation transaction: sent from the genesis
+// vault, carrying no SPHINCS authorization material and no gas, and carrying
+// the deterministic genesis-funding ID of its own (receiver, amount, nonce).
+//
+// Sender identity alone is NOT enough — an ordinary vault spend is not a
+// system transaction. This is only a *shape* test and is height-free, so it is
+// informational (explorer badges, tooling). Every authorization or admission
+// decision must use IsSystemTransactionAt(height), which additionally requires
+// the transaction to be inside block 0.
 func (tx *Transaction) IsSystemTransaction() bool {
-	return tx != nil && (tx.Sender == "genesis" || tx.Sender == GenesisVaultAddress)
+	if tx == nil || !isGenesisVaultSender(tx.Sender) {
+		return false
+	}
+	if tx.Amount == nil || tx.Amount.Sign() <= 0 {
+		return false
+	}
+	// Genesis funding transactions are unsigned by construction; any auth
+	// material means this is a real (authorized) transaction, not a
+	// protocol-created distribution.
+	if len(tx.Signature) != 0 || len(tx.PublicKey) != 0 || len(tx.Proof) != 0 ||
+		len(tx.SignatureHash) != 0 || len(tx.Commitment) != 0 || len(tx.MerkleRootHash) != 0 ||
+		len(tx.AuthTimestamp) != 0 || len(tx.AuthNonce) != 0 {
+		return false
+	}
+	if tx.GasLimit != nil && tx.GasLimit.Sign() != 0 {
+		return false
+	}
+	if tx.GasPrice != nil && tx.GasPrice.Sign() != 0 {
+		return false
+	}
+	// A genesis funding transaction is a bare value transfer: no contract
+	// payload, no memo, no OP_RETURN.
+	if len(tx.Code) != 0 || len(tx.CallData) != 0 || len(tx.Data) != 0 ||
+		len(tx.ReturnData) != 0 || tx.ToContract != "" {
+		return false
+	}
+	return tx.ID != "" && tx.ID == GenesisAllocationTxID(tx.Receiver, tx.Amount, tx.Nonce)
+}
+
+// IsSystemTransactionAt is the authorization-relevant form of
+// IsSystemTransaction: the unsigned genesis exemption applies only to block 0.
+// A vault spend at any later height returns false, so it must satisfy the
+// normal auth path (and, for the vault/escrow policy addresses, the M-of-N
+// custody path) exactly like any other spend.
+func (tx *Transaction) IsSystemTransactionAt(height uint64) bool {
+	return height == 0 && tx.IsSystemTransaction()
 }
 
 // HasFullAuthBundle returns true when all fields needed for real SPHINCS+

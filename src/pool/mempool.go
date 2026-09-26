@@ -187,14 +187,14 @@ func (mp *Mempool) BroadcastTransaction(tx *types.Transaction) error {
 	// ====================================================
 
 	// ========== SVM SIGNATURE VERIFICATION ==========
-	// Verify transaction signature using SVM before adding to mempool
-	// Skip genesis vault transactions (they are trusted)
-	if tx.Sender != "0000000000000000000000000000000000000001" { // Genesis vault address
-		if err := mp.verifyTransactionSignature(tx); err != nil {
-			return fmt.Errorf("SVM signature verification failed: %w", err)
-		}
-		logger.Debug("SVM: Transaction signature verified for %s", tx.ID)
+	// Verify transaction signature using SVM before adding to mempool.
+	// No genesis/system exemption: the mempool only ever feeds blocks above
+	// genesis, so every transaction admitted here must be fully authorized —
+	// including a spend from the genesis vault.
+	if err := mp.verifyTransactionSignature(tx); err != nil {
+		return fmt.Errorf("SVM signature verification failed: %w", err)
 	}
+	logger.Debug("SVM: Transaction signature verified for %s", tx.ID)
 	// =================================================
 
 	// Check broadcast pool limits

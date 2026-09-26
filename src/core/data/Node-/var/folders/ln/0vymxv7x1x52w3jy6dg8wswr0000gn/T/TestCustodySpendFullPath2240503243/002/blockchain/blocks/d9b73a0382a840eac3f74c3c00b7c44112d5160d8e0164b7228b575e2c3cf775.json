@@ -1,0 +1,41 @@
+{
+  "header": {
+    "hash": "d9b73a0382a840eac3f74c3c00b7c44112d5160d8e0164b7228b575e2c3cf775",
+    "txs_root": "08b593ec79b72371b72b9ea9c3e8a330fcb71f785a45a5d1f43de485cbd3b546",
+    "state_root": "dde4e5caacca3c3be1f1ded1d253632291ca95b59794c00bd2c27c3923c721ae",
+    "parent_hash": "GENESIS_547dc5cc5a78b10b6dbed21233d6a75d83acde3237ed883890af2c81477b27c1",
+    "uncles_hash": "3ae8b868383211aadef2f800ae8fca910fe7b4b64a7b675436c30bf810181aae",
+    "extra_data": "Sphinx Block 1",
+    "miner": "0000000000000000000000000000000000000000",
+    "version": 1,
+    "nblock": 1,
+    "height": 1,
+    "timestamp": "2026-07-15T19:33:19Z",
+    "difficulty": "1",
+    "nonce": "0000000000000003",
+    "gas_limit": "50000000",
+    "gas_used": "21000",
+    "proposer_signature": "",
+    "proposer_id": "",
+    "sig_data_hash": "d9b73a0382a840eac3f74c3c00b7c44112d5160d8e0164b7228b575e2c3cf775",
+    "commit_status": "committed",
+    "signature_valid": false
+  },
+  "body": {
+    "txs_list": [
+      {
+        "amount": "25000000000000000000000",
+        "chain_id": 73310,
+        "gas_limit": "21000",
+        "gas_price": "1000000000",
+        "id": "custody-e2e-spend-0",
+        "nonce": 0,
+        "receiver": "SPIF 0000 0000 0000 0000 0000 0000 0000 0000 0000 00AA",
+        "sender": "SPIF 9679 004B C224 62BB 3EC8 1DF6 FF8D AB01 AFBC BD4C",
+        "signature": "",
+        "timestamp": "2026-07-15T19:33:19Z"
+      }
+    ],
+    "uncles_hash": "3ae8b868383211aadef2f800ae8fca910fe7b4b64a7b675436c30bf810181aae"
+  }
+}

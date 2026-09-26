@@ -1,0 +1,13 @@
+{
+  "chain_identification": null,
+  "nodes": null,
+  "storage_state": null,
+  "basic_chain_state": {
+    "best_block_hash": "GENESIS_547dc5cc5a78b10b6dbed21233d6a75d83acde3237ed883890af2c81477b27c1",
+    "total_blocks": 1,
+    "last_updated": "2026-09-27T01:02:04+07:00"
+  },
+  "block_size_metrics": null,
+  "burn_state": null,
+  "timestamp": ""
+}

@@ -1097,9 +1097,19 @@ func applyCGEReleasesWithWitness(bc *Blockchain, block *types.Block, stateDB *St
 		}
 		stateDB.SetCGEReleased(alloc.Address, target)
 
-		logger.Info("CGE RELEASE: %s nSPX → %s (%s), elapsed=%ds, cumulative=%s/%s nSPX, schedule=%s",
-			delta.String(), alloc.Address, alloc.Label, elapsed,
-			target.String(), alloc.BalanceNSPX.String(), sched.String())
+		// Per-release authorization marker: an auditor greps this line to see
+		// whether ONE specific release carried M-of-N authority, instead of
+		// relying on a boot-time notice. Unauthorised releases are Warn-level
+		// because that state is abnormal (see warnCGEAuthorizationStatus).
+		if escrowEnforced() {
+			logger.Info("CGE RELEASE: %s nSPX → %s (%s), elapsed=%ds, cumulative=%s/%s nSPX, schedule=%s, authorised=multisig",
+				delta.String(), alloc.Address, alloc.Label, elapsed,
+				target.String(), alloc.BalanceNSPX.String(), sched.String())
+		} else {
+			logger.Warn("CGE RELEASE UNAUTHORISED: %s nSPX → %s (%s), elapsed=%ds, cumulative=%s/%s nSPX, schedule=%s — released with NO M-of-N witness (enforcement disabled; SubmitCGEWitness has no staging caller)",
+				delta.String(), alloc.Address, alloc.Label, elapsed,
+				target.String(), alloc.BalanceNSPX.String(), sched.String())
+		}
 	}
 }
 

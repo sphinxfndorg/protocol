@@ -2175,6 +2175,14 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 //
 // Returns: Error if initialization fails
 func (bc *Blockchain) initializeChain() error {
+	// State the CGE release authorization posture once per startup. The
+	// negative case is a live, unaudited gap in an already-running mechanism,
+	// so it is a loud ERROR rather than a silent default. Skipped inside
+	// `go test` binaries to keep test output clean (policyAutoLoadDisabled).
+	if !policyAutoLoadDisabled() {
+		warnCGEAuthorizationStatus()
+	}
+
 	// Late joiner check: skip genesis creation entirely.
 	// The sync loop will download the entire chain (including genesis) from peers.
 	if bc.IsLateJoiner() {

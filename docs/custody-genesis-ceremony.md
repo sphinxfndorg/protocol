@@ -100,16 +100,37 @@ That is correct, fail-closed behaviour. It also means:
 ## Related, separate, and arguably more urgent: CGE release enforcement
 
 This note covers genesis only (path #1). The ongoing release path (path #2) is
-untouched by this work and is currently soft-gated in the worst way:
+untouched by the genesis work and is currently soft-gated in the worst way:
 
 - `SetEscrowMultisigEnforced(true)` has **no production caller**, so
   `escrowEnforced()` is always false, so `applyCGEReleases` escrow→recipient
   transfers are **never** witness-gated — even with
   `config/escrow_multisig.json` present.
-- With no policy at all, the same is true silently (no warning).
+- `SubmitCGEWitness` (the only way a witness gets staged) also has **no
+  production caller**, so a block body's witness set is always empty.
 
-Enabling enforcement is not a one-line flip: no production code stages
-`SubmitCGEWitness` entries, so turning it on halts all time-based vesting until
-a signing workflow exists. That trade-off is the decision to make next — genesis
-being hardened does not make the vault secure overall while the release path
-stays soft-gated by default.
+**Status: made loud (step 1 of 3), not yet closed.** The gap is no longer a
+silent default:
+
+- `core.warnCGEAuthorizationStatus()` runs once per node startup
+  (`initializeChain`) and emits an **ERROR** naming the real cause — enforcement
+  disabled *and* nothing staging witnesses — and states explicitly that a
+  configured policy does **not** gate these releases.
+- `applyCGEReleasesWithWitness` emits a **per-release** line so a specific
+  release can be audited: `authorised=multisig` when gated, otherwise
+  `CGE RELEASE UNAUTHORISED: …` at Warn level.
+- `core.CGEReleasesAuthorised()` is the explicit predicate (NOT
+  "is a policy loaded"), pinned by `TestEscrowPolicyDoesNotImplyAuthorisedReleases`.
+
+Remaining sequence (each gated on the previous landing):
+
+1. ✅ Loud startup + per-release audit marker (done).
+2. ⬜ Build the `SubmitCGEWitness` staging workflow: who calls it, when, and how
+   a custodian's signed witness reaches the block at the right height before the
+   schedule fires. Needs its own end-to-end test, the way genesis got
+   `TestGenesisStartupGateIntegration` rather than unit tests on the pieces.
+3. ⬜ Only then flip enforcement on (`escrowEnforced = policy != nil`, or an
+   explicit enable that has a production caller).
+
+Flipping enforcement **before** step 2 does not secure vesting — it *stops* it,
+for every recipient, because nothing stages witnesses. Do not reorder.

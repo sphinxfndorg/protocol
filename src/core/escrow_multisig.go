@@ -175,3 +175,48 @@ func verifyDevModuleWitness(bc *Blockchain, w multisig.MultiSigWitness, recipien
 	msg := devModuleReleaseMessage(bc, recipient, moduleID, w.Expiry)
 	return multisig.VerifyThreshold(msg, w, headerTS)
 }
+
+// ----------------------------------------------------------------------------
+// Authorization posture (loud, not silent)
+// ----------------------------------------------------------------------------
+
+// CGEReleasesAuthorised reports whether time-based CGE escrow→recipient
+// releases are gated by an M-of-N witness.
+//
+// ★ It is NOT equivalent to "an escrow policy is configured". A loaded policy
+// only changes WHERE escrow coins live and gates ordinary spends FROM the
+// escrow address; it does not by itself gate the schedule's own releases. That
+// additionally needs escrowMultisigEnforced, which has no production caller
+// today, so in production this returns false — with OR without
+// config/escrow_multisig.json.
+func CGEReleasesAuthorised() bool {
+	return escrowEnforced()
+}
+
+// warnCGEAuthorizationStatus states, once per node startup, whether time-based
+// CGE releases are authorised. The negative case is a live gap in an
+// already-running mechanism, so it must not be a silent default, and the
+// message must name the REAL cause so an operator who correctly configured a
+// custody policy is not misled into believing the escrow is secured:
+//
+//   - enforcement is off because SetEscrowMultisigEnforced has no production
+//     caller, AND
+//   - nothing stages witnesses because SubmitCGEWitness has no production
+//     caller, so a block body's witness set is always empty.
+//
+// The per-release counterpart is emitted in applyCGEReleasesWithWitness, so an
+// auditor can see whether one specific release carried authority rather than
+// relying on this boot-time line.
+func warnCGEAuthorizationStatus() {
+	if CGEReleasesAuthorised() {
+		logger.Info("CGE release authorization: ON — time-based escrow releases require an M-of-N witness (escrow=%s)",
+			GetCGEEscrowAddress())
+		return
+	}
+	policyState := "no escrow custody policy is configured"
+	if EscrowPolicy() != nil {
+		policyState = "an escrow custody policy IS configured, but it does NOT gate these releases"
+	}
+	logger.Error("CGE releases are UNAUTHORISED: time-based vesting will move escrow→recipient with NO M-of-N witness (%s; escrow=%s). Cause: enforcement is disabled (SetEscrowMultisigEnforced has no production caller) and nothing stages witnesses (SubmitCGEWitness has no production caller). Do not treat the escrow as secured. See docs/custody-genesis-ceremony.md.",
+		policyState, GetCGEEscrowAddress())
+}

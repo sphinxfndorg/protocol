@@ -130,19 +130,31 @@ func (bc *Blockchain) publishActiveChainID() {
 	multisig.SetActiveChainID(chainIDForWitness(bc))
 }
 
-func cgeReleaseMessage(bc *Blockchain, recipient string, amount *big.Int, height uint64, expiry uint64) []byte {
-	var amt []byte
+// cgeReleaseMessage builds the exact custodian-signed authorization for one
+// time-based CGE escrow release. It binds the MILESTONE (the cumulative
+// unlocked target), not a block height: see
+// multisig.CGEVestingReleaseMessage. amount is the per-block delta, target
+// is the cumulative total those deltas accumulate toward.
+func cgeReleaseMessage(bc *Blockchain, recipient string, amount, target *big.Int, expiry uint64) []byte {
+	var delta, milestone []byte
 	if amount != nil {
-		amt = amount.Bytes()
+		delta = amount.Bytes()
 	}
-	return multisig.CustodyReleaseMessage(escrowMultisigDomain, chainIDForWitness(bc), GetCGEEscrowAddress(), recipient, amt, height, expiry)
+	if target != nil {
+		milestone = target.Bytes()
+	}
+	return multisig.CGEVestingReleaseMessage(escrowMultisigDomain, chainIDForWitness(bc), GetCGEEscrowAddress(), recipient, delta, milestone, expiry)
 }
 
+// devModuleReleaseMessage builds the custodian-signed authorization for one
+// development-module reward release. It is the message the escrow verification
+// hook (escrow_verify_hook.go) hands to policy.ReleaseDevelopmentModuleWithWitness,
+// so it must stay the single encoder shared by signer and verifier.
 func devModuleReleaseMessage(bc *Blockchain, recipient string, moduleID uint64, expiry uint64) []byte {
 	return multisig.DevModuleReleaseMessage(escrowMultisigDomain, chainIDForWitness(bc), GetCGEEscrowAddress(), recipient, moduleID, expiry)
 }
 
-func verifyCGEWitness(bc *Blockchain, w multisig.MultiSigWitness, recipient string, amount *big.Int, height uint64, headerTS uint64) bool {
+func verifyCGEWitness(bc *Blockchain, w multisig.MultiSigWitness, recipient string, amount, target *big.Int, headerTS uint64) bool {
 	p := activeEscrowPolicy()
 	if p == nil {
 		return false
@@ -155,24 +167,7 @@ func verifyCGEWitness(bc *Blockchain, w multisig.MultiSigWitness, recipient stri
 	if err := multisig.ValidateWitnessExpiry(w.Expiry, headerTS); err != nil {
 		return false
 	}
-	msg := cgeReleaseMessage(bc, recipient, amount, height, w.Expiry)
-	return multisig.VerifyThreshold(msg, w, headerTS)
-}
-
-func verifyDevModuleWitness(bc *Blockchain, w multisig.MultiSigWitness, recipient string, moduleID uint64, height uint64, headerTS uint64) bool {
-	p := activeEscrowPolicy()
-	if p == nil {
-		return false
-	}
-	if w.Policy.Domain != p.Domain {
-		w.Policy = *p
-	} else if len(w.Policy.PubKeys) == 0 {
-		w.Policy = *p
-	}
-	if err := multisig.ValidateWitnessExpiry(w.Expiry, headerTS); err != nil {
-		return false
-	}
-	msg := devModuleReleaseMessage(bc, recipient, moduleID, w.Expiry)
+	msg := cgeReleaseMessage(bc, recipient, amount, target, w.Expiry)
 	return multisig.VerifyThreshold(msg, w, headerTS)
 }
 

@@ -874,3 +874,91 @@ func (bc *Blockchain) WriteGenesisStateFromBlock(block *types.Block) error {
 
 	return gs.writeGenesisStateFile(bc.storage.GetStateDir())
 }
+
+// Registry for the M-of-N authorizer (and optional witness sink) used when the
+// process-global cached genesis block is built. This is the seam that lets a
+// policy-owned genesis vault produce a block 0 whose distributions carry
+// threshold custody witnesses — see GenesisState.BuildBlockWithCustody for the
+// builder and tx_auth.custodyPolicyOwns for the fail-closed check that makes
+// such witnesses mandatory once the vault resolves to a registered policy.
+//
+// Why a package-level registry and not a Blockchain field: getCachedGenesisBlock
+// (global.go) is a sync.Once value computed on the FIRST GetGenesisHash() call
+// in the process, which happens during chain-parameter construction — before
+// any Blockchain exists and before bind.StartNode reaches NewBlockchain. The
+// authorizer therefore has to be registered by whoever resolves the network
+// phase, exactly like SetGenesisSigner.
+
+var genesisDistributionAuthMu sync.Mutex
+
+var (
+	genesisDistributionAuth        GenesisDistributionAuthorizer
+	genesisDistributionAuthChainID uint64
+	genesisWitnessSink             func(*types.Block) error
+)
+
+// SetGenesisDistributionAuthorizer registers the authorizer used for block 0's
+// distribution transactions, bound to chainID. A nil auth restores the legacy
+// unsigned genesis path, which is what a vault with no registered policy keeps.
+//
+// chainID is bound into every witness message (via multisig.SpendMessage), so
+// it must be the chain the node will actually validate block 0 against —
+// devnet 73310, not the mainnet default.
+func SetGenesisDistributionAuthorizer(auth GenesisDistributionAuthorizer, chainID uint64) {
+	genesisDistributionAuthMu.Lock()
+	defer genesisDistributionAuthMu.Unlock()
+	genesisDistributionAuth = auth
+	if auth == nil {
+		genesisDistributionAuthChainID = 0
+	} else {
+		genesisDistributionAuthChainID = chainID
+	}
+}
+
+func getGenesisDistributionAuthorizer() (GenesisDistributionAuthorizer, uint64) {
+	genesisDistributionAuthMu.Lock()
+	defer genesisDistributionAuthMu.Unlock()
+	return genesisDistributionAuth, genesisDistributionAuthChainID
+}
+
+// SetGenesisWitnessSink registers a callback invoked once with the freshly
+// built custody-bearing genesis block, so the producer can persist the witness
+// set for peers that hold no custodian keys. A nil sink unregisters it.
+func SetGenesisWitnessSink(fn func(*types.Block) error) {
+	genesisDistributionAuthMu.Lock()
+	defer genesisDistributionAuthMu.Unlock()
+	genesisWitnessSink = fn
+}
+
+func getGenesisWitnessSink() func(*types.Block) error {
+	genesisDistributionAuthMu.Lock()
+	defer genesisDistributionAuthMu.Unlock()
+	return genesisWitnessSink
+}
+
+// GenesisDistributionAuthorizerConfigured reports whether block 0 will be
+// built with custody witnesses (i.e. an authorizer is registered). Used by the
+// devnet provisioning report and by tests.
+func GenesisDistributionAuthorizerConfigured() bool {
+	auth, _ := getGenesisDistributionAuthorizer()
+	return auth != nil
+}
+
+// resetGenesisCustodyForTest clears the authorizer, the witness sink and the
+// cached genesis block so a test can observe a first-build in isolation.
+// Production code never calls this: the cache is intentionally permanent.
+func resetGenesisCustody() {
+	SetGenesisDistributionAuthorizer(nil, 0)
+	SetGenesisWitnessSink(nil)
+	genesisDistributionAuthMu.Lock()
+	genesisOnce = sync.Once{}
+	genesisCached = nil
+	genesisHashValue = ""
+	genesisTimestampValue = 0
+	genesisDistributionAuthMu.Unlock()
+	// Forget the process-level idempotence marker too, so a test can exercise a
+	// fresh provisioning decision the way the next process start would.
+	devnetCustodyMu.Lock()
+	devnetCustodyApplied = nil
+	devnetCustodyMu.Unlock()
+}

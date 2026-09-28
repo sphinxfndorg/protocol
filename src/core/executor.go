@@ -1075,7 +1075,7 @@ func applyCGEReleasesWithWitness(bc *Blockchain, block *types.Block, stateDB *St
 		}
 		if escrowEnforced() {
 			w, ok := witnesses[alloc.Address]
-			if !ok || !verifyCGEWitness(bc, w.witness, alloc.Address, delta, block.GetHeight(), uint64(block.Header.Timestamp)) {
+			if !ok || !verifyCGEWitness(bc, w.witness, alloc.Address, delta, target, uint64(block.Header.Timestamp)) {
 				logger.Warn("applyCGEReleases: missing/invalid multisig witness for %s (%s) — skipping", alloc.Label, alloc.Address)
 				continue
 			}
@@ -1186,16 +1186,61 @@ func (bc *Blockchain) recordBlockGasSnapshot(block *types.Block, stateDB *StateD
 	stateDB.SetPrevBlockGas(block.Header.GasUsed, block.Header.GasLimit)
 }
 
-// ExecuteBlock is called from CommitBlock.
-func (bc *Blockchain) ExecuteBlock(block *types.Block) ([]byte, error) {
+// executeBlockStaged runs a block's transitions against a fresh StateDB and
+// returns the state root that a flush WOULD produce — without writing anything
+// to LevelDB.
+//
+// applyBlockTransitions only ever mutates the StateDB's pending maps and its
+// in-memory supply counters (totalSupply/genesisSupply/rewardsMinted); every
+// account write, contract write and supply increment is buffered until
+// StateDB.Commit(). That makes this the safe way to evaluate a block: the
+// caller compares the returned root against the consensus header and, when
+// they disagree, simply drops the handle — persistent state and rewards_minted
+// are left exactly as they were, so a retried block always reads the same
+// question instead of drifting further on every attempt.
+//
+// The root is computed with the same committed-plus-pending overlay that
+// previewStateRoot relies on, which is byte-identical to what Commit()
+// computes after flushing (Commit writes pending, clears it, then hashes the
+// same key set with the same values).
+//
+// The returned *StateDB is owned by the caller: flush it once the header state
+// root validates, or drop it on any refusal.
+//
+// Concurrency: identical to the old ExecuteBlock and to previewStateRoot. The
+// staged handle is private to this call — applyBlockTransitions and
+// computeStateRoot mutate and read only that handle's own pending maps plus
+// committed LevelDB rows, never another StateDB's buffers — and CommitBlock
+// serializes commits under bc.commitMu. RPC readers and previewStateRoot open
+// their own handles (each with fresh, empty pending maps) and therefore can
+// never observe this call's staged-but-unflushed writes, which live nowhere
+// but the returned handle.
+func (bc *Blockchain) executeBlockStaged(block *types.Block) ([]byte, *StateDB, error) {
 	stateDB, err := bc.newStateDB()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	if err := bc.applyBlockTransitions(block, stateDB); err != nil {
 		logger.Error("ExecuteBlock: applyBlockTransitions failed: %v", err)
-		return nil, fmt.Errorf("ExecuteBlock: execution failed: %w", err)
+		return nil, nil, fmt.Errorf("ExecuteBlock: execution failed: %w", err)
+	}
+
+	stateRoot, err := stateDB.computeStateRoot()
+	if err != nil {
+		return nil, nil, err
+	}
+	return stateRoot, stateDB, nil
+}
+
+// ExecuteBlock executes and immediately persists a block. This is the replay
+// path (checkpoint replay, state rebuild, ExecuteGenesisBlock, tests) where no
+// consensus header is being checked against the result. CommitBlock uses
+// executeBlockStaged instead so it can validate before flushing.
+func (bc *Blockchain) ExecuteBlock(block *types.Block) ([]byte, error) {
+	_, stateDB, err := bc.executeBlockStaged(block)
+	if err != nil {
+		return nil, err
 	}
 
 	stateRoot, err := stateDB.Commit()
@@ -1205,11 +1250,19 @@ func (bc *Blockchain) ExecuteBlock(block *types.Block) ([]byte, error) {
 	return stateRoot, nil
 }
 
-func (bc *Blockchain) previewStateRoot(height uint64, txs []*types.Transaction, proposerID string, headerTimestamp int64, witnesses []*types.CGEReleaseWitness) []byte {
-	stateDB, err := bc.newStateDB()
-	if err != nil {
-		logger.Warn("previewStateRoot: failed to open stateDB: %v", err)
-		return bc.calculateStateRootFallback()
+// previewStateRoot computes the state root block creation will seal, using
+// the caller's state handle when one is supplied. CreateBlock passes the SAME
+// handle it used to read cgeReleasesPendingAt, so the proposer's hot path
+// opens state once rather than twice; nil (tests, fallback paths) keeps the
+// previous open-our-own behaviour.
+func (bc *Blockchain) previewStateRoot(stateDB *StateDB, height uint64, txs []*types.Transaction, proposerID string, headerTimestamp int64, witnesses []*types.CGEReleaseWitness) []byte {
+	if stateDB == nil {
+		var err error
+		stateDB, err = bc.newStateDB()
+		if err != nil {
+			logger.Warn("previewStateRoot: failed to open stateDB: %v", err)
+			return bc.calculateStateRootFallback()
+		}
 	}
 
 	block := &types.Block{
@@ -1430,6 +1483,37 @@ func (bc *Blockchain) GetCheckpointMessage() (*consensus.CheckpointMessage, erro
 	}, nil
 }
 
+// genesisBlockForCheckpointCheck returns the hash of this node's height-0
+// block — the ONLY value the peer's GenesisHash may be compared against.
+//
+// ★ WHY THIS EXISTS INSTEAD OF bc.chain[0].GetHash(): chain[0] is "the first
+// element of the in-memory chain slice", which is only guaranteed to BE the
+// genesis block if the slice still starts at height 0. A node that trimmed,
+// compacted, or rebuilt its tip from a checkpoint has chain[0] pointing at a
+// LATER block; comparing against it then produces a "genesis hash mismatch"
+// during ordinary peer catch-up, in the exact shape observed live:
+// peer=<height-1 tip hash, bare>, local=GENESIS_<genesis hash>. Scanning for
+// the height-0 entry (with a fallback to chain[0] when the chain genuinely
+// contains exactly one genesis block) makes the comparison mean "are these
+// two nodes on the same chain from the start", not "is my first cached block
+// your genesis".
+//
+// This stays separate from the many other genesis-hash reads (kex, VDF,
+// storage) on purpose: those run at identity/handshake time when chain[0] is
+// genesis by construction. Checkpoint application is the one place the chain
+// slice may legitimately start above height 0.
+func (bc *Blockchain) genesisBlockForCheckpointCheck() string {
+	for _, b := range bc.chain {
+		if b != nil && b.GetHeight() == 0 {
+			return b.GetHash()
+		}
+	}
+	if len(bc.chain) > 0 && bc.chain[0] != nil {
+		return bc.chain[0].GetHash()
+	}
+	return ""
+}
+
 // ApplyCheckpointFromPeer applies a checkpoint received from a peer
 func (bc *Blockchain) ApplyCheckpointFromPeer(cp *consensus.CheckpointMessage) error {
 	bc.lock.Lock()
@@ -1440,10 +1524,19 @@ func (bc *Blockchain) ApplyCheckpointFromPeer(cp *consensus.CheckpointMessage) e
 		return nil
 	}
 
-	// Verify genesis hash matches
-	if cp.GenesisHash != bc.chain[0].GetHash() {
-		logger.Error("ApplyCheckpointFromPeer: genesis hash mismatch: peer=%s, local=%s",
-			cp.GenesisHash, bc.chain[0].GetHash())
+	// Verify genesis hash matches.
+	//
+	// ★ BOTH sides must be the GENESIS hash. Node operators kept hitting
+	// "genesis hash mismatch" during ordinary peer catch-up because a producer
+	// once filled cp.GenesisHash with a non-genesis block id, so compare each
+	// side explicitly against the node's own genesis height-0 block — not
+	// against whatever hash happened to be first in some slice. A "mismatch"
+	// that survives this check is a REAL chain split; anything else is a
+	// field/height bug, and the message must say which side looked wrong.
+	localGenesis := bc.genesisBlockForCheckpointCheck()
+	if cp.GenesisHash != localGenesis {
+		logger.Error("ApplyCheckpointFromPeer: genesis hash mismatch: peer=%s, local=%s (peer's TipHeight=%d TipHash=%s)",
+			cp.GenesisHash, localGenesis, cp.TipHeight, cp.TipHash)
 		return errors.New("genesis hash mismatch")
 	}
 
@@ -1693,10 +1786,30 @@ func (bc *Blockchain) CreateBlock() (block *types.Block, err error) {
 		currentTimestamp = time.Now().Unix()
 	}
 
-	// Custodian witnesses staged for exactly this height. They ride in the
-	// block body so verifiers need no local pool and no side channel.
-	blockWitnesses := bc.pendingBlockWitnesses(nextHeight)
-	stateRoot := bc.previewStateRoot(nextHeight, selectedTxs, proposerID, currentTimestamp, blockWitnesses)
+	// ★ ONE STATE OPEN for both halves of block creation: read which releases
+	// are pending (to decide which staged witnesses may ride this block), then
+	// hand the SAME handle to previewStateRoot to compute the sealed root.
+	// Opening a second handle here would double the state opens on the
+	// proposer's hot path for no reason — and anything that reads state twice
+	// risks disagreeing with itself if the two reads ever differ.
+	previewState, perr := bc.newStateDB()
+	if perr != nil {
+		logger.Warn("CreateBlock: preview state open: %v (no witnesses will be attached)", perr)
+	}
+	// Authorizations staged for this block: not-before target height AND a
+	// release actually pending at the timestamp being sealed, so a witness is
+	// never spent on a block that has nothing to release for it. They ride in
+	// the block body so verifiers need no local pool and no side channel.
+	// StageCGEWitnessesFromDir is the production caller for
+	// SubmitCGEWitness: custodian pre-signed artifacts dropped into the
+	// staging directory reach the pool here. refTime is chain-derived (the
+	// timestamp about to be sealed), never a wall clock; a malformed drop is
+	// logged and skipped inside, never fatal.
+	if _, err := bc.StageCGEWitnessesFromDir(bc.cgeWitnessStagingDir(), uint64(currentTimestamp)); err != nil {
+		logger.Warn("CreateBlock: CGE witness staging: %v", err)
+	}
+	blockWitnesses := bc.stagedWitnesses(cgeReleasesPendingAt(previewState, currentTimestamp), nextHeight)
+	stateRoot := bc.previewStateRoot(previewState, nextHeight, selectedTxs, proposerID, currentTimestamp, blockWitnesses)
 
 	logger.Info("Creating block with timestamp: %d (%s)",
 		currentTimestamp, time.Unix(currentTimestamp, 0).Format(time.RFC3339))
@@ -1780,7 +1893,7 @@ func (bc *Blockchain) CreateBlock() (block *types.Block, err error) {
 	// The staged witnesses are now committed to this block's body; clear them
 	// so the same authorization can never be attached to a second block.
 	if len(blockWitnesses) > 0 {
-		bc.dropPendingBlockWitnesses(nextHeight)
+		bc.dropStagedWitnesses(blockWitnesses)
 	}
 
 	// Cache merkle root in consensus engine

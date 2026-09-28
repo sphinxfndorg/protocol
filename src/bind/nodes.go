@@ -296,6 +296,37 @@ func StartNodeWithOptions(
 		logger.Info("FULL PBFT CONSENSUS (same-box) — %d validators", totalNodes)
 	}
 
+	// ════════════════════════════════════════════════════════════════════
+	// ★ DEVNET AUTO-CUSTODY — must run BEFORE SECTION 1 below.
+	//
+	// Resolving chain parameters calls core.GetGenesisHash(), which is a
+	// process-global sync.Once that BUILDS block 0 on first use. Block 0's
+	// distributions are authorized by the genesis vault, so the vault policy,
+	// the escrow policy and (for the producing node) the block-0 authorizer
+	// all have to exist before that one-time build — otherwise the node caches
+	// an unsigned block 0 that the genesis guard then refuses.
+	//
+	// Devnet-only and fail-closed: on testnet/mainnet this is a no-op, and the
+	// first node (no --seeds) is the only one allowed to GENERATE the policies.
+	// ════════════════════════════════════════════════════════════════════
+	devnetCustody, custodyErr := core.AutoProvisionDevnetCustody(core.DevnetCustodyOptions{
+		NetworkType:   networkType,
+		BootstrapNode: seeds == "",
+		DataDir:       dataDir,
+	})
+	if custodyErr != nil {
+		return fmt.Errorf("devnet auto-custody: %w", custodyErr)
+	}
+	// If something already computed genesis before we got here (a host that
+	// called core.GetGenesisHash() first), the block-0 vault address is frozen
+	// and provisioning can no longer affect it. Fail loudly here rather than let
+	// it surface later as a misleading "insufficient balance" executing block 0.
+	if devnetCustody != nil && devnetCustody.Enabled {
+		if violErr := core.GenesisCustodyOrderingViolation(); violErr != nil {
+			return fmt.Errorf("devnet auto-custody: %w", violErr)
+		}
+	}
+
 	// SECTION 1 — chain identification
 	// Use the correct chain parameters for the running network type.
 	// Previously this used commit.SphinxChainParams() which always returns mainnet
@@ -311,6 +342,20 @@ func StartNodeWithOptions(
 		coreChainParams = core.GetSphinxChainParams()
 	}
 	logger.Info("Chain: %s  ChainID=%d  Symbol=%s", coreChainParams.ChainName, coreChainParams.ChainID, coreChainParams.Symbol)
+
+	// Belt-and-braces phase gate: if auto-custody engaged, the chain the node
+	// actually resolved must be devnet. This is the check that makes it
+	// impossible for devnet-only auto-provisioned keys to arm on a chain that
+	// carries value, even if the --network selector and the parameter table
+	// ever drift apart.
+	if devnetCustody != nil && devnetCustody.Enabled && !coreChainParams.IsDevnet() {
+		return fmt.Errorf("devnet auto-custody engaged for --network=%q but resolved %s (ChainID=%d), which is not devnet — refusing to start with devnet-only auto-provisioned custody material",
+			networkType, coreChainParams.ChainName, coreChainParams.ChainID)
+	}
+	if devnetCustody != nil && devnetCustody.Enabled {
+		logger.Warn("DEVNET AUTO-CUSTODY ACTIVE: vault=%s escrow=%s signer=%v replay=%v — this custody set is devnet convenience, NOT real M-of-N security.",
+			devnetCustody.VaultAddress, devnetCustody.EscrowAddress, devnetCustody.SigningNode, devnetCustody.ReplayNode)
+	}
 
 	networkType = "devnet"
 	logger.Info("Network type: %s (%s)", networkType, core.GetNetworkDisplayName(networkType))

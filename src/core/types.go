@@ -210,6 +210,10 @@ type Blockchain struct {
 	// chainWeight is the cumulative PBFT attestation weight of the current
 	// canonical chain. It is updated atomically whenever a block is committed.
 	chainWeight *big.Int
+
+	// cgeWitnessDir overrides DefaultCGEWitnessDir for CGE witness staging
+	// (tests). Empty means the default. Set via SetCGEWitnessDir.
+	cgeWitnessDir string
 }
 
 // GenesisState holds the complete genesis configuration used to bootstrap a node.
@@ -1122,6 +1126,14 @@ type AtomicCommitJournal struct {
 	// also the amount rollback restores to).
 	BurnedThisBlockNSPX string `json:"burned_this_block_nspx,omitempty"`
 	BurnedBeforeNSPX    string `json:"burned_before_nspx,omitempty"`
+
+	// Supply counters snapshotted by StartAtomicCommit before the block ran.
+	// totalSupply is recoverable from account balances, but these two are pure
+	// accumulators that only StateDB.Commit() writes, so a rolled-back block
+	// would otherwise leave them permanently ahead of the network. Captured
+	// here and written back by restoreSupplyCounters.
+	GenesisSupplyBefore string `json:"genesis_supply_before,omitempty"`
+	RewardsMintedBefore string `json:"rewards_minted_before,omitempty"`
 }
 
 // ReorgJournal records chain reorganization state for crash recovery

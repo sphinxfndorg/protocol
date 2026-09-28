@@ -129,6 +129,50 @@ The Mint Data screen allows the user to select any regular file and attach a cry
 
 Minting is a gated, paid operation governed by the consensus policy (`src/policy`): the wallet must hold at least the minimum mint balance (100 SPX) — enforced against the node's live `getbalance` — and each mint pays the policy mint fee (default 1 SPX) through the anchor transaction's gas fee. The screen shows the floor, the fee, and the user's current balance before confirming.
 
+#### Collections: 1 contract holds many NFTs
+
+A SIP-721 **collection** is one smart-contract address; each **NFT** is one
+`tokenId` inside it (`mint` allocates `sip721:info.next_token_id`, stores
+`tokenURI[tokenId]`/`ownerOf[tokenId]`, and indexes `sip721:mint:<mintID>`).
+Minting a new file mints a new `tokenId` — it does **not** deploy a new
+contract. Deploy one collection per publisher/series (e.g. `Datasets/DSC`),
+not one per file: per-file deploys waste `21000+100000+code*50` gas each and
+fragment `Marketplace` discovery (`SearchSIP721Tokens` scans `1..NextTokenID-1`
+inside one collection only).
+
+The wallet remembers **one active/default** collection in
+`~/.sphinx/usi_collection.json` (`gui/helper.go:SavedCollection`), which Mint
+Data mints into and Marketplace searches by default. Old collections stay
+valid on-chain after you switch — only the default pointer changes.
+
+**A. Mint into a NEW collection (deploy once, then reuse):**
+
+1. Mint Data → `Marketplace Collection (SIP-721)` → `Deploy New Collection`.
+2. Enter `Name` + `Symbol` → `Deploy`. The address is **generated on-chain**
+   (`contracts.ContractAddress(sender,nonce,code)`, canonical
+   `SPIF XXXX …` form) — never typed by hand.
+3. The GUI saves it to `usi_collection.json` and shows
+   `Generated for you: <Name> (<Symbol>) — mints go into this collection.`
+4. Fill `NFT Metadata (ERC-721)` (`NFT name` required — it builds the
+   `ipfs://<metadataCID>` `tokenURI`), pick your file, `Mint Data`.
+   Every later mint reuses the same address automatically.
+
+**B. Mint into an EXISTING collection (adopt or paste):**
+
+1. Same identity, another machine: `Use Existing Address…` → paste the
+   contract address. The GUI validates it via
+   `GetSIP721CollectionInfo` (`getcontractstorage … sip721:info`) before
+   adopting — a non-collection is rejected, never saved blindly.
+2. Someone else's collection (you can only mint if you are its owner —
+   the node enforces `mint requires collection owner` at consensus):
+   paste its address into Mint Data's collection field, or into
+   Marketplace's `Collection & Token` lookup + `Discover Minted Data`.
+3. Mint as normal: new file → new `tokenId` in that same contract
+   (e.g. `Token #1 = nftt.png`, `Token #2 = next.png`).
+
+Use `Copy` next to the collection address to share it (Marketplace search,
+or another wallet's `Use Existing Address…`).
+
 ### IPFS dependency for minted data
 
 Minting pins the signed data to **IPFS** so a verifier can fetch the payload by CID. IPFS is a **separate daemon** from the Sphinx node — running the chain nodes does not start IPFS. Start a Kubo daemon (or IPFS Desktop) and leave it listening on the default API port:

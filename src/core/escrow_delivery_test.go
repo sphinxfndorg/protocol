@@ -84,20 +84,24 @@ func TestEscrowWitnessDeliveryTwoNodesFromBlockData(t *testing.T) {
 	proposer, _ := buildEscrowNode(t, genesisTS)
 	verifier, verifierDB := buildEscrowNode(t, genesisTS)
 
-	msg := cgeReleaseMessage(proposer, founder.Address, delta, height, expiry)
+	msg := cgeReleaseMessage(proposer, founder.Address, delta, delta, expiry)
 	w := signWitness(t, proposer, p, sks, pks, []int{0, 1}, msg, expiry)
 
 	// Proposer intake: goes through the expiry-horizon sanity check.
 	if err := proposer.SubmitCGEWitness(founder.Address, height, w, uint64(headerTS)); err != nil {
 		t.Fatalf("SubmitCGEWitness: %v", err)
 	}
-	staged := proposer.pendingBlockWitnesses(height)
+	pdb, err := proposer.newStateDB()
+	if err != nil {
+		t.Fatalf("open proposer state: %v", err)
+	}
+	staged := proposer.stagedWitnesses(cgeReleasesPendingAt(pdb, headerTS), height)
 	if len(staged) != 1 || staged[0].Recipient != founder.Address {
 		t.Fatalf("staged witnesses = %+v, want one for %s", staged, founder.Address)
 	}
 
 	// The proposer's preview must already include the gated release.
-	previewRoot := proposer.previewStateRoot(height, nil, "", headerTS, staged)
+	previewRoot := proposer.previewStateRoot(nil, height, nil, "", headerTS, staged)
 	if len(previewRoot) == 0 {
 		t.Fatal("proposer preview produced an empty state root")
 	}
@@ -165,9 +169,9 @@ func TestEscrowWitnessDeliveryRejectsBadWitnesses(t *testing.T) {
 	// they must be signed against a real chain-params context — the same one
 	// the executing node recomputes from.
 	msgBC, _ := buildEscrowNode(t, genesisTS)
-	msg := cgeReleaseMessage(msgBC, founder.Address, delta, height, expiry)
-	expiredMsg := cgeReleaseMessage(msgBC, founder.Address, delta, height, uint64(headerTS)-1)
-	soonMsg := cgeReleaseMessage(msgBC, founder.Address, delta, height, uint64(headerTS)+1)
+	msg := cgeReleaseMessage(msgBC, founder.Address, delta, delta, expiry)
+	expiredMsg := cgeReleaseMessage(msgBC, founder.Address, delta, delta, uint64(headerTS)-1)
+	soonMsg := cgeReleaseMessage(msgBC, founder.Address, delta, delta, uint64(headerTS)+1)
 
 	// Each case runs on a fresh node, so a rejected release is visible as an
 	// untouched founder balance.
@@ -228,22 +232,26 @@ func TestEscrowWitnessIntakeHorizon(t *testing.T) {
 
 	bc, _ := buildEscrowNode(t, int64(CanonicalGenesisTimestamp))
 	ref := uint64(CanonicalGenesisTimestamp)
+	// Intake canonicalizes against the time-based allocations, so a
+	// placeholder recipient is rejected outright.
+	founder := allocByLabel(t, "Founder")
 
-	if err := bc.SubmitCGEWitness("recipient", 1, multisig.MultiSigWitness{Policy: p, Expiry: 0}, ref); err == nil {
+	if err := bc.SubmitCGEWitness(founder.Address, 1, multisig.MultiSigWitness{Policy: p, Expiry: 0}, ref); err == nil {
 		t.Fatal("unset expiry must be rejected at intake")
 	}
-	if err := bc.SubmitCGEWitness("recipient", 1, multisig.MultiSigWitness{Policy: p, Expiry: ref + 60}, ref); err == nil {
+	if err := bc.SubmitCGEWitness(founder.Address, 1, multisig.MultiSigWitness{Policy: p, Expiry: ref + 60}, ref); err == nil {
 		t.Fatal("expiry inside the minimum horizon must be rejected at intake")
 	}
 	ok := multisig.MultiSigWitness{Policy: p, Sigs: map[int][]byte{0: {0x01}}, Expiry: ref + 30*24*3600}
-	if err := bc.SubmitCGEWitness("recipient", 1, ok, ref); err != nil {
+	if err := bc.SubmitCGEWitness(founder.Address, 1, ok, ref); err != nil {
 		t.Fatalf("one-month horizon witness must be accepted at intake: %v", err)
 	}
-	if got := bc.pendingBlockWitnesses(1); len(got) != 1 {
-		t.Fatalf("staged witnesses = %d, want 1", len(got))
+	staged := bc.stagedWitnessList()
+	if len(staged) != 1 {
+		t.Fatalf("staged witnesses = %d, want 1", len(staged))
 	}
-	bc.dropPendingBlockWitnesses(1)
-	if got := bc.pendingBlockWitnesses(1); len(got) != 0 {
+	bc.dropStagedWitnesses(staged)
+	if got := bc.stagedWitnessList(); len(got) != 0 {
 		t.Fatalf("staged witnesses must be cleared after sealing, got %d", len(got))
 	}
 }

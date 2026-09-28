@@ -104,11 +104,26 @@ SUBCOMMANDS
                            signed proposals, deduped by transaction id.)
                   create  --pubkey <files...> --threshold M --domain <s> --out policy.json
                   message --policy policy.json --kind spend|cge-release|dev-module \\
-                          --receiver <addr> --amount-spx <n> --nonce <n> --expiry <unix> \\
+                          --receiver <addr> --amount-spx <n> --expiry <unix> \\
+                          [--nonce <n>]            (spend: account nonce / dev-module: module id)
+                          [--milestone-nspx <n>]   (cge-release ONLY: cumulative unlocked
+                                                   target naming the milestone; required —
+                                                   vesting witnesses bind the milestone,
+                                                   never a block height)
                           --out msg.msg            (builds the exact bytes custodians sign)
                   sign    --policy policy.json --tx msg.msg --key <keyfile> --out sig.json
                   combine --policy policy.json --sig sig1.json --sig sig2.json \\
                           --expiry <unix> --release-time <unix> --out witness.json
+                  coverage --policy config/escrow_multisig.json \\
+                           [--dir config/cge_witnesses] [--rpc 127.0.0.1:8700] \\
+                           [--now <unix>] [--horizon <unix>] [--json]
+                          (PRE-FLIGHT for enforcing CGE releases: audits the
+                           staged witness files and reports, per time-based
+                           recipient, whether a valid witness reaches past the
+                           horizon — then exits non-zero if ANY recipient is
+                           uncovered. Run this before enabling enforcement:
+                           an uncovered recipient is not protected, it is
+                           silently skipped.)
 
 TOKENOMICS OVERVIEW
   Genesis Supply: 1,170,000,000 SPX (23.4% of 5B max supply) — 1,040,000,000 SPX remainder + 130,000,000 SPX sold (Angel Round + Public ICO), both funded in block 0
@@ -239,7 +254,31 @@ func runNodeCmd(args []string) error {
 	// automatic flows (block 0 minting and applyCGEReleases respectively);
 	// this watcher does not touch either.
 	var autoSpendArgs []string
-	if _, statErr := os.Stat(custodyRoles["escrow"].OutPath); statErr == nil {
+	// Per-node FIRST: the escrow policy lives under this node's own datadir in
+	// the fully per-node layout (<datadir>/config/escrow_multisig.json). The
+	// shared-root path is the legacy fallback for nodes provisioned before the
+	// per-node layout landed. NEVER the reverse: a node must not silently pick
+	// up another node's keys.
+	escrowPolicyPath := core.EscrowPolicyPathForDataDir(*dataDir)
+	proposalsDir := core.CustodyProposalsDirForDataDir(*dataDir)
+	if _, statErr := os.Stat(escrowPolicyPath); statErr != nil && *dataDir != "" {
+		if _, legacyErr := os.Stat(custodyRoles["escrow"].OutPath); legacyErr == nil {
+			escrowPolicyPath = custodyRoles["escrow"].OutPath
+			// ERROR, not Warn: default level is INFO so both display, but ERROR
+			// marks this as a migration condition the operator must close out
+			// (copy the bundle into <datadir>/config), not a routine notice.
+			// A silently-misconfigured node must never pass via this fallback
+			// without a loud, greppable line.
+			logger.Error("MIGRATION: escrow policy found ONLY at legacy shared path %s — copy it to %s for the fully per-node layout (this fallback will be removed)", escrowPolicyPath, core.EscrowPolicyPathForDataDir(*dataDir))
+		}
+	}
+	proposalsPathForMsg := proposalsDir
+	if _, statErr := os.Stat(proposalsDir); statErr != nil && *dataDir != "" {
+		if _, legacyErr := os.Stat(custodyProposalsDir); legacyErr == nil {
+			proposalsPathForMsg = custodyProposalsDir
+		}
+	}
+	if _, statErr := os.Stat(escrowPolicyPath); statErr == nil {
 		// A multisig policy has been provisioned (via "multisig devnet" or
 		// equivalent) — the watcher is expected to work, so an unreadable or
 		// invalid policy is a hard startup error, not a silent no-op. No
@@ -251,13 +290,13 @@ func runNodeCmd(args []string) error {
 			walletRPC = fmt.Sprintf("127.0.0.1:%d", 8700+*nodeIndex)
 		}
 		spendArgs, err := autoWatchArgs(
-			custodyRoles["escrow"].OutPath, walletRPC, custodyProposalsDir)
+			escrowPolicyPath, walletRPC, proposalsDir)
 		if err != nil {
 			return err
 		}
 		autoSpendArgs = spendArgs
 	} else {
-		logger.Info("no multisig policy at %s — auto multisig spend watcher disabled (run \"multisig devnet\" to enable treasury spends)", custodyRoles["escrow"].OutPath)
+		logger.Info("no multisig policy at %s — auto multisig spend watcher disabled (run \"multisig devnet\" to enable treasury spends); legacy shared path %s also checked (%s)", escrowPolicyPath, custodyRoles["escrow"].OutPath, proposalsPathForMsg)
 	}
 
 	// Build the NodePortConfig using network package
@@ -387,6 +426,35 @@ func runNodeCmd(args []string) error {
 	}
 
 	var vdfParams *consensus.VDFParams
+
+	// ════════════════════════════════════════════════════════════════════
+	// ★ DEVNET AUTO-CUSTODY MUST BE THE FIRST THING THAT TOUCHES GENESIS.
+	//
+	// core.GetGenesisHash() below (the --pbft branch derives VDF parameters
+	// from it) is a process-global sync.Once that BUILDS block 0 on first use.
+	// Block 0's distributions are paid by the genesis vault, so the vault policy
+	// and the escrow policy must exist before that build — otherwise genesis is
+	// cached with the legacy unsigned vault address and block 0 later fails with
+	// a misleading "insufficient balance" while executing. Provisioning here,
+	// before any path that can call GetGenesisHash(), is what makes that
+	// impossible; bind.StartNode re-invokes it as a no-op safety net for hosts
+	// that call it directly.
+	// ════════════════════════════════════════════════════════════════════
+	custody, custodyErr := core.AutoProvisionDevnetCustody(core.DevnetCustodyOptions{
+		NetworkType:   *networkFlag,
+		BootstrapNode: *seeds == "",
+		DataDir:       *dataDir,
+	})
+	if custodyErr != nil {
+		return fmt.Errorf("devnet auto-custody: %w", custodyErr)
+	}
+	if custody != nil && custody.Enabled {
+		if violErr := core.GenesisCustodyOrderingViolation(); violErr != nil {
+			return fmt.Errorf("devnet auto-custody: %w", violErr)
+		}
+		logger.Warn("DEVNET AUTO-CUSTODY armed before genesis: vault=%s escrow=%s signer=%v replay=%v",
+			custody.VaultAddress, custody.EscrowAddress, custody.SigningNode, custody.ReplayNode)
+	}
 
 	if *pbftMode {
 		logger.Info("═══════════════════════════════════════════════════════════════")

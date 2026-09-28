@@ -171,20 +171,40 @@ func getCachedGenesisBlock() *types.Block {
 		// ChainName here is irrelevant to the hash — only timestamp, difficulty,
 		// gas limit, and extra data feed into BuildBlock() → FinalizeHash().
 		gs := DefaultGenesisState()
-		genesisCached = gs.BuildBlock()
+
+		// A policy-owned vault MUST authorize its block-0 distributions by
+		// M-of-N agreement (tx_auth.custodyPolicyOwns makes the unsigned
+		// genesis exemption unavailable to such a vault). When an authorizer is
+		// registered — devnet auto-custody, or a real ceremony's — build block 0
+		// through the custody path so the witnesses are part of the body, hence
+		// part of TxsRoot, hence part of the hash every node recomputes.
+		auth, authChainID := getGenesisDistributionAuthorizer()
+		if auth != nil {
+			genesisCached = gs.BuildBlockWithCustody(auth, authChainID)
+			logger.Info("Genesis block built WITH M-of-N custody witnesses (chainID=%d, vault=%s)",
+				authChainID, GenesisVaultAddress)
+		} else {
+			genesisCached = gs.BuildBlock()
+
+			// No authorizer, yet the vault resolves to a custody policy: this
+			// block cannot authorize its own distributions, so surface that here
+			// instead of letting it fail later as a confusing block-0 error.
+			if custodyPolicyOwns(GenesisVaultAddress) {
+				logger.Error("genesis vault %s is a custody policy but the genesis block was built UNSIGNED: block-0 distributions require M-of-N witnesses — build block 0 with GenesisState.BuildBlockWithCustody before starting this node", GenesisVaultAddress)
+			}
+		}
+
 		genesisHashValue = genesisCached.GetHash()
 		genesisTimestampValue = gs.Timestamp
 		logger.Info("Genesis block computed once: %s at timestamp %d",
 			genesisHashValue, genesisTimestampValue)
 
-		// A policy-owned vault must authorize its block-0 distributions by
-		// M-of-N agreement (GenesisState.BuildBlockWithCustody + tx_auth's
-		// custodyPolicyOwns). The plain BuildBlock() above is unsigned, so once
-		// config/genesis_multisig.json is loaded this block is NOT a valid
-		// genesis block — surface that here instead of letting it fail later as
-		// a confusing block-0 authorization error.
-		if custodyPolicyOwns(GenesisVaultAddress) {
-			logger.Error("genesis vault %s is a custody policy but the genesis block was built UNSIGNED: block-0 distributions require M-of-N witnesses — build block 0 with GenesisState.BuildBlockWithCustody before starting this node", GenesisVaultAddress)
+		// Let the producer persist the witness set, so peers that hold no
+		// custodian keys can rebuild the identical block 0 (core/devnet_custody.go).
+		if sink := getGenesisWitnessSink(); sink != nil {
+			if err := sink(genesisCached); err != nil {
+				logger.Error("genesis witness sink failed: %v", err)
+			}
 		}
 	})
 	signGenesisIfPossible(genesisCached)

@@ -18,7 +18,7 @@ import (
 
 func runMultisigCmd(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("multisig requires a subcommand: devnet, spend, create, message, sign, combine")
+		return fmt.Errorf("multisig requires a subcommand: devnet, spend, create, message, sign, combine, coverage")
 	}
 	switch args[0] {
 	case "devnet":
@@ -33,6 +33,8 @@ func runMultisigCmd(args []string) error {
 		return runMultisigSign(args[1:])
 	case "combine":
 		return runMultisigCombine(args[1:])
+	case "coverage":
+		return runMultisigCoverage(args[1:])
 	default:
 		return fmt.Errorf("unknown multisig subcommand %q", args[0])
 	}
@@ -123,7 +125,7 @@ func parseAmount(nspxStr, spxStr string) (*big.Int, error) {
 // runMultisigMessage builds the exact message a custodian must sign, using the
 // same policy, domain, chain ID and canonical encoder the verifier uses. It is
 // the operator-facing counterpart of musig.SpendMessage /
-// CustodyReleaseMessage / DevModuleReleaseMessage: custodians never
+// CGEVestingReleaseMessage / DevModuleReleaseMessage: custodians never
 // hand-compute the bytes, and a drift between signer and verifier is
 // impossible because both call the same function.
 //
@@ -138,7 +140,8 @@ func runMultisigMessage(args []string) error {
 	receiver := fs.String("receiver", "", "destination address")
 	amountNSPX := fs.String("amount-nspx", "", "exact amount in nSPX (decimal)")
 	amountSPX := fs.String("amount-spx", "", "amount in whole SPX (decimal)")
-	nonce := fs.Uint64("nonce", 0, "account nonce (spend) / block height (cge-release) / module id (dev-module)")
+	nonce := fs.Uint64("nonce", 0, "account nonce (spend) / module id (dev-module). Unused for cge-release: vesting witnesses bind the milestone (--milestone-nspx), never a height")
+	milestoneNSPX := fs.String("milestone-nspx", "", "cge-release only: cumulative unlocked target in nSPX that names the milestone being authorized (required for cge-release)")
 	expiry := fs.Uint64("expiry", 0, "witness expiry as a unix timestamp")
 	chainID := fs.Uint64("chain-id", defaultCustodyChainID, "chain id bound into the message")
 	releaseTime := fs.Uint64("release-time", 0, "expected release unix timestamp for the expiry-horizon check (0 = skip)")
@@ -180,7 +183,11 @@ func runMultisigMessage(args []string) error {
 		if amount == nil {
 			return fmt.Errorf("--kind cge-release requires --amount-nspx or --amount-spx")
 		}
-		msg = multisig.CustodyReleaseMessage(p.Domain, *chainID, from, *receiver, amount.Bytes(), *nonce, *expiry)
+		milestone, ok := new(big.Int).SetString(strings.TrimSpace(*milestoneNSPX), 10)
+		if !ok || milestone == nil || milestone.Sign() <= 0 {
+			return fmt.Errorf("--kind cge-release requires --milestone-nspx (the cumulative unlocked target naming this milestone)")
+		}
+		msg = multisig.CGEVestingReleaseMessage(p.Domain, *chainID, from, *receiver, amount.Bytes(), milestone.Bytes(), *expiry)
 	case "dev-module":
 		msg = multisig.DevModuleReleaseMessage(p.Domain, *chainID, from, *receiver, *nonce, *expiry)
 	default:

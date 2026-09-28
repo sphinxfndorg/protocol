@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
 	multisig "github.com/sphinxfndorg/protocol/src/core/musig"
@@ -191,6 +192,39 @@ func TestMultisigMessageMatchesVerifierEncoding(t *testing.T) {
 	}
 }
 
+// TestMultisigMessageRequiresMilestone proves --kind cge-release cannot be
+// built without --milestone-nspx. The milestone names the release the
+// witness authorizes; a message without it could not be verified against any
+// release, so refusing here turns a ceremony-time typo into an immediate
+// local error instead of a dead witness.
+func TestMultisigMessageRequiresMilestone(t *testing.T) {
+	dir := t.TempDir()
+	km, err := key.NewKeyManager()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := writeCustodianKeys(t, dir, 0, km)
+	policyPath := filepath.Join(dir, "escrow.json")
+	if err := runMultisigCreate([]string{
+		"--threshold", "1", "--domain", "sphinx-escrow-v1",
+		"--pubkey", c.pubPath, "--out", policyPath,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	err = runMultisigMessage([]string{
+		"--policy", policyPath, "--kind", "cge-release",
+		"--receiver", "00000000000000000000000000000000000000BB",
+		"--amount-nspx", "100", "--expiry", "1900000000", "--chain-id", "7331",
+		"--out", filepath.Join(dir, "cge.msg"),
+	})
+	if err == nil {
+		t.Fatal("cge-release without --milestone-nspx must be refused")
+	}
+	if !strings.Contains(err.Error(), "--milestone-nspx") {
+		t.Fatalf("the refusal must name --milestone-nspx, got: %v", err)
+	}
+}
+
 // TestMultisigMessageCGEKindsMatchVerifier covers the two protocol-triggered
 // message kinds, which share the canonical encoder with the CGE verifier.
 func TestMultisigMessageCGEKindsMatchVerifier(t *testing.T) {
@@ -217,6 +251,7 @@ func TestMultisigMessageCGEKindsMatchVerifier(t *testing.T) {
 	}
 	receiver := "00000000000000000000000000000000000000BB"
 	amount := new(big.Int).Mul(big.NewInt(6250000), big.NewInt(1e18))
+	milestone := new(big.Int).Mul(big.NewInt(6250000), big.NewInt(1e18))
 	refTS := uint64(1800000000)
 	expiry := refTS + 30*24*3600
 
@@ -224,7 +259,7 @@ func TestMultisigMessageCGEKindsMatchVerifier(t *testing.T) {
 	if err := runMultisigMessage([]string{
 		"--policy", policyPath, "--kind", "cge-release",
 		"--receiver", receiver, "--amount-nspx", amount.String(),
-		"--nonce", "2", "--expiry", itoa(expiry), "--chain-id", "7331", "--out", out,
+		"--milestone-nspx", milestone.String(), "--expiry", itoa(expiry), "--chain-id", "7331", "--out", out,
 	}); err != nil {
 		t.Fatalf("cge-release message: %v", err)
 	}
@@ -232,7 +267,7 @@ func TestMultisigMessageCGEKindsMatchVerifier(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantRelease := multisig.CustodyReleaseMessage(p.Domain, 7331, escrow, receiver, amount.Bytes(), 2, expiry)
+	wantRelease := multisig.CGEVestingReleaseMessage(p.Domain, 7331, escrow, receiver, amount.Bytes(), milestone.Bytes(), expiry)
 	if hex.EncodeToString(got) != hex.EncodeToString(wantRelease) {
 		t.Fatalf("cge-release message = %x, want %x", got, wantRelease)
 	}

@@ -1888,15 +1888,21 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 	}
 
 	// ════════════════════════════════════════════════════════════════════════
-	// CRITICAL: Execute block, compute real StateRoot, embed in header
+	// CRITICAL: execute the block STAGED, validate, then flush
 	// ════════════════════════════════════════════════════════════════════════
-	// The state root MUST be computed and embedded in the block header BEFORE
-	// the block is stored. Previously, the state root was computed but the
-	// header was left immutable — meaning the stored block had a different
-	// state root than what execution produced. This is a consensus bug:
-	// nodes that replay the same block must arrive at the same state root,
-	// and that root must be in the header so light clients can verify.
-	stateRoot, err := bc.ExecuteBlock(typeBlock)
+	// executeBlockStaged applies the block's transitions into StateDB's
+	// pending buffers and in-memory counters only — nothing reaches LevelDB
+	// until the flush below. That ordering is what makes a divergent block
+	// refusal idempotent: a refused attempt leaves accounts, contract state,
+	// total_supply and rewards_minted byte-for-byte untouched, so every retry
+	// starts from the same pre-block state instead of minting another reward
+	// and producing a different root each time.
+	//
+	// The state root MUST still be the real execution root and must be checked
+	// against the header BEFORE the block is stored: nodes that replay the same
+	// block must arrive at the same state root, and that root must be in the
+	// header so light clients can verify.
+	stateRoot, stagedState, err := bc.executeBlockStaged(typeBlock)
 	if err != nil {
 		logger.Error("ERROR ExecuteBlock failed: %v", err)
 		// Wrapped with consensus.ErrInvalidBlockTx — see the comment on the
@@ -1905,12 +1911,15 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 		// exactly as deterministic as an auth failure: rebuilding the same
 		// block will fail the same way every time, so the offending
 		// transaction(s) need to be evicted rather than retried.
+		//
+		// Nothing was written, so abort the journal rather than Rollback()ing
+		// state that was never mutated.
 		if jm != nil {
-			jm.Rollback()
+			jm.AbortAtomicCommit()
 		}
 		return fmt.Errorf("CommitBlock: execution failed: %w: %w", err, consensus.ErrInvalidBlockTx)
 	}
-	logger.Info("SUCCESS Block executed, stateRoot=%x", stateRoot)
+	logger.Info("SUCCESS Block executed (staged), stateRoot=%x", stateRoot)
 
 	// ════════════════════════════════════════════════════════════════════════
 	// CONSENSUS-SAFETY FIX: never silently rehash a divergent block
@@ -1942,6 +1951,34 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 	if !bytes.Equal(typeBlock.Header.StateRoot, stateRoot) {
 		logger.Error("ERROR STATE DIVERGENCE DETECTED at height %d: header claims StateRoot=%x, local execution produced=%x — refusing to commit",
 			typeBlock.GetHeight(), typeBlock.Header.StateRoot, stateRoot)
+
+		// ★ Refuse WITHOUT having touched persistent state.
+		//
+		// The journal was opened before execution (StartAtomicCommit), but the
+		// execution above was staged: this attempt's account writes, contract
+		// writes and block-reward mint all live in StateDB's pending buffers,
+		// and returning here drops the handle, discarding them. Previously
+		// ExecuteBlock flushed via stateDB.Commit() before this comparison, so
+		// every retry started from already-mutated state, minted another
+		// reward, and produced a different root on each attempt (observed
+		// live: 335 distinct roots and +5 SPX per retry for one block,
+		// drifting total_supply from 1,170,000,005 to 1,170,004,860 while
+		// healthy peers sat at 5 minted).
+		//
+		// AbortAtomicCommit (not Rollback) is the matching cleanup: there is
+		// no state to restore, and Rollback's fallback path — when it cannot
+		// reconstruct state from the journal — is rebuildStateToHeight, a full
+		// wipe-and-replay that would destroy state this refusal never touched.
+		//
+		// Note what this does NOT do: it cannot fix the FIRST refusal. That is
+		// a genuine prior-state difference (stale/residue state on this node).
+		// The staging converts "every retry diverges further" into "every
+		// retry reads the same question" — the node stays stuck until the
+		// underlying state difference is resolved, which is correct: starting
+		// would be forking.
+		if jm != nil {
+			jm.AbortAtomicCommit()
+		}
 		return fmt.Errorf(
 			"CommitBlock: state root mismatch at height %d (header=%x, executed=%x) — local state has diverged from the network; refusing to commit rather than silently rehashing",
 			typeBlock.GetHeight(), typeBlock.Header.StateRoot, stateRoot,
@@ -1949,9 +1986,30 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 	}
 
 	// State root validation passed — the block's execution root matches the
-	// consensus-approved header. State changes from the first ExecuteBlock
-	// above have already been recorded by the journal (started before execution)
-	// and committed to LevelDB. Now proceed to finalize the block.
+	// consensus-approved header. Flush the staged state to LevelDB now; only
+	// from here on does this attempt become visible to anything else.
+	if _, err := stagedState.Commit(); err != nil {
+		logger.Error("ERROR Failed to flush state DB: %v", err)
+		// A flush can fail part-way through its Puts, so this is the one path
+		// where state really may have been mutated: use the full journal
+		// rollback, not the abort.
+		if jm != nil {
+			jm.Rollback()
+		}
+		return fmt.Errorf("CommitBlock: failed to flush state DB: %w", err)
+	}
+	logger.Info("SUCCESS State DB flushed after state root validation")
+	if jm != nil {
+		jm.MarkIndexUpdated() // account state is now the phase-tracked risk; block bytes come next
+	}
+
+	// Also verify the state DB flush worked by checking vault balance
+	if typeBlock.GetHeight() >= 1 {
+		vaultBalance, err := stagedState.GetBalance(GenesisVaultAddress)
+		if err == nil && vaultBalance != nil {
+			logger.Info("SUCCESS State DB verification: vault balance = %s nSPX", vaultBalance.String())
+		}
+	}
 
 	txIDs := make([]string, len(typeBlock.Body.TxsList))
 	for i, tx := range typeBlock.Body.TxsList {
@@ -1961,43 +2019,6 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 		bc.mempool.RemoveTransactions(txIDs)
 		logger.Info("SUCCESS Removed %d committed transactions from mempool after execution", len(txIDs))
 	}
-
-	// ========== PRODUCTION FIX: Force state DB flush ==========
-	// Get the state DB as concrete *StateDB type (which has Commit method)
-	stateDBInterface, err := bc.NewStateDB()
-	if err != nil {
-		logger.Error("ERROR Failed to get state DB: %v", err)
-		return fmt.Errorf("CommitBlock: failed to get state DB: %w", err)
-	}
-
-	// Type assert to *StateDB to access Commit method
-	stateDB, ok := stateDBInterface.(*StateDB)
-	if !ok {
-		logger.Error("ERROR Failed to cast state DB to *StateDB")
-		return fmt.Errorf("CommitBlock: state DB is not *StateDB")
-	}
-
-	// Force commit to flush all changes to disk
-	if _, err := stateDB.Commit(); err != nil {
-		logger.Error("ERROR Failed to flush state DB: %v", err)
-		if jm != nil {
-			jm.Rollback()
-		}
-		return fmt.Errorf("CommitBlock: failed to flush state DB: %w", err)
-	}
-	logger.Info("SUCCESS State DB flushed successfully after block execution")
-	if jm != nil {
-		jm.MarkIndexUpdated() // account state is now the phase-tracked risk; block bytes come next
-	}
-
-	// Also verify the state DB flush worked by checking vault balance
-	if typeBlock.GetHeight() >= 1 {
-		vaultBalance, err := stateDB.GetBalance(GenesisVaultAddress)
-		if err == nil && vaultBalance != nil {
-			logger.Info("SUCCESS State DB verification: vault balance = %s nSPX", vaultBalance.String())
-		}
-	}
-	// ==========================================================
 
 	// Process OP_RETURN data in transactions
 	for _, tx := range typeBlock.Body.TxsList {
@@ -2046,13 +2067,18 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 		}
 	}
 
-	// The block hash was voted on before CommitBlock. StateRoot participates in
-	// that hash, so mutating it here would make the stored header disagree with
-	// the consensus-approved block hash. Keep the header immutable at commit
-	// time and report any execution-root mismatch for the proposal path to fix.
+	// The block hash was voted on before CommitBlock, and StateRoot
+	// participates in that hash. The header is therefore never mutated at
+	// commit time: a mismatch was already refused hard above (before any state
+	// was flushed), so by this point typeBlock.Header.StateRoot == stateRoot.
 	if !bytes.Equal(typeBlock.Header.StateRoot, stateRoot) {
-		logger.Warn("CommitBlock: execution state root differs from proposed header for block %s (proposed=%x executed=%x)",
+		// Defensive only — unreachable after the refusal above.
+		logger.Error("CommitBlock: internal error — unvalidated state root reached block store for %s (proposed=%x executed=%x)",
 			typeBlock.GetHash(), typeBlock.Header.StateRoot, stateRoot)
+		if jm != nil {
+			jm.Rollback()
+		}
+		return fmt.Errorf("CommitBlock: state root reached block store unvalidated for %s", typeBlock.GetHash())
 	}
 
 	// ========== PRODUCTION FIX: Store block in storage AFTER state flush ==========

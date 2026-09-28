@@ -77,10 +77,39 @@ func (jm *JournalManager) StartAtomicCommit(blockHash string, blockHeight uint64
 		PreviousTipHeight: previousTipHeight,
 		StartedAt:         time.Now(),
 	}
+	jm.snapshotSupplyCounters(jm.activeTx)
 
 	jm.inProgress = true
 	jm.persistTx()
 	logger.Info(" Started atomic commit journal for block %s at height %d", blockHash[:16], blockHeight)
+}
+
+// snapshotSupplyCounters records the supply counters that a rollback CANNOT
+// derive from account state, while they still describe the pre-block world.
+//
+// totalSupply is recomputed from account balances by restoreSupplyCounters,
+// but genesis supply and rewards_minted are pure accumulators: a block that
+// mints and is then rolled back would otherwise leave supply:rewards
+// permanently ahead of every peer (the observed rewards_minted drift). Capture
+// both here so restoreSupplyCounters can put them back verbatim.
+//
+// Silently a no-op when no blockchain is attached yet (tests, early init) —
+// the counters then simply stay untouched on rollback rather than being
+// restored.
+func (jm *JournalManager) snapshotSupplyCounters(tx *AtomicCommitJournal) {
+	if jm.bc == nil {
+		return
+	}
+	db, err := jm.bc.storage.GetDB()
+	if err != nil {
+		return
+	}
+	if data, err := db.Get(genesisSupplyKey); err == nil && len(data) > 0 {
+		tx.GenesisSupplyBefore = string(data)
+	}
+	if data, err := db.Get(rewardsMintedKey); err == nil && len(data) > 0 {
+		tx.RewardsMintedBefore = string(data)
+	}
 }
 
 // ████████ JOURNAL MONITORING HOOK - Every state change call logs ████████
@@ -334,13 +363,65 @@ func (jm *JournalManager) restoreSupplyCounters() error {
 		return fmt.Errorf("failed to write total supply: %w", err)
 	}
 
-	logger.Info("restoreSupplyCounters: recomputed total supply = %s", totalSupply.String())
+	// Restore the counters that are NOT derivable from account balances.
+	// rewards_minted in particular is a pure accumulator written by
+	// StateDB.Commit(); leaving it in place across a rollback is exactly what
+	// let divergent retries drift it further on every attempt.
+	if tx := jm.activeTx; tx != nil {
+		if tx.GenesisSupplyBefore != "" {
+			if err := db.Put(genesisSupplyKey, []byte(tx.GenesisSupplyBefore)); err != nil {
+				return fmt.Errorf("failed to restore genesis supply: %w", err)
+			}
+		}
+		if tx.RewardsMintedBefore != "" {
+			if err := db.Put(rewardsMintedKey, []byte(tx.RewardsMintedBefore)); err != nil {
+				return fmt.Errorf("failed to restore rewards minted: %w", err)
+			}
+		}
+	}
+
+	logger.Info("restoreSupplyCounters: recomputed total supply = %s nSPX", totalSupply.String())
 	return nil
+}
+
+// AbortAtomicCommit discards the active commit journal WITHOUT touching
+// persistent state.
+//
+// This is the correct cleanup for a refusal that happened while the block was
+// still staged: CommitBlock executes into StateDB's pending buffers and only
+// flushes after the header state root validates, so a rejected attempt has
+// written nothing that needs restoring.
+//
+// Rollback() must NOT be used there. It rewrites every recorded balance and,
+// when it cannot reconstruct state from the journal, falls back to
+// rebuildStateToHeight — a full wipe-and-replay of the chain that would
+// destroy state the refusal never touched.
+func (jm *JournalManager) AbortAtomicCommit() {
+	jm.mu.Lock()
+	tx := jm.activeTx
+	jm.activeTx = nil
+	jm.inProgress = false
+	jm.mu.Unlock()
+
+	if tx == nil {
+		return
+	}
+	if tx.BlockHash != "" {
+		txPath := filepath.Join(jm.journalDir, fmt.Sprintf("tx_%s.json", tx.BlockHash[:16]))
+		if err := os.Remove(txPath); err != nil && !os.IsNotExist(err) {
+			logger.Warn("JournalManager.AbortAtomicCommit: failed to remove journal file: %v", err)
+		}
+	}
+	logger.Info("SUCCESS Aborted atomic commit journal for block %s (no state was written)",
+		tx.BlockHash[:min(16, len(tx.BlockHash))])
 }
 
 // Rollback reverts all changes made in the current transaction.
 // Uses fast recorded-state rollback first, falls back to rebuildStateToHeight
 // if the recorded state is incomplete or corrupted.
+//
+// Only valid once state has actually been flushed. For a refusal that never
+// reached disk, use AbortAtomicCommit instead.
 func (jm *JournalManager) Rollback() error {
 	jm.mu.Lock()
 	tx := jm.activeTx

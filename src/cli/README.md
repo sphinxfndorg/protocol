@@ -340,14 +340,70 @@ go run src/cli/main.go node --role=validator \
 
 **Expected:** Creates genesis, waits for nodes 2 and 3 to connect and become ready, then starts PBFT. It does not mine a solo chain in this `--nodes=3` flow.
 
-> **Multisig treasury spend — no flags, runs on every node.** The custody watcher starts automatically inside every node's process whenever a multisig policy is provisioned — nothing on the command line and nothing that differs between terminals. The node is never told a destination or amount: it scans `config/spend_proposals/` for spends the custodian quorum has already signed (each file is a complete `multisig spend --dry-run --out` transaction, so destination/amount/nonce live *inside* the signed payload) and broadcasts at most one per cycle, deduped by transaction id. It can never authorize a spend on its own — the node re-verifies the witness at admission.
+> **Devnet custody layout — fully per-node, and the copy is an ORDERED step.**
+> Node 1 auto-generates inside its own datadir: policies + witness book under
+> `data/node1/config/`, custodian throwaway keys under
+> `data/node1/custody/devnet-auto/`. It never touches the shared repo root, and
+> no node reads another node's directory.
 >
-> - **Creating a proposal** (an operator action, not the node's): assemble the usual spend and drop it into the proposals directory instead of broadcasting by hand —
->   `go run src/cli/main.go multisig spend --policy config/escrow_multisig.json --to <addr> --amount-spx <n> --keys-dir data/custody/escrow --rpc 127.0.0.1:8700 --dry-run --out config/spend_proposals/<id>.json`
+> ⚠️ **You cannot start all three terminals at once any more.** Node 1 *authors*
+> block 0; nodes 2 and 3 can only *replay* it. Until they hold node 1's bundle
+> they have no way to reproduce the same genesis hash, so they now **refuse to
+> start** rather than build a divergent chain. Follow this order:
+>
+> **Step 1 — start Terminal 1 alone** (the command above) and let it finish the
+> one-time custody signing. Watch for this line before continuing:
+> ```
+> DEVNET AUTO-CUSTODY: persisted N genesis witnesses to data/node1/config/devnet_genesis_witnesses.json
+> ```
+> That file does not exist until signing completes (~3 min of STHINCS signing),
+> so copying before this point is the single most common mistake — it produces a
+> "half-done copy" (policies present, witness book missing).
+>
+> **Step 2 — copy ONLY the public bundle** into each peer's own datadir:
+> ```bash
+> for n in 2 3; do
+>   mkdir -p data/node$n/config
+>   for f in genesis_multisig.json escrow_multisig.json devnet_genesis_witnesses.json; do
+>     cp data/node1/config/$f data/node$n/config/$f
+>   done
+> done
+> ```
+> Never copy `custody/` — that holds the custodian secret keys, and a replaying
+> node needs none of them.
+>
+> **Step 3 — start Terminals 2 and 3.** Each loads the bundle, rebuilds block 0
+> byte-for-byte from the persisted witnesses, and passes key exchange.
+>
+> If you skip Step 2, the joiner exits immediately with
+> `devnet late joiner has no custody bundle in its own datadir: …` plus the exact
+> copy commands. That refusal is deliberate: previously such a node started
+> anyway, silently built a *different* block 0 (legacy vault, unsigned) while
+> node 1 built the custody one, and then presented as the far more confusing
+> *"nodes cannot connect to each other"* — every peer rejecting every other peer
+> at key exchange because the genesis hashes disagreed.
+>
+> This copy step is the devnet stand-in for the real ceremony-artifact
+> distribution.
+>
+> ⚠️ **KNOWN GAP — do NOT script this copy.** The `cp` above is deliberately
+> manual. Any automation that reaches across node directories on the same host
+> (a script that finds `data/node1/config` and fills in every other datadir)
+> re-creates exactly the shared-filesystem assumption the per-node layout was
+> introduced to remove: it would make a broken distribution path look healthy
+> on one machine and only fail on real multi-host infra. If distribution needs
+> automating, automate the *transport* (out-of-band hand-off of the public
+> bundle), not a same-host directory scan. The manual step is the honest
+> stand-in for a distribution mechanism that does not exist yet.
+
+> **Multisig treasury spend — no flags, runs on every node.** The custody watcher starts automatically inside every node's process whenever a multisig policy is provisioned — nothing on the command line and nothing that differs between terminals. The node is never told a destination or amount: it scans **its own `<datadir>/config/spend_proposals/`** for spends the custodian quorum has already signed (each file is a complete `multisig spend --dry-run --out` transaction, so destination/amount/nonce live *inside* the signed payload) and broadcasts at most one per cycle, deduped by transaction id. It can never authorize a spend on its own — the node re-verifies the witness at admission.
+>
+> - **Creating a proposal** (an operator action, not the node's): assemble the usual spend and drop it into that node's proposals directory instead of broadcasting by hand —
+>   `go run src/cli/main.go multisig spend --policy data/node1/config/escrow_multisig.json --to <addr> --amount-spx <n> --keys-dir data/custody/escrow --rpc 127.0.0.1:8700 --dry-run --out data/node1/config/spend_proposals/<id>.json`
 >   The next watcher cycle re-verifies it against the **live** policy — sender address, chain id, expiry window, the witness's embedded policy, and a real M-of-N signature check over the exact spend — then broadcasts it.
-> - ⚠️ **`config/spend_proposals/` is a trust boundary, not an inbox.** Anything that can write there can force a broadcast *attempt* of a payment the quorum already signed; protect it like the custodian keys themselves. A malformed or invalid file is logged and skipped, never fatal, so one bad drop cannot block the others.
+> - ⚠️ **`<datadir>/config/spend_proposals/` is a trust boundary, not an inbox.** Anything that can write there can force a broadcast *attempt* of a payment the quorum already signed; protect it like the custodian keys themselves. A malformed or invalid file is logged and skipped, never fatal, so one bad drop cannot block the others.
 > - **Replay-safe:** the watcher dedupes by transaction id — a proposal already broadcast, already on-chain, or already rejected is never resubmitted, and it survives a restart (each candidate is checked against `gettransactionreceipt` before broadcasting).
-> - **Prerequisite:** run `go run src/cli/main.go multisig devnet --role escrow` **before** starting any node, so `config/escrow_multisig.json` exists before genesis is created — the policy's address is what block 0 funds, and every node re-verifies proposals against it. If this file is missing when a node starts, that node logs `no multisig policy at config/escrow_multisig.json — auto multisig spend watcher disabled` and starts normally with the watcher off — it does not fail startup.
+> - **Prerequisite:** the escrow policy must exist in the node's own datadir — `<datadir>/config/escrow_multisig.json` — before that node starts, because the policy's address is what block 0 funds and what every node re-verifies proposals against. In the auto-custody flow you get it by copying node 1's public bundle (see the layout note under Terminal 1). If it is missing, the node logs `no multisig policy at <datadir>/config/escrow_multisig.json — auto multisig spend watcher disabled` and starts normally with the watcher off — it does **not** fail startup, and it does **not** reach into another node's datadir. (A node that still has only the pre-per-node `config/escrow_multisig.json` at the repo root still works via a legacy fallback, but that path logs a loud `MIGRATION:` ERROR telling you to copy the bundle — close it out rather than relying on it.)
 > - **Broadcaster ≠ custodian — no custodian keys on watcher nodes.** A node running the watcher only broadcasts spends the quorum already signed, so it needs **no custodian key files**. `data/custody/escrow/…` belongs only on the machines that *sign* proposals (`multisig devnet` / `message` / `sign` / `combine`); do **not** copy M-of-N of them onto every broadcasting node — that widens the key-distribution surface for a signing authority the watcher never exercises. Startup is gated only on the policy being present and parseable.
 > - **Every terminal is identical** — there's no per-terminal spend configuration to keep in sync. Ctrl+C stops the watcher and the node together; a transient broadcast failure (e.g. this node's RPC not listening yet) is logged and retried next interval, and a fatal loop error logs `auto multisig spend watcher stopped: …` while the node keeps running.
 

@@ -87,7 +87,7 @@ func TestEscrowGatedReleaseEndToEnd(t *testing.T) {
 	sched := policy.CGEScheduleForLabel(founder.Label)
 	elapsed := int64(headerTS) - genesisTS
 	target := sched.UnlockedAt(elapsed, founder.BalanceNSPX)
-	msg := cgeReleaseMessage(nil, founder.Address, target, height, headerTS+uint64(12*policy.CGEMonthSeconds))
+	msg := cgeReleaseMessage(nil, founder.Address, target, target, headerTS+uint64(12*policy.CGEMonthSeconds))
 	w := signWitness(t, nil, p, sks, pks, []int{0, 1}, msg, headerTS+uint64(12*policy.CGEMonthSeconds))
 	refs := map[string]multisigWitnessRef{founder.Address: witnessRefFor(w)}
 	block := cgeTestBlock(height, int64(headerTS))
@@ -125,14 +125,14 @@ func TestEscrowGatedReleaseRejects(t *testing.T) {
 	founder := allocByLabel(t, "Founder")
 	elapsed := int64(headerTS) - CanonicalGenesisTimestamp
 	target := policy.CGEScheduleForLabel(founder.Label).UnlockedAt(elapsed, founder.BalanceNSPX)
-	msg := cgeReleaseMessage(nil, founder.Address, target, height, headerTS+uint64(12*policy.CGEMonthSeconds))
+	msg := cgeReleaseMessage(nil, founder.Address, target, target, headerTS+uint64(12*policy.CGEMonthSeconds))
 	weak := signWitness(t, nil, p, sks, pks, []int{0}, msg, headerTS+uint64(12*policy.CGEMonthSeconds))
 	s1 := newState(t)
 	applyCGEReleasesWithWitness(nil, cgeTestBlock(height, int64(headerTS)), s1, map[string]multisigWitnessRef{founder.Address: witnessRefFor(weak)})
 	if bal, _ := s1.GetBalance(founder.Address); bal.Sign() != 0 {
 		t.Fatalf("below-threshold witness must not mutate state, got %s", bal.String())
 	}
-	expiredMsg := cgeReleaseMessage(nil, founder.Address, target, height, headerTS-1)
+	expiredMsg := cgeReleaseMessage(nil, founder.Address, target, target, headerTS-1)
 	expired := signWitness(t, nil, p, sks, pks, []int{0, 1}, expiredMsg, headerTS-1)
 	s2 := newState(t)
 	applyCGEReleasesWithWitness(nil, cgeTestBlock(height, int64(headerTS)), s2, map[string]multisigWitnessRef{founder.Address: witnessRefFor(expired)})

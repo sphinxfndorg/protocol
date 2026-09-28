@@ -93,13 +93,16 @@ func BytesToUint256(data []byte) *uint256.Int {
 	return uint256.NewInt(0).SetBytes(data)
 }
 
-// NewSigningService creates a new signing service.
-// This initializes all the components needed for cryptographic operations:
-// - SPHINCS+ manager for signing operations
-// - Key manager for key generation and serialization
-// - Node identification for tracking which node this service belongs to
-// FIXED: parameter type changed to *sign.STHINCSManager
-func NewSigningService(sphincsManager *sign.STHINCSManager, keyManager *key.KeyManager, nodeID string) *SigningService {
+// NewSigningService creates a new signing service from the node's PERSISTED
+// identity keypair (the serialized sk/pk bytes loaded by the caller, e.g.
+// network.LoadIdentityKeys / network.NodeIdentityKeys).
+//
+// This constructor NEVER generates key material: identitySK/identityPK must be
+// a valid, internally consistent SPHINCS+ keypair, and anything else is a
+// hard error so a node refuses to start instead of silently adopting a fresh
+// identity (which would break peers' node_id<->key pinning and re-sign blocks
+// under an unknown key).
+func NewSigningService(sphincsManager *sign.STHINCSManager, keyManager *key.KeyManager, nodeID string, identitySK, identityPK []byte) (*SigningService, error) {
 	// Create the service struct with provided dependencies
 	service := &SigningService{
 		sphincsManager:    sphincsManager,
@@ -107,45 +110,45 @@ func NewSigningService(sphincsManager *sign.STHINCSManager, keyManager *key.KeyM
 		nodeID:            nodeID,
 		publicKeyRegistry: make(map[string]*sthincs.SPHINCS_PK), // FIXED: initialize map
 	}
-	// Generate or load the cryptographic keys for this node
-	service.initializeKeys()
-	return service
+	// Load (never generate) the persisted identity keypair for this node.
+	if err := service.setIdentityKey(identitySK, identityPK); err != nil {
+		return nil, fmt.Errorf("signing service identity for %s: %w", nodeID, err)
+	}
+	return service, nil
 }
 
-// initializeKeys generates or loads keys for this node.
-// This is called during service creation to set up the node's identity.
-// The keys are used for signing all consensus messages from this node.
-func (s *SigningService) initializeKeys() error {
-	fmt.Printf("=== KEY GENERATION DEBUG for node %s ===\n", s.nodeID)
-
-	// Generate a new key pair using the key manager
-	// Returns: secret key wrapper, public key, and any error
-	skWrapper, pk, err := s.keyManager.GenerateKey()
+// setIdentityKey deserializes the caller-provided identity keypair into the
+// service. It is a pure load: empty or malformed key material is an error and
+// no keygen fallback exists — fail closed, never regenerate.
+//
+// The bytes are the same serialization network.GetOrCreateKeys persists to
+// Node-<address>/keys (SerializeKeyPair: sk = SKseed||SKprf||PKseed||PKroot,
+// pk = PKseed||PKroot), so the key used for handshakes, PBFT verification and
+// the genesis header signature is exactly the persisted node identity.
+func (s *SigningService) setIdentityKey(identitySK, identityPK []byte) error {
+	if s.keyManager == nil {
+		return fmt.Errorf("key manager is not initialized")
+	}
+	if len(identitySK) == 0 || len(identityPK) == 0 {
+		return fmt.Errorf("missing identity key material (sk=%d bytes, pk=%d bytes): refusing to generate a new identity",
+			len(identitySK), len(identityPK))
+	}
+	// Structural pair-consistency check: catches a private key file paired
+	// with a DIFFERENT public key file (mismatched restore) before we ever
+	// sign or advertise anything.
+	ok, err := s.keyManager.VerifyPubKey(identitySK, identityPK)
 	if err != nil {
-		return err
+		return fmt.Errorf("identity keypair validation failed: %w", err)
 	}
-
-	// Debug output showing key fingerprints (first 8 bytes)
-	fmt.Printf("SKseed fingerprint: %x...\n", skWrapper.SKseed[:8])
-	fmt.Printf("PKroot fingerprint: %x...\n", skWrapper.PKroot[:8])
-
-	// Store the private key components in SPHINCS+ format
-	s.privateKey = &sthincs.SPHINCS_SK{
-		SKseed: skWrapper.SKseed, // Secret seed for signing
-		SKprf:  skWrapper.SKprf,  // Secret PRF key
-		PKseed: skWrapper.PKseed, // Public seed (part of public key)
-		PKroot: skWrapper.PKroot, // Root public key
+	if !ok {
+		return fmt.Errorf("identity keypair mismatch: private key does not match public key")
 	}
-	// Store the public key object
+	sk, pk, err := s.keyManager.DeserializeKeyPair(identitySK, identityPK)
+	if err != nil {
+		return fmt.Errorf("cannot deserialize identity keypair: %w", err)
+	}
+	s.privateKey = sk
 	s.publicKey = pk
-
-	// Debug: show public key fingerprint if serialization succeeds
-	pkBytes, err := pk.SerializePK()
-	if err == nil {
-		fmt.Printf("Public key fingerprint: %x...\n", pkBytes[:8])
-	}
-
-	fmt.Printf("=== END KEY DEBUG ===\n")
 	return nil
 }
 

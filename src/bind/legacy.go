@@ -141,8 +141,18 @@ func StartSingleNodeInternal(nodeConfig network.NodePortConfig, dataDir string) 
 		// Get the blockchain and create consensus engine
 		blockchain := resources[0].Blockchain
 
-		// Create signing service
-		signingService := consensus.NewSigningService(nil, keyManager, nodeConfig.Name)
+		// Create signing service from the persisted identity keypair
+		// (SetupNodes above already created it via p2p.NewServer →
+		// network.NewNode → GetOrCreateKeys, keyed by the node's TCP
+		// address). Fail closed: never generate a fresh identity here.
+		identitySK, identityPK, identityErr := network.LoadIdentityKeys(nodeConfig.TCPAddr)
+		if identityErr != nil {
+			return fmt.Errorf("failed to load node identity keys for %s: %w", nodeConfig.TCPAddr, identityErr)
+		}
+		signingService, err := consensus.NewSigningService(nil, keyManager, nodeConfig.Name, identitySK, identityPK)
+		if err != nil {
+			return fmt.Errorf("failed to create signing service: %w", err)
+		}
 
 		// Create node manager for consensus
 		nodeMgr := network.NewCallNodeManager()

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"strconv"
 	"sync"
 	"time"
@@ -327,6 +328,113 @@ func (nkm *NetworkKeyManager) GetOrCreateKeys(address string) ([]byte, []byte, e
 	log.Printf("GetOrCreateKeys: Generated and stored SPHINCS+ keys for %s (sk=%d pk=%d bytes)",
 		address, len(privateKey), len(publicKey))
 	return privateKey, publicKey, nil
+}
+
+// LoadIdentityKeys returns the persisted identity keypair for address and
+// NEVER generates or regenerates key material.
+//
+// Fail-closed contract:
+//   - both key files present and readable → return them
+//   - any file missing, unreadable, corrupt, or size-mismatched → error
+//     (an error message that says "refusing to regenerate", not a silent
+//     fallback to a fresh keypair)
+//
+// This is the loader the consensus SigningService identity must go through:
+// silently minting a new key on a damaged datadir would change the node's
+// consensus identity, break peers' node_id<->key pinning (bind/challenge.go)
+// and make historical producer signatures unverifiable. A damaged keypair is
+// an operator problem; regenerate only by explicit operator action.
+func LoadIdentityKeys(address string) (privateKey []byte, publicKey []byte, err error) {
+	if !common.KeysExist(address) {
+		// Distinguish "never had keys" (caller may create via
+		// NodeIdentityKeys/GetOrCreateKeys) from "had keys, now damaged":
+		// if either file exists alone, the pair is damaged.
+		if fileExists(common.GetPrivateKeyPath(address)) || fileExists(common.GetPublicKeyPath(address)) {
+			return nil, nil, fmt.Errorf("identity keypair for %s is incomplete (private.key exists=%v, public.key exists=%v) — refusing to regenerate; restore the missing file from backup",
+				address, fileExists(common.GetPrivateKeyPath(address)), fileExists(common.GetPublicKeyPath(address)))
+		}
+		return nil, nil, fmt.Errorf("no identity keys for %s — no key material to load (create via NodeIdentityKeys on first start) — refusing to generate inline", address)
+	}
+	privateKey, publicKey, err = common.ReadKeysFromFile(address)
+	if err != nil {
+		return nil, nil, fmt.Errorf("identity keys for %s are unreadable or corrupt: %w — refusing to regenerate; restore the keypair from backup", address, err)
+	}
+	return privateKey, publicKey, nil
+}
+
+// NodeIdentityKeys is the single entry point production startup uses to obtain
+// the node's identity keypair:
+//
+//   - key files exist (any state) → strict fail-closed load via
+//     LoadIdentityKeys; a damaged pair is an error, never a regeneration
+//   - NO key files at all (genuine first start) → GetOrCreateKeys creates and
+//     persists them (created=true)
+//
+// created reports whether this call minted the first-ever keypair, so callers
+// can log it distinctly from the ordinary "loaded persisted identity" path.
+func NodeIdentityKeys(db *database.DB, address string) (privateKey []byte, publicKey []byte, created bool, err error) {
+	if common.KeysExist(address) || fileExists(common.GetPrivateKeyPath(address)) || fileExists(common.GetPublicKeyPath(address)) {
+		privateKey, publicKey, err = LoadIdentityKeys(address)
+		return privateKey, publicKey, false, err
+	}
+	// Genuine first start: no key material on disk yet. With a database
+	// handle, delegate to GetOrCreateKeys (identical format, plus the legacy
+	// LevelDB migration lookup); without one, generate directly and persist.
+	// Either way the pair is created exactly once and persisted — the strictly
+	// file-gated condition above means this branch can never silently replace
+	// an existing keypair.
+	if db != nil {
+		var nkm *NetworkKeyManager
+		nkm, err = NewNetworkKeyManager(db)
+		if err != nil {
+			return nil, nil, false, fmt.Errorf("NodeIdentityKeys: %w", err)
+		}
+		privateKey, publicKey, err = nkm.GetOrCreateKeys(address)
+		if err != nil {
+			return nil, nil, false, fmt.Errorf("NodeIdentityKeys: first-start key creation for %s failed: %w", address, err)
+		}
+		return privateKey, publicKey, true, nil
+	}
+	privateKey, publicKey, err = generateIdentityKeysFileOnly(address)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	return privateKey, publicKey, true, nil
+}
+
+// generateIdentityKeysFileOnly mints a fresh identity keypair and persists it
+// to the keys/ files without any LevelDB involvement. It is only called when
+// no key file exists at all (genuine first start), so it can never overwrite
+// an existing identity. Format and permissions are exactly GetOrCreateKeys'
+// (SerializeKeyPair + WriteKeysToFile: private 0600, public 0644).
+func generateIdentityKeysFileOnly(address string) (privateKey []byte, publicKey []byte, err error) {
+	km, err := sthincs.NewKeyManager()
+	if err != nil {
+		return nil, nil, fmt.Errorf("NodeIdentityKeys: key manager: %w", err)
+	}
+	sk, pk, err := km.GenerateKey()
+	if err != nil {
+		return nil, nil, fmt.Errorf("NodeIdentityKeys: key generation failed for %s: %w", address, err)
+	}
+	privateKey, publicKey, err = km.SerializeKeyPair(sk, pk)
+	if err != nil {
+		return nil, nil, fmt.Errorf("NodeIdentityKeys: serialize key pair for %s: %w", address, err)
+	}
+	if len(privateKey) != 2*len(publicKey) {
+		return nil, nil, fmt.Errorf("NodeIdentityKeys: size invariant violated — sk=%d bytes, pk=%d bytes (expected sk=2×pk)", len(privateKey), len(publicKey))
+	}
+	if err := common.WriteKeysToFile(address, privateKey, publicKey); err != nil {
+		return nil, nil, fmt.Errorf("NodeIdentityKeys: failed to persist keys for %s: %w", address, err)
+	}
+	log.Printf("NodeIdentityKeys: generated and persisted first-start identity for %s (sk=%d pk=%d bytes)",
+		address, len(privateKey), len(publicKey))
+	return privateKey, publicKey, nil
+}
+
+// fileExists reports whether path exists and is a regular file.
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
 }
 
 // generateSPHINCSKeys generates a real SPHINCS+ key pair and serializes it.

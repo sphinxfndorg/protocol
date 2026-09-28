@@ -38,6 +38,10 @@ func testSTHINCSParams(t *testing.T) *parameters.Parameters {
 
 // newTestSigningService builds a fully functional SigningService (real key
 // generation, no evidence DB) for challenge sign/verify tests.
+//
+// Key material is generated EXPLICITLY here and injected — NewSigningService
+// itself never generates (it loads the node's persisted identity in
+// production). Test-only generation lives in test code on purpose.
 func newTestSigningService(t *testing.T, nodeID string) (*consensus.SigningService, *parameters.Parameters) {
 	t.Helper()
 	cfg, err := config.NewSTHINCSParameters()
@@ -48,8 +52,19 @@ func newTestSigningService(t *testing.T, nodeID string) (*consensus.SigningServi
 	if err != nil {
 		t.Fatalf("NewKeyManager: %v", err)
 	}
+	sk, pk, err := km.GenerateKey()
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	skBytes, pkBytes, err := km.SerializeKeyPair(sk, pk)
+	if err != nil {
+		t.Fatalf("SerializeKeyPair: %v", err)
+	}
 	mgr := sign.NewSTHINCSManager(nil, km, cfg)
-	ss := consensus.NewSigningService(mgr, km, nodeID)
+	ss, err := consensus.NewSigningService(mgr, km, nodeID, skBytes, pkBytes)
+	if err != nil {
+		t.Fatalf("NewSigningService: %v", err)
+	}
 	if _, err := ss.GetPublicKey(); err != nil {
 		t.Fatalf("test signing service has no public key: %v", err)
 	}
@@ -85,7 +100,6 @@ func rawChallengeSignature(t *testing.T, params *parameters.Parameters, sk *sthi
 	}
 	return signed
 }
-
 
 // TestDerivePeerListenAddr pins the address-derivation rule: the dialable
 // address is connection IP + CLAIMED listening port — never the ephemeral
@@ -424,4 +438,3 @@ func TestChallengeHandlerFlowsGateAdmission(t *testing.T) {
 		}
 	})
 }
-

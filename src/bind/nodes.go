@@ -527,8 +527,29 @@ func StartNodeWithOptions(
 	// be registered before genesis gets built, not after. Everything this
 	// needs (db, sharedKeyManager, sharedSphincsParams, currentNodeID) is
 	// already available at this point.
+	//
+	// ★ ONE PERSISTENT IDENTITY. The consensus keypair is loaded from the
+	// node's own persisted keys (Node-<address>/keys — the same files
+	// network.NewNode uses) via NodeIdentityKeys, NOT generated per start:
+	//   - first start (no key files at all) → created once and persisted
+	//   - every later start → strict fail-closed load; a damaged pair aborts
+	//     startup instead of silently minting a new identity (which would
+	//     break peers' node_id<->key pinning and re-sign historical blocks
+	//     under an unknown key)
+	// This key is what key exchange, PBFT signature verification and the
+	// genesis header signature all use — one keypair, loaded, never regenerated.
+	identitySK, identityPK, identityCreated, identityErr := network.NodeIdentityKeys(mainDatabase, currentAddress)
+	if identityErr != nil {
+		return fmt.Errorf("failed to load node identity keys for %s: %w", currentAddress, identityErr)
+	}
+	if identityCreated {
+		logger.Info("Created new node identity keypair for %s (persisted at %s)", currentNodeID, common.GetKeysDataDir(currentAddress))
+	}
 	sphincsMgr := sign.NewSTHINCSManager(db, sharedKeyManager, sharedSphincsParams)
-	signingService := consensus.NewSigningService(sphincsMgr, sharedKeyManager, currentNodeID)
+	signingService, err := consensus.NewSigningService(sphincsMgr, sharedKeyManager, currentNodeID, identitySK, identityPK)
+	if err != nil {
+		return fmt.Errorf("failed to create signing service: %w", err)
+	}
 
 	if selfPK := signingService.GetPublicKeyObject(); selfPK != nil {
 		signingService.RegisterPublicKey(currentNodeID, selfPK)

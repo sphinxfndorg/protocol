@@ -162,21 +162,21 @@ func FindFreePort(basePort int, protocol string) (int, error) {
 
 // GetNodePortConfigs generates or retrieves a list of node port configurations.
 // Parameters:
-//   - numNodes: Number of nodes to configure
-//   - roles: Slice of node roles (length should match numNodes)
+//   - count: Number of nodes to configure
+//   - roles: Slice of node roles (length should match count)
 //   - overrides: Map of port overrides (e.g., "tcpAddr0": "127.0.0.1:32307")
 //
 // Returns:
 //   - Slice of node port configurations
 //   - Error if configuration fails
-func GetNodePortConfigs(numNodes int, roles []NodeRole, overrides map[string]string) ([]NodePortConfig, error) {
+func GetNodePortConfigs(count int, roles []NodeRole, overrides map[string]string) ([]NodePortConfig, error) {
 	// First, check if configurations already exist in the global store
 	// Acquire read lock to check existing configs
 	NodeConfigsLock.RLock()
-	if len(NodeConfigs) >= numNodes {
+	if len(NodeConfigs) >= count {
 		// We have enough configurations in the store, retrieve them
-		configs := make([]NodePortConfig, 0, numNodes)
-		for i := 0; i < numNodes; i++ {
+		configs := make([]NodePortConfig, 0, count)
+		for i := 0; i < count; i++ {
 			id := fmt.Sprintf("Node-%d", i) // Generate node ID
 			if config, exists := NodeConfigs[id]; exists {
 				configs = append(configs, config) // Add existing config
@@ -192,7 +192,7 @@ func GetNodePortConfigs(numNodes int, roles []NodeRole, overrides map[string]str
 	NodeConfigsLock.RUnlock()
 
 	// Generate new configurations if none exist or insufficient
-	configs := make([]NodePortConfig, numNodes)
+	configs := make([]NodePortConfig, count)
 
 	// ★ FIX: Track used ports globally across all nodes to prevent conflicts
 	// even when nodes are started independently in seed-based mode
@@ -203,7 +203,7 @@ func GetNodePortConfigs(numNodes int, roles []NodeRole, overrides map[string]str
 	checkBasePorts := []int{baseTCPPort, baseUDPPort, baseHTTPPort, baseWSPort}
 	scannedCount := 0
 	for _, base := range checkBasePorts {
-		for port := base; port < base+numNodes*portStep+100; port++ {
+		for port := base; port < base+count*portStep+100; port++ {
 			scannedCount++
 			if isPortInUse(port) {
 				usedPorts[port] = true
@@ -213,7 +213,7 @@ func GetNodePortConfigs(numNodes int, roles []NodeRole, overrides map[string]str
 	log.Printf("GetNodePortConfigs: scanned %d candidate ports, %d already in use", scannedCount, len(usedPorts))
 
 	// Generate configuration for each node
-	for i := 0; i < numNodes; i++ {
+	for i := 0; i < count; i++ {
 		// Generate node name and ID
 		name := fmt.Sprintf("Node-%d", i)
 		id := name // Use name as ID for consistency
@@ -326,7 +326,7 @@ func GetNodePortConfigs(numNodes int, roles []NodeRole, overrides map[string]str
 			seedNodes = validSeeds // Use only valid seeds
 		} else {
 			// Generate default seeds (all other nodes in the network)
-			for j := 0; j < numNodes; j++ {
+			for j := 0; j < count; j++ {
 				if j != i { // Exclude self
 					seedPort := baseUDPPort + j*portStep
 					// Ensure seed port is not already used

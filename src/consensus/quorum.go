@@ -13,13 +13,13 @@ import (
 )
 
 // NewQuorumVerifier creates a new quorum verifier instance
-// totalNodes: Total number of nodes in the network
+// setSize: Total number of nodes in the network
 // faultyNodes: Number of faulty (Byzantine) nodes to tolerate
 // quorumFraction: Fraction of nodes required for quorum (typically 2/3 for BFT)
 // Returns a configured QuorumVerifier instance
-func NewQuorumVerifier(totalNodes, faultyNodes int, quorumFraction float64) *QuorumVerifier {
+func NewQuorumVerifier(setSize, faultyNodes int, quorumFraction float64) *QuorumVerifier {
 	return &QuorumVerifier{
-		totalNodes:     totalNodes,
+		setSize:        setSize,
 		faultyNodes:    faultyNodes,
 		quorumFraction: quorumFraction,
 	}
@@ -36,7 +36,7 @@ func (qv *QuorumVerifier) VerifySafety() bool {
 	meetsQuorumRequirement := qv.quorumFraction >= 2.0/3.0
 
 	// Check if faulty nodes are within BFT tolerance limit (less than 1/3)
-	meetsFaultTolerance := qv.faultyNodes < qv.totalNodes/3
+	meetsFaultTolerance := qv.faultyNodes < qv.setSize/3
 
 	// Both conditions must be true for safety guarantee
 	return meetsQuorumRequirement && meetsFaultTolerance
@@ -45,24 +45,24 @@ func (qv *QuorumVerifier) VerifySafety() bool {
 // VerifyQuorumIntersection verifies the quorum intersection property
 // Quorum intersection ensures any two quorums have at least one honest node in common
 // This prevents network splits and ensures consensus consistency
-// Formula: (2Q - 1) * totalNodes > faultyNodes
+// Formula: (2Q - 1) * setSize > faultyNodes
 // Where Q is the quorum fraction
 // Returns true if quorum intersection property is satisfied
 func (qv *QuorumVerifier) VerifyQuorumIntersection() bool {
 	Q := qv.quorumFraction
 	// Calculate the intersection size between any two quorums
-	intersection := (2*Q - 1) * float64(qv.totalNodes)
+	intersection := (2*Q - 1) * float64(qv.setSize)
 	// Intersection must be larger than number of faulty nodes to ensure at least one honest node
 	return intersection > float64(qv.faultyNodes)
 }
 
 // CalculateMinQuorumSize calculates minimum quorum size needed
 // Quorum size is the minimum number of nodes required to reach consensus
-// Calculated as: ceil(totalNodes * quorumFraction)
+// Calculated as: ceil(setSize * quorumFraction)
 // Returns the minimum quorum size (at least 1)
 func (qv *QuorumVerifier) CalculateMinQuorumSize() int {
 	// Calculate minimum quorum size using ceiling to ensure we have enough nodes
-	minSize := int(math.Ceil(float64(qv.totalNodes) * qv.quorumFraction))
+	minSize := int(math.Ceil(float64(qv.setSize) * qv.quorumFraction))
 	// Ensure we have at least 1 node in quorum (edge case for very small networks)
 	if minSize < 1 {
 		return 1
@@ -75,16 +75,16 @@ func (qv *QuorumVerifier) CalculateMinQuorumSize() int {
 // Formula: (2f + 1) / N where f is faulty nodes, N is total nodes
 // For BFT systems, minimum is 2/3 to ensure safety and liveness
 // faultyNodes: Number of faulty nodes to tolerate
-// totalNodes: Total number of nodes in the network
+// setSize: Total number of nodes in the network
 // Returns the optimal quorum fraction (never less than 2/3)
-func CalculateOptimalQuorumFraction(faultyNodes, totalNodes int) float64 {
+func CalculateOptimalQuorumFraction(faultyNodes, setSize int) float64 {
 	// Handle edge case where there are no nodes
-	if totalNodes == 0 {
+	if setSize == 0 {
 		return 2.0 / 3.0 // Return default BFT fraction
 	}
 
 	// Calculate theoretical minimum quorum fraction: (2f + 1)/N
-	calculated := float64(2*faultyNodes+1) / float64(totalNodes)
+	calculated := float64(2*faultyNodes+1) / float64(setSize)
 
 	// Ensure we meet BFT minimum requirement of 2/3
 	if calculated < 2.0/3.0 {
@@ -105,26 +105,26 @@ func NewQuorumCalculator(quorumFraction float64) *QuorumCalculator {
 
 // VerifyQuorumIntersection verifies the quorum intersection property
 // This is the same verification as in QuorumVerifier but with explicit parameters
-// totalNodes: Total number of nodes in the network
+// setSize: Total number of nodes in the network
 // faultyNodes: Number of faulty (Byzantine) nodes
 // Returns true if quorum intersection property is satisfied
-func (qc *QuorumCalculator) VerifyQuorumIntersection(totalNodes, faultyNodes int) bool {
+func (qc *QuorumCalculator) VerifyQuorumIntersection(setSize, faultyNodes int) bool {
 	Q := qc.quorumFraction
-	// Calculate intersection size: (2Q - 1) * totalNodes
-	intersection := (2*Q - 1) * float64(totalNodes)
+	// Calculate intersection size: (2Q - 1) * setSize
+	intersection := (2*Q - 1) * float64(setSize)
 	// Intersection must exceed faulty nodes to ensure consensus consistency
 	return intersection > float64(faultyNodes)
 }
 
 // CalculateMaxFaulty calculates maximum faulty nodes tolerated
 // This determines how many Byzantine nodes the system can handle while maintaining safety
-// Formula: floor((1 - Q) * totalNodes)
+// Formula: floor((1 - Q) * setSize)
 // Where Q is the quorum fraction
-// totalNodes: Total number of nodes in the network
+// setSize: Total number of nodes in the network
 // Returns maximum number of faulty nodes that can be tolerated
-func (qc *QuorumCalculator) CalculateMaxFaulty(totalNodes int) int {
-	// Calculate maximum faulty nodes: (1 - Q) * totalNodes
-	maxFaulty := int((1 - qc.quorumFraction) * float64(totalNodes))
+func (qc *QuorumCalculator) CalculateMaxFaulty(setSize int) int {
+	// Calculate maximum faulty nodes: (1 - Q) * setSize
+	maxFaulty := int((1 - qc.quorumFraction) * float64(setSize))
 
 	// Ensure non-negative result
 	if maxFaulty < 0 {
@@ -151,7 +151,7 @@ func (qv *QuorumVerifier) VerifyWithProgress() bool {
 
 	root := logger.NewTask("Quorum safety verification")
 	fractionCheck := logger.NewTask(fmt.Sprintf("Quorum fraction >= 2/3 (have %.4f)", qv.quorumFraction))
-	toleranceCheck := logger.NewTask(fmt.Sprintf("Fault tolerance < N/3 (faulty=%d, total=%d)", qv.faultyNodes, qv.totalNodes))
+	toleranceCheck := logger.NewTask(fmt.Sprintf("Fault tolerance < N/3 (faulty=%d, total=%d)", qv.faultyNodes, qv.setSize))
 	intersectionCheck := logger.NewTask("Quorum intersection property")
 	root.AddChild(fractionCheck).AddChild(toleranceCheck).AddChild(intersectionCheck)
 
@@ -171,7 +171,7 @@ func (qv *QuorumVerifier) VerifyWithProgress() bool {
 
 	toleranceCheck.SetStatus(logger.TaskRunning)
 	time.Sleep(150 * time.Millisecond)
-	meetsFaultTolerance := qv.faultyNodes < qv.totalNodes/3
+	meetsFaultTolerance := qv.faultyNodes < qv.setSize/3
 	if meetsFaultTolerance {
 		toleranceCheck.SetStatus(logger.TaskSuccess)
 	} else {

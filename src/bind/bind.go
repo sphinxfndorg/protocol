@@ -25,6 +25,18 @@ import (
 )
 
 // BindTCPServers binds TCP servers for the given node configurations.
+//
+// ★ ORPHANED BY THE LEGACY-HARNESS REMOVAL (Phase 1, step 5). Its only caller
+// was bind/legacy.go's SetupNodes, which is gone. Nothing in the tree calls it
+// any more — production StartNode builds its own listeners directly (SECTION 11
+// for P2P gossip, SECTION 11a for wallet/JSON-RPC via transport.NewTCPServer)
+// and releases them through nodeShutdown.
+//
+// It is kept, not deleted, because it is EXPORTED: bind is a library package
+// and an external embedder could still be using it. Unlike the three unexported
+// helpers (startHTTPServer / startP2PServer / startWebSocketServer, now
+// removed), an exported symbol cannot be proven dead by the compiler. Say the
+// word and it goes too, along with NodeResources / Shutdown / CallNodeRPC.
 func BindTCPServers(configs []NodeConfig, wg *sync.WaitGroup) error {
 	for _, config := range configs {
 		if config.Address == "" || config.Name == "" || config.MessageCh == nil || config.RPCServer == nil || config.ReadyCh == nil {
@@ -84,6 +96,26 @@ func handleIncomingConn(
 	logger.Debug("[%s] Received message type: %s", selfID, msg.Type)
 
 	switch msg.Type {
+	case "devnet_bundle_request":
+		// Devnet PUBLIC bundle fetch — unauthenticated by design: the files
+		// are public ceremony artifacts and a joiner has no keys yet.
+		// Served only from this node's OWN datadir via the allowlist in
+		// core (ServeDevnetBundle); custody/ is unreachable.
+		var req core.DevnetBundleRequest
+		if err := json.Unmarshal(msg.Data, &req); err != nil {
+			logger.Warn("[%s] Bad bundle request: %v", selfID, err)
+			return
+		}
+		resp, err := core.ServeDevnetBundle(selfAddr, req)
+		if err != nil {
+			logger.Warn("[%s] Bundle request refused: %v", selfID, err)
+			return
+		}
+		respBytes, _ := json.Marshal(resp)
+		respMsg := security.Message{Type: "devnet_bundle_response", Data: respBytes}
+		encoded, _ := respMsg.Encode()
+		_ = writeFramedMessage(conn, encoded)
+		return
 	case "key_exchange":
 		var kx peerKeyExchangeMsg
 		if err := json.Unmarshal(msg.Data, &kx); err != nil {

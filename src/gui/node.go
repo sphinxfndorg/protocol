@@ -86,7 +86,7 @@ func (n *EmbeddedNode) Start(cfg NodeConfig) error {
 		HTTPPort: cfg.HTTPPort, WSPort: cfg.WSPort, Role: network.RoleValidator,
 	}
 	go func() {
-		err := bind.StartNodeWithOptions(cfg.DataDir, portCfg, 1, 0, nil, cfg.Network, cfg.Seeds, "",
+		err := bind.StartNodeWithOptions(cfg.DataDir, portCfg, 0, nil, cfg.Network, cfg.Seeds, "",
 			bind.NodeOptions{Stop: n.stop, LogWriter: n.log, DisableDashboard: true})
 		n.mu.Lock()
 		n.err = err

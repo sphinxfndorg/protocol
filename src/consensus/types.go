@@ -454,9 +454,11 @@ type TimeoutMsg struct {
 	Timestamp int64  `json:"timestamp"`
 }
 
-// QuorumVerifier provides mathematical guarantees for BFT safety
+// QuorumVerifier provides mathematical guarantees for BFT safety.
+// setSize is the number of validators in the ACTIVE STAKED set (chain state) —
+// it is never a connected-peer count or a CLI-supplied node count.
 type QuorumVerifier struct {
-	totalNodes     int
+	setSize        int
 	faultyNodes    int
 	quorumFraction float64
 }

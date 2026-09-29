@@ -131,6 +131,12 @@ type SphinxChainParameters struct {
 	// Consensus Configuration
 	ConsensusConfig *ConsensusConfig
 
+	// EpochBlocks is the epoch length IN BLOCKS (epoch(h) = h / EpochBlocks).
+	// It is a chain parameter: read from the genesis file / chain params,
+	// never from a CLI flag. The production default is large; devnet uses a
+	// small value so epochs turn over quickly.
+	EpochBlocks uint64
+
 	// Performance Configuration
 	PerformanceConfig *PerformanceConfig
 }
@@ -459,43 +465,6 @@ func (e *genesisValidatorEntry) UnmarshalJSON(data []byte) error {
 	e.StakeSPX = raw.StakeSPX
 	e.PublicKey = raw.PublicKey
 	return nil
-}
-
-// genesisStateSnapshot is an intermediate representation used exclusively for
-// JSON serialisation. It converts *big.Int fields to strings so that the file
-// can be read by tools that do not understand Go's big.Int encoding.
-// Now includes the full allocation and validator lists so genesis_state.json
-// contains real data rather than blank arrays.
-type genesisStateSnapshot struct {
-	ChainID           uint64 `json:"chain_id"`
-	ChainName         string `json:"chain_name"`
-	Symbol            string `json:"symbol"`
-	Timestamp         string `json:"timestamp"`
-	ExtraData         string `json:"extra_data"`
-	InitialDifficulty string `json:"initial_difficulty"`
-	InitialGasLimit   string `json:"initial_gas_limit"`
-	Nonce             string `json:"nonce"`
-	TotalAllocations  int    `json:"total_allocations"`
-	// TotalAllocatedNSPX / TotalAllocatedSPX are the genesis supply block 0
-	// actually mints: the per-category gross (sold + remainder) summed. This is
-	// the figure that must match the funded vault and the recorded genesis
-	// supply — it is deliberately NOT the remainder-only number.
-	TotalAllocatedNSPX string `json:"total_allocated_nspx"`
-	TotalAllocatedSPX  string `json:"total_allocated_spx"`
-	// TotalRemainderNSPX / TotalRemainderSPX and TotalSoldNSPX / TotalSoldSPX
-	// break the gross down (gross = remainder + sold) so the audit file is
-	// self-explanatory instead of appearing to contradict the chain.
-	TotalRemainderNSPX string `json:"total_remainder_nspx"`
-	TotalRemainderSPX  string `json:"total_remainder_spx"`
-	TotalSoldNSPX      string `json:"total_sold_nspx"`
-	TotalSoldSPX       string `json:"total_sold_spx"`
-	TotalValidators    int    `json:"total_validators"`
-	// Allocations is the full ordered list of pre-funded accounts.
-	// This was the field that caused genesis_state.json to appear blank.
-	Allocations []genesisAllocationEntry `json:"allocations"`
-	// InitialValidators is the full list of genesis validators.
-	// omitempty keeps the file clean when the list is empty (most networks).
-	InitialValidators []genesisValidatorEntry `json:"initial_validators,omitempty"`
 }
 
 // GenesisAllocation represents a single account that is funded at genesis.

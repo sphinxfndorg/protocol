@@ -5,12 +5,14 @@
 package core
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -327,23 +329,24 @@ func (gs *GenesisState) allocationsToTxListAuthorized(auth GenesisDistributionAu
 // ----------------------------------------------------------------------------
 
 // legacyGenesisVaultAddress is the pre-multisig vault address. It remains the
-// fallback when no genesis_multisig.json policy is configured so existing
+// fallback when the genesis document carries no `multisig` section, so existing
 // chains and tests keep byte-identical genesis block 0.
 const legacyGenesisVaultAddress = "0000000000000000000000000000000000000001"
 
 // GenesisVaultAddress is the active vault address. It defaults to the legacy
-// value and is replaced by LoadGenesisVaultPolicy when a genesis multisig
-// policy file is present.
+// value and is replaced by LoadGenesisVaultPolicy when the `multisig` section of
+// the single genesis document is present.
 var GenesisVaultAddress = legacyGenesisVaultAddress
 
 // policyAutoLoadDisabled reports whether this process is a `go test` binary.
 //
-// ★ WHY: config/genesis_multisig.json and config/escrow_multisig.json are
-// auto-loaded at package init, because that is what makes a live node derive
-// its vault/escrow address from the operator's policy file. A developer who
-// has just run the live custody demo (multisig devnet) therefore has those
-// files on disk — and every test that assumes the default addresses would
-// start failing for a reason that has nothing to do with the code under test.
+// ★ WHY: the `multisig` section of config/genesis_state.json and
+// config/escrow_multisig.json are auto-loaded at package init, because that is
+// what makes a live node derive its vault/escrow address from the operator's
+// policy data. A developer who has just run the live custody demo
+// (multisig devnet) therefore has that data on disk — and every test that
+// assumes the default addresses would start failing for a reason that has
+// nothing to do with the code under test.
 // Tests that exercise the policy path load it explicitly
 // (LoadGenesisVaultPolicy / LoadEscrowPolicy) and restore the previous state,
 // so skipping only the implicit init-time auto-load keeps both behaviors.
@@ -552,7 +555,7 @@ func ApplyGenesis(bc *Blockchain, gs *GenesisState) error {
 		envGs.ChainName = bc.chainParams.ChainName
 		envGs.ChainID = bc.chainParams.ChainID
 	}
-	if writeErr := envGs.writeGenesisStateFile(bc.storage.GetStateDir()); writeErr != nil {
+	if writeErr := envGs.writeGenesisStateFile(common.GetDataDir()); writeErr != nil {
 		logger.Warn("ApplyGenesis: failed to write genesis_state.json: %v", writeErr)
 	}
 
@@ -617,7 +620,7 @@ func ApplyGenesisWithCachedBlock(bc *Blockchain, gs *GenesisState, cachedBlock *
 			envGs.InitialDifficulty = new(big.Int).Set(cachedBlock.Header.Difficulty)
 			envGs.InitialGasLimit = new(big.Int).Set(cachedBlock.Header.GasLimit)
 			envGs.Nonce = cachedBlock.Header.Nonce
-			if writeErr := envGs.writeGenesisStateFile(bc.storage.GetStateDir()); writeErr != nil {
+			if writeErr := envGs.writeGenesisStateFile(common.GetDataDir()); writeErr != nil {
 				logger.Warn("ApplyGenesis (cached, skip): failed to rewrite genesis_state.json: %v", writeErr)
 			}
 			return nil
@@ -648,7 +651,7 @@ func ApplyGenesisWithCachedBlock(bc *Blockchain, gs *GenesisState, cachedBlock *
 	envGs.InitialDifficulty = new(big.Int).Set(cachedBlock.Header.Difficulty)
 	envGs.InitialGasLimit = new(big.Int).Set(cachedBlock.Header.GasLimit)
 	envGs.Nonce = cachedBlock.Header.Nonce
-	if writeErr := envGs.writeGenesisStateFile(bc.storage.GetStateDir()); writeErr != nil {
+	if writeErr := envGs.writeGenesisStateFile(common.GetDataDir()); writeErr != nil {
 		logger.Warn("ApplyGenesis (cached): failed to write genesis_state.json: %v", writeErr)
 	}
 
@@ -658,14 +661,24 @@ func ApplyGenesisWithCachedBlock(bc *Blockchain, gs *GenesisState, cachedBlock *
 	return nil
 }
 
-// writeGenesisStateFile serialises the GenesisState to a JSON file at
-// <stateDir>/genesis_state.json. The file is created with 0644 permissions.
+// writeGenesisStateFile merges the GenesisState audit view into the ONE genesis
+// document at <datadir>/config/genesis_state.json (mode 0644).
+//
+// datadir — NOT the chain state dir — is the location because R9 makes
+// genesis_state.json the single genesis file: the audit view, the chain
+// parameters, the validator set, the funded accounts, the custody policy and
+// the block-0 witness set all live in that one file under <datadir>/config/.
+//
+// It writes the complete per-account allocation list and per-validator list so
+// the document contains real data instead of blank arrays, and it MERGES rather
+// than replaces, so a node that already holds the sections written by
+// `genesis create` or by custody provisioning keeps them.
 //
 // FIX: now writes the complete per-account allocation list and per-validator
 // list so genesis_state.json contains real data instead of blank arrays.
-func (gs *GenesisState) writeGenesisStateFile(stateDir string) error {
-	if err := os.MkdirAll(stateDir, 0755); err != nil {
-		return fmt.Errorf("cannot create state dir: %w", err)
+func (gs *GenesisState) writeGenesisStateFile(datadir string) error {
+	if err := os.MkdirAll(perNodePath(datadir, "config"), 0755); err != nil {
+		return fmt.Errorf("cannot create config dir: %w", err)
 	}
 
 	// Build per-account rows and compute the supply block 0 mints. Each row
@@ -701,7 +714,7 @@ func (gs *GenesisState) writeGenesisStateFile(stateDir string) error {
 	}
 	totalGross := new(big.Int).Add(totalRemainder, totalSold)
 
-	// Build per-validator rows.
+	// Build the per-validator audit rows.
 	valEntries := make([]genesisValidatorEntry, len(gs.InitialValidators))
 	for i, v := range gs.InitialValidators {
 		stakeSPX := new(big.Int)
@@ -719,43 +732,42 @@ func (gs *GenesisState) writeGenesisStateFile(stateDir string) error {
 		}
 	}
 
-	// Produce a JSON-friendly snapshot with string representations of big.Int
-	// fields so the file is readable without a Go runtime.
-	snapshot := genesisStateSnapshot{
-		ChainID:            gs.ChainID,
-		ChainName:          gs.ChainName,
-		Symbol:             gs.Symbol,
-		Timestamp:          time.Unix(gs.Timestamp, 0).UTC().Format(time.RFC3339),
-		ExtraData:          string(gs.ExtraData),
-		InitialDifficulty:  gs.InitialDifficulty.String(),
-		InitialGasLimit:    gs.InitialGasLimit.String(),
-		Nonce:              gs.Nonce,
-		TotalAllocations:   len(gs.Allocations),
-		TotalAllocatedNSPX: totalGross.String(),
-		TotalAllocatedSPX:  new(big.Int).Div(totalGross, big.NewInt(1e18)).String(),
-		TotalRemainderNSPX: totalRemainder.String(),
-		TotalRemainderSPX:  new(big.Int).Div(totalRemainder, big.NewInt(1e18)).String(),
-		TotalSoldNSPX:      totalSold.String(),
-		TotalSoldSPX:       new(big.Int).Div(totalSold, big.NewInt(1e18)).String(),
-		TotalValidators:    len(gs.InitialValidators),
+	// Merge the audit view into the ONE genesis document. This deliberately
+	// only touches the top-level identity fields, the supply totals and the two
+	// audit row arrays — the chain / validators / funded_accounts / multisig /
+	// witnesses sections belong to other writers and must survive untouched.
+	//
+	// Every *big.Int is rendered as a decimal string first, so the file is
+	// readable by tools with no Go runtime.
+	audit := func(gf *GenesisStateFile) {
+		gf.ChainID = gs.ChainID
+		gf.ChainName = gs.ChainName
+		gf.Symbol = gs.Symbol
+		gf.Timestamp = time.Unix(gs.Timestamp, 0).UTC().Format(time.RFC3339)
+		gf.ExtraData = string(gs.ExtraData)
+		gf.InitialDifficulty = gs.InitialDifficulty.String()
+		gf.InitialGasLimit = gs.InitialGasLimit.String()
+		gf.Nonce = gs.Nonce
+
+		gf.TotalAllocations = len(gs.Allocations)
+		gf.TotalAllocatedNSPX = totalGross.String()
+		gf.TotalAllocatedSPX = new(big.Int).Div(totalGross, big.NewInt(1e18)).String()
+		gf.TotalRemainderNSPX = totalRemainder.String()
+		gf.TotalRemainderSPX = new(big.Int).Div(totalRemainder, big.NewInt(1e18)).String()
+		gf.TotalSoldNSPX = totalSold.String()
+		gf.TotalSoldSPX = new(big.Int).Div(totalSold, big.NewInt(1e18)).String()
+		gf.TotalValidators = len(gs.InitialValidators)
 		// Full ordered allocation list — previously missing, now populated.
-		Allocations: allocEntries,
+		gf.Allocations = allocEntries
 		// Full validator list — previously missing, now populated.
-		InitialValidators: valEntries,
+		gf.InitialValidators = valEntries
 	}
-
-	data, err := json.MarshalIndent(snapshot, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal error: %w", err)
-	}
-
-	path := filepath.Join(stateDir, "genesis_state.json")
-	if err := os.WriteFile(path, data, 0644); err != nil {
-		return fmt.Errorf("write error: %w", err)
+	if err := MutateGenesisFile(datadir, audit); err != nil {
+		return err
 	}
 
 	logger.Info("Genesis state written to %s (%d allocations, genesis supply %s SPX = %s sold + %s remainder)",
-		path, len(gs.Allocations),
+		GenesisStateFilePathForDataDir(datadir), len(gs.Allocations),
 		new(big.Int).Div(totalGross, big.NewInt(1e18)).String(),
 		new(big.Int).Div(totalSold, big.NewInt(1e18)).String(),
 		new(big.Int).Div(totalRemainder, big.NewInt(1e18)).String())
@@ -872,7 +884,7 @@ func (bc *Blockchain) WriteGenesisStateFromBlock(block *types.Block) error {
 		InitialValidators: []*GenesisValidator{}, // not critical for late joiners
 	}
 
-	return gs.writeGenesisStateFile(bc.storage.GetStateDir())
+	return gs.writeGenesisStateFile(common.GetDataDir())
 }
 
 // Registry for the M-of-N authorizer (and optional witness sink) used when the
@@ -961,4 +973,412 @@ func resetGenesisCustody() {
 	devnetCustodyMu.Lock()
 	devnetCustodyApplied = nil
 	devnetCustodyMu.Unlock()
+}
+
+// ----------------------------------------------------------------------------
+// The ONE genesis document — <datadir>/config/genesis_state.json
+//
+// R9: a node has exactly ONE genesis file. It is the only place initial
+// validator membership, chain parameters, the devnet genesis-vault custody
+// policy and the pre-signed block-0 witness set are recorded. There is no
+// separate genesis document, no separate multisig policy file and no separate
+// witness book, and there is deliberately NO compatibility fallback that reads
+// any of them.
+//
+// Four writers share this one file, in this order on a running node:
+//
+//  1. `genesis create` (the devnet helper — the ONLY place K is known) writes
+//     the chain, validators and funded_accounts sections;
+//  2. devnet custody provisioning merges in the multisig section (the genesis
+//     vault policy) and, on the bootstrap node, the witnesses section;
+//  3. the block-0 witness sink merges in the witnesses section after signing;
+//  4. the block-0 audit writer merges in the top-level identity fields, the
+//     supply totals and the CGE allocations / initial_validators audit rows.
+//
+// Every merge goes through MutateGenesisFile (load → mutate → atomic write), so
+// no writer can clobber a section another writer owns, and a restarted node
+// keeps all four.
+//
+// ★ NOT PART OF BLOCK 0's HASH INPUT — the one invariant this document must
+// never break. Block 0's hash is types.Block.FinalizeHash(), which concatenates
+// ONLY header fields: version, block number, timestamp, parentHash, txsRoot,
+// stateRoot, nonce, difficulty, gasLimit, gasUsed, unclesHash, extraData and
+// miner. It never reads this file and never marshals a GenesisState. The
+// sections below therefore describe MEMBERSHIP, PARAMETERS and AUTHORIZATION
+// only, and none of them can change the genesis hash.
+// TestGenesisHash_UnaffectedByFile in genesis_test.go pins that.
+//
+// Note on the two "allocations" concepts. The top-level `allocations` array is
+// the canonical CGE genesis distribution: it DOES feed block 0's TxsRoot, and
+// its rows carry the per-category remainder/sold/gross breakdown. The
+// `funded_accounts` array is the devnet pre-funding of reward addresses, applied
+// to state during block-0 execution and never entering a header. They are
+// different data with different hash consequences, so they are different
+// sections; the field semantics of each are unchanged.
+// ----------------------------------------------------------------------------
+
+// GenesisStateFileName is the single genesis document's file name, and
+// GenesisStateFileSubdir its per-node relative path under a datadir (the same
+// perNodePath convention the escrow policy and spend-proposal inbox use).
+const (
+	GenesisStateFileName   = "genesis_state.json"
+	GenesisStateFileSubdir = "config/" + GenesisStateFileName
+
+	// genesisStateFileVersion is the consolidated document's schema version.
+	genesisStateFileVersion = 2
+)
+
+// genesisFileMu serialises load → mutate → write cycles inside this process.
+// On-disk writes are already atomic (temp+rename); this only stops two
+// in-process writers (e.g. the witness sink and the block-0 audit writer) from
+// reading the same base document and losing one section.
+var genesisFileMu sync.Mutex
+
+// GenesisChainParams are the chain parameters the genesis document carries.
+// EpochBlocks is the epoch length IN BLOCKS (epoch(h) = h / EpochBlocks) that
+// consensus reads from chain state — never from a flag. The production default
+// is large; the devnet helper writes a small value so devnet epochs turn over
+// quickly.
+type GenesisChainParams struct {
+	ChainID     uint64 `json:"chain_id"`
+	Network     string `json:"network"`
+	EpochBlocks uint64 `json:"epoch_blocks"`
+	// MinStakeNSPX records the minimum stake the file was authored against
+	// (decimal nSPX string) so a reader can detect parameter drift between the
+	// file and the running chain params.
+	MinStakeNSPX string `json:"min_stake_nspx"`
+}
+
+// GenesisStakedValidator is one initial validator: the node ID the consensus
+// layer will use (Node-<tcp-addr>), that identity's SPHINCS+ public key, the
+// initial stake in nSPX, and the reward address its block rewards accrue to.
+type GenesisStakedValidator struct {
+	NodeID        string `json:"node_id"`
+	PublicKey     string `json:"public_key"`
+	StakeNSPX     string `json:"stake_nspx"`
+	RewardAddress string `json:"reward_address"`
+}
+
+// GenesisFundedAccount is one pre-funded reward address. BalanceNSPX is a
+// decimal nSPX string. These are credited to state during block-0 execution
+// (see Blockchain.seedGenesisFileAllocations) and never enter a block header.
+type GenesisFundedAccount struct {
+	Address     string `json:"address"`
+	BalanceNSPX string `json:"balance_nspx"`
+	Label       string `json:"label"`
+}
+
+// GenesisStateFile is the on-disk <datadir>/config/genesis_state.json document —
+// the single genesis file described above.
+type GenesisStateFile struct {
+	Version int `json:"version"`
+
+	// ── Block-0 identity and header template (audit view) ──────────────────
+	// The human-readable record of what block 0 was built from. Written by the
+	// block-0 audit path, never read back to build a block, and therefore
+	// incapable of influencing the genesis hash.
+	ChainID           uint64 `json:"chain_id"`
+	ChainName         string `json:"chain_name,omitempty"`
+	Symbol            string `json:"symbol,omitempty"`
+	Timestamp         string `json:"timestamp,omitempty"`
+	ExtraData         string `json:"extra_data,omitempty"`
+	InitialDifficulty string `json:"initial_difficulty,omitempty"`
+	InitialGasLimit   string `json:"initial_gas_limit,omitempty"`
+	Nonce             string `json:"nonce,omitempty"`
+
+	// ── Supply totals (audit view) ─────────────────────────────────────────
+	TotalAllocations   int    `json:"total_allocations,omitempty"`
+	TotalAllocatedNSPX string `json:"total_allocated_nspx,omitempty"`
+	TotalAllocatedSPX  string `json:"total_allocated_spx,omitempty"`
+	TotalRemainderNSPX string `json:"total_remainder_nspx,omitempty"`
+	TotalRemainderSPX  string `json:"total_remainder_spx,omitempty"`
+	TotalSoldNSPX      string `json:"total_sold_nspx,omitempty"`
+	TotalSoldSPX       string `json:"total_sold_spx,omitempty"`
+	TotalValidators    int    `json:"total_validators,omitempty"`
+	// Allocations is the full ordered CGE distribution. This array DOES feed
+	// block 0's TxsRoot; it is not the devnet reward-address pre-funding.
+	Allocations []genesisAllocationEntry `json:"allocations,omitempty"`
+	// InitialValidators is the full genesis validator list, for audit only.
+	InitialValidators []genesisValidatorEntry `json:"initial_validators,omitempty"`
+
+	// ── Membership and parameters (the sections a node actually reads) ─────
+
+	// Chain carries the chain parameters. EpochBlocks is authoritative: it is
+	// the value bind.StartNode hands to core.SetGenesisEpochBlocks before chain
+	// params are constructed.
+	Chain GenesisChainParams `json:"chain,omitempty"`
+
+	// Validators is the initial validator set, sorted by NodeID. Every node in
+	// the network must read the identical list. It is the ONLY source of initial
+	// validator membership: no flag, peer count or synthesized roster ever names
+	// a validator.
+	Validators []GenesisStakedValidator `json:"validators,omitempty"`
+
+	// FundedAccounts are the pre-funded reward addresses (validator reward
+	// addresses plus the extra devnet ones used by later Stake transactions).
+	FundedAccounts []GenesisFundedAccount `json:"funded_accounts,omitempty"`
+
+	// ── Devnet block-0 authorization ───────────────────────────────────────
+
+	// Multisig is the genesis vault custody policy (M-of-N over SPHINCS+
+	// custodian keys). Its derived address becomes the block-0 distribution
+	// sender, so it must be present before block 0 is built and is what a late
+	// joiner must receive to rebuild an identical block 0.
+	Multisig *multisig.MultiPartyPolicy `json:"multisig,omitempty"`
+
+	// Witnesses is the pre-signed block-0 witness book: one threshold witness per
+	// distribution slice plus the binding facts a replaying node must agree on.
+	// It lets a node rebuild block 0 identically while holding no custodian keys.
+	Witnesses *GenesisWitnessBook `json:"witnesses,omitempty"`
+}
+
+// HasValidatorSet reports whether this document names an initial validator set at
+// all. A document with none is a block-0 audit record only: the network was not
+// provisioned with `genesis create`, so membership comes from on-chain Stake
+// transactions alone.
+func (gf *GenesisStateFile) HasValidatorSet() bool {
+	return gf != nil && len(gf.Validators) > 0
+}
+
+// GenesisStateFilePathForDataDir returns the absolute path of the single genesis
+// document for one node's datadir. Empty datadir keeps the legacy shared-root
+// layout.
+func GenesisStateFilePathForDataDir(datadir string) string {
+	return perNodePath(datadir, GenesisStateFileSubdir)
+}
+
+// LoadGenesisFile reads <datadir>/config/genesis_state.json. A missing file is
+// not an error: it returns (nil, nil), which callers treat as "this network has
+// no genesis document — fall back to the legacy behaviour". A present-but-invalid
+// file is an error: refusing to start is the only safe response, because a node
+// that guesses its validator set cannot agree with one that reads it.
+func LoadGenesisFile(datadir string) (*GenesisStateFile, error) {
+	path := GenesisStateFilePathForDataDir(datadir)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read genesis file %s: %w", path, err)
+	}
+	var gf GenesisStateFile
+	if err := ValidateGenesisFileBytes(data, &gf); err != nil {
+		return nil, fmt.Errorf("genesis file %s: %w", path, err)
+	}
+	return &gf, nil
+}
+
+// ValidateGenesisFileBytes parses and validates raw genesis-document JSON. It is
+// the single chokepoint for genesis-document parsing, used by both the loader and
+// the devnet bundle validator (which must fail-closed on fetched bytes).
+func ValidateGenesisFileBytes(data []byte, gf *GenesisStateFile) error {
+	if len(data) == 0 {
+		return fmt.Errorf("empty genesis file")
+	}
+	if gf == nil {
+		return fmt.Errorf("nil destination")
+	}
+	if err := json.Unmarshal(data, gf); err != nil {
+		return fmt.Errorf("not a genesis file: %w", err)
+	}
+	return gf.Validate()
+}
+
+// Validate enforces the genesis sanity rules for the consolidated document:
+//   - the schema version is the one this build understands (no compatibility
+//     fallback, so an older layout is refused rather than half-read);
+//   - a document that names a validator set must list at least
+//     consensus.MinValidators of them (a GENESIS rule, not a runtime wait
+//     condition). A document with NO validator section is a valid block-0 audit
+//     record for a network that was not provisioned with `genesis create`;
+//   - node IDs and reward addresses are well-formed, unique, and one reward
+//     address per node ID;
+//   - stakes and balances are positive decimal nSPX;
+//   - chain parameters are present and positive whenever a validator set is;
+//   - the multisig policy and witness book, when present, are self-consistent.
+//
+// It deliberately does not care whether any validator is online.
+func (gf *GenesisStateFile) Validate() error {
+	if gf == nil {
+		return fmt.Errorf("genesis file is nil")
+	}
+	if gf.Version != genesisStateFileVersion {
+		return fmt.Errorf("unsupported version %d (want %d)", gf.Version, genesisStateFileVersion)
+	}
+
+	// A validator set and its chain parameters travel together: chain params with
+	// no set (or a set with no params) is a half-written `genesis create`
+	// document, and accepting it would let a node run with membership but the
+	// default EpochBlocks.
+	hasSet := len(gf.Validators) > 0
+	hasChain := gf.Chain.EpochBlocks != 0 || gf.Chain.ChainID != 0 || gf.Chain.Network != ""
+	if hasSet != hasChain {
+		return fmt.Errorf("genesis file must carry both the chain parameters and the validator set (chain present=%t, validators present=%t)", hasChain, hasSet)
+	}
+
+	if hasSet {
+		if len(gf.Validators) < consensus.MinValidators {
+			return fmt.Errorf("genesis file must list at least %d validators, got %d",
+				consensus.MinValidators, len(gf.Validators))
+		}
+		if gf.Chain.EpochBlocks == 0 {
+			return fmt.Errorf("chain parameter epoch_blocks must be positive")
+		}
+		if gf.Chain.ChainID == 0 {
+			return fmt.Errorf("chain parameter chain_id must be positive")
+		}
+
+		seenIDs := make(map[string]bool, len(gf.Validators))
+		seenReward := make(map[string]bool, len(gf.Validators))
+		for i, v := range gf.Validators {
+			if strings.TrimSpace(v.NodeID) == "" {
+				return fmt.Errorf("validator[%d]: node_id is empty", i)
+			}
+			if seenIDs[v.NodeID] {
+				return fmt.Errorf("validator[%d]: duplicate node_id %s", i, v.NodeID)
+			}
+			seenIDs[v.NodeID] = true
+
+			if _, err := parseDecimalNSPX(v.StakeNSPX); err != nil {
+				return fmt.Errorf("validator[%d] (%s): stake_nspx %q: %w", i, v.NodeID, v.StakeNSPX, err)
+			}
+			if v.PublicKey != "" {
+				pk, err := hex.DecodeString(stripHexPrefix(v.PublicKey))
+				if err != nil || len(pk) != 32 {
+					return fmt.Errorf("validator[%d] (%s): public_key must be 32 bytes of hex", i, v.NodeID)
+				}
+			}
+			if v.RewardAddress != "" {
+				addr := common.CanonicalSPIFAddress(v.RewardAddress)
+				if !common.ValidateSPIFAddress(addr) {
+					return fmt.Errorf("validator[%d] (%s): reward_address %q is not a valid address", i, v.NodeID, v.RewardAddress)
+				}
+				if seenReward[addr] {
+					return fmt.Errorf("validator[%d]: reward address %s is bound to more than one validator", i, addr)
+				}
+				seenReward[addr] = true
+			}
+		}
+	}
+
+	for i, a := range gf.FundedAccounts {
+		addr := common.CanonicalSPIFAddress(a.Address)
+		if !common.ValidateSPIFAddress(addr) {
+			return fmt.Errorf("funded_accounts[%d]: address %q is not a valid address", i, a.Address)
+		}
+		if _, err := parseDecimalNSPX(a.BalanceNSPX); err != nil {
+			return fmt.Errorf("funded_accounts[%d] (%s): balance_nspx %q: %w", i, addr, a.BalanceNSPX, err)
+		}
+	}
+
+	if gf.Multisig != nil {
+		if err := gf.Multisig.Validate(); err != nil {
+			return fmt.Errorf("multisig section: %w", err)
+		}
+	}
+	if gf.Witnesses != nil {
+		if err := gf.Witnesses.validateSelf(); err != nil {
+			return fmt.Errorf("witnesses section: %w", err)
+		}
+	}
+	return nil
+}
+
+// StakeNSPX returns the parsed initial stake of nodeID, or nil when the document
+// does not list that node.
+func (gf *GenesisStateFile) StakeNSPX(nodeID string) *big.Int {
+	if gf == nil {
+		return nil
+	}
+	for _, v := range gf.Validators {
+		if v.NodeID == nodeID {
+			stake, err := parseDecimalNSPX(v.StakeNSPX)
+			if err != nil {
+				return nil
+			}
+			return stake
+		}
+	}
+	return nil
+}
+
+// WriteGenesisFile persists gf atomically to <datadir>/config/genesis_state.json
+// (mode 0644, public data — it is also served over the devnet bundle endpoint so
+// late joiners read the identical validator set, custody policy and witness book).
+func WriteGenesisFile(datadir string, gf *GenesisStateFile) error {
+	if gf == nil {
+		return fmt.Errorf("genesis file is nil")
+	}
+	if err := gf.Validate(); err != nil {
+		return fmt.Errorf("refusing to write an invalid genesis file: %w", err)
+	}
+	genesisFileMu.Lock()
+	defer genesisFileMu.Unlock()
+	return writeGenesisFileUnlocked(datadir, gf)
+}
+
+// MutateGenesisFile performs a load → mutate → atomic write cycle on the one
+// genesis document, which is how the four writers share it without clobbering
+// each other's sections. mutate receives the current document (an empty one at the
+// current schema version when the file does not exist yet) and may change any
+// field; everything it leaves alone is preserved.
+//
+// The result is validated before it is written, so an invalid document is never
+// persisted. An error from the mutator aborts without writing.
+func MutateGenesisFile(datadir string, mutate func(*GenesisStateFile)) error {
+	if mutate == nil {
+		return fmt.Errorf("genesis file: nil mutator")
+	}
+	genesisFileMu.Lock()
+	defer genesisFileMu.Unlock()
+
+	gf, err := LoadGenesisFile(datadir)
+	if err != nil {
+		return err
+	}
+	if gf == nil {
+		gf = &GenesisStateFile{Version: genesisStateFileVersion}
+	}
+	mutate(gf)
+	if gf.Version == 0 {
+		gf.Version = genesisStateFileVersion
+	}
+	if err := gf.Validate(); err != nil {
+		return fmt.Errorf("genesis file: refusing to write an invalid document: %w", err)
+	}
+	return writeGenesisFileUnlocked(datadir, gf)
+}
+
+// writeGenesisFileUnlocked marshals and atomically persists gf. Callers must hold
+// genesisFileMu.
+func writeGenesisFileUnlocked(datadir string, gf *GenesisStateFile) error {
+	data, err := json.MarshalIndent(gf, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal genesis file: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(GenesisStateFilePathForDataDir(datadir)), 0o755); err != nil {
+		return err
+	}
+	return writeBundleFile(datadir, GenesisStateFileSubdir, append(data, '\n'))
+}
+
+// parseDecimalNSPX parses a decimal nSPX string into a big.Int.
+func parseDecimalNSPX(s string) (*big.Int, error) {
+	t := strings.TrimSpace(s)
+	if t == "" {
+		return nil, fmt.Errorf("empty amount")
+	}
+	v, ok := new(big.Int).SetString(t, 10)
+	if !ok {
+		return nil, fmt.Errorf("not a decimal integer: %q", s)
+	}
+	return v, nil
+}
+
+// stripHexPrefix removes a leading 0x/0X if present.
+func stripHexPrefix(s string) string {
+	if len(s) >= 2 && (s[:2] == "0x" || s[:2] == "0X") {
+		return s[2:]
+	}
+	return s
 }

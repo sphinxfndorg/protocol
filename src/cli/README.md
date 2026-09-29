@@ -1,723 +1,561 @@
-# Sphinx Blockchain CLI — Node Networking & Synchronization
+# Sphinx CLI — Running Nodes
 
-## Overview
+How to build the CLI, author the genesis document, run validator nodes as
+separate processes, and add nodes to a live network.
 
-This document explains how Sphinx blockchain nodes discover each other, synchronize blockchain data, and participate in PBFT consensus. A node can **join at any time** and always synchronizes with the existing network — there is no requirement for all nodes to start simultaneously.
-
-### Peer Discovery Architecture (Current)
-
-Sphinx uses a **hybrid** of static seeds, peer exchange (PEX), and Kademlia DHT iterative lookups. All three are now active:
-
-| Mechanism | Type | Status |
-|---|---|---|
-| EIP-1459 DNS discovery (`enrtree://`) | Authenticated bootstrap via DNS TXT records | ✅ Implemented (`p2p/seed` package resolves DNS trees) |
-| Static seed addresses (`--seeds=IP:PORT`) | Plain TCP bootstrap | ✅ Implemented |
-| Peer exchange (PEX) — "ask a peer who they know" | Gossip-based peer list sharing | ✅ Implemented (`requestPeerListSync` / `discoverAndRegisterPeers`) |
-| Kademlia DHT iterative lookup / routing | Ethereum-style discv4/discv5 | ✅ **Wired up** — `StartNode` creates a `dht.DHT` instance bound to the node's deterministic same-box UDP port (TCP port + 1000), translates same-box TCP seeds to matching UDP routers, and passes it to `NodeManager` for `FindClosestPeers` / iterative routing |
-
-**What this means in practice:**  
-Sphinx bootstraps via DNS tree or static seeds (like Ethereum), discovers peers-of-peers via PEX gossip (like Bitcoin), and additionally performs Kademlia iterative lookups against the routing table (like Ethereum's discv4). The `--seeds` addresses are used as plain TCP bootstrap targets for initial key exchange and block sync. In the localhost test mode, a seed's TCP port is deterministically translated to its same-box DHT UDP port (TCP + 1000), so `30303` becomes DHT router `31303`; public-device deployments retain their configured UDP-port behavior. On a real device network, the routing table fills organically as the DHT processes ping/pong/find-node responses.
+Every command below was executed against this tree.
 
 ---
 
-## Architecture: Three Separate Responsibilities
+## 1. Prerequisites and build
 
-The node lifecycle separates three distinct concerns:
+Go 1.25+ (`go version` — this tree is developed on go1.27.1).
 
-| Phase | What Happens | PBFT Required? |
-|-------|-------------|----------------|
-| **Bootstrap** | Load or create genesis block | ❌ No — trusted setup |
-| **Synchronization** | Download and verify existing chain from peers | ❌ No — historical sync |
-| **Consensus** | Participate in PBFT for new blocks | ✅ Yes — ≥3 validators |
-
-This separation is critical. A node must always be able to synchronize historical state **without** participating in consensus.
-
----
-
-## How Genesis Works
-
-### First Node (Node-A)
-
-When the very first node starts:
-
-1. No blockchain data exists locally
-2. The node creates the **genesis block** (block 0) using hardcoded parameters
-3. The genesis block is a **trusted setup** — it does NOT require:
-   - Any peer connection
-   - PBFT quorum
-   - Validator approval
-4. What happens next depends on the configured network size:
-   - With `totalNodes <= 1` (for example, a genuine single-node run), the node enters solo mode and mines blocks without PBFT.
-   - With `--nodes=3` in the seed-based localhost flow, the node creates genesis but waits for the configured validators to connect and become ready before proposing block 1. It does **not** mine a solo chain in this mode.
-
-For the recommended three-node flow:
-
-```
-Bootstrap node starts
-  ↓
-No existing chain found
-  ↓
-Create genesis block (trusted setup, no quorum needed)
-  ↓
-Wait for the other validators to connect and install genesis
-  ↓
-Wait until the configured validators are ready
-  ↓
-Start PBFT and propose block 1
-```
-
-A single-node run still follows the trusted-genesis path and can mine solo:
-
-```
-Single-node start
-  ↓
-Create genesis block
-  ↓
-Enter SOLO_MODE
-  ↓
-Mine blocks independently
-```
-
-### Why Genesis Is Trusted
-
-The genesis block is compiled into the binary. Every node produces the **same genesis hash** from the same parameters (timestamp, difficulty, gas limit, extra data, allocations). This means:
-
-- All nodes agree on genesis without any communication
-- A peer with a different genesis hash is on a fundamentally incompatible chain
-- Genesis hash is verified during the key exchange handshake — mismatches are rejected
-
----
-
-## How Late Joiners Work
-
-### Node-B Joins (Minutes, Hours, or Days Later)
-
-When a second node starts:
-
-1. Node-B detects it has no local blockchain data and enters **late-joiner mode** (`Late-joiner mode: skipping ExecuteGenesisBlock()… will sync genesis+blocks from peers`)
-2. It connects to Node-A (or any seed peer) via TCP
-3. It performs a **key exchange** that includes genesis hash verification
-4. If blocks already exist on the network, it requests genesis + all missing blocks in **batches of 500** and verifies each one before committing
-5. If no blocks exist yet, there is nothing to download: it registers as a validator and participates in the **first PBFT round** from genesis onward
-6. Once at the tip it enters **periodic monitoring mode**
-
-> ⚠️ **Which of step 4/step 5 you get depends on the node's validator-set size, not on timing.** With the same-box harness the set size comes from `--nodes`, so a joiner must use the *same* `--nodes` as the rest of the network — see the growth-limit warning in the Quick Test section. A node started with the default `--nodes=1` believes it is a one-validator network, cannot resolve any other validator's attestations, and can never verify a downloaded block.
-
-```
-Node-B starts (late joiner)
-  ↓
-No local chain — late joiner mode activated
-  ↓
-Connect to seed peer (Node-A)
-  ↓
-Key exchange + genesis hash verification
-  ↓
-Blocks already committed on the network?
-  ├─ yes → request genesis + blocks 1→N in batches of 500,
-  │        verify (parent hash, attestation quorum, continuity), commit
-  └─ no  → join the first PBFT round at genesis and follow it forward
-  ↓
-Reach CAUGHT_UP state
-  ↓
-Enter periodic monitoring (re-check every 10 seconds)
-  ↓
-Wait for more validators (need ≥3 for PBFT)
-```
-
-### Node-C Joins (Same Behavior)
-
-Node-C follows the exact same process as Node-B:
-- Verifies genesis hash with any reachable peer
-- If blocks already exist, downloads and verifies them; otherwise joins the PBFT round at genesis
-- Catches up to the network tip
-
-### Node-D, E, F...N Join (Years Later)
-
-Every subsequent node behaves identically, **provided it is configured with the network's validator-set size** (same-box harness: the same `--nodes`, and its own `--node-index`):
-
-- The sync loop **never gives up** — it retries with exponential backoff (up to 5 minutes)
-- It tries all known peers until one responds
-- It downloads the chain from genesis to tip (in 500-block batches) and enters periodic monitoring after catching up
-
-> ⚠️ **The retry loop will keep retrying a chain it can never accept.** If the joiner's effective validator set is larger than what the historical blocks attest, every batch is rejected with
-> `Block 1 failed attestation quorum check: block 1 attestation quorum not met: 96.00 / 160.00 SPX attested (need ≥ 106.67)`
-> and the node stays at height `0` forever. This is the growth limit documented in the Quick Test section (3 → 4 validators works; 4 → 5 does not).
-
----
-
-## Synchronization Protocol
-
-### Block Download (Chunked)
-
-Blocks are downloaded in **batches of 500** to prevent memory pressure and handle disconnections gracefully:
-
-```
-GetBlocksRequest{FromHeight: 1, ToHeight: 500}
-  ↓
-Peer responds with 500 blocks + their tip height
-  ↓
-Verify each block sequentially
-  ↓
-Commit each block
-  ↓
-Repeat: GetBlocksRequest{FromHeight: 501, ToHeight: 1000}
-  ↓
-...continue until caught up
-```
-
-### Block Verification Pipeline
-
-Every downloaded block passes through this verification pipeline **before** being committed:
-
-```
-Receive Block
-  ↓
-Verify previous hash matches local tip
-  ↓
-Verify block height is contiguous
-  ↓
-Verify block attestations (PBFT quorum for blocks > 0)
-  ↓
-Verify parent hash chain continuity
-  ↓
-Commit block to local storage
-```
-
-### Periodic Sync Monitoring
-
-After catching up, the sync loop does **not** exit. It enters a periodic check mode:
-
-```
-Every 10 seconds:
-  ↓
-Query all peers for their chain tip height
-  ↓
-If any peer has a higher height:
-    ↓
-  Download missing blocks in batches
-    ↓
-  Verify and commit
-  ↓
-If all peers at same height:
-    ↓
-  Sleep 10 seconds, repeat
-```
-
-This ensures nodes stay synchronized without restarting, even after temporary network partitions.
-
----
-
-## PBFT Consensus Activation
-
-PBFT only activates when **3 or more validators** are connected:
-
-```
-1 validator (a genuine single-node run):
-  → Solo mode: mine blocks independently via CommitBlock
-  → No PBFT voting needed
-
-2 validators (Node-A + Node-B):
-  → Both sync to same height
-  → Still not enough for PBFT (need ≥3)
-  → Wait for third validator
-
-3+ validators (Node-A + Node-B + Node-C):
-  → PBFT activates automatically
-  → Leader election begins
-  → Block proposals use 2/3 quorum
-  → All subsequent blocks use PBFT
-```
-
-In the `--nodes=3` localhost flow, the bootstrap node does not enter the one-validator solo branch. It creates genesis, waits for the other validators to become ready, and then starts PBFT. Solo mining is reserved for `totalNodes <= 1`; mining solo blocks in a configured multi-node network can create a chain that peers never voted on.
-
-### Sync State Machine
-
-```
-SYNCING
-  ↓ (sync loop catches up)
-CAUGHT_UP
-  ↓ (block production loop transitions)
-CONSENSUS_PARTICIPANT
-  ↓ (PBFT rounds begin)
-Active PBFT validator
-```
-
-A node in `SYNCING` state will **never** participate in PBFT rounds. It waits until the sync loop transitions it to `CAUGHT_UP`, then the block production loop transitions it to `CONSENSUS_PARTICIPANT`.
-
----
-
-## Peer Discovery
-
-### Seed Nodes
-
-Nodes discover each other through:
-1. **Static configuration** (Legacy Same-Box Mode only — no `--seeds`, no custom `--tcp-addr`: `--nodes=3` pre-registers the fixed-port peer addresses for that mode)
-2. **Seed addresses** (`--seeds=IP:PORT` — plain TCP addresses)
-3. **DNS discovery** (`--seeds=enrtree://...` — EIP-1459 authenticated peer lists)
-
-> **Fixed:** `--nodes=3` on its own no longer pre-registers peers as validators. A bootstrap node started without `--seeds` does not treat the other configured nodes as connected. In the recommended localhost flow it waits for real peers to complete key exchange, install genesis, and become ready before proposing; only a genuine `totalNodes <= 1` run enters solo mode. `--nodes=3` tells the node how many validators to expect for PBFT quorum math — it does not add validators by itself.
-
-### Key Exchange Handshake
-
-Every peer connection includes a key exchange that verifies:
-
-| Field | Purpose |
-|-------|---------|
-| `NodeID` | Unique peer identifier |
-| `PublicKey` | SPHINCS+ public key for signature verification |
-| `RewardAddress` | SPIF wallet address for staking (optional) |
-| `GenesisHash` | Peer's claimed genesis block hash |
-
-**If the peer's genesis hash differs from ours, the connection is rejected.** This prevents accidental network splits.
-
-### Peer Exchange (PEX)
-
-After key exchange, nodes ask peers "who else do you know about?" and share their known peer lists. This allows the network to grow organically.
-
-### Validator Registration on Discovery
-
-> **Fixed:** Previously, a discovered peer was only added as a **network/gossip peer** — it was never added to the validator set unless it separately supplied a `RewardAddress` *and* that address had a verified on-chain balance. In test/permissioned setups (no `--reward-address`), neither condition was ever met, so every node's validator set silently stayed at size 1 forever — each node saw itself as the only validator, "won" 100% of its own quorum, and mined its own independent chain.
->
-> Discovered peers are now granted **minimum validator stake immediately** upon successful key exchange, so the validator set grows to match the number of connected peers. This is what makes `validators=3` (and real 2-of-3 PBFT quorum) actually reachable in the Quick Test flow below.
->
-> ⚠️ This immediate-stake grant is intended for local/test/permissioned networks. If this code path is ever exposed on a public network, it should be gated (e.g. behind a `--test-mode` flag) — as written, any peer that can complete a TCP key exchange gets voting power with no real stake behind it.
-
----
-
-## Running Tests from Terminal
-
-### About Ports and Data Directories
-
-**The real trigger for "synthetic" (auto-assigned) addressing is whether `--tcp-addr` is provided and differs from the default same-box port — not whether `--nodes=3` is present.** `--nodes=3` only tells the node how many validators to expect for PBFT quorum math; it does not by itself override your address or data directory.
-
-- **If you omit `--tcp-addr`** (or pass a value equal to the hardcoded default `32307 + node-index`), the node falls back to fully synthetic same-box addressing: fixed ports starting at **32307** (TCP) / **32418** (UDP), and `--datadir` is ignored — data always lands in `data/Node-127.0.0.1:<synthetic-port>/`. This is the **Legacy Same-Box Mode** described below.
-- **If you explicitly pass `--tcp-addr`** with a port that differs from that default (as in the Quick Test commands below), your address *and* your `--datadir` are both honored exactly as given. This is the normal, recommended mode.
-
-> **Fixed:** Passing a custom `--tcp-addr` (including a custom loopback port, as in the Quick Test commands below) used to also incorrectly collapse the node's internal validator/peer address list down to size 1 — as if it were a single, isolated node — even though the address itself was handled correctly. That collapse only happens now for a genuine public/real network address; custom loopback ports no longer trigger it. This was the actual root cause behind nodes never seeing each other as validators in the Quick Test flow, and is distinct from the address/datadir handling described above.
-
-> ⚠️ **The single most common setup mistake:** giving two or more terminals the **same `--datadir`**. Each node's data directory must be unique to that node — `data/node1` for node 1, `data/node2` for node 2, and so on. Reusing one `--datadir` across terminals doesn't corrupt anything (each node's data still lands in its own `Node-<address>` subfolder, since that subfolder is keyed by address, not by whatever base dir you gave it) — but it does mean you'll find every node's storage nested under one confusingly-named folder instead of separated the way you intended. Before starting multiple nodes, double check: **one terminal → one `--tcp-addr` → one matching, unique `--datadir`.**
-
-To use custom ports and data directories, use **seed-based mode** (`--seeds=`) which operates like real blockchain nodes: a late joiner connects to a seed, downloads the chain, then discovers additional peers via PEX gossip.
-
-### ⚡ Quick Test: Seed-Based Mode (Recommended)
-
-This approach uses `--seeds=` to point late joiners at the first node. On a real network, DNS discovery and PEX gossip propagate peer information after the initial seed connection.
-
-**Important:** When testing on localhost (127.0.0.1), the CLI detects loopback addresses and requires `--nodes=3` even with `--seeds`. On real machines with public IPs, `--nodes=3` is not needed.
-
-**Before you open any terminals, write down the mapping below and keep it visible.** Every value in the "changes per node" columns must be different in every terminal — this is the table that would have caught the `--datadir` mix-up:
-
-| Terminal | `--tcp-addr` | `--http-port` | wallet RPC (derived) | `--datadir` | `--node-index` |
-|----------|-------------|---------------|----------------------|-------------|----------------|
-| 1 | `127.0.0.1:30303` | `127.0.0.1:8545` | `127.0.0.1:8700` | `data/node1` | `0` |
-| 2 | `127.0.0.1:30304` | `127.0.0.1:8546` | `127.0.0.1:8701` | `data/node2` | `1` |
-| 3 | `127.0.0.1:30305` | `127.0.0.1:8547` | `127.0.0.1:8702` | `data/node3` | `2` |
-| 4 | `127.0.0.1:30306` | `127.0.0.1:8548` | `127.0.0.1:8703` | `data/node4` | `3` |
-| 5 | `127.0.0.1:30307` | `127.0.0.1:8549` | `127.0.0.1:8704` | `data/node5` | `4` |
-| 6 | `127.0.0.1:30308` | `127.0.0.1:8550` | `127.0.0.1:8705` | `data/node6` | `5` |
-| 7 | `127.0.0.1:30309` | `127.0.0.1:8551` | `127.0.0.1:8706` | `data/node7` | `6` |
-| 8 | `127.0.0.1:30310` | `127.0.0.1:8552` | `127.0.0.1:8707` | `data/node8` | `7` |
-
-The **wallet/JSON-RPC port is not a flag** — it is always derived as **`8700 + --node-index`**, and it is the port `--rpc` must target for `get-balance`/`watch-tx`, the port peers use for tip queries and block downloads, and the *first* thing that collides if `--node-index` is missing. It is listed above so you never have to derive it by hand.
-
-> ⚠️ **Always pass `--node-index` on a single machine, and give every node the *same* `--nodes=N`.**
->
-> - **Omitting `--node-index` defaults it to `0`**, so the node tries to bind wallet RPC `8700` — already held by Terminal 1 — and exits during startup with:
->   `failed to bind wallet RPC listener on 127.0.0.1:8700: listen tcp 127.0.0.1:8700: bind: address already in use`
->   If you must run a node without a free `--node-index`, override the derived port explicitly: `--ws-port=127.0.0.1:8710` (any value other than the `127.0.0.1:8600` default is honoured as-is).
-> - **`--nodes` sizes the local validator set for every node on this machine.** `--nodes=N` with `--node-index=i` requires `i < N` (`node-index 3 out of range for 3 nodes` otherwise), and a node started with the default `--nodes=1` believes it is a one-validator network: its validator set stays size 1, so it can never resolve the other validators' attestations and can never verify a downloaded block. Give every node the same `N` — the total number of validators you intend to run.
-
-**Terminal 1 — First validator (creates genesis, then waits for the configured validators):**
 ```bash
-cd Desktop/protocol
-go run src/cli/main.go node --role=validator \
+git clone https://github.com/sphinxfndorg/protocol.git
+cd protocol
+go build ./...                 # compile everything
+go build -o sphinx ./src/cli   # build the CLI binary
+```
+
+Check it:
+
+```bash
+./sphinx help
+```
+
+If you would rather not build a binary, every command in this document also
+works as `go run src/cli/main.go <command>` — just slower on each invocation,
+because the CLI is recompiled.
+
+Run the tests (the Makefile targets exist because `src/core`'s SPHINCS+ suites
+take ~12 min and exceed `go test`'s 10 min per-package default):
+
+```bash
+make test          # all suites, 40m timeout
+make test-cli      # just the CLI
+go test ./... -timeout 40m
+```
+
+---
+
+## 2. The one genesis document
+
+A node has **exactly one** genesis file: `<datadir>/config/genesis_state.json`.
+It is the only source of the initial validator set; nothing else on the node
+records membership. It carries:
+
+| Section | Contents |
+|---|---|
+| `chain` | `chain_id`, `network`, `epoch_blocks`, `min_stake_nspx` |
+| `validators` | `node_id`, `public_key`, `stake_nspx`, `reward_address` |
+| `funded_accounts` | pre-funded reward addresses (`address`, `balance_nspx`, `label`) |
+| `multisig` | the genesis vault M-of-N custody policy |
+| `witnesses` | the pre-signed block-0 witness book |
+| top-level | block-0 audit fields (identity, supply totals, CGE allocation rows) |
+
+There is no `genesis.json`, no `genesis_multisig.json`, no
+`devnet_genesis_witnesses.json`, and no fallback that reads any of them.
+
+**How a node gets it:**
+
+- **devnet** — `genesis create` writes one per node datadir. A node started with
+  `--seeds` also fetches the missing public sections from its seeds
+  automatically, retrying while the bootstrap node is still signing.
+- **any other network** — there is **no automatic fetch**. Place the file at
+  `<datadir>/config/genesis_state.json` out of band (copy/scp) before the node
+  starts. A node started without it still runs, but it has no genesis validators
+  and no funded accounts, so it stays a peer until it is staked.
+
+**Block 0's hash does not depend on these sections.** It is built from the frozen
+canonical parameters, so every node derives the same genesis hash.
+
+**Identity is derived from `--tcp-addr`** as `Node-<host:port>`. That exact
+string must appear as `node_id` in `genesis_state.json`, or the node is not in
+the set. `--port-offset` never changes it.
+
+---
+
+## 3. Author the genesis document (`genesis create`)
+
+`K` is a parameter you choose. It is **not** a constant of the system, and no
+running node ever learns it from a flag — the value is written once into the
+document and thereafter read from chain state like any other data.
+
+```bash
+./sphinx genesis create --validators=K     # K = 3, 4, 5, … 1000
+```
+
+The only rule is a floor: **`K >= 3`** (`consensus.MinValidators`), because a
+smaller set can never be safe. What `K` you pick is a liveness choice, not a
+correctness one — see §8. The node behaves identically whether `K` is 3 or 1000;
+`K` only decides how many validators exist and how many must vote.
+
+Flags:
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--validators=K` | `0` | number of genesis validators. **Rejected if `K < 3`** (`consensus.MinValidators`). Pick for the fault tolerance you want, not for convenience |
+| `--funded-accounts=M` | `0` | extra reward addresses pre-funded with a stake-sized balance, so validators added later can be staked |
+| `--root` | `data` | root directory holding the per-validator `node<N>` datadirs |
+| `--host` | `127.0.0.1` | host used to derive each node's `Node-<host:port>` identity |
+| `--tcp-base` | `30303` | P2P TCP port of validator 0; validator `i` gets `tcp-base+i` |
+| `--stake-spx` | `32` | initial stake per validator, in whole SPX (`denom.MinValidatorStakeSPX`) |
+| `--epoch-blocks` | `10` | `epoch_blocks` chain parameter written into the document |
+| `--chain-id` | `73310` | chain id written into the document |
+| `--network` | `devnet` | network label written into the document |
+
+This tool is the **only** place `K` exists. It is never written into any node's
+flags, never inferred from a connected-peer count, and never re-read by a
+running node — once the document is written, the count is just data.
+
+It writes one entry per validator. For the `N = 3` case, i.e.
+`--root=data --tcp-base=30303 --validators=3`:
+
+```
+data/node0/config/genesis_state.json      validator Node-127.0.0.1:30303
+data/node1/config/genesis_state.json      validator Node-127.0.0.1:30304
+data/node2/config/genesis_state.json      validator Node-127.0.0.1:30305
+data/node0/Node-127.0.0.1:30303/          that node's generated SPHINCS+ identity key
+data/node1/Node-127.0.0.1:30304/
+data/node2/Node-127.0.0.1:30305/
+data/custody/devnet-rewards/validator-0.key.json   … one per genesis validator
+data/custody/devnet-rewards/funded-3.key.json      … M extra funded reward keys
+```
+
+Every node reads a **byte-identical** copy of the document.
+
+`--validators` tells **only this tool** how many validators to write. The value
+never reaches a running node, and no node flag carries a count.
+
+Re-running `genesis create` against existing datadirs is **refused** if it would
+rename, drop or re-key a validator identity the document already binds, and a
+re-run with identical parameters rewrites the same bytes. Reward keys are loaded,
+never regenerated, so addresses are stable across runs.
+
+Both refusals, shown against the `N = 3` datadir above:
+
+```bash
+$ ./sphinx genesis create --validators=2
+--validators=2 is below the BFT minimum (consensus.MinValidators=3): a genesis file listing fewer can never be safe
+
+$ ./sphinx genesis create --validators=3 --tcp-base=41403
+refusing to rewrite .../config/genesis_state.json: it already binds validator Node-127.0.0.1:30303, but this run does not include it (it would rename or drop a validator identity). ...
+```
+
+---
+
+## 4. Starting a node
+
+```bash
+./sphinx node --role=validator --tcp-addr=127.0.0.1:30303 --datadir=data/node0 --pbft
+```
+
+### `node` flags
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--role` | `validator` | `validator` \| `sender` \| `receiver` \| `none` |
+| `--tcp-addr` | `127.0.0.1:30303` | P2P gossip listen address. **Also defines this node's `Node-<host:port>` identity** |
+| `--http-port` | `127.0.0.1:8545` | HTTP JSON-RPC listen address |
+| `--ws-port` | `127.0.0.1:8600` | wallet/JSON-RPC listen address. Left at the default it becomes **`8700 + --port-offset`** |
+| `--udp-port` | `""` | DHT UDP port. Defaults to **this node's TCP port + 1000** |
+| `--datadir` | `data` | LevelDB/storage directory. Left at the default it becomes **`data/node<offset>`** |
+| `--port-offset` | `0` | **Local addressing only.** Shifts the *default* TCP/HTTP/WS/UDP ports and the *default* datadir. Never changes a node ID, a validator set, or membership |
+| `--seeds` | `""` | comma-separated seed TCP addresses, and/or `enrtree://` DNS discovery URLs. Empty ⇒ the built-in default DNS discovery tree |
+| `--network` | `devnet` | `devnet` \| `testnet` \| `mainnet` |
+| `--reward-address` | `""` | SPIF wallet address that stakes this node and receives its block rewards |
+| `--pbft` | `false` | tunes startup logging. Consensus itself is driven by the on-chain set, so this is not what turns PBFT on |
+| `--config` | `""` | path to a JSON node-config file. Must describe **one** node |
+| `--mode` | `development` | `development` \| `production` |
+
+**Derived addressing.** With `--port-offset=N` and no explicit overrides:
+
+| | value |
+|---|---|
+| P2P TCP | `127.0.0.1:(30303+N)` |
+| HTTP JSON-RPC | `127.0.0.1:(8545+N)` |
+| wallet RPC (`--ws-port`) | `127.0.0.1:(8700+N)` |
+| DHT UDP | P2P TCP + 1000 = `31303+N` |
+| datadir | `data/node<N>` |
+
+An explicit `--tcp-addr` / `--http-port` / `--ws-port` / `--datadir` always wins
+and is never shifted. If you pass an explicit `--tcp-addr`, you must also pass a
+`--datadir` (the default would otherwise still be derived from the offset).
+
+UDP discovery is always **TCP + 1000** for a given node, so the DHT port of
+`127.0.0.1:30304` is `31304`.
+
+### Consensus and quorum, in one paragraph
+
+Membership comes from chain state only: the genesis document's `validators`, then
+on-chain Stake transactions. A block commits only when validators holding
+**strictly more than 2/3 of the staked set's total stake** have voted
+(`voted*3 > total*2`). Peers are not validators: a node that is not in the set
+still gossips, syncs and relays, but its vote weighs zero and it is never a
+leader. Offline validators do not change the set size — they simply do not vote.
+
+---
+
+## 5. Single-machine devnet — running N nodes, one per terminal
+
+The walkthrough below uses **N = 3** because that is the minimum legal set and
+the smallest thing that produces blocks. It is an example, not a requirement.
+For any `N` the commands are the same shape — see the general rule at the end of
+this section.
+
+Everything runs as separate processes on `127.0.0.1` with unique ports and
+datadirs. There is **no node-count flag**.
+
+All commands below are relative to the **repository root** (the directory holding
+`go.mod`), and assume you built the binary in §1. Adjust the path if your clone
+lives somewhere else.
+
+**Step 0 — once, before any node starts:**
+
+```bash
+./sphinx genesis create --validators=N
+```
+
+Substitute your own `N` (`>= 3`). The three-terminal walkthrough below is the
+`N = 3` case, expanded for each node:
+
+This writes `data/node0`, `data/node1`, `data/node2` with validators
+`Node-127.0.0.1:30303`, `:30304`, `:30305`.
+
+**Terminal 1 — the bootstrap node** (holds the datadir `genesis create` wrote for validator 0):
+
+```bash
+./sphinx node --role=validator \
     --tcp-addr=127.0.0.1:30303 \
     --http-port=127.0.0.1:8545 \
-    --datadir=data/node1 \
-    --nodes=3 --node-index=0 \
+    --datadir=data/node0 \
     --pbft
 ```
 
-**Expected:** Creates genesis, waits for nodes 2 and 3 to connect and become ready, then starts PBFT. It does not mine a solo chain in this `--nodes=3` flow.
-
-> **Devnet custody layout — fully per-node, and the copy is an ORDERED step.**
-> Node 1 auto-generates inside its own datadir: policies + witness book under
-> `data/node1/config/`, custodian throwaway keys under
-> `data/node1/custody/devnet-auto/`. It never touches the shared repo root, and
-> no node reads another node's directory.
->
-> ⚠️ **You cannot start all three terminals at once any more.** Node 1 *authors*
-> block 0; nodes 2 and 3 can only *replay* it. Until they hold node 1's bundle
-> they have no way to reproduce the same genesis hash, so they now **refuse to
-> start** rather than build a divergent chain. Follow this order:
->
-> **Step 1 — start Terminal 1 alone** (the command above) and let it finish the
-> one-time custody signing. Watch for this line before continuing:
-> ```
-> DEVNET AUTO-CUSTODY: persisted N genesis witnesses to data/node1/config/devnet_genesis_witnesses.json
-> ```
-> That file does not exist until signing completes (~3 min of STHINCS signing),
-> so copying before this point is the single most common mistake — it produces a
-> "half-done copy" (policies present, witness book missing).
->
-> **Step 2 — copy ONLY the public bundle** into each peer's own datadir:
-> ```bash
-> for n in 2 3; do
->   mkdir -p data/node$n/config
->   for f in genesis_multisig.json escrow_multisig.json devnet_genesis_witnesses.json; do
->     cp data/node1/config/$f data/node$n/config/$f
->   done
-> done
-> ```
-> Never copy `custody/` — that holds the custodian secret keys, and a replaying
-> node needs none of them.
->
-> **Step 3 — start Terminals 2 and 3.** Each loads the bundle, rebuilds block 0
-> byte-for-byte from the persisted witnesses, and passes key exchange.
->
-> If you skip Step 2, the joiner exits immediately with
-> `devnet late joiner has no custody bundle in its own datadir: …` plus the exact
-> copy commands. That refusal is deliberate: previously such a node started
-> anyway, silently built a *different* block 0 (legacy vault, unsigned) while
-> node 1 built the custody one, and then presented as the far more confusing
-> *"nodes cannot connect to each other"* — every peer rejecting every other peer
-> at key exchange because the genesis hashes disagreed.
->
-> This copy step is the devnet stand-in for the real ceremony-artifact
-> distribution.
->
-> ⚠️ **KNOWN GAP — do NOT script this copy.** The `cp` above is deliberately
-> manual. Any automation that reaches across node directories on the same host
-> (a script that finds `data/node1/config` and fills in every other datadir)
-> re-creates exactly the shared-filesystem assumption the per-node layout was
-> introduced to remove: it would make a broken distribution path look healthy
-> on one machine and only fail on real multi-host infra. If distribution needs
-> automating, automate the *transport* (out-of-band hand-off of the public
-> bundle), not a same-host directory scan. The manual step is the honest
-> stand-in for a distribution mechanism that does not exist yet.
-
-> **Multisig treasury spend — no flags, runs on every node.** The custody watcher starts automatically inside every node's process whenever a multisig policy is provisioned — nothing on the command line and nothing that differs between terminals. The node is never told a destination or amount: it scans **its own `<datadir>/config/spend_proposals/`** for spends the custodian quorum has already signed (each file is a complete `multisig spend --dry-run --out` transaction, so destination/amount/nonce live *inside* the signed payload) and broadcasts at most one per cycle, deduped by transaction id. It can never authorize a spend on its own — the node re-verifies the witness at admission.
->
-> - **Creating a proposal** (an operator action, not the node's): assemble the usual spend and drop it into that node's proposals directory instead of broadcasting by hand —
->   `go run src/cli/main.go multisig spend --policy data/node1/config/escrow_multisig.json --to <addr> --amount-spx <n> --keys-dir data/custody/escrow --rpc 127.0.0.1:8700 --dry-run --out data/node1/config/spend_proposals/<id>.json`
->   The next watcher cycle re-verifies it against the **live** policy — sender address, chain id, expiry window, the witness's embedded policy, and a real M-of-N signature check over the exact spend — then broadcasts it.
-> - ⚠️ **`<datadir>/config/spend_proposals/` is a trust boundary, not an inbox.** Anything that can write there can force a broadcast *attempt* of a payment the quorum already signed; protect it like the custodian keys themselves. A malformed or invalid file is logged and skipped, never fatal, so one bad drop cannot block the others.
-> - **Replay-safe:** the watcher dedupes by transaction id — a proposal already broadcast, already on-chain, or already rejected is never resubmitted, and it survives a restart (each candidate is checked against `gettransactionreceipt` before broadcasting).
-> - **Prerequisite:** the escrow policy must exist in the node's own datadir — `<datadir>/config/escrow_multisig.json` — before that node starts, because the policy's address is what block 0 funds and what every node re-verifies proposals against. In the auto-custody flow you get it by copying node 1's public bundle (see the layout note under Terminal 1). If it is missing, the node logs `no multisig policy at <datadir>/config/escrow_multisig.json — auto multisig spend watcher disabled` and starts normally with the watcher off — it does **not** fail startup, and it does **not** reach into another node's datadir. (A node that still has only the pre-per-node `config/escrow_multisig.json` at the repo root still works via a legacy fallback, but that path logs a loud `MIGRATION:` ERROR telling you to copy the bundle — close it out rather than relying on it.)
-> - **Broadcaster ≠ custodian — no custodian keys on watcher nodes.** A node running the watcher only broadcasts spends the quorum already signed, so it needs **no custodian key files**. `data/custody/escrow/…` belongs only on the machines that *sign* proposals (`multisig devnet` / `message` / `sign` / `combine`); do **not** copy M-of-N of them onto every broadcasting node — that widens the key-distribution surface for a signing authority the watcher never exercises. Startup is gated only on the policy being present and parseable.
-> - **Every terminal is identical** — there's no per-terminal spend configuration to keep in sync. Ctrl+C stops the watcher and the node together; a transient broadcast failure (e.g. this node's RPC not listening yet) is logged and retried next interval, and a fatal loop error logs `auto multisig spend watcher stopped: …` while the node keeps running.
-
-**Terminal 2 — Second validator (late joiner, connects via --seeds):**
-
-> `--datadir=data/node2` and `--tcp-addr=127.0.0.1:30304` must both differ from Terminal 1 — that's the pairing that gets mixed up most often.
+**Terminal 2** (`--port-offset=1` ⇒ TCP `30304`, wallet RPC `8701`, datadir `data/node1`):
 
 ```bash
-cd Desktop/protocol
-go run src/cli/main.go node --role=validator \
-    --tcp-addr=127.0.0.1:30304 \
-    --http-port=127.0.0.1:8546 \
-    --datadir=data/node2 \
-    --nodes=3 --node-index=1 \
+./sphinx node --role=validator \
+    --port-offset=1 \
     --seeds=127.0.0.1:30303 \
     --pbft
 ```
 
-**Expected:** Registers as a validator, waits for the other validators to connect, then participates in the PBFT rounds. Since no blocks exist yet, there is nothing to download — the download path only runs for a joiner that arrives after blocks are already committed.
+**Terminal 3** (`--port-offset=2` ⇒ TCP `30305`, wallet RPC `8702`, datadir `data/node2`):
 
-**Terminal 3 — Third validator (PBFT activates):**
 ```bash
-cd Desktop/protocol
-go run src/cli/main.go node --role=validator \
-    --tcp-addr=127.0.0.1:30305 \
-    --http-port=127.0.0.1:8547 \
-    --datadir=data/node3 \
-    --nodes=3 --node-index=2 \
+./sphinx node --role=validator \
+    --port-offset=2 \
     --seeds=127.0.0.1:30303 \
     --pbft
 ```
 
-**Expected:** Registers as the third validator; once all three are connected, PBFT starts and produces block 1.
+Terminals 2 and 3 derive the **same** `Node-<host:port>` identities that
+`genesis create` wrote, because the offset shifts `--tcp-addr` and `--datadir`
+together (`30304`↔`data/node1`, `30305`↔`data/node2`).
 
-**Terminal 4 — Fourth validator (joins the network that Terminals 1–3 are already running):**
+Start them in **any order**. Terminals 2/3 wait on their own and fetch the public
+bundle from node 1.
 
-> **Corrected:** this command previously omitted `--nodes`/`--node-index`, which made the node attempt wallet RPC port `8700` (already held by Terminal 1) and exit with `bind: address already in use`. Pass `--node-index=3` and raise `--nodes` to `4` — see the warning in the table above for why both are required.
+### What you should see
+
+Node 1 alone:
+
+```
+GENESIS FILE: seeded 3 validators into the consensus set (96 SPX total)
+Block-production suspended (need ≥ 3 staked+ready validators for PBFT, have 1 — waiting for validators to become reachable)
+```
+
+Node 1 is **waiting**, not stalled or mining a solo chain. Once all three are up,
+each node logs:
+
+```
+Quorum achieved: 96.00 / 96.00 SPX voted (100.0%)
+committed block <same-hash> at height 1
+```
+
+96 SPX = 3 × 32. All three must report the **identical** block hash at each
+height, and there must be **zero** `attestation quorum not met` errors.
+
+### The general rule for N nodes
+
+Nothing above is specific to 3. For a set of `N` validators, author it with
+`--validators=N` and start node `i` (0-based) as:
 
 ```bash
-cd Desktop/protocol
-go run src/cli/main.go node --role=validator \
-    --tcp-addr=127.0.0.1:30306 \
-    --http-port=127.0.0.1:8548 \
-    --datadir=data/node4 \
-    --nodes=4 --node-index=3 \
+./sphinx genesis create --validators=N          # once, for any N >= 3
+
+# node 0 — the bootstrap
+./sphinx node --role=validator --tcp-addr=127.0.0.1:30303 --http-port=127.0.0.1:8545 --datadir=data/node0 --pbft
+
+# node i (i >= 1)
+./sphinx node --role=validator --port-offset=i --seeds=127.0.0.1:30303 --pbft
+```
+
+| | value for node `i` |
+|---|---|
+| `--port-offset` | `i` |
+| P2P TCP | `127.0.0.1:(30303+i)` |
+| HTTP JSON-RPC | `127.0.0.1:(8545+i)` |
+| wallet RPC | `127.0.0.1:(8700+i)` |
+| DHT UDP | `(30303+i) + 1000` |
+| `--datadir` | `data/node<i>` |
+| identity | `Node-127.0.0.1:(30303+i)` |
+
+Every validator except node 0 is started **identically** — same command, only
+the offset differs. `genesis create` derives exactly these identities, so each
+node finds itself in the set. A node with `i >= N` was never written into the
+document, so it joins as a **peer** (see §6).
+
+The staked total and the quorum threshold scale with `N` automatically:
+`N × 32` SPX total, and each block needs strictly more than `2/3 × N × 32`
+SPX voting. The nodes do not need to be told any of this.
+
+
+---
+
+## 6. Adding nodes to a live network
+
+A later node needs **only `--seeds`** plus its own identity/ports. It does not
+need the genesis document in advance: on devnet it fetches the public sections
+from its seeds.
+
+```bash
+# Pick any offset i >= N — it is not in the document, so this node is a PEER.
+# For an N=3 network the first such offset is 3 (a 4th, unlisted node):
+
+./sphinx node --role=validator \
+    --port-offset=3 \
     --seeds=127.0.0.1:30303 \
     --pbft
 ```
 
-**Expected:** Binds wallet RPC on `127.0.0.1:8703`, passes key exchange with all three running peers (identical genesis hash), converges on `validators=4` / 128 SPX total stake, downloads blocks `1→N` from any peer and catches up to the tip, then validates (and can itself propose) blocks.
+That node is `Node-127.0.0.1:30306` on datadir `data/node3`. Unless
+`genesis create` listed it, it is **a peer only**:
 
-**Scaling up: an N-node network must be sized up front.**
-
-The set size a node believes in comes from `--nodes`, and every node must agree on it. So the commands above are two *separate* scenarios — do not mix their `--nodes` values:
-
-| Scenario | Terminals 1–3 | Terminal 4 | Result |
-|---|---|---|---|
-| **A — 3-node network** (the Quick Test above) | `--nodes=3` | — | ✅ converged, `validators=3` |
-| **B — grow a running 3-node chain by one** | `--nodes=3` (already running) | `--nodes=4 --node-index=3` | ✅ node 4 syncs and validates |
-| **C — 8-node network, sized up front** | `--nodes=8 --node-index=0..2` | `--nodes=8 --node-index=3..7` | ✅ only variant that scales past 4 |
-
-**Scenario C — all eight nodes, `--nodes=8` on every one of them.** Terminals 1–4 are the same addresses/datadirs as above, but with `--nodes=8 --node-index=0|1|2|3`; Terminals 5–8 are:
-
-```bash
-# Terminal 5
-go run src/cli/main.go node --role=validator \
-    --tcp-addr=127.0.0.1:30307 --http-port=127.0.0.1:8549 \
-    --datadir=data/node5 --nodes=8 --node-index=4 \
-    --seeds=127.0.0.1:30303 --pbft
-
-# Terminal 6
-go run src/cli/main.go node --role=validator \
-    --tcp-addr=127.0.0.1:30308 --http-port=127.0.0.1:8550 \
-    --datadir=data/node6 --nodes=8 --node-index=5 \
-    --seeds=127.0.0.1:30303 --pbft
-
-# Terminal 7
-go run src/cli/main.go node --role=validator \
-    --tcp-addr=127.0.0.1:30309 --http-port=127.0.0.1:8551 \
-    --datadir=data/node7 --nodes=8 --node-index=6 \
-    --seeds=127.0.0.1:30303 --pbft
-
-# Terminal 8
-go run src/cli/main.go node --role=validator \
-    --tcp-addr=127.0.0.1:30310 --http-port=127.0.0.1:8552 \
-    --datadir=data/node8 --nodes=8 --node-index=7 \
-    --seeds=127.0.0.1:30303 --pbft
+```
+Not listed in the genesis file — participating as a peer only until a Stake transaction admits this node
 ```
 
-For N nodes the general rule is: `--node-index = i` (0-based), `--tcp-addr = 127.0.0.1:(30303+i)`, `--http-port = 127.0.0.1:(8545+i)`, wallet RPC auto-derives to `127.0.0.1:(8700+i)`, `--datadir=data/node(i+1)`, and `--nodes=N` on **every** node — with a large enough TCP port range if `i` pushes past `30310`.
+It syncs the full chain, relays gossip and can answer RPC — but it contributes
+**0 SPX** to the quorum denominator and never becomes leader. You can verify the
+denominator is unaffected: the three listed validators keep reporting
+`96.00 / 96.00 SPX`, not `96.00 / 128.00`.
 
-> ⚠️ **Growth limit — read this before adding a 5th+ node to a chain that is already producing blocks.** Blocks record the attestations that existed when they were produced. With no per-epoch validator snapshots (`core.SnapshotValidatorSet` has no callers), a syncing node verifies historical blocks against its **current** validator set, so the 2/3 threshold it enforces rises as nodes are added, while old blocks keep their original attestation weight. Measured on this repo:
+To add several at once, give each its own offset (they map to `data/node<N>`
+and `30303+N`):
+
+```bash
+./sphinx node --role=validator --port-offset=3 --seeds=127.0.0.1:30303 --pbft
+./sphinx node --role=validator --port-offset=4 --seeds=127.0.0.1:30303 --pbft
+./sphinx node --role=validator --port-offset=5 --seeds=127.0.0.1:30303 --pbft
+```
+
+If the node's datadir is empty, the first thing it must do is obtain the genesis
+document. On devnet that happens automatically over the network:
+
+```
+DEVNET BUNDLE: waiting for the bootstrap node to finish signing — retrying bundle fetch over the network (elapsed 15s)
+DEVNET BUNDLE: fetched + verified the public bundle over the network in 21s
+```
+
+If it instead exits with `devnet late joiner has no custody bundle …`, the fetch
+failed — the seeds were unreachable, or the bootstrap node was not running yet.
+That refusal is deliberate: starting without the document would build a
+*different* block 0, and every peer would reject it at key exchange.
+
+> **Restarting a node with an existing datadir never refetches and never
+> overwrites.** It logs `DEVNET BUNDLE: local bundle already complete — no
+> fetch, no overwrite` and keeps the files byte-for-byte.
+
+---
+
+## 7. Becoming a validator: staking
+
+**Current state of this build.** Unstaked nodes are peers only (§6). The
+mechanism that turns a peer into a validator is a **Stake transaction**, which —
+at the time of writing — is **not yet exposed as a CLI subcommand**. The
+`funded-accounts` reward addresses and keys that `genesis create` produces are
+the inputs it will consume:
+
+```
+data/custody/devnet-rewards/funded-3.key.json   private_key + public_key (hex)
+data/custody/devnet-rewards/validator-0.key.json
+```
+
+Those keys are real spendable SPIF accounts, already funded with a stake-sized
+balance, and their addresses are listed in the document's `funded_accounts`.
+Until the Stake subcommand lands, a non-genesis node cannot be added to the set.
+
+> **`--reward-address`** declares which address a node stakes from and receives
+> rewards at. Admission from a reward address is **balance-verified**: the
+> address must hold at least the minimum stake on-chain, and one reward address
+> admits at most one node ID. There is no localhost trust path and no
+> self-grant — an unlisted node can never award itself a seat by starting up.
 >
-> | Scenario | Result |
-> |---|---|
-> | 3 validators running (`--nodes=3`), start node 4 with `--nodes=4 --node-index=3` | ✅ syncs, catches up (old blocks carry 3 × 32 = 96 SPX ≥ 2/3 × 128 = 85.33) |
-> | Same, but start node 4 with `--nodes` omitted | ❌ validator set stays 1 → `0.00 / 32.00 SPX attested (need ≥ 21.33)`, never syncs |
-> | 4 validators running, start node 5 with `--nodes=5 --node-index=4` | ❌ `block 1 attestation quorum not met: 96.00 / 160.00 SPX attested (need ≥ 106.67)` — retries forever, stays at height 0 |
-> | All 5 started together with `--nodes=5 --node-index=0..4` | ✅ all reach the same height, `validators=5`, zero errors |
->
-> **So: size the network up front** (start every node with `--nodes=N`), or grow only while `2/3 × (new validators × 32) ≤ ` the attestation weight on the oldest block you must verify. Going 3 → 4 works; 4 → 5 does not. Lifting this limitation is a code fix (populate `SnapshotValidatorSet` at epoch transitions so historical blocks verify against the set that actually signed them), not a flag.
+> Keep `data/custody/` private. `devnet-rewards/*.key.json` contain private keys.
 
-> **Note:** `--nodes`/`--node-index` are the same-box harness. On real machines with public IPs, omit both and let `--seeds` + PEX discovery populate the validator set dynamically.
+---
 
-### Testing late-joiner sync against an existing chain
+## 8. Liveness
 
-Use this procedure to verify that a node can rejoin after its local state is
-removed while the other validators continue producing blocks. Use the exact
-per-node ports and datadirs from the Quick Test above; do not reuse a datadir
-between nodes.
+Under strict 2/3 stake the chain proceeds only while more than two thirds of the
+staked set votes. For a staked set of `K` validators at 32 SPX each, a block
+needs strictly more than `2/3 × K × 32` SPX voting.
 
-1. Start all three nodes with the Quick Test commands.
-2. Wait until all three nodes report at least height `5` and confirm their
-   block indexes agree.
-3. Stop only node 3 with `Ctrl+C`. Leave nodes 1 and 2 running.
-4. Wait until nodes 1 and 2 report at least height `8`.
-5. Remove **only** node 3's datadir:
+| Staked set `K` | Stop one validator | Why |
+|---|---|---|
+| `K = 3` (the minimum) | **chain halts** — 2 remaining hold 64 SPX, and `64*3 = 192` is not `> 192` | expected, not a bug |
+| `K >= 4` | **chain continues** — 3 of 4 hold 96 SPX, and `96*3 = 288 > 256` | one offline validator tolerated |
 
-   ```bash
-   rm -rf data/node3
-   ```
+So the floor of 3 buys you a working chain, not fault tolerance. Choose `K` for
+the availability you actually need: `K = 3` has none, `K = 4` tolerates one
+offline validator, `K = 5` tolerates two, and so on (`f = floor((K-1)/3)`).
+The node computes this itself; you do not configure it.
 
-   Do not remove `data/node1`, `data/node2`, or the shared repository-level
-   `artifact-db` directory.
-6. Restart node 3 with the same command:
+Practical notes for a single machine:
 
-   ```bash
-   cd Desktop/protocol
-   go run src/cli/main.go node --role=validator \
-       --tcp-addr=127.0.0.1:30305 \
-       --http-port=127.0.0.1:8547 \
-       --datadir=data/node3 \
-       --nodes=3 --node-index=2 \
-       --seeds=127.0.0.1:30303 \
-       --pbft
-   ```
+- **View-change timeouts are generous on purpose.** A full PBFT round needs
+  several SPHINCS+ signatures (block header, proposal, prepare, commit), and each
+  costs seconds of CPU. Six signers on one laptop is slow; the leader waits up to
+  ~90s for a round to commit before advancing the view. Give a loaded machine
+  time before concluding something is wrong.
+- **Offline validators do not change the set size.** They stop voting and the
+  remaining stake simply may not clear 2/3 — which is exactly the halt above.
+- **Keep the datadirs separate.** One terminal → one `--tcp-addr` → one matching
+  `--datadir`. Two nodes sharing a datadir is the most common setup mistake.
+- **Preserve `Node-<addr>/keys`.** That is the node's persistent identity. Peers
+  pin `node_id`↔public key, so deleting it and regenerating makes the node a
+  stranger under a familiar name.
 
-7. Verify that node 3 reports genesis installation, catches up to the current
-   tip, and rejoins PBFT. Compare the three `block_index.json` files after the
-   catch-up completes; their block hash-to-height maps must match.
 
-A successful run has no `parent hash mismatch` or `stopping batch` messages,
-and the restarted node's final height is not lower than the other nodes'.
+---
 
-> **Identity note:** A node's SPHINCS+ identity key is stored under its
-> `Node-<address>/keys` directory. A full `rm -rf data/node3` therefore removes
-> the key as well as the chain. The running peers correctly reject the same node
-> ID when it presents a newly generated key, so a datadir-only wipe can verify
-> chain synchronization and index equality but cannot rejoin under the old
-> identity. To test a true restart with the same identity, preserve and restore
-> the node's `keys` directory separately; to rotate identity, start with a new
-> node ID/address instead.
+## 9. Removed flags — and what replaced them
 
-### Legacy Same-Box Mode (Fixed Ports)
+`--nodes`, `--node-index` and `--legacy-cluster` **no longer exist**. Use of any
+of them fails immediately with `flag provided but not defined`.
 
-This mode uses hardcoded ports (32307, 32308, 32309) and auto-generated data directories (`data/Node-127.0.0.1:32307/`, etc.) regardless of `--datadir` and `--tcp-addr` flags. Each `--node-index` maps to a specific port.
+| Removed | Was used for | Now |
+|---|---|---|
+| `--nodes=N` | told a node how many validators to expect, and sized its local validator set | **Nothing.** The set comes from `genesis_state.json`, then on-chain Stake transactions. No flag or peer count can influence it |
+| `--node-index=<i>` | selected this node's slot in a pre-agreed roster (ports, identity, datadir, wallet-RPC port) | **`--port-offset=<i>`** — shifts *default* ports and *default* datadir only. It never selects an identity or a place in the validator set |
+| `--legacy-cluster` | ran the deprecated same-process 3-node harness (`RunMultipleNodesInternal`) | **Nothing.** The harness, `bind/legacy.go`, and the flag are deleted. There is **no same-box mode** |
+| `--test-nodes` | set a `TestConfig.NumNodes` field that nothing ever read | **Nothing.** Deleted |
+| derived wallet RPC `8700 + --node-index` | per-node wallet-RPC port | **`8700 + --port-offset`**, or an explicit `--ws-port` |
 
-> **Fixed:** Each node's list of *peer* addresses in this mode used to be computed from a hardcoded base of `32307`, which broke if a node's own port didn't start from that base. Peer addresses are now derived as `port - node-index`, so the peer list is correct regardless of which port a given node actually bound to.
+Consequences to be aware of:
 
-**Terminal 1 — Node-index 0 (port 32307):**
+- **No "sized up front" requirement.** Earlier versions of this document told you
+  to start every node with the same `--nodes=N` and warned that growing a running
+  network was limited (3→4 worked, 4→5 did not). That limitation was an artefact
+  of `--nodes` overriding the validator set. Membership is chain state now, so
+  there is no up-front sizing and no growth limit.
+- **No "synthetic / same-box addressing" fallback.** Previously, omitting
+  `--tcp-addr` fell back to fixed ports starting at 32307 and ignored
+  `--datadir`. That path is gone; `--tcp-addr` and `--datadir` are always honoured
+  as given (or derived from `--port-offset`).
+- **The `legacyExecute` function name is not legacy.** It is the normal
+  flag-parsing path for flag-style invocation. Only its `--legacy-cluster` branch
+  was legacy, and that branch is gone.
+
+---
+
+## 10. Inspecting a running node
+
+Query **that node's** wallet-RPC port (`8700 + --port-offset`):
+
 ```bash
-go run src/cli/main.go node --role=validator \
-    --http-port=127.0.0.1:8545 \
-    --datadir=data \
-    --nodes=3 \
-    --node-index=0 \
-    --pbft
+# node 1 (offset 0 → 8700)
+./sphinx get-balance --rpc 127.0.0.1:8700 \
+    --address <ADDRESS>
+
+# node 2 (offset 1 → 8701)
+./sphinx get-balance --rpc 127.0.0.1:8701 \
+    --address <ADDRESS>
 ```
 
-**Terminal 2 — Node-index 1 (port 32308):**
-```bash
-go run src/cli/main.go node --role=validator \
-    --http-port=127.0.0.1:8546 \
-    --datadir=data \
-    --nodes=3 \
-    --node-index=1 \
-    --pbft
+**The vault and escrow addresses are not fixed constants on a devnet.** Node 1
+generates an M-of-N custody policy on first start and uses its derived address as
+block 0's vault, so the address to query is whatever that node logged:
+
+```
+DEVNET AUTO-CUSTODY ACTIVE: vault=7A4399BF09033F3F9DB7D311A1949F3CEF938C2A escrow=B2B87E290E2D2EA57008DDF1CF684E259781FC6A
 ```
 
-**Terminal 3 — Node-index 2 (port 32309):**
+Query those and you get the expected shape — the escrow holds the time-locked
+remainder, and the vault has already paid every allocation out of itself in block
+0, so it reads `0`:
+
 ```bash
-go run src/cli/main.go node --role=validator \
-    --http-port=127.0.0.1:8547 \
-    --datadir=data \
-    --nodes=3 \
-    --node-index=2 \
-    --pbft
+$ ./sphinx get-balance --rpc 127.0.0.1:8700 --address 7A4399BF09033F3F9DB7D311A1949F3CEF938C2A
+Balance for 7A4399BF09033F3F9DB7D311A1949F3CEF938C2A: 0.000000 SPX (confirmed=0 nSPX, ...)
+
+$ ./sphinx get-balance --rpc 127.0.0.1:8700 --address B2B87E290E2D2EA57008DDF1CF684E259781FC6A
+Balance for B2B87E290E2D2EA57008DDF1CF684E259781FC6A: 424999981.513632 SPX (confirmed=424999981513631687242798355 nSPX, ...)
 ```
 
-Data will be stored in:
-- `data/Node-127.0.0.1:32307/` (node-index=0)
-- `data/Node-127.0.0.1:32308/` (node-index=1)
-- `data/Node-127.0.0.1:32309/` (node-index=2)
+`0000000000000000000000000000000000000001` is only the **legacy** fallback vault
+address, used when a network has no custody policy at all. On a devnet with
+auto-custody it correctly reads `0` — it is not the address block 0 funded.
 
-### Verify Your Data Directories Are Actually Separate
+> Pointing `--rpc` at an `--http-port` value fails — that listener speaks HTTP,
+> not the handshake-authenticated JSON-RPC wire format `get-balance` needs.
 
-After starting all your nodes, confirm each `--datadir` only ever produced **one** `Node-<address>` subfolder — if you see more than one under any single `data/nodeN`, two terminals were pointed at the same `--datadir`:
+Useful log lines and what they mean:
 
-```bash
-# macOS
-for d in data/node*; do echo "$d:"; ls "$d"; done
+| Line | Meaning |
+|---|---|
+| `GENESIS FILE: <K> initial validators, epoch_blocks=<E>, network=<N>` | the document was loaded |
+| `seeded <K> validators into the consensus set (<S> SPX total)` | the staked set is exactly the document's, at its declared stakes |
+| `Not listed in the genesis file — participating as a peer only …` | this node is not in the set; it is a peer |
+| `No genesis file at … — validator membership will come from runtime stake admission only` | no document on disk |
+| `Waiting for staked validators to be ready (<r>/<min> minimum)…` | the node is waiting for liveness, not misconfigured |
+| `Quorum achieved: <voted> / <total> SPX voted` | a round reached > 2/3 |
+| `committed block <hash> at height <h>` | the hash must match on every validator |
+| `DEVNET BUNDLE: fetched + verified the public bundle over the network` | a joiner obtained the document itself |
 
-# Each line should show exactly ONE Node-<address> folder.
-# More than one means two terminals shared a --datadir — recheck the table above.
-```
-
-### Check Balance via RPC
-
-While any node is running, query **that node's** wallet RPC port — `8700 + --node-index`, i.e. `8700` for node 1, `8701` for node 2, `8702` for node 3, and so on:
-
-```bash
-# Node 1 (--node-index=0 → wallet RPC 8700)
-go run src/cli/main.go get-balance \
-    --rpc 127.0.0.1:8700 \
-    --address 0000000000000000000000000000000000000001
-
-# Node 3 (--node-index=2 → wallet RPC 8702)
-go run src/cli/main.go get-balance \
-    --rpc 127.0.0.1:8702 \
-    --address 0000000000000000000000000000000000000001
-```
-
-`0000…0001` is the genesis vault: it mints the full supply in block 0 and pays every allocation out of itself in the same block, so it correctly reads `0` afterwards. The CGE escrow `0000…0002` holds the time-locked portion — e.g. `424,999,985 SPX` shortly after genesis, releasing as chain time advances.
-
-> ⚠️ Pointing `--rpc` at the `--http-port` value (`8545`…) fails with
-> `handshake with 127.0.0.1:8547: … i/o timeout` — that listener speaks HTTP, not the handshake-authenticated JSON-RPC wire format `get-balance` needs.
-
-### Clean Up and Restart
+Tear down and start over:
 
 ```bash
-# Stop all nodes with Ctrl+C
-# Clear data directories to start fresh:
+# Ctrl+C in each terminal, then:
 rm -rf data/
 ```
 
----
-
-## Expected Behavior Summary
-
-| Scenario | Expected Result |
-|----------|----------------|
-| Node-A starts with `--nodes=3` | Creates genesis, waits for the configured validators, then starts PBFT |
-| Node-A starts as a genuine single-node run | Creates genesis and mines blocks solo (no PBFT) |
-| Node-B joins 5 min later, same `--nodes` | Joins the PBFT round at genesis (nothing committed yet to download) |
-| Node-C joins 10 min later, same `--nodes` | Same; `validators=3`, PBFT produces block 1 |
-| Node 4 joins while blocks already exist, `--nodes=4 --node-index=3` | Downloads and verifies blocks `1→N`, catches up, validates ✅ |
-| Node 4 joins with the same command but `--nodes` omitted | ❌ validator set stays 1 → `0.00 / 32.00 SPX attested (need ≥ 21.33)`, stuck at height 0 |
-| Node 5 joins a running 4-validator chain, `--nodes=5` | ❌ `96.00 / 160.00 SPX attested (need ≥ 106.67)` on block 1 — sees the growth limit above |
-| All N nodes started together with `--nodes=N` | ✅ All converge, `validators=N`, identical tip |
-| Killing Node-B, restarting with the same datadir | Resumes from last committed block |
-| Disconnect during sync | Resumes from last committed height |
-| Different genesis hash | Connection rejected during key exchange |
-| Network partition | Reconnects and syncs missing blocks |
-| Omitting `--node-index` on a second same-machine node | ❌ startup failure: `bind wallet RPC listener on 127.0.0.1:8700: address already in use` |
 
 ---
 
-## Changelog: Validator Set Discovery Fix
+## 11. Troubleshooting
 
-Earlier versions of this doc described the behavior below as intended, but two bugs in `src/bind/nodes.go` meant it never actually worked across more than one process: every node stayed in `validators=1` forever, each mined its own chain independently, and late joiners saw repeated `parent hash mismatch` / "stopping batch" errors trying to sync a chain that didn't match what they'd already committed themselves.
-
-Six fixes across `nodes.go` and `helpers.go` address this:
-
-| File | Bug | Fix |
-|------|-----|-----|
-| `nodes.go` | A custom `--tcp-addr` (including loopback) incorrectly collapsed the validator/address list to size 1 | Only a genuine public/real address collapses the count |
-| `nodes.go` | Legacy Same-Box Mode derived peer addresses from a hardcoded base port (`32307`) | Peer addresses are derived as `port - node-index` |
-| `nodes.go` | `registerDiscoveredPeer` added peers as network contacts only, never as validators | Discovered peers now get minimum validator stake immediately on key exchange |
-| `nodes.go` | A bootstrap node with `--nodes=3` (but no `--seeds`) pre-registered peers that hadn't actually connected | Pre-registration only happens when `--seeds` is explicitly provided |
-| `nodes.go` | The Legacy Same-Box fallback logic could still activate during seed-based (`--seeds=`) runs, interfering with peer discovery | Scoped so seed-based mode and Legacy Same-Box Mode no longer cross-interfere — **re-verify this one against a fresh test run**, since the exact condition wasn't fully confirmed against logs at the time of writing |
-| `helpers.go` | Bootstrap node could keep mining solo blocks after the 3rd validator joined, racing with the new PBFT round | Solo mining stops → node syncs to tip → then enters PBFT, as an explicit sequence |
-
-**Net effect:** the "Quick Test: Seed-Based Mode" flow below is the flow these fixes were built for — with `--nodes=3`, Terminal 1 creates genesis and waits for real peers to become ready, Terminals 2 and 3 join via `--seeds=127.0.0.1:30303`, and all three nodes converge on `validators=3` with real 2-of-3 PBFT quorum. A genuine single-node run (`totalNodes <= 1`) remains the only path that mines solo.
-
-If you re-run the Quick Test commands below, confirm in the logs that all three nodes report `validators=3` (not `validators=1`), that no `parent hash mismatch` messages appear, and that view changes settle rather than climbing rapidly.
+| Symptom | Cause |
+|---|---|
+| `flag provided but not defined: …` | you used a flag this build no longer has — see §9 |
+| `--validators=2 is below the BFT minimum …` | a genesis document needs ≥ 3 validators |
+| `refusing to rewrite … it already binds validator …` | re-running `genesis create` with parameters that would rename/re-key existing identities. Re-run with the same `--host`/`--tcp-base`, or delete the old document deliberately |
+| `address already in use` on bind | two processes on the same port. Give each a distinct `--port-offset`, or explicit `--tcp-addr`/`--http-port`/`--ws-port` |
+| node runs but never produces a block; logs `Waiting for staked validators to be ready (r/min …)` | fewer than `consensus.MinValidators` (3) staked+ready validators are reachable. Start more of the listed validators |
+| node logs `Not listed in the genesis file …` and never votes | it is not in the document's `validators`; see §7 |
+| `attestation quorum not met` | some validators' votes are missing for that block — a liveness problem, not a config error. Check which validators are up |
+| `devnet late joiner has no custody bundle …` | the network bundle fetch failed: seeds unreachable, or the bootstrap node was not yet running. Check `--seeds` |
+| `genesis hash mismatch` at key exchange | the peer holds a different genesis document. All nodes in one network must read byte-identical documents |
+| a node started with `--port-offset=0` next to an existing node fails to bind | offset 0 collides with node 1; use a distinct offset |
 
 ---
 
-## Changelog: Quick-Test Tutorial Corrections (measured)
-
-The Quick Test commands were re-run against this tree with three, four and five real
-node processes. Findings, and what was changed in this document:
-
-| # | Symptom (reproduced) | Cause | Doc change |
-|---|----------------------|-------|-----------|
-| 1 | **Terminal 4 exited at startup:** `failed to bind wallet RPC listener on 127.0.0.1:8700: … address already in use` | The tutorial's Terminal 4 omitted `--node-index`; wallet RPC is always derived as `8700 + node-index`, so it defaulted to `0` and collided with Terminal 1 | Terminal 4 now passes `--nodes=4 --node-index=3`; the port table lists the derived wallet-RPC port per node and documents the `--ws-port` override |
-| 2 | A joiner with `--nodes` omitted stayed at `validators=1` and never synced: `0.00 / 32.00 SPX attested (need ≥ 21.33)` | `--nodes=1` tells the node it is a one-validator network, so it can never resolve the other validators' attestations | Added the "always pass `--node-index`, give every node the same `--nodes`" warning next to the port table |
-| 3 | Nodes 2 and 3 documented as "downloads genesis + all blocks", but they never issued a single block request (0 `Syncing blocks` lines) — they reached CAUGHT_UP at height 0 and joined the first PBFT round | Nothing was committed yet when they joined; the download path only runs for a joiner that arrives after blocks exist | Late-joiner section and Expected Behavior table now distinguish "join the PBFT round at genesis" from "download and verify blocks" |
-| 4 | **A 5th node cannot join a running chain:** `block 1 attestation quorum not met: 96.00 / 160.00 SPX attested (need ≥ 106.67)`, stuck at height 0 forever | Blocks carry the attestations that existed when produced, but sync-time verification uses the joiner's *current* validator set, so the 2/3 threshold rises as nodes are added. `core.SnapshotValidatorSet` — which exists exactly to verify historical blocks against the set that signed them — **has no callers**, so `GetValidatorSetAtEpoch` always returns nil and every check falls back to the live set | Documented the measured growth limit (3 → 4 works; 4 → 5 does not) and the "size the network up front with `--nodes=N`" workaround |
-
-Verified-good baseline in the same run: 3-node PBFT converged to `validators=3` and an
-identical tip hash across all three processes; 5 nodes started together with
-`--nodes=5 --node-index=0..4` converged with `validators=5` and zero errors; genesis hash
-matched across every process; `get-balance` reported the CGE escrow at `424,999,985 SPX`
-with the vault correctly drained after block 0.
-
-Still open (code fixes, not documentation): (a) derive a non-colliding wallet-RPC default
-when `--node-index` is absent, and (b) call `SnapshotValidatorSet` at epoch transitions so
-validators can be added to a live network without invalidating historical block
-verification.
-
----
-
-## File Reference
+## 12. File reference
 
 | File | Purpose |
-|------|---------|
+|---|---|
 | `src/cli/main.go` | CLI entry point |
-| `src/cli/utils/cli.go` | Command routing and flag parsing |
-| `src/bind/nodes.go` | `StartNode()` — full node startup |
-| `src/bind/helpers.go` | `runBlockSyncLoop()` — block download |
-| `src/bind/helpers.go` | `runBlockProductionLoop()` — block mining |
-| `src/bind/helpers.go` | `exchangeKeyWithPeerSync()` — peer handshake |
-| `src/bind/types.go` | `SyncState`, `GetBlocksRequest/Response` |
-| `src/core/sync.go` | `SyncManager` — sync state machine |
-| `src/core/blockchain.go` | `NewBlockchain()` — genesis creation |
-| `src/core/genesis.go` | `GenesisState.BuildBlock()` — deterministic genesis |
+| `src/cli/utils/cli.go` | subcommand routing, `node` flags, `--port-offset`, help text |
+| `src/cli/utils/genesis.go` | `genesis create` — the only place the validator count exists |
+| `src/core/genesis.go` | the one genesis document: struct, loader, writer, `Validate` |
+| `src/bind/nodes.go` | `StartNode` — full node startup, listener binding, shutdown |
+| `src/bind/helpers.go` | block sync, block production, peer handshake, genesis seeding |
+| `src/bind/node_shutdown.go` | ordered teardown |
+| `src/bind/devnet_bundle.go` | devnet joiner-side public-bundle fetch |
+| `src/consensus/validators.go` | `MinValidators` |
+| `src/consensus/consensus.go` | quorum (`meetsStakeQuorum` = `voted*3 > total*2`), leader selection |
+| `src/bind/types.go` | `SyncState`, `GetBlocksRequest` / `GetBlocksResponse` |
+

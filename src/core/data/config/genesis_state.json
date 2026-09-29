@@ -1,0 +1,46 @@
+{
+  "version": 2,
+  "chain_id": 7331,
+  "chain_name": "Sphinx Mainnet",
+  "symbol": "SPX",
+  "timestamp": "2024-11-20T02:40:00Z",
+  "extra_data": "Sphinx Network Genesis Block - Decentralized Future",
+  "initial_difficulty": "17179869184",
+  "initial_gas_limit": "5000",
+  "nonce": "0000000000000001",
+  "total_allocations": 2,
+  "total_allocated_nspx": "105000000000000000000000000",
+  "total_allocated_spx": "105000000",
+  "total_remainder_nspx": "100000000000000000000000000",
+  "total_remainder_spx": "100000000",
+  "total_sold_nspx": "5000000000000000000000000",
+  "total_sold_spx": "5000000",
+  "allocations": [
+    {
+      "address": "SPIF 1000 0000 0000 0000 0000 0000 0000 0000 0000 0001",
+      "balance_nspx": "50000000000000000000000000",
+      "balance_spx": "50000000",
+      "sold_nspx": "5000000000000000000000000",
+      "sold_spx": "5000000",
+      "gross_nspx": "55000000000000000000000000",
+      "gross_spx": "55000000",
+      "label": "Founder"
+    },
+    {
+      "address": "SPIF 2000 0000 0000 0000 0000 0000 0000 0000 0000 0001",
+      "balance_nspx": "50000000000000000000000000",
+      "balance_spx": "50000000",
+      "sold_nspx": "0",
+      "sold_spx": "0",
+      "gross_nspx": "50000000000000000000000000",
+      "gross_spx": "50000000",
+      "label": "Foundation"
+    }
+  ],
+  "chain": {
+    "chain_id": 0,
+    "network": "",
+    "epoch_blocks": 0,
+    "min_stake_nspx": ""
+  }
+}

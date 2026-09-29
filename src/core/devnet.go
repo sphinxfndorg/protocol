@@ -16,13 +16,22 @@
 // of the feature — it is convenience for a throwaway chain, and it must never
 // be able to arm itself on a chain that carries value.
 //
-// ★ WHAT "AUTO" COSTS. Every witness is a real STHINCS signature (~7s each on
-// this parameter set) and block 0 needs a threshold set for each allocation
-// slice, so the node that SIGNS block 0 pays ~3 minutes once. That cost is why
-// the producer persists the witness set to config/: witnesses are public data
-// (they ride in block 0 anyway), so peer nodes rebuild a byte-identical block 0
-// from them instantly and never need a custodian key. Secret keys stay under
-// data/custody/devnet-auto/ and are never distributed.
+// ★ WHAT "AUTO" COSTS. Every witness is a real STHINCS signature (~7-8s on this
+// parameter set) and block 0 needs a threshold set for each distribution slice:
+// 13 slices × 2-of-3 = 26 signatures. Those signatures are independent, so they
+// are signed concurrently by a BOUNDED pool (devnetCustodyWorkers: default
+// runtime.NumCPU() capped at devnetCustodyWorkerCap) and collected BY INDEX.
+// Measured on a 4-core/8-thread machine: 3m17s serial (workers=1) vs 1m03s with
+// 8 workers (~3.1x), producing byte-identical witnesses either way — signing is
+// deterministic (production parameters set RANDOMIZE=false) and results are
+// placed by (slice, custodian) index, never by completion order. Reserved heap
+// grows with the pool (~12 MB serial → ~25 MB at 8 workers).
+//
+// That one-time cost is paid only by the producer: it persists the witness set
+// to config/: witnesses are public data (they ride in block 0 anyway), so peer
+// nodes rebuild a byte-identical block 0 from them instantly, verify-only, and
+// never need a custodian key. Secret keys stay under data/custody/devnet-auto/
+// and are never distributed.
 //
 // ★ WHY EVERY NODE MUST REBUILD BLOCK 0 IDENTICALLY. core.getCachedGenesisBlock
 // computes genesis once per process and every node uses that hash in key
@@ -34,12 +43,14 @@
 package core
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -57,26 +68,27 @@ import (
 const DevnetChainID uint64 = 73310
 
 const (
-	// DefaultDevnetVaultPolicyPath / DefaultDevnetEscrowPolicyPath are the same
-	// auto-loaded config paths a real ceremony writes. Auto-custody therefore
-	// produces artifacts the rest of the node already understands.
+	// DefaultDevnetEscrowPolicyPath is the shared-root CGE escrow policy a real
+	// ceremony writes. Auto-custody therefore produces artifacts the rest of the
+	// node already understands. The ESCROW policy is NOT genesis-related: it
+	// decides where block 0 sends the locked remainder, not who the validators
+	// are, so it keeps its own file.
 	//
-	// ★ LEGACY SHARED-ROOT DEFAULTS. When DevnetCustodyOptions.DataDir is set —
-	// which the CLI and bind.StartNode always do — withDefaults() IGNORES these
+	// ★ LEGACY SHARED-ROOT DEFAULT. When DevnetCustodyOptions.DataDir is set —
+	// which the CLI and bind.StartNode always do — withDefaults() IGNORES this
 	// and scopes every path under the node's own datadir instead. These survive
 	// only for tests and the same-process harness, which leave DataDir empty.
-	DefaultDevnetVaultPolicyPath  = defaultGenesisMultisigPath
 	DefaultDevnetEscrowPolicyPath = defaultEscrowMultisigPath
-
-	// DefaultDevnetWitnessPath holds the pre-signed block-0 witness set. It is
-	// public data relayed to peer nodes so they need no custodian keys.
-	DefaultDevnetWitnessPath = "config/devnet_genesis_witnesses.json"
 
 	// Per-node relative paths used when DataDir is set. Custody private keys
 	// live under <datadir>/custody/devnet-auto (NOT data/custody — that prefix
 	// is the ceremony/manual `multisig devnet` namespace, and reusing it would
 	// let an operator mistake auto-generated throwaways for ceremony keys).
-	// Public policies + witness book live under <datadir>/config.
+	//
+	// ★ There is no per-node path for the genesis vault policy or the block-0
+	// witness book: both live as SECTIONS of the single genesis document,
+	// <datadir>/config/genesis_state.json (GenesisStateFileSubdir). That is the
+	// consolidation — one file, one loader, one writer, no fallback.
 	//
 	// ★ TODO(ceremony-loader): the ceremony-side loader must enforce this
 	// separation in the OTHER direction — refuse to load a devnet-auto path
@@ -94,9 +106,7 @@ const (
 	//
 	// TODO(ceremony-loader): attach the ticket that tracks building the loader;
 	// the pending test file carries the same unlinked placeholder.
-	vaultPolicySubdir      = "config/genesis_multisig.json"
 	escrowPolicySubdir     = "config/escrow_multisig.json"
-	witnessSubdir          = "config/devnet_genesis_witnesses.json"
 	custodyProposalsSubdir = "config/spend_proposals"
 	vaultKeysSubdir        = "custody/devnet-auto/vault"
 	escrowKeysSubdir       = "custody/devnet-auto/escrow"
@@ -122,6 +132,51 @@ const (
 	devnetWitnessValidity = 30 * 24 * time.Hour
 )
 
+// DevnetBundleFile describes one allowlisted PUBLIC devnet bundle file served
+// over the network to late joiners. Name is the allowlist key used on the
+// wire; Subdir is the per-node relative path under the node's own datadir
+// (see perNodePath / escrowPolicySubdir / GenesisStateFileSubdir). Only
+// allowlisted files are ever served or fetched — custody/ private keys are never
+// in this list, never served, and never fetched.
+type DevnetBundleFile struct {
+	Name   string
+	Subdir string
+	// Optional marks a file that a legitimate network may simply not have.
+	// The bundle fetch gives up on an optional file after a few rounds instead
+	// of blocking a joiner for the full deadline; a network that DOES have it
+	// still fetches it like any other file.
+	Optional bool
+}
+
+// DevnetPublicBundleFiles is the complete PUBLIC bundle a late joiner needs.
+//
+// After the genesis consolidation there are exactly TWO files: the single
+// genesis document (which carries the chain parameters, the initial validator
+// set, the pre-funded accounts, the genesis vault custody policy AND the
+// pre-signed block-0 witness book as sections) and the CGE escrow policy, which
+// is not genesis-related and keeps its own file.
+//
+// Both are REQUIRED: a joiner cannot rebuild block 0 without the policy and the
+// witnesses, so there is no legitimate devnet where the genesis document is
+// absent. The serve path answers Ready=false while the bootstrap node is still
+// signing, and the fetch retries.
+var DevnetPublicBundleFiles = []DevnetBundleFile{
+	{Name: GenesisStateFileName, Subdir: GenesisStateFileSubdir},
+	{Name: "escrow_multisig.json", Subdir: escrowPolicySubdir},
+}
+
+// devnetBundleByName resolves a wire name to its bundle entry. Unknown names
+// are rejected so a peer can never coax this node into serving an arbitrary
+// file (in particular nothing under custody/).
+func devnetBundleByName(name string) (DevnetBundleFile, bool) {
+	for _, f := range DevnetPublicBundleFiles {
+		if f.Name == name {
+			return f, true
+		}
+	}
+	return DevnetBundleFile{}, false
+}
+
 // DevnetCustodyOptions configures AutoProvisionDevnetCustody. Zero values take
 // the defaults above; tests override the paths so nothing touches the real
 // repository config/ or data/ trees.
@@ -138,10 +193,9 @@ type DevnetCustodyOptions struct {
 	// DataDir scopes every default custody/config path to one node. Fully
 	// per-node layout: dataDir/config/*.json and dataDir/custody/.... The
 	// node never reads the shared repo root, so distributing a devnet is an
-	// explicit copy of node1's PUBLIC bundle
-	// (genesis_multisig.json, escrow_multisig.json,
-	// devnet_genesis_witnesses.json) into each peer's <datadir>/config —
-	// the same shape the real ceremony-artifact distribution will take.
+	// explicit copy of node1's PUBLIC bundle (the single genesis document and
+	// the escrow policy) into each peer's <datadir>/config — the same shape
+	// the real ceremony-artifact distribution will take.
 	// Empty means the legacy shared-root layout (used by tests and the
 	// same-process harness).
 	DataDir string
@@ -149,9 +203,15 @@ type DevnetCustodyOptions struct {
 	ChainID          uint64
 	GenesisTimestamp int64
 
-	VaultPolicyPath  string
+	// GenesisStatePath is the single genesis document this node reads and writes.
+	// It carries the chain parameters, the initial validator set, the funded
+	// accounts, the genesis vault custody policy (Multisig section) and the
+	// pre-signed block-0 witness set (Witnesses section). There is deliberately
+	// no separate policy path and no separate witness path any more.
+	GenesisStatePath string
+	// EscrowPolicyPath is the CGE escrow policy, which is NOT genesis-related
+	// and keeps its own file.
 	EscrowPolicyPath string
-	WitnessPath      string
 	VaultKeysDir     string
 	EscrowKeysDir    string
 
@@ -183,14 +243,11 @@ func (o DevnetCustodyOptions) withDefaults() DevnetCustodyOptions {
 	// shared repo root. The subdir constants are the single source of truth;
 	// the exported Default* constants above are the legacy shared-root values
 	// tests assert against.
-	if o.VaultPolicyPath == "" {
-		o.VaultPolicyPath = scope(vaultPolicySubdir)
+	if o.GenesisStatePath == "" {
+		o.GenesisStatePath = scope(GenesisStateFileSubdir)
 	}
 	if o.EscrowPolicyPath == "" {
 		o.EscrowPolicyPath = scope(escrowPolicySubdir)
-	}
-	if o.WitnessPath == "" {
-		o.WitnessPath = scope(witnessSubdir)
 	}
 	if o.VaultKeysDir == "" {
 		o.VaultKeysDir = scope(vaultKeysSubdir)
@@ -223,14 +280,11 @@ func EscrowPolicyPathForDataDir(datadir string) string {
 	return perNodePath(datadir, escrowPolicySubdir)
 }
 
-// VaultPolicyPathForDataDir / WitnessPathForDataDir: same per-node scoping for
-// the genesis vault policy and the persisted block-0 witness book.
-func VaultPolicyPathForDataDir(datadir string) string {
-	return perNodePath(datadir, vaultPolicySubdir)
-}
-
-func WitnessPathForDataDir(datadir string) string {
-	return perNodePath(datadir, witnessSubdir)
+// GenesisStatePathForDataDir: same per-node scoping for the ONE genesis document
+// (<datadir>/config/genesis_state.json), which holds the genesis vault policy and
+// the pre-signed block-0 witness book as sections alongside the validator set.
+func GenesisStatePathForDataDir(datadir string) string {
+	return perNodePath(datadir, GenesisStateFileSubdir)
 }
 
 // VaultKeysDirForDataDir / EscrowKeysDirForDataDir: same per-node scoping for
@@ -259,7 +313,9 @@ type DevnetCustodyResult struct {
 
 	VaultAddress  string
 	EscrowAddress string
-	WitnessPath   string
+	// GenesisStatePath is the single genesis document the policy and witness
+	// book were merged into.
+	GenesisStatePath string
 }
 
 // DevnetAutoCustodyRequested reports whether networkType selects the devnet
@@ -269,17 +325,33 @@ func DevnetAutoCustodyRequested(networkType string) bool {
 	return strings.EqualFold(strings.TrimSpace(networkType), string(PhaseDevnet))
 }
 
-// devnetGenesisWitnessBook is the persisted block-0 authorization set: one
-// witness per distribution slice, keyed by the slice's nonce (the running
-// transaction index allocationsToTxList assigns), plus the binding facts a
-// replaying node must agree on before it can rebuild the same block.
-type devnetGenesisWitnessBook struct {
+// GenesisWitnessBook is the persisted block-0 authorization set: one witness per
+// distribution slice, keyed by the slice's nonce (the running transaction index
+// allocationsToTxList assigns), plus the binding facts a replaying node must agree
+// on before it can rebuild the same block.
+//
+// It is a SECTION of the single genesis document, not a file of its own.
+type GenesisWitnessBook struct {
 	Version       int                                 `json:"version"`
 	ChainID       uint64                              `json:"chain_id"`
 	VaultAddress  string                              `json:"vault_address"`
 	EscrowAddress string                              `json:"escrow_address"`
 	Expiry        uint64                              `json:"expiry"`
 	Witnesses     map[string]multisig.MultiSigWitness `json:"witnesses"`
+}
+
+// validateSelf is the section-local sanity check; the chain/vault/escrow binding
+// is checked separately by validateAgainst, which needs the resolved addresses.
+// A present-but-empty book would let a peer rebuild a block 0 it cannot
+// authorize, so it is refused when the document is parsed.
+func (b *GenesisWitnessBook) validateSelf() error {
+	if b == nil {
+		return nil
+	}
+	if len(b.Witnesses) == 0 {
+		return fmt.Errorf("witness book holds no witnesses")
+	}
+	return nil
 }
 
 type devnetCustodianKey struct {
@@ -347,7 +419,7 @@ func GenesisCustodyOrderingViolation() error {
 // missing. This predicate exists to catch the ALL-ABSENT case, which is the one
 // that would otherwise silently diverge from the network.
 func devnetCustodyBundlePresent(opts DevnetCustodyOptions) bool {
-	return fileExists(opts.VaultPolicyPath) || fileExists(opts.EscrowPolicyPath)
+	return fileExists(opts.GenesisStatePath) || fileExists(opts.EscrowPolicyPath)
 }
 
 // devnetLateJoinerMissingBundleError is the refusal for a devnet node started
@@ -356,10 +428,6 @@ func devnetCustodyBundlePresent(opts DevnetCustodyOptions) bool {
 // builds a different block 0, and is then rejected by every peer at key
 // exchange with no hint as to why.
 func devnetLateJoinerMissingBundleError(opts DevnetCustodyOptions) error {
-	cfgDir := filepath.Dir(opts.EscrowPolicyPath)
-	if cfgDir == "" || cfgDir == "." {
-		cfgDir = filepath.Dir(opts.VaultPolicyPath)
-	}
 	return fmt.Errorf(`devnet late joiner has no custody bundle in its own datadir: neither %s nor %s exists.
 
 A node started with --seeds cannot mint custody material — it must REPLAY the
@@ -367,18 +435,14 @@ bootstrap node's block 0. Without the bundle it would build a different genesis
 (legacy vault, unsigned, no witnesses), and every peer would reject it at key
 exchange because the genesis hashes differ. Refusing to start instead.
 
-Fix, in order:
-  1. Start the FIRST validator (no --seeds) alone and let it finish signing.
-     Wait for: "persisted N genesis witnesses to .../devnet_genesis_witnesses.json"
-  2. Copy ONLY the public bundle from that node's datadir into this one:
-       mkdir -p %s
-       cp <bootstrap-datadir>/config/genesis_multisig.json \
-          <bootstrap-datadir>/config/escrow_multisig.json \
-          <bootstrap-datadir>/config/devnet_genesis_witnesses.json %s/
-  3. Start this node again.
+Fix: wait for the bootstrap node to finish signing — a joiner now fetches
+the PUBLIC bundle over the network automatically (see bind's
+ensureDevnetBundleFromSeeds) and retries while the bootstrap is still
+signing. If this error still fires, the network fetch itself failed
+(seeds unreachable or bootstrap not yet listening); check --seeds.
 
-Never copy the custody/ directory: a replaying node needs no custodian keys.`,
-		opts.VaultPolicyPath, opts.EscrowPolicyPath, cfgDir, cfgDir)
+Never fetch or copy the custody/ directory: a replaying node needs no keys.`,
+		opts.GenesisStatePath, opts.EscrowPolicyPath)
 }
 
 // AutoProvisionDevnetCustody provisions (or loads) devnet custody and, when
@@ -387,7 +451,7 @@ Never copy the custody/ directory: a replaying node needs no custodian keys.`,
 // operator must fix — never for the "not devnet" / "test binary" no-op paths.
 func AutoProvisionDevnetCustody(opts DevnetCustodyOptions) (*DevnetCustodyResult, error) {
 	opts = opts.withDefaults()
-	res := &DevnetCustodyResult{WitnessPath: opts.WitnessPath}
+	res := &DevnetCustodyResult{GenesisStatePath: opts.GenesisStatePath}
 
 	if !DevnetAutoCustodyRequested(opts.NetworkType) {
 		return res, nil // not devnet: today's behaviour is untouched
@@ -452,7 +516,7 @@ func ensureDevnetEscrowPolicy(opts DevnetCustodyOptions, res *DevnetCustodyResul
 			logger.Error("DEVNET AUTO-CUSTODY: %s is absent and this node is a late joiner (--seeds set) — refusing to generate a competing escrow policy. Start the first validator (no --seeds) once so it writes the shared policy, then restart this node.", opts.EscrowPolicyPath)
 			return nil
 		}
-		if err := generateDevnetCustodySet(opts.EscrowKeysDir, opts.EscrowPolicyPath, "sphinx-escrow-v1", opts); err != nil {
+		if err := generateDevnetCustodySet(opts.EscrowKeysDir, "sphinx-escrow-v1", opts, saveEscrowPolicy(opts)); err != nil {
 			return err
 		}
 		res.GeneratedKeys = true
@@ -471,63 +535,80 @@ func ensureDevnetEscrowPolicy(opts DevnetCustodyOptions, res *DevnetCustodyResul
 
 // ensureDevnetVaultPolicy makes the genesis vault a custody address and wires
 // the authorizer that lets block 0 satisfy guardGenesisAuthorization.
+//
+// The M-of-N policy lives in the `multisig` section of the single genesis
+// document and the pre-signed witnesses in its `witnesses` section, so every
+// read and write here goes through LoadGenesisFile / MutateGenesisFile. There is
+// no separate policy file and no separate witness book any more.
 func ensureDevnetVaultPolicy(opts DevnetCustodyOptions, res *DevnetCustodyResult) error {
 	autoKeysPresent := dirHasEntries(opts.VaultKeysDir)
 
-	if !fileExists(opts.VaultPolicyPath) {
+	gf, err := LoadGenesisFile(datadirOf(opts.GenesisStatePath))
+	if err != nil {
+		return fmt.Errorf("devnet auto-custody: read %s: %w", opts.GenesisStatePath, err)
+	}
+	hasPolicy := gf != nil && gf.Multisig != nil
+	hasWitnesses := gf != nil && gf.Witnesses != nil
+
+	if !hasPolicy {
 		if !opts.BootstrapNode {
-			logger.Error("DEVNET AUTO-CUSTODY: %s is absent and this node is a late joiner (--seeds set) — refusing to generate a competing genesis vault policy. Start the first validator (no --seeds) once so it writes the shared policy plus the pre-signed genesis witnesses, then restart this node.", opts.VaultPolicyPath)
+			logger.Error("DEVNET AUTO-CUSTODY: %s carries no multisig section and this node is a late joiner (--seeds set) — refusing to generate a competing genesis vault policy. Start the first validator (no --seeds) once so it writes the policy plus the pre-signed genesis witnesses, then restart this node.", opts.GenesisStatePath)
 			return nil
 		}
-		if err := generateDevnetCustodySet(opts.VaultKeysDir, opts.VaultPolicyPath, "sphinx-vault-v1", opts); err != nil {
+		if err := generateDevnetCustodySet(opts.VaultKeysDir, "sphinx-vault-v1", opts, saveVaultPolicy(opts)); err != nil {
 			return err
 		}
 		autoKeysPresent = true
 		res.GeneratedKeys = true
-		logger.Error("DEVNET AUTO-CUSTODY: genesis vault policy + all %d custodian keys generated by this process (%s, policy %s). This is devnet convenience, NOT real M-of-N security. Never use auto-provisioned keys for testnet or mainnet.", opts.Custodians, opts.VaultKeysDir, opts.VaultPolicyPath)
-		logger.Error("DEVNET AUTO-CUSTODY: distribute the PUBLIC bundle (genesis_multisig.json, escrow_multisig.json, devnet_genesis_witnesses.json) from %s to every peer <datadir>/config/ before they start — never the keys.", filepath.Dir(opts.VaultPolicyPath))
-		logger.Error("DEVNET AUTO-CUSTODY: this node signs block 0's distribution slices (%d-of-%d each) — expect minutes of STHINCS signing before genesis exists. The resulting witnesses are persisted to %s so other devnet nodes need no custodian keys.", opts.Threshold, opts.Custodians, opts.WitnessPath)
+		logger.Error("DEVNET AUTO-CUSTODY: genesis vault policy + all %d custodian keys generated by this process (%s, policy in %s). This is devnet convenience, NOT real M-of-N security. Never use auto-provisioned keys for testnet or mainnet.", opts.Custodians, opts.VaultKeysDir, opts.GenesisStatePath)
+		logger.Error("DEVNET AUTO-CUSTODY: distribute the PUBLIC bundle (%s, escrow_multisig.json) from %s to every peer <datadir>/config/ before they start — never the keys.", GenesisStateFileName, filepath.Dir(opts.GenesisStatePath))
+		logger.Error("DEVNET AUTO-CUSTODY: this node signs block 0's distribution slices (%d-of-%d each, %d slices) with a bounded worker pool — expect on the order of a minute of STHINCS signing before genesis exists (more on a single core; the completed run logs the exact wall time). The resulting witnesses are merged into %s so other devnet nodes need no custodian keys.", opts.Threshold, opts.Custodians, len(devnetCustodySlicesForGenesis(opts.GenesisTimestamp)), opts.GenesisStatePath)
 	}
 
-	addr, err := LoadGenesisVaultPolicy(opts.VaultPolicyPath)
+	// Re-read the document: generateDevnetCustodySet may have just merged a
+	// freshly generated policy into it, and the witnesses/policy used below must
+	// be the ones actually on disk, not the pre-generation snapshot.
+	gf, err = LoadGenesisFile(datadirOf(opts.GenesisStatePath))
 	if err != nil {
-		return fmt.Errorf("devnet auto-custody: load genesis vault policy %s: %w", opts.VaultPolicyPath, err)
+		return fmt.Errorf("devnet auto-custody: re-read %s: %w", opts.GenesisStatePath, err)
+	}
+	if gf == nil || gf.Multisig == nil {
+		return fmt.Errorf("devnet auto-custody: %s has no multisig section after provisioning", opts.GenesisStatePath)
+	}
+	hasWitnesses = gf.Witnesses != nil
+
+	addr, err := LoadGenesisVaultPolicy(opts.GenesisStatePath)
+	if err != nil {
+		return fmt.Errorf("devnet auto-custody: load genesis vault policy from %s: %w", opts.GenesisStatePath, err)
 	}
 	res.VaultAddress = addr
 
-	if !autoKeysPresent && !fileExists(opts.WitnessPath) {
+	if !autoKeysPresent && !hasWitnesses {
 		// A policy with no devnet-auto keys is a REAL ceremony policy. Block 0
 		// then has to come from the ceremony's own build tooling; leave the
 		// authorizer unset so global.go keeps logging its unsigned-genesis
 		// ERROR rather than silently signing with keys we do not have.
-		logger.Warn("DEVNET AUTO-CUSTODY: vault policy %s is not auto-provisioned (no keys at %s) — leaving block-0 authorization to the ceremony. Block 0 will be built UNSIGNED unless a witness set is supplied.", opts.VaultPolicyPath, opts.VaultKeysDir)
+		logger.Warn("DEVNET AUTO-CUSTODY: vault policy in %s is not auto-provisioned (no keys at %s) — leaving block-0 authorization to the ceremony. Block 0 will be built UNSIGNED unless a witness set is supplied.", opts.GenesisStatePath, opts.VaultKeysDir)
 		if !opts.BootstrapNode {
-			// The common real cause: a HALF-DONE copy. The policies were
-			// copied but %s was not — usually because the bootstrap node had
-			// not finished signing when the copy ran. Without the witnesses
-			// this node builds an unsigned block 0 from a policy-owned vault,
-			// which the genesis guard then refuses with a much more cryptic
-			// message ("failed transaction authorization"). Name it here.
-			logger.Error("DEVNET AUTO-CUSTODY: this node is a late joiner and %s is missing — that is almost always a half-done copy. Wait for the first validator to log \"persisted N genesis witnesses\", then re-copy it (see the missing-bundle instructions in %s).", opts.WitnessPath, "core/devnet.go")
+			// The common real cause: a HALF-DONE copy. The document was
+			// copied before the bootstrap node finished signing. Without the
+			// witnesses this node builds an unsigned block 0 from a
+			// policy-owned vault, which the genesis guard then refuses with a
+			// much more cryptic message ("failed transaction authorization").
+			logger.Error("DEVNET AUTO-CUSTODY: this node is a late joiner and %s carries no witnesses section — that is almost always a half-done copy. Wait for the first validator to log \"persisted N genesis witnesses\", then re-copy it (see the missing-bundle instructions in %s).", opts.GenesisStatePath, "core/devnet.go")
 		}
 		return nil
 	}
 
-	if fileExists(opts.WitnessPath) {
-		book, err := loadDevnetWitnessBook(opts.WitnessPath)
-		if err != nil {
-			return err
-		}
+	if hasWitnesses {
+		book := gf.Witnesses
 		if err := book.validateAgainst(opts, addr); err != nil {
 			return err
 		}
-		policy, err := multisig.LoadPolicy(opts.VaultPolicyPath)
-		if err != nil {
-			return fmt.Errorf("devnet auto-custody: load vault policy for witness replay: %w", err)
-		}
+		policy := gf.Multisig
 		SetGenesisDistributionAuthorizer(book.authorizer(policy, opts.GenesisTimestamp), book.ChainID)
 		res.ReplayNode = true
-		logger.Warn("DEVNET AUTO-CUSTODY: loaded the pre-signed genesis witness set from %s (chain %d, vault %s) — this node rebuilds block 0 identically WITHOUT holding any custodian key.", opts.WitnessPath, book.ChainID, book.VaultAddress)
+		logger.Warn("DEVNET AUTO-CUSTODY: loaded the pre-signed genesis witness set from %s (chain %d, vault %s) — this node rebuilds block 0 identically WITHOUT holding any custodian key.", opts.GenesisStatePath, book.ChainID, book.VaultAddress)
 		return nil
 	}
 
@@ -535,10 +616,7 @@ func ensureDevnetVaultPolicy(opts DevnetCustodyOptions, res *DevnetCustodyResult
 	if err != nil {
 		return err
 	}
-	policy, err := multisig.LoadPolicy(opts.VaultPolicyPath)
-	if err != nil {
-		return fmt.Errorf("devnet auto-custody: load vault policy for signing: %w", err)
-	}
+	policy := gf.Multisig
 	if len(keys) < int(policy.Threshold) {
 		return fmt.Errorf("devnet auto-custody: %d custodian key(s) at %s but threshold is %d — cannot sign block 0", len(keys), opts.VaultKeysDir, policy.Threshold)
 	}
@@ -547,57 +625,278 @@ func ensureDevnetVaultPolicy(opts DevnetCustodyOptions, res *DevnetCustodyResult
 		address: addr,
 		chainID: opts.ChainID,
 		expiry:  uint64(opts.GenesisTimestamp) + uint64(devnetWitnessValidity/time.Second),
+		refTime: uint64(opts.GenesisTimestamp),
 		keys:    keys,
 	}
+
+	// Sign EVERY slice up front, with a bounded worker pool, BEFORE arming the
+	// authorizer or the witness sink. A failure here returns an error and leaves
+	// the process with nothing armed, no sink and no witnesses section — the node
+	// refuses to start instead of building a block 0 it cannot authorize.
+	slices := devnetCustodySlicesForGenesis(opts.GenesisTimestamp)
+	signStart := time.Now()
+	if err := signer.signAll(context.Background(), slices); err != nil {
+		return fmt.Errorf("devnet auto-custody: signing block 0 distributions failed: %w", err)
+	}
+	logger.Info("DEVNET AUTO-CUSTODY: signed %d block-0 slice(s) × %d-of-%d custodians in %s using %d worker(s)",
+		len(slices), policy.Threshold, len(keys), time.Since(signStart).Round(time.Millisecond), devnetCustodyWorkerCount())
+
 	SetGenesisDistributionAuthorizer(signer.authorizer(), opts.ChainID)
 	SetGenesisWitnessSink(witnessSink(opts, addr))
 	res.SigningNode = true
-	logger.Error("DEVNET AUTO-CUSTODY: this node signs block 0 with the generated custodian keys kept at %s and persists the witness set to %s. These keys are devnet throwaways — never reuse them for testnet or mainnet.", opts.VaultKeysDir, opts.WitnessPath)
+	logger.Error("DEVNET AUTO-CUSTODY: this node signs block 0 with the generated custodian keys kept at %s and merges the witness set into %s. These keys are devnet throwaways — never reuse them for testnet or mainnet.", opts.VaultKeysDir, opts.GenesisStatePath)
+	return nil
+}
+
+// ----------------------------------------------------------------------------
+// Block-0 signing pool
+//
+// Block 0 needs one threshold witness per distribution slice: 13 slices x
+// 2-of-3 = 26 real STHINCS signatures. They are INDEPENDENT — the signature
+// for (slice i, custodian j) shares no input with any other pair — so they are
+// signed concurrently by a BOUNDED pool and collected BY INDEX.
+//
+// Determinism: the production parameter set sets RANDOMIZE=false
+// (core/sthincs/config.NewSTHINCSParameters -> MakeSthincsPlusSPHINXHASH128s
+// Robust(false)), and Spx_sign consumes randomness ONLY for its `opt`
+// randomizer when RANDOMIZE is set. With RANDOMIZE=false signing is therefore
+// a pure function of (params, key, message): the same slice signed by the same
+// custodian yields the same bytes regardless of goroutine or ordering. Results
+// are stored per (slice, custodian) index — never in completion order — so the
+// assembled witnesses and the persisted witness book are byte-identical to the
+// serial implementation for the same inputs.
+// ----------------------------------------------------------------------------
+
+// devnetCustodyWorkerCap bounds the pool. Signing is CPU- and memory-heavy
+// (each Spx_sign builds a full FORS/hypertree working set), so the pool is
+// capped instead of scaling with the signature count.
+const devnetCustodyWorkerCap = 8
+
+// devnetCustodyWorkers selects the pool size: 0 means runtime.NumCPU() capped
+// at devnetCustodyWorkerCap; 1 is the SERIAL reference path (used by tests to
+// produce the reference output). It is a variable so tests can sweep counts.
+var devnetCustodyWorkers = 0
+
+// devnetCustodyWorkerCount resolves the effective pool size (always >= 1).
+func devnetCustodyWorkerCount() int {
+	n := devnetCustodyWorkers
+	if n <= 0 {
+		n = runtime.NumCPU()
+	}
+	if n > devnetCustodyWorkerCap {
+		n = devnetCustodyWorkerCap
+	}
+	if n < 1 {
+		n = 1
+	}
+	return n
+}
+
+// devnetCustodySlice is one block-0 distribution slice, identified by the nonce
+// allocationsToTxListAuthorized assigns it.
+type devnetCustodySlice struct {
+	receiver string
+	amount   *big.Int
+	nonce    uint64
+}
+
+// devnetCustodySignJob is one (slice, custodian) signature task.
+type devnetCustodySignJob struct {
+	sliceIdx  int
+	custodian int
+	slice     devnetCustodySlice
+}
+
+// devnetCustodySlicesForGenesis returns the canonical (receiver, amount, nonce)
+// set block 0 will distribute. It CALLS the canonical slice builder
+// (allocationsToTxList) instead of re-deriving the rule, so the signer and the
+// block builder can never drift: if the slice rule changes, the signed set
+// changes with it.
+func devnetCustodySlicesForGenesis(genesisTimestamp int64) []devnetCustodySlice {
+	gs := &GenesisState{
+		Allocations: DefaultGenesisAllocations(),
+		Timestamp:   genesisTimestamp,
+	}
+	txs := gs.allocationsToTxList()
+	slices := make([]devnetCustodySlice, 0, len(txs))
+	for _, tx := range txs {
+		if tx == nil {
+			continue
+		}
+		slices = append(slices, devnetCustodySlice{receiver: tx.Receiver, amount: tx.Amount, nonce: tx.Nonce})
+	}
+	return slices
+}
+
+// signAll produces the threshold witness for every slice, signing with the
+// first Threshold custodians exactly like the original serial implementation,
+// but concurrently across a bounded worker pool.
+//
+// Fail closed: on the first signature error the remaining work is cancelled, no
+// witnesses are published (s.witnesses stays nil), and the error is returned so
+// the caller aborts startup — no witness book and no armed authorizer can
+// result from a partial run. The pool is bounded, jobs are closed, and the
+// WaitGroup is awaited, so no goroutine outlives the call.
+//
+// Serial path: devnetCustodyWorkers == 1 runs the same code with one worker,
+// producing the byte-identical reference output used by tests.
+func (s *devnetCustodySigner) signAll(ctx context.Context, slices []devnetCustodySlice) error {
+	threshold := int(s.policy.Threshold)
+	if len(slices) == 0 {
+		return fmt.Errorf("no distribution slices to sign")
+	}
+	if len(s.keys) < threshold {
+		return fmt.Errorf("%d custodian key(s) but threshold is %d — cannot sign block 0", len(s.keys), threshold)
+	}
+
+	// Per-slice signature slots: results are indexed by (slice, custodian), so
+	// completion order can never influence the output bytes.
+	sigBuf := make([]map[int][]byte, len(slices))
+	for i := range sigBuf {
+		sigBuf[i] = make(map[int][]byte, threshold)
+	}
+
+	workers := devnetCustodyWorkerCount()
+	if totalJobs := threshold * len(slices); workers > totalJobs {
+		workers = totalJobs
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	jobs := make(chan devnetCustodySignJob)
+	var (
+		wg       sync.WaitGroup
+		mu       sync.Mutex
+		firstErr error
+	)
+	recordErr := func(err error) {
+		mu.Lock()
+		if firstErr == nil {
+			firstErr = err
+			cancel() // stop feeding; in-flight jobs unwind at the next job boundary
+		}
+		mu.Unlock()
+	}
+
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for job := range jobs {
+				if ctx.Err() != nil {
+					return
+				}
+				msg := multisig.SpendMessage(s.policy, s.chainID, s.address, job.slice.receiver, job.slice.amount, job.slice.nonce, s.expiry)
+				sig, err := multisig.SignCustodyMessage(msg, s.keys[job.custodian].sk, s.keys[job.custodian].pk)
+				if err != nil {
+					recordErr(fmt.Errorf("custodian %d failed to sign genesis slice %d (%s): %w",
+						job.custodian, job.slice.nonce, job.slice.receiver, err))
+					return
+				}
+				mu.Lock()
+				sigBuf[job.sliceIdx][job.custodian] = sig
+				mu.Unlock()
+			}
+		}()
+	}
+
+feed:
+	for si, sl := range slices {
+		for ci := 0; ci < threshold; ci++ {
+			select {
+			case <-ctx.Done():
+				break feed
+			case jobs <- devnetCustodySignJob{sliceIdx: si, custodian: ci, slice: sl}:
+			}
+		}
+	}
+	close(jobs)
+	wg.Wait()
+
+	if firstErr != nil {
+		return firstErr
+	}
+
+	// Assemble only after EVERY signature succeeded.
+	witnesses := make(map[uint64]*multisig.MultiSigWitness, len(slices))
+	for si, sl := range slices {
+		sigs := sigBuf[si]
+		if len(sigs) < threshold {
+			return fmt.Errorf("genesis slice %d (%s) has %d signature(s), threshold is %d", sl.nonce, sl.receiver, len(sigs), threshold)
+		}
+		witnesses[sl.nonce] = &multisig.MultiSigWitness{Policy: *s.policy, Sigs: sigs, Expiry: s.expiry}
+	}
+	s.witnesses = witnesses
 	return nil
 }
 
 // devnetCustodySigner produces threshold witnesses over the canonical spend
 // message for a genesis distribution slice.
+//
+// Signing runs ONCE, up front, over every slice with a bounded worker pool
+// (see signAll); the authorizer below is then a pure, fail-closed lookup of
+// those pre-computed witnesses. That ordering is what makes a mid-run failure
+// impossible to half-publish: signing either completes for every slice or the
+// node aborts startup with nothing armed and no witness book written.
 type devnetCustodySigner struct {
 	policy  *multisig.MultiPartyPolicy
 	address string
 	chainID uint64
 	expiry  uint64
+	// refTime is the witness-expiry reference — the genesis timestamp, exactly
+	// what the replay path uses (devnetGenesisWitnessBook.authorizer).
+	refTime uint64
 	keys    []devnetCustodianKey
+
+	// witnesses holds the fully assembled, threshold-satisfying witness for
+	// each distribution slice, keyed by the slice's nonce. It is set only by a
+	// successful signAll and is never partially populated.
+	witnesses map[uint64]*multisig.MultiSigWitness
 }
 
 // authorizer is the GenesisDistributionAuthorizer installed for block 0. It
-// signs with the first Threshold custodians, using multisig.SpendMessage — the
-// same encoder multisig.CheckSpendWitness uses on the validating side — so
-// signer and verifier cannot drift.
+// serves the pre-computed witness for a slice AFTER re-checking it against the
+// canonical message for that slice, using multisig.SpendMessage — the same
+// encoder multisig.CheckSpendWitness uses on the validating side — so signer
+// and verifier cannot drift, and a missing or stale witness fails closed.
 func (s *devnetCustodySigner) authorizer() GenesisDistributionAuthorizer {
 	return func(receiver string, amount *big.Int, nonce uint64) *multisig.MultiSigWitness {
-		sigs := make(map[int][]byte, s.policy.Threshold)
-		for i := 0; i < int(s.policy.Threshold) && i < len(s.keys); i++ {
-			msg := multisig.SpendMessage(s.policy, s.chainID, s.address, receiver, amount, nonce, s.expiry)
-			sig, err := multisig.SignCustodyMessage(msg, s.keys[i].sk, s.keys[i].pk)
-			if err != nil {
-				logger.Error("DEVNET AUTO-CUSTODY: custodian %d failed to sign genesis slice %d (%s): %v", i, nonce, receiver, err)
-				return nil
-			}
-			sigs[i] = sig
-		}
-		if len(sigs) < int(s.policy.Threshold) {
+		w, ok := s.witnesses[nonce]
+		if !ok || w == nil {
+			logger.Error("DEVNET AUTO-CUSTODY: no pre-computed witness for genesis slice %d (%s) — refusing to authorize", nonce, receiver)
 			return nil
 		}
-		return &multisig.MultiSigWitness{Policy: *s.policy, Sigs: sigs, Expiry: s.expiry}
+		msg := multisig.SpendMessage(s.policy, s.chainID, s.address, receiver, amount, nonce, w.Expiry)
+		if !multisig.VerifyThreshold(msg, *w, s.refTime) {
+			logger.Error("DEVNET AUTO-CUSTODY: pre-computed witness for genesis slice %d (%s) does not authorize this release — refusing to reuse it", nonce, receiver)
+			return nil
+		}
+		cp := *w
+		return &cp
 	}
 }
 
-// witnessSink persists the witnesses block 0 was actually built with. They are
-// the same bytes that ride in the block, so publishing them leaks nothing —
-// and it is what lets a peer node reproduce the identical hash without keys.
+// witnessSink merges the witnesses block 0 was actually built with into the
+// `witnesses` section of the ONE genesis document. They are the same bytes that
+// ride in the block, so publishing them leaks nothing — and it is what lets a
+// peer node reproduce the identical hash without keys.
+//
+// Fail closed on completeness: every distribution transaction must carry a
+// witness. A partial set is an error and NOTHING is written — a book missing a
+// slice would let a peer rebuild a block 0 it cannot authorize.
+//
+// The write goes through MutateGenesisFile, so it is atomic (temp file in the
+// destination directory, then rename) AND leaves the chain / validators /
+// funded_accounts / multisig sections of the same document untouched: a reader
+// never observes a truncated witness book, a crash cannot leave a half-written
+// one behind, and the bundle is still one file.
 func witnessSink(opts DevnetCustodyOptions, vaultAddr string) func(*types.Block) error {
 	return func(block *types.Block) error {
 		if block == nil || block.Header == nil {
 			return fmt.Errorf("nil genesis block")
 		}
-		book := devnetGenesisWitnessBook{
+		book := GenesisWitnessBook{
 			Version:       1,
 			ChainID:       opts.ChainID,
 			VaultAddress:  vaultAddr,
@@ -605,8 +904,14 @@ func witnessSink(opts DevnetCustodyOptions, vaultAddr string) func(*types.Block)
 			Expiry:        uint64(opts.GenesisTimestamp) + uint64(devnetWitnessValidity/time.Second),
 			Witnesses:     map[string]multisig.MultiSigWitness{},
 		}
+		missing := 0
 		for _, tx := range block.Body.TxsList {
-			if tx == nil || tx.MultiSigWitness == nil {
+			if tx == nil {
+				missing++
+				continue
+			}
+			if tx.MultiSigWitness == nil {
+				missing++
 				continue
 			}
 			book.Witnesses[strconv.FormatUint(tx.Nonce, 10)] = *tx.MultiSigWitness
@@ -614,50 +919,34 @@ func witnessSink(opts DevnetCustodyOptions, vaultAddr string) func(*types.Block)
 		if len(book.Witnesses) == 0 {
 			return fmt.Errorf("built genesis block carries no custody witnesses")
 		}
-		if dir := filepath.Dir(opts.WitnessPath); dir != "" && dir != "." {
-			if err := os.MkdirAll(dir, 0o755); err != nil {
-				return fmt.Errorf("create witness dir: %w", err)
-			}
+		if missing > 0 {
+			return fmt.Errorf("refusing to persist a partial witness set: %d distribution slice(s) carry no witness", missing)
 		}
-		data, err := json.MarshalIndent(book, "", "  ")
-		if err != nil {
-			return fmt.Errorf("marshal witness book: %w", err)
+		if err := MutateGenesisFile(datadirOf(opts.GenesisStatePath), func(gf *GenesisStateFile) {
+			gf.Witnesses = &book
+		}); err != nil {
+			return fmt.Errorf("merge witness book into %s: %w", opts.GenesisStatePath, err)
 		}
-		if err := os.WriteFile(opts.WitnessPath, append(data, '\n'), 0o644); err != nil {
-			return fmt.Errorf("write %s: %w", opts.WitnessPath, err)
-		}
-		logger.Info("DEVNET AUTO-CUSTODY: persisted %d genesis witnesses to %s (hash %s)", len(book.Witnesses), opts.WitnessPath, block.GetHash())
+		logger.Info("DEVNET AUTO-CUSTODY: persisted %d genesis witnesses to %s (hash %s)", len(book.Witnesses), opts.GenesisStatePath, block.GetHash())
 		return nil
 	}
-}
-
-func loadDevnetWitnessBook(path string) (*devnetGenesisWitnessBook, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("devnet auto-custody: read witness set %s: %w", path, err)
-	}
-	var book devnetGenesisWitnessBook
-	if err := json.Unmarshal(data, &book); err != nil {
-		return nil, fmt.Errorf("devnet auto-custody: parse witness set %s: %w", path, err)
-	}
-	return &book, nil
 }
 
 // validateAgainst refuses a witness set that describes a different chain,
 // vault or escrow than this node resolved. Replaying a book bound to other
 // addresses would build a block 0 whose witnesses cannot authorize it.
-func (b *devnetGenesisWitnessBook) validateAgainst(opts DevnetCustodyOptions, vaultAddr string) error {
+func (b *GenesisWitnessBook) validateAgainst(opts DevnetCustodyOptions, vaultAddr string) error {
 	if b.ChainID != opts.ChainID {
-		return fmt.Errorf("devnet auto-custody: witness set %s is for chain %d but this node is chain %d — delete it and let the first validator regenerate, or fix --network", opts.WitnessPath, b.ChainID, opts.ChainID)
+		return fmt.Errorf("devnet auto-custody: witness set in %s is for chain %d but this node is chain %d — delete it and let the first validator regenerate, or fix --network", opts.GenesisStatePath, b.ChainID, opts.ChainID)
 	}
 	if b.VaultAddress != vaultAddr {
-		return fmt.Errorf("devnet auto-custody: witness set %s authorizes vault %s but the loaded policy resolves to %s", opts.WitnessPath, b.VaultAddress, vaultAddr)
+		return fmt.Errorf("devnet auto-custody: witness set in %s authorizes vault %s but the loaded policy resolves to %s", opts.GenesisStatePath, b.VaultAddress, vaultAddr)
 	}
 	if escrow := GetCGEEscrowAddress(); b.EscrowAddress != "" && b.EscrowAddress != escrow {
-		return fmt.Errorf("devnet auto-custody: witness set %s was built for escrow %s but this node funds %s", opts.WitnessPath, b.EscrowAddress, escrow)
+		return fmt.Errorf("devnet auto-custody: witness set in %s was built for escrow %s but this node funds %s", opts.GenesisStatePath, b.EscrowAddress, escrow)
 	}
-	if len(b.Witnesses) == 0 {
-		return fmt.Errorf("devnet auto-custody: witness set %s is empty", opts.WitnessPath)
+	if err := b.validateSelf(); err != nil {
+		return fmt.Errorf("devnet auto-custody: witness set in %s is invalid: %w", opts.GenesisStatePath, err)
 	}
 	return nil
 }
@@ -666,7 +955,7 @@ func (b *devnetGenesisWitnessBook) validateAgainst(opts DevnetCustodyOptions, va
 // against the canonical message for that slice. Verification is cheap (no
 // signing), and it is what makes a stale or corrupted witness set fail closed
 // here instead of producing a block that cannot pass the genesis guard.
-func (b *devnetGenesisWitnessBook) authorizer(policy *multisig.MultiPartyPolicy, genesisTimestamp int64) GenesisDistributionAuthorizer {
+func (b *GenesisWitnessBook) authorizer(policy *multisig.MultiPartyPolicy, genesisTimestamp int64) GenesisDistributionAuthorizer {
 	refTime := uint64(genesisTimestamp)
 	return func(receiver string, amount *big.Int, nonce uint64) *multisig.MultiSigWitness {
 		w, ok := b.Witnesses[strconv.FormatUint(nonce, 10)]
@@ -684,14 +973,25 @@ func (b *devnetGenesisWitnessBook) authorizer(policy *multisig.MultiPartyPolicy,
 	}
 }
 
-// generateDevnetCustodySet writes N custodian key files plus the policy JSON in
-// the exact on-disk shape `multisig devnet` produces, so the rest of the node
-// (and the CLI) treats auto-provisioned custody like any other policy.
-func generateDevnetCustodySet(keysDir, policyPath, domain string, opts DevnetCustodyOptions) error {
-	if fileExists(policyPath) || dirHasEntries(keysDir) {
+// generateDevnetCustodySet writes N custodian key files, then hands the resulting
+// policy to save, which decides WHERE it lands:
+//
+//   - the genesis vault policy is merged into the `multisig` SECTION of the one
+//     genesis document (MutateGenesisFile), so the vault authorization travels
+//     with the validator set and the witness book;
+//   - the CGE escrow policy keeps its own file (not genesis-related).
+//
+// The key files are the same in both cases, in the exact on-disk shape
+// `multisig devnet` produces, so the rest of the node (and the CLI) treats
+// auto-provisioned custody like any other policy.
+func generateDevnetCustodySet(keysDir, domain string, opts DevnetCustodyOptions, save func(*multisig.MultiPartyPolicy) error) error {
+	if save == nil {
+		return fmt.Errorf("devnet auto-custody: no policy sink for %s", domain)
+	}
+	if dirHasEntries(keysDir) {
 		// Never overwrite a real or previously generated custody set: the keys
 		// are the only thing that can authorize the existing chain's block 0.
-		return fmt.Errorf("devnet auto-custody: refusing to overwrite existing custody material at %s / %s", keysDir, policyPath)
+		return fmt.Errorf("devnet auto-custody: refusing to overwrite existing custody keys at %s", keysDir)
 	}
 	if err := os.MkdirAll(keysDir, 0o700); err != nil {
 		return fmt.Errorf("create devnet custody keys dir: %w", err)
@@ -726,15 +1026,33 @@ func generateDevnetCustodySet(keysDir, policyPath, domain string, opts DevnetCus
 	if err := policy.Validate(); err != nil {
 		return fmt.Errorf("devnet custody policy invalid: %w", err)
 	}
-	if dir := filepath.Dir(policyPath); dir != "" && dir != "." {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return fmt.Errorf("create policy dir: %w", err)
+	return save(policy)
+}
+
+// saveVaultPolicy merges the freshly generated genesis vault policy into the
+// `multisig` section of the one genesis document.
+func saveVaultPolicy(opts DevnetCustodyOptions) func(*multisig.MultiPartyPolicy) error {
+	return func(p *multisig.MultiPartyPolicy) error {
+		return MutateGenesisFile(datadirOf(opts.GenesisStatePath), func(gf *GenesisStateFile) {
+			gf.Multisig = p
+		})
+	}
+}
+
+// saveEscrowPolicy writes the CGE escrow policy to its own file. The escrow is
+// NOT genesis-related, so it deliberately does not live in the genesis document.
+func saveEscrowPolicy(opts DevnetCustodyOptions) func(*multisig.MultiPartyPolicy) error {
+	return func(p *multisig.MultiPartyPolicy) error {
+		if dir := filepath.Dir(opts.EscrowPolicyPath); dir != "" && dir != "." {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				return fmt.Errorf("create policy dir: %w", err)
+			}
 		}
+		if err := p.Save(opts.EscrowPolicyPath); err != nil {
+			return fmt.Errorf("write devnet custody policy %s: %w", opts.EscrowPolicyPath, err)
+		}
+		return nil
 	}
-	if err := policy.Save(policyPath); err != nil {
-		return fmt.Errorf("write devnet custody policy %s: %w", policyPath, err)
-	}
-	return nil
 }
 
 // loadDevnetCustodianKeys reads every custodian key file the generated set
@@ -803,4 +1121,174 @@ func dirHasEntries(dir string) bool {
 		}
 	}
 	return false
+}
+
+// devnetBundleDataDirRegistry maps a process-local serving address
+// ("host:port" as the TCP listener bound it) to the datadir whose PUBLIC
+// bundle should be served. Only the node's own datadir is ever registered.
+var devnetBundleDataDirRegistry = struct {
+	sync.RWMutex
+	byAddr map[string]string
+}{byAddr: map[string]string{}}
+
+// RegisterDevnetBundleDataDir publishes datadir as the bundle source for the
+// listener bound at serveAddr. Only the node's own datadir is registered.
+func RegisterDevnetBundleDataDir(serveAddr, datadir string) {
+	if serveAddr == "" || datadir == "" {
+		return
+	}
+	devnetBundleDataDirRegistry.Lock()
+	defer devnetBundleDataDirRegistry.Unlock()
+	devnetBundleDataDirRegistry.byAddr[serveAddr] = datadir
+}
+
+func devnetBundleDataDirFor(serveAddr string) (string, bool) {
+	devnetBundleDataDirRegistry.RLock()
+	defer devnetBundleDataDirRegistry.RUnlock()
+	d, ok := devnetBundleDataDirRegistry.byAddr[serveAddr]
+	return d, ok
+}
+
+// DevnetBundleRequest is the wire request for one bundle file.
+type DevnetBundleRequest struct {
+	File string `json:"file"`
+}
+
+// DevnetBundleResponse carries one bundle file's bytes. Ready=false means the
+// bootstrap has not produced the file yet (still signing): retryable.
+type DevnetBundleResponse struct {
+	File    string `json:"file"`
+	Ready   bool   `json:"ready"`
+	Missing bool   `json:"missing,omitempty"`
+	Data    []byte `json:"data,omitempty"`
+}
+
+// bundleCompleteForDataDir reports whether datadir holds the full REQUIRED
+// PUBLIC bundle. Both entries are required after the genesis consolidation: a
+// joiner needs the vault policy and the witness book (sections of the genesis
+// document) to rebuild block 0, and the escrow policy to derive the same escrow
+// address. A restarted node must not be blocked re-fetching files that are
+// already there, so a node with a complete datadir skips the network fetch and
+// never overwrites its bundle.
+func bundleCompleteForDataDir(datadir string) bool {
+	if datadir == "" {
+		return false
+	}
+	for _, f := range DevnetPublicBundleFiles {
+		if f.Optional {
+			continue
+		}
+		data, err := os.ReadFile(perNodePath(datadir, f.Subdir))
+		if err != nil || len(data) == 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// validateBundleBytes fail-closes on fetched bytes before they touch disk.
+func validateBundleBytes(name string, data []byte) error {
+	if len(data) == 0 {
+		return fmt.Errorf("bundle file %s is empty", name)
+	}
+	switch name {
+	case GenesisStateFileName:
+		var gf GenesisStateFile
+		if err := ValidateGenesisFileBytes(data, &gf); err != nil {
+			return fmt.Errorf("bundle %s failed validation: %w", name, err)
+		}
+		return nil
+	case "escrow_multisig.json":
+		var p multisig.MultiPartyPolicy
+		if err := json.Unmarshal(data, &p); err != nil {
+			return fmt.Errorf("bundle %s not a policy: %w", name, err)
+		}
+		return p.Validate()
+	default:
+		return fmt.Errorf("unknown bundle file %s", name)
+	}
+}
+
+// writeBundleFile persists one verified bundle file atomically (temp+rename,
+// mode 0644 — public data) inside the node's OWN datadir.
+func writeBundleFile(datadir, subdir string, data []byte) error {
+	path := perNodePath(datadir, subdir)
+	dir := filepath.Dir(path)
+	if dir == "" {
+		dir = "."
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".devnet_bundle-*.json")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	defer os.Remove(name)
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	_ = tmp.Chmod(0o644)
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(name, path)
+}
+
+// DevnetBundleComplete reports whether datadir already holds the full PUBLIC
+// bundle. Exported for bind: a restarted node with an existing datadir skips
+// the network fetch entirely and never overwrites its bundle.
+func DevnetBundleComplete(datadir string) bool {
+	return bundleCompleteForDataDir(datadir)
+}
+
+// ValidateDevnetBundleBytes fail-closes on fetched bytes before they touch
+// disk. Exported for bind's network fetch path.
+func ValidateDevnetBundleBytes(name string, data []byte) error {
+	return validateBundleBytes(name, data)
+}
+
+// WriteDevnetBundleFile persists one verified bundle file atomically inside
+// the node's OWN datadir. Exported for bind's network fetch path.
+func WriteDevnetBundleFile(datadir, subdir string, data []byte) error {
+	return writeBundleFile(datadir, subdir, data)
+}
+
+// BundleSubdirFor returns the per-node relative path for an allowlisted
+// bundle file name. Unknown names are refused.
+func BundleSubdirFor(name string) (string, bool) {
+	entry, ok := devnetBundleByName(name)
+	if !ok {
+		return "", false
+	}
+	return entry.Subdir, true
+}
+
+// DevnetBundleOptional reports whether an allowlisted bundle file may be
+// legitimately absent on a network (see DevnetBundleFile.Optional). Unknown
+// names are not optional.
+func DevnetBundleOptional(name string) bool {
+	entry, ok := devnetBundleByName(name)
+	return ok && entry.Optional
+}
+
+// ServeDevnetBundle answers one bundle request from this node's OWN datadir.
+// Only allowlisted PUBLIC files that already exist are served; custody/ keys
+// are unreachable by construction (no allowlist entry, no lookup).
+func ServeDevnetBundle(serveAddr string, req DevnetBundleRequest) (DevnetBundleResponse, error) {
+	entry, ok := devnetBundleByName(req.File)
+	if !ok || req.File == "" {
+		return DevnetBundleResponse{}, fmt.Errorf("unknown bundle file %q", req.File)
+	}
+	datadir, ok := devnetBundleDataDirFor(serveAddr)
+	if !ok || datadir == "" {
+		return DevnetBundleResponse{}, fmt.Errorf("no bundle source for %s", serveAddr)
+	}
+	data, err := os.ReadFile(perNodePath(datadir, entry.Subdir))
+	if err != nil || len(data) == 0 {
+		return DevnetBundleResponse{File: entry.Name, Ready: false}, nil
+	}
+	return DevnetBundleResponse{File: entry.Name, Ready: true, Data: data}, nil
 }

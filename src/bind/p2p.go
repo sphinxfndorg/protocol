@@ -2,13 +2,19 @@
 // MIT License https://opensource.org/license/mit
 
 // go/src/bind/p2p.go
+//
+// ★ REMOVED (Phase 1, step 5): startP2PServer(name, *p2p.Server, ...) used
+// to spin up one p2p.Server per node for the legacy same-box harness. It
+// went with bind/legacy.go: production StartNode binds its own listeners in
+// SECTION 11 (net.Listen for P2P gossip, transport.NewTCPServer for
+// wallet/JSON-RPC) and releases them through nodeShutdown, so nothing
+// called it any more.
 package bind
 
 import (
 	"encoding/json"
 	"fmt"
 	"net"
-	"sync"
 	"time"
 
 	"github.com/sphinxfndorg/protocol/src/consensus"
@@ -16,56 +22,7 @@ import (
 	"github.com/sphinxfndorg/protocol/src/core"
 	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/parameters"
 	security "github.com/sphinxfndorg/protocol/src/handshake"
-	"github.com/sphinxfndorg/protocol/src/p2p"
 )
-
-// startP2PServer starts a P2P server for the given node.
-func startP2PServer(name string, server *p2p.Server, readyCh chan<- struct{}, errorCh chan<- error, udpReadyCh chan<- struct{}, wg *sync.WaitGroup) {
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		logger.Info("Starting P2P server for %s on %s", name, server.LocalNode().Address)
-		startCh := make(chan error, 1)
-		go func() {
-			defer func() {
-				if r := recover(); r != nil {
-					logger.Error("Panic in P2P server startup for %s: %v", name, r)
-					startCh <- fmt.Errorf("panic: %v", r)
-				}
-			}()
-			logger.Info("Calling server.Start() for %s", name)
-			err := server.Start()
-			logger.Info("server.Start() for %s returned with error: %v", name, err)
-			startCh <- err
-		}()
-		select {
-		case err := <-startCh:
-			if err != nil {
-				logger.Error("P2P server failed for %s: %v", name, err)
-				// Attempt to close the server on failure
-				if closeErr := server.Close(); closeErr != nil {
-					logger.Error("Failed to close P2P server for %s: %v", name, closeErr)
-				}
-				if closeErr := server.CloseDB(); closeErr != nil {
-					logger.Error("Failed to close DB for %s: %v", name, closeErr)
-				}
-				errorCh <- err
-				return
-			}
-			logger.Info("P2P server for %s started successfully", name)
-			logger.Info("Sending UDP ready signal for %s", name)
-			udpReadyCh <- struct{}{} // Signal UDP listener is ready
-			logger.Info("Sending ready signal for P2P server %s", name)
-			readyCh <- struct{}{}
-		case <-time.After(10 * time.Second):
-			logger.Warn("P2P server for %s took too long to start, assuming ready", name)
-			logger.Info("Sending UDP ready signal for %s", name)
-			udpReadyCh <- struct{}{}
-			logger.Info("Sending ready signal for P2P server %s", name)
-			readyCh <- struct{}{}
-		}
-	}()
-}
 
 // requestPeerListSync asks a single peer "who else do you know about?".
 //

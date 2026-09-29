@@ -3,9 +3,12 @@
 
 // go/src/bind/node_shutdown.go
 //
-// Ordered shutdown for the node started by StartNodeWithOptions. (The legacy
-// same-box harness has its own Shutdown([]NodeResources) in shutdown.go —
-// different path, untouched.)
+// Ordered shutdown for the node started by StartNodeWithOptions. This is the
+// ONLY shutdown path: the legacy same-box harness (and its
+// Shutdown([]NodeResources) in shutdown.go) was removed together with
+// bind/legacy.go and the -legacy-cluster flag, because it hardcoded a 3-node
+// cluster on fixed 32307+ ports with Node-0/1/2 identities that no genesis
+// document could ever name.
 //
 // Before this file existed, StartNode's teardown was
 // `cons.Stop(); cancelCtx(); wg.Wait(); flushNodeState()` and nothing else: the

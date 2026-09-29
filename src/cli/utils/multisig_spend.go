@@ -13,7 +13,8 @@
 // rpc.sendRawTransaction, core.validateTransactionAuth) accepted a witness or
 // silently fell back to single-key auth. These two commands close that loop:
 // the witness is produced with the SAME policy file the node auto-loads
-// (config/escrow_multisig.json or config/genesis_multisig.json), so a passing
+// (config/escrow_multisig.json, or the `multisig` section of the single
+// config/genesis_state.json for the vault), so a passing
 // run proves signer and verifier agree byte-for-byte.
 package utils
 
@@ -33,6 +34,7 @@ import (
 
 	"github.com/sphinxfndorg/protocol/src/bind/abi"
 	logger "github.com/sphinxfndorg/protocol/src/console"
+	"github.com/sphinxfndorg/protocol/src/core"
 	multisig "github.com/sphinxfndorg/protocol/src/core/musig"
 	key "github.com/sphinxfndorg/protocol/src/core/sthincs/key/backend"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
@@ -57,12 +59,19 @@ const defaultCustodyWatchInterval = 10 * time.Second
 // The escrow domain is not cosmetic: core.escrowMultisigDomain is the string
 // bound into every CGE release message, and the vault domain separates the
 // genesis vault's spend namespace from the escrow's.
+//
+// InGenesisDoc marks the roles whose policy is a SECTION of the single genesis
+// document (<datadir>/config/genesis_state.json) rather than a file of its own.
+// Only the genesis vault is: R9 leaves exactly one genesis file, and the vault
+// policy is genesis data (it authorises block 0). The escrow is not genesis
+// related, so it keeps config/escrow_multisig.json.
 var custodyRoles = map[string]struct {
-	Domain   string
-	OutPath  string
-	KeysDir  string
-	Label    string
-	AutoLoad string
+	Domain       string
+	OutPath      string
+	InGenesisDoc bool
+	KeysDir      string
+	Label        string
+	AutoLoad     string
 }{
 	"escrow": {
 		Domain:   "sphinx-escrow-v1",
@@ -72,11 +81,12 @@ var custodyRoles = map[string]struct {
 		AutoLoad: "core.InitEscrowAddress",
 	},
 	"vault": {
-		Domain:   "sphinx-vault-v1",
-		OutPath:  "config/genesis_multisig.json",
-		KeysDir:  "data/custody/vault",
-		Label:    "genesis vault",
-		AutoLoad: "core.InitGenesisVaultAddress",
+		Domain:       "sphinx-vault-v1",
+		OutPath:      "config/genesis_state.json",
+		InGenesisDoc: true,
+		KeysDir:      "data/custody/vault",
+		Label:        "genesis vault",
+		AutoLoad:     "core.InitGenesisVaultAddress",
 	},
 }
 
@@ -169,20 +179,46 @@ func runMultisigDevnet(args []string) error {
 	if err != nil {
 		return err
 	}
-	if dir := filepath.Dir(*out); dir != "" && dir != "." {
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			return fmt.Errorf("create policy dir: %w", err)
+	// The vault policy is a SECTION of the single genesis document; the escrow
+	// policy keeps its own file. Both are public data (custodian SECRET keys go to
+	// keysDir only).
+	if spec.InGenesisDoc {
+		if err := core.MutateGenesisFile(dirOfGenesisDoc(*out), func(gf *core.GenesisStateFile) {
+			gf.Multisig = p
+		}); err != nil {
+			return fmt.Errorf("merge vault policy into %s: %w", *out, err)
 		}
-	}
-	if err := p.Save(*out); err != nil {
-		return fmt.Errorf("write policy: %w", err)
+	} else {
+		if dir := filepath.Dir(*out); dir != "" && dir != "." {
+			if err := os.MkdirAll(dir, 0755); err != nil {
+				return fmt.Errorf("create policy dir: %w", err)
+			}
+		}
+		if err := p.Save(*out); err != nil {
+			return fmt.Errorf("write policy: %w", err)
+		}
 	}
 
 	fmt.Printf("role=%s label=%s\naddress=%s\nthreshold=%d-of-%d domain=%s\npolicy=%s\nkeys=%s\n",
 		strings.ToLower(*role), spec.Label, addr, *threshold, *custodians, *domain, *out, *keysDir)
-	fmt.Printf("The node auto-loads this policy via %s at process start;\n"+
-		"start (or restart) every node AFTER writing it so all nodes derive the same address.\n", spec.AutoLoad)
+	if spec.InGenesisDoc {
+		fmt.Printf("The policy is the `multisig` SECTION of %s — there is no separate\n", *out)
+		fmt.Printf("genesis policy file. The node reads it via %s.\n", spec.AutoLoad)
+	} else {
+		fmt.Printf("The node auto-loads this policy via %s at process start;\n", spec.AutoLoad)
+	}
+	fmt.Printf("start (or restart) every node AFTER writing it so all nodes derive the same address.\n")
 	return nil
+}
+
+// dirOfGenesisDoc strips the "config/genesis_state.json" suffix from a path so it
+// can be handed to core.MutateGenesisFile, which scopes the document by datadir.
+func dirOfGenesisDoc(path string) string {
+	suffix := core.GenesisStateFileSubdir
+	if len(path) > len(suffix) && strings.HasSuffix(path, suffix) {
+		return strings.TrimSuffix(path, suffix)
+	}
+	return path
 }
 
 // runMultisigSpend is the live path: it fetches the custodial account's nonce

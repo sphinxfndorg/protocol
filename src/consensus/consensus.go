@@ -181,27 +181,33 @@ func NewConsensus(
 	// Create time converter for slot calculations
 	timeConverter := NewTimeConverter(genesisTime)
 
-	// Add this node as a validator if it has sufficient stake
-	// blockchain is guaranteed non-nil at this point.
-	// Get this node's stake from the blockchain
-	stake := blockchain.GetValidatorStake(nodeID)
-	if stake != nil {
-		minStake := validatorSet.GetMinStakeAmount()
-		// Check if node meets minimum stake requirement
-		if stake.Cmp(minStake) >= 0 {
-			// Convert to SPX units (div by denomination)
-			stakeSPX := new(big.Int).Div(stake, big.NewInt(denom.SPX))
-			validatorSet.AddValidator(nodeID, uint64(stakeSPX.Int64()))
-		}
-	}
-	// If node not in validator set, add with minimum stake
-	if validatorSet.validators[nodeID] == nil {
-		minStakeSPX := validatorSet.GetMinStakeSPX()
-		logger.Info("Adding self %s with minimum stake %d SPX", nodeID, minStakeSPX)
-		validatorSet.AddValidator(nodeID, minStakeSPX)
-	}
-
-	// NEW: Register self public key with signing service
+	// ── MEMBERSHIP IS NOT DECIDED HERE ──────────────────────────────────────
+	// This constructor used to grant the local node a seat in the validator
+	// set, twice:
+	//
+	//   a) stake := blockchain.GetValidatorStake(nodeID); if stake >= minStake
+	//      { validatorSet.AddValidator(nodeID, stake) }        (a BALANCE read)
+	//   b) if validatorSet.validators[nodeID] == nil { AddValidator(nodeID,
+	//      GetMinStakeSPX()) }                                  (unconditional)
+	//
+	// (b) is the real defect and it is structural: the set is created EMPTY two
+	// lines above, so `validators[nodeID] == nil` is true on EVERY start, and
+	// every node therefore added itself at minimum stake before any genesis data
+	// had been read. A node NOT listed in genesis_state.json still ended up in the
+	// live set — and so in the quorum denominator and leader rotation — purely
+	// because it booted. It is also an R1 violation: consensus code deciding
+	// membership from a balance rather than from chain state.
+	//
+	// The constructor now starts with an EMPTY set and leaves admission to the
+	// layer that owns chain state:
+	//   * genesis_state.json  → bind.seedGenesisValidators (start-up seeding);
+	//   * on-chain Stake txs  → the executor (Phase 2, queued to epoch boundaries).
+	// A node absent from both is a PEER: it holds no stake, so its votes weigh
+	// nothing (getValidatorStake returns 0) and it is never a leader candidate.
+	// That is the correct expression of "peers are not validators", and it
+	// scales: N is whatever the chain says it is, never this process's opinion.
+	//
+	// Register self public key with signing service.
 	if signingService != nil {
 		// Register self public key so the node can verify its own signatures
 		if selfPK := signingService.GetPublicKeyObject(); selfPK != nil {
@@ -3116,31 +3122,30 @@ func (c *Consensus) getValidatorStake(validatorID string) *big.Int {
 	return big.NewInt(0)
 }
 
-// calculateQuorumSize returns the number of votes needed for quorum
-func (c *Consensus) calculateQuorumSize(totalNodes int) int {
-	quorumSize := int(float64(totalNodes) * c.quorumFraction)
+// calculateQuorumSize returns the number of votes needed for quorum.
+// setSize is the size of the active staked validator set (chain state).
+func (c *Consensus) calculateQuorumSize(setSize int) int {
+	quorumSize := int(float64(setSize) * c.quorumFraction)
 	if quorumSize < 1 {
 		return 1 // Minimum quorum size is 1
 	}
 	return quorumSize
 }
 
-// getTotalNodes returns the total number of active validator nodes
+// getTotalNodes returns the size of the ACTIVE STAKED validator set — chain
+// state only. It never reads nodeManager/peer membership: connectivity is not
+// membership, and a disconnected (or absent) validator still counts toward N
+// exactly as a connected one does. It also never reads a CLI flag or any
+// configured node count — there is none any more.
+//
+// NOTE (Phase 1): this reads the live ValidatorSet directly. Phase 2 adds
+// ValidatorSetAt(height) with per-epoch snapshots persisted in rawdb, and the
+// quorum paths below then take an explicit snapshot parameter.
 func (c *Consensus) getTotalNodes() int {
-	peers := c.nodeManager.GetPeers()
-	validatorCount := 0
-	// Count validator peers
-	for _, peer := range peers {
-		node := peer.GetNode()
-		if node.GetRole() == RoleValidator && node.GetStatus() == NodeStatusActive {
-			validatorCount++
-		}
+	if c.validatorSet == nil {
+		return 0
 	}
-	// Count self if validator
-	if c.isValidator() {
-		validatorCount++
-	}
-	return validatorCount
+	return len(c.validatorSet.ActiveValidatorIDs(0))
 }
 
 // commitBlock commits a block to the blockchain

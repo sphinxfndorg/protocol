@@ -42,8 +42,8 @@ func transactionAuthNonce(tx *types.Transaction) []byte {
 }
 
 // custodyPolicyOwns reports whether sender resolves to a registered M-of-N
-// custody policy (the genesis vault when config/genesis_multisig.json is
-// loaded, or any other custody address).
+// custody policy (the genesis vault when the `multisig` section of the single
+// genesis document is loaded, or any other custody address).
 //
 // ★ WHY genesis distributions need it: a policy-owned vault must authorize its
 // block-0 distributions exactly like any other custody spend. Without this, the

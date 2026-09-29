@@ -9,11 +9,10 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
+	"time"
 
 	"github.com/sphinxfndorg/protocol/src/bind"
 	"github.com/sphinxfndorg/protocol/src/common"
@@ -42,6 +41,8 @@ func Execute() error {
 			return runWalletCmd(os.Args[2:])
 		case "multisig":
 			return runMultisigCmd(os.Args[2:])
+		case "genesis":
+			return runGenesisCmd(os.Args[2:])
 		case "help", "--help", "-h":
 			printHelp()
 			return nil
@@ -56,6 +57,38 @@ func Execute() error {
 
 func isFlag(s string) bool {
 	return len(s) > 0 && s[0] == '-'
+}
+
+// Default listen addresses. --port-offset shifts these, and only these, so
+// several node processes can coexist on one machine. The UDP discovery port is
+// derived by bind from the (possibly shifted) TCP port as TCP+1000.
+const (
+	defaultTCPAddr  = "127.0.0.1:30303"
+	defaultHTTPAddr = "127.0.0.1:8545"
+	defaultWSAddr   = "127.0.0.1:8600"
+	defaultDataDir  = "data"
+)
+
+// applyPortOffset rewrites the DEFAULT listen addresses (and default datadir)
+// by offset. An explicitly supplied value is never touched: the caller only
+// reaches here with the flag defaults, and each field is compared against its
+// default literal before being shifted. Offset 0 is a no-op.
+func applyPortOffset(offset int, tcpAddr, httpAddr, wsAddr, dataDir *string) {
+	if offset == 0 {
+		return
+	}
+	if tcpAddr != nil && *tcpAddr == defaultTCPAddr {
+		*tcpAddr = fmt.Sprintf("127.0.0.1:%d", 30303+offset)
+	}
+	if httpAddr != nil && *httpAddr == defaultHTTPAddr {
+		*httpAddr = fmt.Sprintf("127.0.0.1:%d", 8545+offset)
+	}
+	if wsAddr != nil && *wsAddr == defaultWSAddr {
+		*wsAddr = fmt.Sprintf("127.0.0.1:%d", 8700+offset)
+	}
+	if dataDir != nil && *dataDir == defaultDataDir {
+		*dataDir = fmt.Sprintf("data/node%d", offset)
+	}
 }
 
 func printHelp() {
@@ -124,6 +157,19 @@ SUBCOMMANDS
                            uncovered. Run this before enabling enforcement:
                            an uncovered recipient is not protected, it is
                            silently skipped.)
+  genesis       Devnet genesis-file authoring (the ONLY place the validator
+                count K exists)
+                  create  --validators=K [--funded-accounts=M]
+                          [--root=data] [--tcp-base=30303] [--host=127.0.0.1]
+                          [--stake-spx 32] [--epoch-blocks 10]
+                          [--chain-id 73310] [--network devnet]
+                          Writes the SAME genesis document to every
+                          <root>/node<i>/config/genesis_state.json, generates each
+                          validator's Node-<addr> identity keypair under its
+                          own node dir, and generates K + M devnet staking keys
+                          under <root>/custody/devnet-rewards/ so a validator
+                          added later can send a Stake tx from a funded reward
+                          address. Rejects K < 3. Run BEFORE starting nodes.
 
 TOKENOMICS OVERVIEW
   Genesis Supply: 1,170,000,000 SPX (23.4% of 5B max supply) — 1,040,000,000 SPX remainder + 130,000,000 SPX sold (Angel Round + Public ICO), both funded in block 0
@@ -133,16 +179,43 @@ TOKENOMICS OVERVIEW
     Public ICO: 100,000,000 SPX @ $0.36 = $36.0M
     Total Raised: $54.6M (200,000,000 SPX sold, 16.1% of genesis)
 
-HYBRID CONSENSUS INFORMATION
-  Blocks 0-1:   VDF-PBFT (no stake required for validators)
-  Blocks 2+:    VDF+Stake PBFT (validators must have minimum stake)
+GENESIS DOCUMENT — the single source of validator membership
+  Every node reads <datadir>/config/genesis_state.json. It is the ONLY place the
+  initial validator set, the chain parameters, the genesis vault policy and the
+  block-0 witnesses are recorded. There is no other genesis file and no flag
+  that carries a node count.
+
+  How it reaches a node:
+    * devnet — the "genesis create" subcommand (--validators=K) writes one per
+                datadir, and a node started with --seeds fetches the missing
+                public sections over the network from its seeds (retrying while
+                the bootstrap node is still signing).
+    * any other network — there is NO automatic fetch. The file must be placed at
+                <datadir>/config/genesis_state.json out of band (copy/scp it)
+                BEFORE the node starts. A node started without it still runs, but
+                it has no genesis validators and no funded accounts, so it stays
+                a peer until a Stake transaction admits it.
+
+  A node derives its own identity from --tcp-addr as Node-<host:port>, so the
+  node_id recorded in genesis_state.json must match that exact string.
+
+CONSENSUS
+  One rule at every height, including block 1: a block commits only when
+  validators holding STRICTLY more than 2/3 of the staked validator set's total
+  stake have voted. The validator set comes from chain state — the genesis
+  document's validators plus on-chain Stake transactions — never from a CLI flag
+  or a connected-peer count. There is no "blocks 0-1 need no stake" phase.
+  VDF-derived leader selection runs on top of that same staked set.
 
 REAL-DEVICE QUICK START (ETH/BTC style — no pre-agreed node count)
   Each machine runs independently; peer discovery is via --seeds.
   Nodes can join or leave the network at any time — late joiners automatically
   sync the full blockchain from peers before participating in consensus.
 
-  # Node 1 (bootnode / first validator)
+  # Node 1 (bootnode / first validator) — holds the genesis document.
+  # genesis_state.json must already exist at <datadir>/config/genesis_state.json
+  # (see "GENESIS DOCUMENT" above). Author it once with "genesis create" and
+  # copy that one file into every node's datadir.
   go run main.go node --role=validator \
       --tcp-addr=<PUBLIC_IP_1>:30303 \
       --http-port=<PUBLIC_IP_1>:8545 \
@@ -162,9 +235,10 @@ REAL-DEVICE QUICK START (ETH/BTC style — no pre-agreed node count)
       --seeds=<PUBLIC_IP_1>:30303,<PUBLIC_IP_2>:30303 \
       --datadir=data --pbft
 
-  PBFT activates automatically once >= 3 validators are connected.
-  Late-joining nodes sync automatically and join consensus when caught up.
-  No --nodes or --node-index required.
+  PBFT starts once validators holding > 2/3 of the staked stake of the
+  genesis snapshot are connected and ready. Validator membership comes from
+  the genesis file and on-chain Stake transactions — never from a CLI flag
+  or a connected-peer count. There is no configured node-count flag at all.
 
 EIP-1459 DNS DISCOVERY (cryptographically authenticated bootstrap)
   Instead of plain IP seeds, you can use enrtree:// URLs. The node list
@@ -184,37 +258,47 @@ EIP-1459 DNS DISCOVERY (cryptographically authenticated bootstrap)
       --seeds=enrtree://<PUBKEY_HEX>@nodes.sphinx.network,1.2.3.4:30303 \
       --datadir=data --pbft
 
-SAME-BOX / DEV QUICK START (all nodes on one machine)
-  For local development and testing. Nodes can be started in any order and
-  late-joining nodes will automatically sync from peers.
+SAME-MACHINE / DEV QUICK START (all nodes on one machine)
+  For local development and testing. Step 1 writes the one genesis document that
+  defines the validator set — run it once, before any node starts. Steps 2..4
+  start three separate processes, each with its own --datadir and ports. Nodes
+  can be started in any order; late joiners sync from peers. --port-offset only
+  shifts default ports/datadir — it never changes a node's identity or its place
+  in the validator set.
 
-  # Terminal 1 — first validator (creates genesis block)
+  # Step 1 (ONCE) — author the genesis document for 3 validators.
+  # Writes data/node{0,1,2}/config/genesis_state.json, the three Node-<addr>
+  # identity keypairs, and 3 devnet staking keys.
+  go run main.go genesis create --validators=3
+
+  # Step 2 (Terminal 1) — first validator: 127.0.0.1:30303, datadir data/node0
   go run main.go node --role=validator --tcp-addr=127.0.0.1:30303 \
-      --udp-port=30304 --http-port=127.0.0.1:8545 --datadir=data/validator \
-      --nodes=3 --pbft
+      --http-port=127.0.0.1:8545 --datadir=data/node0 --pbft
 
-  # Terminal 2 — can be started anytime, even after Terminal 1 is running
-  go run main.go node --role=validator --tcp-addr=127.0.0.1:30304 \
-      --udp-port=30305 --http-port=127.0.0.1:8546 --datadir=data/validator2 \
-      --node-index=1 --nodes=3 --pbft
+  # Step 3 (Terminal 2) — --port-offset=1 gives 127.0.0.1:30304, datadir
+  # data/node1, wallet RPC 127.0.0.1:8701; it derives the SAME Node-<addr> ID
+  # that Step 1 wrote. Can be started anytime, even after Terminal 1 is running.
+  go run main.go node --role=validator --port-offset=1 \
+      --seeds=127.0.0.1:30303 --pbft
 
-  # Terminal 3 — can also be delayed; will sync automatically
-  go run main.go node --role=validator --tcp-addr=127.0.0.1:30305 \
-      --udp-port=30306 --http-port=127.0.0.1:8547 --datadir=data/validator3 \
-      --node-index=2 --nodes=3 --pbft
+  # Step 4 (Terminal 3) — --port-offset=2 gives 127.0.0.1:30305, datadir
+  # data/node2. Can also be delayed; will sync automatically.
+  go run main.go node --role=validator --port-offset=2 \
+      --seeds=127.0.0.1:30303 --pbft
 
   TIP: To test late-joiner sync, start Terminal 1, wait for it to produce a few
   blocks, then start Terminal 2 and/or 3 — they will automatically catch up.
 
-LEGACY COMMANDS
-  go run main.go -test-nodes=3     Run PBFT integration test (single process)
-  go run main.go                   Run default two-node network (single process)
+  WALLET RPC = 8700 + --port-offset; UDP discovery port = TCP + 1000.
 `)
 }
 
-// StartPBFTNodeMode is a wrapper for StartDistributedNode to maintain compatibility
-func StartPBFTNodeMode(dataDir string, nodeConfig network.NodePortConfig, totalNodes, nodeIndex int, vdfParams *consensus.VDFParams, rewardAddress string) error {
-	return bind.StartNode(dataDir, nodeConfig, totalNodes, nodeIndex, vdfParams, "devnet", "", rewardAddress)
+// StartPBFTNodeMode is a compatibility wrapper around bind.StartNode.
+//
+// portOffset is a LOCAL addressing convenience (default listen ports + default
+// datadir) and never affects validator membership.
+func StartPBFTNodeMode(dataDir string, nodeConfig network.NodePortConfig, portOffset int, vdfParams *consensus.VDFParams, rewardAddress string) error {
+	return bind.StartNode(dataDir, nodeConfig, portOffset, vdfParams, "devnet", "", rewardAddress)
 }
 
 // runNodeCmd handles the "node" subcommand
@@ -222,24 +306,29 @@ func runNodeCmd(args []string) error {
 	fs := flag.NewFlagSet("node", flag.ExitOnError)
 
 	role := fs.String("role", "validator", "Node role: validator | sender | receiver | none")
-	tcpAddr := fs.String("tcp-addr", "127.0.0.1:30303", "TCP address for P2P (host:port)")
-	udpPort := fs.String("udp-port", "", "UDP port for peer discovery (defaults to this node's generated unique UDP port)")
-	httpPort := fs.String("http-port", "127.0.0.1:8545", "HTTP JSON-RPC listen address")
-	wsPort := fs.String("ws-port", "127.0.0.1:8600", "WebSocket listen address")
+	tcpAddr := fs.String("tcp-addr", defaultTCPAddr, "TCP address for P2P (host:port)")
+	udpPort := fs.String("udp-port", "", "UDP port for peer discovery (defaults to this node's TCP port + 1000)")
+	httpPort := fs.String("http-port", defaultHTTPAddr, "HTTP JSON-RPC listen address")
+	wsPort := fs.String("ws-port", defaultWSAddr, "WebSocket/wallet-RPC listen address")
 	seeds := fs.String("seeds", "", "Comma-separated seed node UDP addresses or enrtree:// DNS discovery URLs")
 	dataDir := fs.String("datadir", "data", "Directory for LevelDB storage")
-	nodeIndex := fs.Int("node-index", 0, "Node index within this machine's port range (same-box harness only; ignored in real-device mode)")
+	portOffset := fs.Int("port-offset", 0, "Per-process port offset: shifts ONLY the default tcp/http/udp/wallet-RPC ports (and the default datadir). It never changes a validator's node ID or membership.")
 	configFile := fs.String("config", "", "Path to JSON node-config file (optional)")
-	numNodes := fs.Int("nodes", 1, "Total nodes in the network (same-box harness only; real-device mode discovers validators dynamically)")
 	pbftMode := fs.Bool("pbft", false, "Enable PBFT consensus mode")
 	mode := fs.String("mode", "development", "Run mode: development, production")
-	maxPeers := fs.Int("max-peers", 50, "Maximum peer connections (production mode)")
 	networkFlag := fs.String("network", "devnet", "Network type: devnet, testnet, mainnet")
 	rewardAddress := fs.String("reward-address", "", common.SPIFPrefix+" wallet address to stake and receive block rewards from (required for real validator participation; peers verify its on-chain balance before granting validator status — see help for details)")
 
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+
+	// --port-offset shifts ONLY the default listen ports and the default
+	// datadir. It is a local addressing convenience for running several node
+	// processes on one machine; it never selects a mode, a validator set, or a
+	// node identity. An explicit --tcp-addr/--http-port/--ws-port/--datadir
+	// always wins.
+	applyPortOffset(*portOffset, tcpAddr, httpPort, wsPort, dataDir)
 
 	// Multisig treasury spend broadcast is always on — no flags, no
 	// destination or amount to configure, and no custodian keys. The node
@@ -254,6 +343,16 @@ func runNodeCmd(args []string) error {
 	// automatic flows (block 0 minting and applyCGEReleases respectively);
 	// this watcher does not touch either.
 	var autoSpendArgs []string
+	// ★ DEVNET BUNDLE FETCH — must run BEFORE anything touches genesis and
+	// before the policy stat below: a joiner (seeds != "") with an incomplete
+	// local bundle fetches the PUBLIC bundle over the network from its seeds,
+	// verifying every file before it touches disk, retrying while the
+	// bootstrap is still signing. Network transport only; custody/ never.
+	if wait, ferr := bind.EnsureDevnetBundleFromSeeds(*networkFlag, *seeds, *dataDir); ferr != nil {
+		return fmt.Errorf("devnet bundle fetch: %w", ferr)
+	} else if wait > 0 {
+		logger.Info("DEVNET BUNDLE: joiner waited %s for the bootstrap bundle", wait.Round(time.Second))
+	}
 	// Per-node FIRST: the escrow policy lives under this node's own datadir in
 	// the fully per-node layout (<datadir>/config/escrow_multisig.json). The
 	// shared-root path is the legacy fallback for nodes provisioned before the
@@ -287,7 +386,7 @@ func runNodeCmd(args []string) error {
 		const unsetWSPortDefault = "127.0.0.1:8600"
 		walletRPC := *wsPort
 		if walletRPC == "" || walletRPC == unsetWSPortDefault {
-			walletRPC = fmt.Sprintf("127.0.0.1:%d", 8700+*nodeIndex)
+			walletRPC = fmt.Sprintf("127.0.0.1:%d", 8700+*portOffset)
 		}
 		spendArgs, err := autoWatchArgs(
 			escrowPolicyPath, walletRPC, proposalsDir)
@@ -299,7 +398,10 @@ func runNodeCmd(args []string) error {
 		logger.Info("no multisig policy at %s — auto multisig spend watcher disabled (run \"multisig devnet\" to enable treasury spends); legacy shared path %s also checked (%s)", escrowPolicyPath, custodyRoles["escrow"].OutPath, proposalsPathForMsg)
 	}
 
-	// Build the NodePortConfig using network package
+	// Build the NodePortConfig for THIS process. A node no longer describes a
+	// slot in a pre-agreed set of N nodes — only its own listen addresses.
+	// Validator membership comes from chain state (genesis + Stake txs), never
+	// from a count supplied on the command line.
 	var nodeConfig network.NodePortConfig
 
 	if *configFile != "" {
@@ -307,41 +409,18 @@ func runNodeCmd(args []string) error {
 		if err != nil {
 			return fmt.Errorf("failed to load config file: %v", err)
 		}
-		if *nodeIndex < 0 || *nodeIndex >= len(configs) {
-			return fmt.Errorf("node-index %d out of range for %d configs", *nodeIndex, len(configs))
-		}
-		nodeConfig = configs[*nodeIndex]
-	} else {
-		roles := bind.ParseRoles(*role, *numNodes)
-
-		flagOverrides := map[string]string{}
-		if *tcpAddr != "" {
-			flagOverrides[fmt.Sprintf("tcpAddr%d", *nodeIndex)] = *tcpAddr
-		}
-		if *udpPort != "" {
-			flagOverrides[fmt.Sprintf("udpPort%d", *nodeIndex)] = *udpPort
-		}
-		if *httpPort != "" {
-			flagOverrides[fmt.Sprintf("httpPort%d", *nodeIndex)] = *httpPort
-		}
-		if *wsPort != "" {
-			flagOverrides[fmt.Sprintf("wsPort%d", *nodeIndex)] = *wsPort
-		}
-		if *seeds != "" {
-			flagOverrides["seeds"] = *seeds
-		}
-		if *mode == "production" {
-			flagOverrides["maxPeers"] = strconv.Itoa(*maxPeers)
-		}
-
-		configs, err := network.GetNodePortConfigs(*numNodes, roles, flagOverrides)
+		nodeConfig, err = configFileEntry(configs, *portOffset)
 		if err != nil {
-			return fmt.Errorf("failed to generate node configs: %v", err)
+			return err
 		}
-		if *nodeIndex < 0 || *nodeIndex >= len(configs) {
-			return fmt.Errorf("node-index %d out of range for %d nodes", *nodeIndex, *numNodes)
+	} else {
+		nodeConfig = network.NodePortConfig{
+			TCPAddr:  *tcpAddr,
+			UDPPort:  *udpPort,
+			HTTPPort: *httpPort,
+			WSPort:   *wsPort,
+			Role:     bind.ParseRoles(*role, 1)[0],
 		}
-		nodeConfig = configs[*nodeIndex]
 	}
 
 	// Set defaults if not already set
@@ -361,53 +440,21 @@ func runNodeCmd(args []string) error {
 	logger.Info("Starting node role=%s tcp=%s udp=%s rpc=%s seeds=%q data=%s pbft=%v mode=%s network=%s",
 		*role, nodeConfig.TCPAddr, nodeConfig.UDPPort, nodeConfig.HTTPPort, *seeds, *dataDir, *pbftMode, *mode, *networkFlag)
 
-	// ── Determine mode: real-device, seed-based, or same-box ──
+	// ── Peer discovery is decided by flags/config, never by a node count ──
 	//
-	// real-device mode: non-loopback --tcp-addr (public IP or hostname).
-	//   Peers discovered dynamically via --seeds / DNS + PEX.
-	//   --nodes and --node-index are ignored.
-	//
-	// seed-based mode: loopback --tcp-addr WITH --seeds provided.
-	//   Like real-device mode: the node discovers peers via --seeds.
-	//   --nodes and --node-index are NOT required (no same-box harness).
-	//   This is the recommended way to test late-joiner sync on localhost.
-	//
-	// same-box mode: loopback --tcp-addr WITHOUT --seeds.
-	//   Uses the legacy hardcoded 32307+ port range.
-	//   Requires --nodes=3 and --node-index for peer pre-registration.
-	isRealDevice := false
-	isSeedBased := false
-	if *tcpAddr != "" {
-		host, _, splitErr := net.SplitHostPort(*tcpAddr)
-		if splitErr != nil {
-			host = *tcpAddr
-		}
-		if ip := net.ParseIP(host); ip != nil && !ip.IsLoopback() {
-			isRealDevice = true
-		} else if host != "" && host != "localhost" && net.ParseIP(host) == nil {
-			isRealDevice = true // hostname, assume non-loopback
-		}
+	// A node's start-up behaviour does not depend on how many other nodes the
+	// operator expects to exist:
+	//   - a non-empty --seeds (plain addresses and/or enrtree:// DNS trees)
+	//     makes the node dial out and discover peers via seeds + PEX/DHT;
+	//   - no --seeds means the node relies on inbound connections and any
+	//     default DNS tree the network config defines.
+	// Validator membership is never inferred here — it comes from chain state
+	// (the genesis file, then on-chain Stake/Unstake transactions). A small
+	// peer count while the validator set is large is a liveness condition, not
+	// a configuration error, and is never treated as one.
+	if *pbftMode && strings.TrimSpace(*seeds) == "" {
+		logger.Info("PBFT enabled with no --seeds: relying on inbound peers / default discovery tree; validator set comes from chain state")
 	}
-	// If --seeds is provided (even for loopback), treat as seed-based mode.
-	// The node discovers peers dynamically and does NOT need the same-box
-	// harness with pre-registered peer addresses.
-	if *seeds != "" && strings.TrimSpace(*seeds) != "" {
-		isSeedBased = true
-	}
-
-	if *pbftMode && !isRealDevice && !isSeedBased && *numNodes < 3 {
-		return fmt.Errorf("same-box PBFT mode requires at least 3 total nodes (--nodes=3), got %d", *numNodes)
-	}
-	// ★ FIX: In seed-based mode (loopback with --seeds), preserve --nodes for
-	// local multi-node testing. Only set numNodes=1 for true real-device mode
-	// (non-loopback IP). This allows 3-node local testing with --seeds to work
-	// correctly.
-	if *pbftMode && isRealDevice && *numNodes > 1 {
-		logger.Info("Real-device mode (non-loopback IP): --nodes=%d ignored; validator count derived from peer discovery", *numNodes)
-		*numNodes = 1 // normalise so same-box harness arrays aren't synthesised
-	}
-	// For seed-based mode on loopback, keep the user's --nodes value so that
-	// local multi-node tests (e.g., 3 nodes with --seeds=127.0.0.1:30303) work.
 
 	// Threshold-gated multisig watch loop runs alongside the node in THIS
 	// process whenever a multisig policy is provisioned — every node runs
@@ -458,23 +505,16 @@ func runNodeCmd(args []string) error {
 
 	if *pbftMode {
 		logger.Info("═══════════════════════════════════════════════════════════════")
-		logger.Info("=== STARTING HYBRID PBFT CONSENSUS MODE ===")
-		logger.Info("This node will participate in hybrid consensus with %d total validators", *numNodes)
+		logger.Info("=== STARTING PBFT CONSENSUS MODE ===")
+		logger.Info("The validator set comes from chain state (the genesis document + Stake transactions), not from a node count")
 		logger.Info("")
-		logger.Info("PHASE 1 (Blocks 0-1): VDF-PBFT (no stake required)")
-		logger.Info("   - All nodes can participate as validators")
-		logger.Info("   - VDF-based leader selection only")
-		logger.Info("   - Genesis block and Block 1 use this phase")
-		logger.Info("")
-		logger.Info("PHASE 2 (Blocks 2+): VDF+Stake PBFT")
-		logger.Info("   - Validators must have minimum stake")
-		logger.Info("   - VDF + stake-based leader selection")
-		logger.Info("   - Secure consensus after initial distribution")
+		logger.Info("QUORUM (identical at every height, including block 1)")
+		logger.Info("   - a block commits only when validators holding STRICTLY > 2/3 of the")
+		logger.Info("     staked validator set's total stake have voted")
+		logger.Info("   - no stake means no vote: unstaked peers never reach quorum")
+		logger.Info("   - there is no 'blocks 0-1 need no stake' phase")
+		logger.Info("   - VDF-derived leader selection runs over that same staked set")
 		logger.Info("═══════════════════════════════════════════════════════════════")
-
-		if *mode == "production" && *numNodes > 100 {
-			logger.Info("Production optimization: Limited peer connections enabled")
-		}
 
 		// Derive VDF parameters
 		expectedGenesisHash := core.GetGenesisHash()
@@ -502,18 +542,17 @@ func runNodeCmd(args []string) error {
 
 		logger.Info("Node will continue running - press Ctrl+C to stop")
 
-		return bind.StartNode(*dataDir, nodeConfig, *numNodes, *nodeIndex, vdfParams, *networkFlag, *seeds, *rewardAddress)
+		return bind.StartNode(*dataDir, nodeConfig, *portOffset, vdfParams, *networkFlag, *seeds, *rewardAddress)
 	}
 
-	// Single node mode
-	logger.Info("=== STARTING SINGLE NODE MODE (NO PBFT) ===")
-	logger.Info("This mode is for development/testing only")
-	logger.Info("To participate in hybrid consensus and mine blocks:")
-	logger.Info("  1. Start 2 more validator nodes with --pbft flag")
-	logger.Info("  2. Total 3+ nodes will enable PBFT consensus")
+	// Single node mode — PBFT not requested on the command line. Consensus
+	// still activates on its own once the genesis/staked validator set reaches
+	// the BFT minimum; nothing here waits for a peer count.
+	logger.Info("=== STARTING NODE WITHOUT --pbft ===")
+	logger.Info("Consensus is driven by the on-chain validator set; --pbft only tunes startup logging")
 	logger.Info("Node will continue running - press Ctrl+C to stop")
 
-	return bind.StartNode(*dataDir, nodeConfig, *numNodes, *nodeIndex, nil, *networkFlag, *seeds, *rewardAddress)
+	return bind.StartNode(*dataDir, nodeConfig, *portOffset, nil, *networkFlag, *seeds, *rewardAddress)
 }
 
 // runSendTxCmd handles the "send-tx" subcommand
@@ -592,13 +631,50 @@ func runWatchTxCmd(args []string) error {
 	})
 }
 
+// configFileEntry resolves --config to THIS process's node configuration.
+//
+// A --config file describes one node's listen addresses, so a single-node
+// document is the expected shape. When the file holds exactly one entry it is
+// used as-is, whatever --port-offset is (the offset has already shifted the
+// flag defaults, and an explicit --config always wins over them).
+//
+// ★ REPORTED, NOT DECIDED (Phase 1, item B): this USED to be
+// `if *portOffset < 0 || *portOffset >= len(configs) { error }; nodeConfig =
+// configs[*portOffset]` — i.e. --port-offset was an INDEX into the config file.
+// That is the same class of limit as the removed index range check that Phase 1
+// removed, and it contradicts --port-offset's documented contract ("shifts ONLY the
+// default tcp/http/udp/wallet-RPC ports and the default datadir; never changes
+// a validator's node ID or membership"). --port-offset is a LOCAL addressing
+// convenience; a config file is an operator-authored description of one node's
+// addresses. Indexing one by the other couples two unrelated things and makes
+// a multi-entry file a de-facto pre-agreed node roster again.
+//
+// A file with more than one entry is therefore AMBIGUOUS, not out of range. It
+// is refused with a message that names the alternatives, because picking one
+// silently would be exactly the "which node am I?" decision this whole change
+// set exists to remove. Restoring multi-entry support (one entry per --port-offset
+// value, or an explicit --select/--name) is a deliberate API decision and is
+// left to the operator.
+func configFileEntry(configs []network.NodePortConfig, portOffset int) (network.NodePortConfig, error) {
+	switch {
+	case len(configs) == 0:
+		return network.NodePortConfig{}, fmt.Errorf("--config file holds no node entries")
+	case len(configs) == 1:
+		return configs[0], nil
+	default:
+		return network.NodePortConfig{}, fmt.Errorf(
+			"--config file holds %d node entries, but a --config file describes ONE node's listen addresses. "+
+				"Use a single-entry file (--port-offset is a local port/datadir shift and is deliberately NOT an index into this file). "+
+				"If you intended to run several nodes, give each one its own config file, or pass --tcp-addr/--http-port/--ws-port/--datadir per process "+
+				"(portOffset=%d)", len(configs), portOffset)
+	}
+}
+
 // legacyExecute handles the original flag-parsing path
 func legacyExecute() error {
 	cfg := &Config{}
-	testCfg := &TestConfig{}
 
 	flag.StringVar(&cfg.configFile, "config", "", "Path to node configuration JSON file")
-	flag.IntVar(&cfg.numNodes, "nodes", 1, "Number of nodes to initialise")
 	flag.StringVar(&cfg.roles, "roles", "none", "Comma-separated node roles")
 	flag.StringVar(&cfg.tcpAddr, "tcp-addr", "", "TCP address (e.g., 127.0.0.1:30303)")
 	flag.StringVar(&cfg.udpPort, "udp-port", "", "UDP port for discovery (e.g., 30304)")
@@ -606,28 +682,15 @@ func legacyExecute() error {
 	flag.StringVar(&cfg.wsPort, "ws-port", "", "WebSocket port (e.g., 127.0.0.1:8600)")
 	flag.StringVar(&cfg.seedNodes, "seeds", "", "Comma-separated seed node UDP addresses or enrtree:// DNS discovery URLs")
 	flag.StringVar(&cfg.dataDir, "datadir", "data", "Directory for LevelDB storage")
-	flag.IntVar(&cfg.nodeIndex, "node-index", 0, "Index of the node to run")
+	flag.IntVar(&cfg.portOffset, "port-offset", 0, "Per-process port offset (shifts only default listen ports and datadir)")
 	flag.StringVar(&cfg.rewardAddress, "reward-address", "", common.SPIFPrefix+" wallet address to stake and receive block rewards from")
-	flag.IntVar(&testCfg.NumNodes, "test-nodes", 0,
-		"Run the PBFT integration test with N validator nodes (0 = disabled)")
-
-	flag.BoolVar(&cfg.legacyCluster, "legacy-cluster", false,
-		"Run the deprecated same-process 3-node devnet harness (requires simultaneous "+
-			"startup, does not support late-joining nodes). Opt-in only.")
 
 	flag.Parse()
-
-	if cfg.legacyCluster {
-		logger.Warn("-legacy-cluster requested: using RunMultipleNodesInternal(), " +
-			"a same-process 3-node harness that does NOT support late joiners. " +
-			"Use the 'node' subcommand or -seeds for production multi-node networks.")
-		return bind.RunMultipleNodesInternal()
-	}
 
 	if flag.NFlag() == 0 {
 		return fmt.Errorf("no flags or subcommand given — run with 'help' for usage, " +
 			"or pass -datadir/-seeds/etc. to start a production node " +
-			"(pass -legacy-cluster to explicitly opt into the deprecated same-process harness)")
+			"(the recommended form is the 'node' subcommand: go run main.go node --help)")
 	}
 
 	var nodeConfig network.NodePortConfig
@@ -637,41 +700,21 @@ func legacyExecute() error {
 		if err != nil {
 			return fmt.Errorf("failed to load config file: %v", err)
 		}
-		if cfg.nodeIndex < 0 || cfg.nodeIndex >= len(configs) {
-			return fmt.Errorf("node-index %d out of range for %d configs", cfg.nodeIndex, len(configs))
-		}
-		nodeConfig = configs[cfg.nodeIndex]
-	} else {
-		roles := bind.ParseRoles(cfg.roles, cfg.numNodes)
-		flagOverrides := make(map[string]string)
-
-		if cfg.tcpAddr != "" {
-			flagOverrides[fmt.Sprintf("tcpAddr%d", cfg.nodeIndex)] = cfg.tcpAddr
-		}
-		if cfg.udpPort != "" {
-			flagOverrides[fmt.Sprintf("udpPort%d", cfg.nodeIndex)] = cfg.udpPort
-		}
-		if cfg.httpPort != "" {
-			flagOverrides[fmt.Sprintf("httpPort%d", cfg.nodeIndex)] = cfg.httpPort
-		}
-		if cfg.wsPort != "" {
-			flagOverrides[fmt.Sprintf("wsPort%d", cfg.nodeIndex)] = cfg.wsPort
-		}
-		if cfg.seedNodes != "" {
-			flagOverrides["seeds"] = cfg.seedNodes
-		}
-
-		configs, err := network.GetNodePortConfigs(cfg.numNodes, roles, flagOverrides)
+		nodeConfig, err = configFileEntry(configs, cfg.portOffset)
 		if err != nil {
-			return fmt.Errorf("failed to generate node configs: %v", err)
+			return err
 		}
-		if cfg.nodeIndex < 0 || cfg.nodeIndex >= len(configs) {
-			return fmt.Errorf("node-index %d out of range for %d nodes", cfg.nodeIndex, cfg.numNodes)
+	} else {
+		nodeConfig = network.NodePortConfig{
+			TCPAddr:  cfg.tcpAddr,
+			UDPPort:  cfg.udpPort,
+			HTTPPort: cfg.httpPort,
+			WSPort:   cfg.wsPort,
+			Role:     bind.ParseRoles(cfg.roles, 1)[0],
 		}
-		nodeConfig = configs[cfg.nodeIndex]
 	}
 
-	return bind.StartNode(cfg.dataDir, nodeConfig, cfg.numNodes, cfg.nodeIndex, nil, "devnet", cfg.seedNodes, cfg.rewardAddress)
+	return bind.StartNode(cfg.dataDir, nodeConfig, cfg.portOffset, nil, "devnet", cfg.seedNodes, cfg.rewardAddress)
 }
 
 // runWalletCmd handles the "wallet" subcommand

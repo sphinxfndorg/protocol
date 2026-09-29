@@ -7,6 +7,7 @@ package core
 import (
 	"fmt"
 	"math/big"
+	"sync"
 	"time"
 
 	"github.com/sphinxfndorg/protocol/src/accounts/key"
@@ -27,6 +28,46 @@ var NetworkNames = map[string]string{
 	"devnet":  "Sphinx Devnet",
 	"testnet": "Sphinx Testnet",
 	"mainnet": "Sphinx Mainnet",
+}
+
+// Epoch-length defaults, in BLOCKS. These are chain parameters: consensus
+// computes epoch(h) = h / EpochBlocks from them (or from the genesis file's
+// value, which wins — see SetGenesisEpochBlocks). They are never read from a
+// CLI flag.
+const (
+	// DefaultEpochBlocks is the production epoch length: large, so epoch
+	// boundaries (validator activations/exits, inflation) are rare events.
+	DefaultEpochBlocks uint64 = 1000
+	// DevnetEpochBlocks is the small devnet epoch length the devnet genesis
+	// helper writes into the genesis file, so devnet tests see epoch
+	// boundaries without producing thousands of blocks.
+	DevnetEpochBlocks uint64 = 10
+)
+
+// genesisEpochBlocksOverride, when non-zero, is the value read from the
+// genesis file and therefore wins over the per-network defaults above.
+var (
+	epochBlocksMu          sync.Mutex
+	genesisEpochBlocksOvrd uint64
+)
+
+// SetGenesisEpochBlocks records the EpochBlocks value the genesis file
+// carries. Must be called before chain params are first constructed (i.e.
+// before core.NewBlockchain). Zero is a no-op.
+func SetGenesisEpochBlocks(n uint64) {
+	epochBlocksMu.Lock()
+	defer epochBlocksMu.Unlock()
+	genesisEpochBlocksOvrd = n
+}
+
+// epochBlocksOrDefault returns the genesis-file override when set, else def.
+func epochBlocksOrDefault(def uint64) uint64 {
+	epochBlocksMu.Lock()
+	defer epochBlocksMu.Unlock()
+	if genesisEpochBlocksOvrd != 0 {
+		return genesisEpochBlocksOvrd
+	}
+	return def
 }
 
 // GetNetworkDisplayName returns the human-readable name for a network phase
@@ -132,6 +173,9 @@ func GetSphinxChainParams() *SphinxChainParameters {
 
 		// Consensus Configuration - PBFT/RANDAO settings
 		ConsensusConfig: GetDefaultConsensusConfig(),
+
+		// Epoch length in blocks (chain parameter, never a flag).
+		EpochBlocks: epochBlocksOrDefault(DefaultEpochBlocks),
 
 		// Performance Configuration - node optimization settings
 		PerformanceConfig: GetDefaultPerformanceConfig(),
@@ -296,6 +340,11 @@ func GetDevnetChainParams() *SphinxChainParameters {
 
 	params.ConsensusConfig.BlockTime = 2 * time.Second
 	params.ConsensusConfig.EpochLength = 10
+
+	// Devnet uses a SMALL epoch length in blocks so tests observe epoch
+	// boundaries quickly. A genesis file's epoch_blocks value still wins
+	// (epochBlocksOrDefault), so `genesis create` can override this.
+	params.EpochBlocks = epochBlocksOrDefault(DevnetEpochBlocks)
 
 	devnetMinStake := new(big.Int).Mul(big.NewInt(1), big.NewInt(1e18))
 	params.ConsensusConfig.MinStakeAmount = devnetMinStake

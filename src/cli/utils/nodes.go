@@ -22,11 +22,11 @@ import (
 func StartNode(
 	dataDir string,
 	nodeConfig network.NodePortConfig,
-	totalNodes, nodeIndex int,
+	portOffset int,
 	vdfParams *consensus.VDFParams,
 	networkType string,
 	seeds string,
 	rewardAddress string,
 ) error {
-	return bind.StartNode(dataDir, nodeConfig, totalNodes, nodeIndex, vdfParams, networkType, seeds, rewardAddress)
+	return bind.StartNode(dataDir, nodeConfig, portOffset, vdfParams, networkType, seeds, rewardAddress)
 }

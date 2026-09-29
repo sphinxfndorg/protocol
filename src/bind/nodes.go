@@ -5,10 +5,11 @@
 //
 // Production node startup. The legacy same-box devnet harness that used to
 // live in this file (StartValidatorNode, StartLocalCluster, LaunchNetwork,
-// StartSingleNodeInternal, RunMultipleNodesInternal, SetupNodes) has moved
-// to legacy.go — it predates StartNode and is only reachable via
-// cli.go's legacyExecute() path. This file now contains just StartNode and
-// its directly-used helpers.
+// StartSingleNodeInternal, RunMultipleNodesInternal, SetupNodes) is GONE: it
+// predated StartNode, hardcoded a 3-node cluster on fixed 32307+ ports with
+// Node-0/1/2 identities that no genesis document could name, and was reachable
+// only via cli.go's -legacy-cluster flag. Both legacy.go and that flag were
+// removed. This file now contains just StartNode and its directly-used helpers.
 package bind
 
 import (
@@ -148,10 +149,10 @@ func isClosed(conn net.Conn) bool {
 }
 
 // ParseRoles converts a comma-separated roles string into a slice of NodeRole.
-func ParseRoles(rolesStr string, numNodes int) []network.NodeRole {
+func ParseRoles(rolesStr string, count int) []network.NodeRole {
 	roles := strings.Split(rolesStr, ",")
-	result := make([]network.NodeRole, numNodes)
-	for i := 0; i < numNodes; i++ {
+	result := make([]network.NodeRole, count)
+	for i := 0; i < count; i++ {
 		if i < len(roles) {
 			switch strings.TrimSpace(roles[i]) {
 			case "sender":
@@ -176,21 +177,20 @@ func ParseRoles(rolesStr string, numNodes int) []network.NodeRole {
 
 // StartNode starts a fully-featured validator node.
 //
-// totalNodes / nodeIndex are the same-box devnet / --test-nodes harness
-// parameters.  On a real-device network (usingRealAddress=true) they are
-// irrelevant: the validator set is built dynamically from what the node
-// discovers through --seeds + PEX, exactly like ETH/BTC.  Pass totalNodes=1
-// and nodeIndex=0 for any single real-device node; the runtime will grow the
-// validator set as peers are discovered.
+// Validator membership is NEVER taken from the command line or from a peer
+// count. The node loads the genesis file from its datadir (via the devnet
+// bundle path), syncs from --seeds/PEX, and learns the current validator set
+// only from chain state. portOffset is a purely local addressing convenience:
+// it shifts default listen ports/datadir and nothing else.
 //
 // rewardAddress is this node's own SPIF wallet address. It is broadcast to
 // peers during key exchange (so THEY can verify OUR balance before staking
 // us) and is also used locally to self-stake from our own genesis/earned
 // balance. It is optional: an empty value just means this node starts with
-// no stake and relies on receiving some (e.g. genesis allocation processed
-// after startup, or funds sent to it) before it can be admitted as a
-// validator by peers. It is never a substitute for balance verification —
-// see stakeValidatorFromRewardAddress in helpers.go.
+// no stake and relies on receiving some (e.g. a genesis allocation, or funds
+// sent to it) before it can be admitted as a validator by peers. It is never
+// a substitute for balance verification — see stakeValidatorFromRewardAddress
+// in helpers.go.
 // startNodeFn is the seam StartNode calls. It exists so a test can prove the
 // wrapper forwards exactly the zero NodeOptions — the CLI-identical gate —
 // without booting a node (see lifecycle_test.go).
@@ -205,13 +205,13 @@ var startNodeFn = StartNodeWithOptions
 func StartNode(
 	dataDir string,
 	nodeConfig network.NodePortConfig,
-	totalNodes, nodeIndex int,
+	portOffset int,
 	vdfParams *consensus.VDFParams,
 	networkType string,
 	seeds string,
 	rewardAddress string,
 ) error {
-	return startNodeFn(dataDir, nodeConfig, totalNodes, nodeIndex, vdfParams, networkType, seeds, rewardAddress, NodeOptions{})
+	return startNodeFn(dataDir, nodeConfig, portOffset, vdfParams, networkType, seeds, rewardAddress, NodeOptions{})
 }
 
 // StartNodeWithOptions is StartNode plus the two things a host process needs
@@ -223,7 +223,7 @@ func StartNode(
 func StartNodeWithOptions(
 	dataDir string,
 	nodeConfig network.NodePortConfig,
-	totalNodes, nodeIndex int,
+	portOffset int,
 	vdfParams *consensus.VDFParams,
 	networkType string,
 	seeds string,
@@ -283,21 +283,24 @@ func StartNodeWithOptions(
 
 	logger.Info("=== STARTING NODE ===")
 
-	isProduction := totalNodes > 100
-
-	switch {
-	case totalNodes == 1:
-		logger.Info("SINGLE NODE / REAL-DEVICE MODE — peers discovered dynamically via --seeds")
-	case totalNodes == 2:
-		logger.Warn("2-NODE CLUSTER — PBFT requires ≥ 3 validators")
-	case isProduction:
-		logger.Info("PRODUCTION MODE — Large network with %d nodes (using optimized peer connections)", totalNodes)
-	default:
-		logger.Info("FULL PBFT CONSENSUS (same-box) — %d validators", totalNodes)
-	}
+	logger.Info("Peer discovery: %s", discoveryModeDesc(seeds))
+	logger.Info("Validator membership comes from chain state (genesis file, then Stake/Unstake transactions) — never from a configured node count")
 
 	// ════════════════════════════════════════════════════════════════════
 	// ★ DEVNET AUTO-CUSTODY — must run BEFORE SECTION 1 below.
+	// ★ DEVNET BUNDLE FETCH — runs BEFORE auto-custody (hence before the
+	// first GetGenesisHash() call): a joiner (seeds != "") with an incomplete
+	// local bundle fetches the PUBLIC bundle over the network from its seeds,
+	// verifying every file before it touches disk, retrying while the
+	// bootstrap is still signing. Bootstrap nodes, non-devnet networks, and
+	// nodes whose datadir already holds the bundle do nothing. Network
+	// transport only — no same-host directory reads; custody/ never served.
+	// ════════════════════════════════════════════════════════════════════
+	if wait, ferr := ensureDevnetBundleFromSeeds(networkType, seeds, dataDir); ferr != nil {
+		return fmt.Errorf("devnet bundle fetch: %w", ferr)
+	} else if wait > 0 {
+		logger.Info("DEVNET BUNDLE: joiner waited %s for the bootstrap bundle", wait.Round(time.Second))
+	}
 	//
 	// Resolving chain parameters calls core.GetGenesisHash(), which is a
 	// process-global sync.Once that BUILDS block 0 on first use. Block 0's
@@ -374,113 +377,52 @@ func StartNodeWithOptions(
 	logger.Info("Shared STHINCS parameters created")
 
 	// SECTION 3 — node identity
-	// ── Determine real-device vs same-box mode ──
-	// real-device mode: the user provided a public / non-loopback IP.
-	//   In this mode we don't pre-configure peer addresses; discovery
-	//   happens via --seeds / DNS + PEX.  synthCount = 1.
 	//
-	// same-box mode: all nodes on loopback, using the legacy hardcoded
-	//   32307+ port range.  synthCount = totalNodes.
+	// A node has exactly ONE identity: Node-<its own --tcp-addr>. There is no
+	// synthesized roster of "node 0..N-1": --port-offset is a purely local
+	// addressing convenience and never an identity. The validator set is read
+	// from chain state (the genesis file, then Stake/Unstake transactions);
+	// the peer set is learned from --seeds + PEX. Neither is derived from, or
+	// bounded by, a configured node count.
+	host, _, splitErr := net.SplitHostPort(nodeConfig.TCPAddr)
+	if splitErr != nil {
+		host = nodeConfig.TCPAddr
+	}
+	if strings.TrimSpace(host) == "" || strings.TrimSpace(nodeConfig.TCPAddr) == "" {
+		return fmt.Errorf("a listen address is required: pass --tcp-addr (e.g. 127.0.0.1:30303)")
+	}
+	usingRealAddress := !isLoopbackHost(host)
+
+	currentAddress := nodeConfig.TCPAddr
+	currentNodeID := fmt.Sprintf("Node-%s", currentAddress)
+
+	// validatorIDs carries ONLY this node's own identity as an initialisation
+	// hint. It is deliberately NOT a validator set: consensus membership is
+	// filled from chain state. No peer list is synthesized — peers are learned
+	// through --seeds + PEX, never from a configured node count.
+	validatorIDs := []string{currentNodeID}
+
+	logger.Info("Node identity: %s at %s (public-ip=%v, datadir=%s)", currentNodeID, currentAddress, usingRealAddress, dataDir)
+
+	// ── GENESIS FILE ─────────────────────────────────────────────────────
+	// The genesis file (written by the devnet helper `genesis create`, fetched
+	// over the devnet bundle path when this node joined via --seeds) is the
+	// ONLY source of the initial validator set. Nothing below derives
+	// membership from a flag, a peer count, or a synthesized roster.
 	//
-	// ★ FIX: When --tcp-addr is explicitly provided by the user (even for
-	// loopback like 127.0.0.1:30303), use it as the node's own address.
-	// The old code went to the else branch for all loopback addresses,
-	// silently replacing e.g. 127.0.0.1:30303 with 127.0.0.1:32307.
-	// Now we detect that nodeConfig.TCPAddr differs from the default
-	// hardcoded port and honour the user's choice.
-	usingRealAddress := false
-	userProvidedTCP := false
-	if nodeConfig.TCPAddr != "" {
-		host, _, splitErr := net.SplitHostPort(nodeConfig.TCPAddr)
-		if splitErr != nil {
-			host = nodeConfig.TCPAddr
-		}
-		if !isLoopbackHost(host) {
-			usingRealAddress = true
-		}
-		// Check if the port differs from the default same-box port
-		_, portStr, _ := net.SplitHostPort(nodeConfig.TCPAddr)
-		defaultPort := fmt.Sprintf("%d", 32307+nodeIndex)
-		if portStr != "" && portStr != defaultPort {
-			userProvidedTCP = true
-		}
+	// It must be loaded BEFORE core.NewBlockchain, because its chain
+	// parameters (EpochBlocks) are resolved into the chain params there.
+	genesisFile, genesisFileErr := core.LoadGenesisFile(dataDir)
+	if genesisFileErr != nil {
+		return fmt.Errorf("genesis file: %w", genesisFileErr)
 	}
-
-	// ★ FIX: synthCount determines how many static peer addresses we generate
-	// and, critically, how many validator IDs core.NewBlockchain seeds into the
-	// on-chain validator set.
-	// - real-device mode (public IP): synthCount = 1, peers via seeds/DHT
-	// - custom loopback ports with --nodes/--node-index AND --seeds: synthCount = totalNodes
-	//   (peers are derived from the custom port using nodeIndex offset)
-	// - custom loopback ports with --nodes/--node-index but NO --seeds: synthCount = totalNodes
-	//   (bootstrap node — same validator set as its peers; it must NOT mine
-	//    solo, which is now gated on totalNodes<=1 in runBlockProductionLoop)
-	// - custom loopback ports with no --nodes: synthCount = 1, no static peers
-	// - legacy same-box (no --tcp-addr): synthCount = totalNodes, hardcoded 32307+
-	//
-	// ★ FIX (#1 validator-set split): the bootstrap node (no --seeds) used to
-	// collapse synthCount to 1 "to enter solo mode". That gave the bootstrap
-	// node a validator set containing only itself (1/1 validators, 32 SPX)
-	// while every node that joined via --seeds used the full set (3/3, 96 SPX).
-	// The two sides then computed different leaders and stake totals, each
-	// rejected the other's proposal as "invalid leader", and the chain
-	// deadlocked. Keeping synthCount = totalNodes here gives every node the
-	// identical genesis validator set, which is the only way leader election and
-	// quorum math can agree.
-	if totalNodes < 1 {
-		totalNodes = 1
-	}
-	synthCount := totalNodes
-	if usingRealAddress {
-		synthCount = 1
-		nodeIndex = 0
-	}
-	// The bootstrap node is always index 0 in the same-box devnet.
-	if seeds == "" && !usingRealAddress {
-		nodeIndex = 0
-	}
-
-	var currentAddress, currentNodeID string
-	validatorIDs := make([]string, synthCount)
-	networkAddresses := make([]string, synthCount)
-
-	// Determine the base host and port for generating peer addresses.
-	// When userProvidedTCP, parse the actual address; otherwise use 32307+.
-	baseHost := "127.0.0.1"
-	basePort := 32307
-	if userProvidedTCP || usingRealAddress {
-		h, pStr, err := net.SplitHostPort(nodeConfig.TCPAddr)
-		if err == nil {
-			baseHost = h
-			if p, err := strconv.Atoi(pStr); err == nil {
-				basePort = p - nodeIndex // Derive base: port - nodeIndex
-			}
-		}
-	}
-
-	for i := 0; i < synthCount; i++ {
-		addr := fmt.Sprintf("%s:%d", baseHost, basePort+i)
-		networkAddresses[i] = addr
-		validatorIDs[i] = fmt.Sprintf("Node-%s", addr)
-	}
-
-	if synthCount == 1 {
-		// Single-node mode: use the actual address from config/seed
-		if userProvidedTCP || usingRealAddress {
-			currentAddress = nodeConfig.TCPAddr
-		} else {
-			currentAddress = networkAddresses[nodeIndex]
-		}
-		currentNodeID = fmt.Sprintf("Node-%s", currentAddress)
+	if genesisFile != nil {
+		core.SetGenesisEpochBlocks(genesisFile.Chain.EpochBlocks)
+		logger.Info("GENESIS FILE: %d initial validators, epoch_blocks=%d, network=%s",
+			len(genesisFile.Validators), genesisFile.Chain.EpochBlocks, genesisFile.Chain.Network)
 	} else {
-		if nodeIndex < 0 || nodeIndex >= synthCount {
-			nodeIndex = 0
-		}
-		currentAddress = networkAddresses[nodeIndex]
-		currentNodeID = validatorIDs[nodeIndex]
+		logger.Info("No genesis file at %s — validator membership will come from runtime stake admission only", core.GenesisStateFilePathForDataDir(dataDir))
 	}
-
-	logger.Info("Node identity: %s at %s (real-device=%v, datadir=%s)", currentNodeID, currentAddress, usingRealAddress, dataDir)
 
 	// SECTION 4 — database initialization
 	if err := common.EnsureNodeDirs(currentAddress); err != nil {
@@ -690,32 +632,23 @@ func StartNodeWithOptions(
 
 	// SECTION 7 — network node manager
 	// ── Parse TCP/UDP addresses first (needed for local node + DHT) ──
-	tcpPort := "30303"
-	if nodeConfig.TCPAddr != "" {
-		_, portStr, err := net.SplitHostPort(nodeConfig.TCPAddr)
-		if err == nil && portStr != "" {
-			tcpPort = portStr
-		} else {
-			tcpPort = nodeConfig.TCPAddr
-		}
-	} else {
-		tcpPort = fmt.Sprintf("%d", 32307+nodeIndex)
+	tcpPort := nodeConfig.TCPAddr
+	if _, portStr, err := net.SplitHostPort(nodeConfig.TCPAddr); err == nil && portStr != "" {
+		tcpPort = portStr
 	}
 
-	// Same-box DHT ports are derived from the node's TCP port so a plain TCP
-	// seed can be translated to the actual UDP router without carrying a second
-	// address in the key-exchange message. Public/real-device seeds retain
-	// their existing UDP-port semantics.
+	// DHT UDP ports are derived from the node's TCP port as TCP+1000 so a
+	// plain TCP seed can be translated to the actual UDP router without
+	// carrying a second address in the key-exchange message. An explicit
+	// --udp-port wins.
 	udpPort := ""
-	udpPortNum := 32308 + nodeIndex
-	if !usingRealAddress {
-		derived, err := sameBoxDHTUDPPort(currentAddress)
-		if err != nil {
-			return fmt.Errorf("derive same-box DHT UDP port: %w", err)
-		}
-		udpPortNum = derived
-	} else if nodeConfig.UDPPort != "" {
-		if p, err := strconv.Atoi(nodeConfig.UDPPort); err == nil {
+	derivedUDP, err := sameBoxDHTUDPPort(currentAddress)
+	if err != nil {
+		return fmt.Errorf("derive DHT UDP port: %w", err)
+	}
+	udpPortNum := derivedUDP
+	if usingRealAddress && nodeConfig.UDPPort != "" {
+		if p, perr := strconv.Atoi(nodeConfig.UDPPort); perr == nil {
 			udpPortNum = p
 		}
 	}
@@ -815,79 +748,36 @@ func StartNodeWithOptions(
 		return fmt.Errorf("failed to create local node: %w", err)
 	}
 
-	if !usingRealAddress {
-		for j := 0; j < synthCount; j++ {
-			if j == nodeIndex {
-				continue
-			}
-			_, peerTCPPort, tcpErr := net.SplitHostPort(networkAddresses[j])
-			if tcpErr != nil {
-				return fmt.Errorf("parse same-box peer TCP address %s: %w", networkAddresses[j], tcpErr)
-			}
-			peerUDPPort := fmt.Sprintf("%d", 32308+j)
-			if !usingRealAddress {
-				derived, deriveErr := sameBoxDHTUDPPort(networkAddresses[j])
-				if deriveErr != nil {
-					return fmt.Errorf("derive DHT UDP port for same-box peer %s: %w", networkAddresses[j], deriveErr)
-				}
-				peerUDPPort = strconv.Itoa(derived)
-			}
-			peerNode := network.NewNode(
-				networkAddresses[j],
-				"127.0.0.1",
-				peerTCPPort,
-				peerUDPPort,
-				false,
-				network.RoleValidator,
-				mainDatabase,
-			)
-			if peerNode != nil {
-				nodeMgr.AddNode(peerNode)
-				logger.Info("Registered same-box peer: %s", networkAddresses[j])
-			}
-		}
-	} else {
-		logger.Info("Real-device mode — skipping same-box static peer list; peers discovered via --seeds + PEX")
-	}
+	// Peers are NOT synthesized here. There is no "same-box" roster derived
+	// from a node count: peers enter nodeMgr/p2pMgr only through discovery
+	// (--seeds, DNS trees, PEX) and a completed key exchange below. A node
+	// with no peers yet simply waits — that is a liveness condition, never a
+	// configuration error.
+	logger.Info("Static peer roster: none — peers are discovered via --seeds/PEX and admitted after key exchange")
 
 	// SECTION 8 — consensus node manager
 	//
 	// ★ FIX: ALWAYS build a real, network-capable P2PConsensusNodeManager —
-	// never a local-only CallNodeManager — regardless of synthCount.
+	// never a local-only CallNodeManager.
 	//
 	// A real blockchain cannot force every node to start at the same time,
-	// and the genesis/bootstrap node in particular must be able to mine
-	// solo with zero peers present, then have late joiners fold in live
-	// whenever they happen to connect, with no restart and no rewiring.
+	// and the genesis/bootstrap node in particular must be able to produce
+	// its own genesis then have late joiners fold in live whenever they
+	// happen to connect, with no restart and no rewiring.
 	//
-	// registerDiscoveredPeer (below, ~line 787) already implements exactly
-	// that: on every newly-discovered peer it calls p2pMgr.AddPeer(...) so
-	// the transport layer picks up new validators dynamically at runtime.
-	// But that call is guarded by `if p2pMgr != nil`, and the old code left
-	// p2pMgr nil whenever synthCount==1 (i.e. exactly the bootstrap-node
-	// case) — so the dynamic join path silently no-op'd on the one node
-	// that most needs it. The bootstrap node then entered "PBFT mode" via
-	// the solo-to-PBFT handoff in helpers.go with its consensus engine
-	// still wired to a manager with zero real peers and no way to ever gain
-	// any, which is the root cause of the "solo miner stuck" symptom.
+	// registerDiscoveredPeer (below) already implements exactly that: on
+	// every newly-discovered peer it calls p2pMgr.AddPeer(...) so the
+	// transport layer picks up new peers dynamically at runtime.
 	//
-	// Solo-vs-PBFT behavior itself is unaffected by this change — that is
-	// still decided purely by effectiveValidatorCount() in helpers.go,
-	// which already tracks live peer discovery via peerRegistry. This
-	// change only ensures the actual message transport is real and
-	// listening from block 0, so that by the time effectiveValidatorCount()
-	// says "3 validators known", p2pMgr already has those peers wired in
-	// and can actually send/receive prepare/vote/commit over TCP.
+	// Solo-vs-PBFT behavior itself is decided by effectiveValidatorCount()
+	// in helpers.go from the STAKED validator set (never from raw peer count).
 	var consensusNodeMgr consensus.NodeManager
 	p2pMgr := network.NewP2PConsensusNodeManager(nodeMgr, currentNodeID)
 
-	for i, addr := range networkAddresses {
-		if i == nodeIndex {
-			continue
-		}
-		p2pMgr.AddPeer(validatorIDs[i], addr)
-		logger.Info("Added peer %s at %s to P2P consensus manager", validatorIDs[i], addr)
-	}
+	// No peers are pre-added: the p2pMgr roster is populated only by
+	// registerDiscoveredPeer/ensureDialbackAdmitted after a verified key
+	// exchange. Pre-seeding it from a synthetic node count would put
+	// unverified members on the consensus broadcast list.
 
 	// Wire the RPC server's outbound transaction relay to the P2P manager so
 	// wallet-submitted transactions (sendrawtransaction — e.g. USI mint
@@ -926,11 +816,7 @@ func StartNodeWithOptions(
 	})
 
 	consensusNodeMgr = p2pMgr
-	if synthCount == 1 && !usingRealAddress {
-		logger.Info("P2P consensus manager ready (0 pre-configured peers — solo/genesis start, peers join dynamically)")
-	} else {
-		logger.Info("P2P consensus manager ready (%d pre-configured peer(s))", len(networkAddresses)-1)
-	}
+	logger.Info("P2P consensus manager ready (peers are added only after a verified key exchange)")
 
 	// SECTION 9 — consensus engine
 	coreChainParams = core.GetSphinxChainParams()
@@ -952,13 +838,25 @@ func StartNodeWithOptions(
 		p2pMgr.SetConsensusEngine(cons)
 	}
 
-	if vs := cons.GetValidatorSet(); vs != nil {
-		minSPX := new(big.Int).Div(minStakeAmount, big.NewInt(1e18)).Uint64()
-		if err := vs.AddValidator(currentNodeID, minSPX); err != nil {
-			logger.Warn("Failed to add self validator: %v", err)
-		} else {
-			logger.Info("Self validator registered")
-		}
+	// ★ REMOVED (Phase 1, step 2 — self-grant): this block used to run
+	//   `vs.AddValidator(currentNodeID, minSPX)` UNCONDITIONALLY, ~65 lines
+	//   BEFORE the self-stake switch below. It handed every starting node a
+	//   minimum-stake seat no matter what the genesis document said, so a node
+	//   NOT listed in genesis_state.json still put itself into the live
+	//   validator set — and therefore into quorum denominators and leader
+	//   rotation — purely because it booted. seedGenesisValidators (below) only
+	//   ADDS the genesis validators, so it never removed that seat.
+	//
+	// The switch below is the single decision point and is exhaustive:
+	//   genesisSeededSelf        → seat and stake come from genesis_state.json
+	//   genesisFile != nil       → peer only until a Stake tx admits this node
+	//   no genesis file + address → verified on-chain balance, else min stake
+	//   no genesis file, no addr  → min stake
+	// and GetMinStakeSPX() returns exactly the value the deleted block computed
+	// inline (minStakeAmount / 1e18, with vs.minStakeAmount being the same
+	// minStakeAmount handed to NewConsensus above), so no behaviour is lost.
+	if vs := cons.GetValidatorSet(); vs == nil {
+		return fmt.Errorf("consensus validator set is unavailable")
 	}
 
 	// ========== Self-stake from operator-supplied reward address ==========
@@ -993,7 +891,26 @@ func StartNodeWithOptions(
 	// address is pre-bound so a remote peer can never claim it.
 	rewardClaims := newRewardClaimLedger()
 
+	// ── GENESIS FILE → consensus validator set ───────────────────────────
+	// Load the initial validator set from chain data. This is the ONLY place
+	// initial membership is established; every node that reads the same file
+	// computes the same set, hence the same leaders and the same quorum.
+	// Public keys are registered up front so attestation signatures from
+	// genesis validators verify without waiting for a handshake.
+	genesisSeededSelf := false
+	if genesisFile != nil {
+		seeded, seedErr := seedGenesisValidators(cons, signingService, sthincsParams, genesisFile, currentNodeID, rewardClaims, bc)
+		if seedErr != nil {
+			return fmt.Errorf("seed validators from genesis file: %w", seedErr)
+		}
+		genesisSeededSelf = seeded
+		logger.Info("GENESIS FILE: seeded %d validators into the consensus set (%d SPX total)",
+			len(genesisFile.Validators), new(big.Int).Div(cons.GetValidatorSet().GetTotalStake(), big.NewInt(1e18)).Uint64())
+	}
+
 	logger.Info("=== SELF-STAKE FROM REWARD ADDRESS ===")
+	// The reward address (if any) is always bound to this node ID up front, so
+	// block rewards route correctly and no remote peer can ever claim it.
 	if rewardAddress != "" {
 		selfRewardAddr := rewardAddress
 		if normalized, err := common.NormalizeSPIFAddress(rewardAddress); err == nil {
@@ -1002,7 +919,29 @@ func StartNodeWithOptions(
 		bc.SetValidatorRewardAddress(currentNodeID, selfRewardAddr)
 		rewardClaims.bindSelf(selfRewardAddr, currentNodeID)
 		logger.Info("[%s] Block rewards / gas fees will route to %s", currentNodeID, selfRewardAddr)
+	}
 
+	switch {
+	case genesisSeededSelf:
+		// This node's seat and stake came from the genesis file. Never
+		// overwrite them with a minimum-stake bootstrap: doing so would let
+		// two nodes disagree about this validator's weight (and hence about
+		// leaders and quorum) depending on local timing.
+		logger.Info("[%s] Self stake comes from the genesis file — no self-bootstrap needed", currentNodeID)
+
+	case genesisFile != nil:
+		// A genesis file defines this network's validator set and this node is
+		// not in it. It therefore participates as a PEER only: a Stake
+		// transaction applied by consensus (Phase 2) is the only way to join.
+		// Self-granting a seat here would put an unstaked node into quorum
+		// math and leader rotation purely because it happened to start.
+		logger.Info("[%s] Not listed in the genesis file — participating as a peer only until a Stake transaction admits this node", currentNodeID)
+
+	case rewardAddress != "":
+		// No genesis file: legacy behaviour. Admit ourselves only from a
+		// VERIFIED on-chain balance; otherwise bootstrap at minimum stake so a
+		// brand-new solo devnet node can produce its own genesis block. This
+		// fallback is applied to our own node ID only, never to a remote peer.
 		if !stakeValidatorFromRewardAddress(bc, cons, currentNodeID, currentNodeID, rewardAddress, rewardClaims) {
 			logger.Info("[%s] Reward address %s has no verifiable/sufficient balance yet — self-bootstrapping at minimum stake", currentNodeID, rewardAddress)
 			if vs := cons.GetValidatorSet(); vs != nil {
@@ -1012,27 +951,27 @@ func StartNodeWithOptions(
 				}
 			}
 		}
-	} else {
+
+	default:
 		logger.Info("[%s] No --reward-address supplied — self-bootstrapping at minimum stake (no peer ever receives this fallback, only our own node)", currentNodeID)
+		if vs := cons.GetValidatorSet(); vs != nil {
+			if err := vs.AddValidator(currentNodeID, vs.GetMinStakeSPX()); err != nil {
+				logger.Warn("[%s] Failed to self-bootstrap minimum stake: %v", currentNodeID, err)
+			}
+		}
 	}
 
 	// Same-box devnet harness (usingRealAddress == false): the other
 	// synthetic validatorIDs in this process are our own test peers, not
 	// external actors, so seeding them at minimum stake is safe — it's
 	// exactly equivalent to running N trusted local validators by hand.
-	if !usingRealAddress {
-		if vs := cons.GetValidatorSet(); vs != nil {
-			minSPX := vs.GetMinStakeSPX()
-			for _, vid := range validatorIDs {
-				if vid == currentNodeID {
-					continue
-				}
-				if err := vs.AddValidator(vid, minSPX); err != nil {
-					logger.Warn("[%s] Failed to seed same-box peer stake for %s: %v", currentNodeID, vid, err)
-				}
-			}
-		}
-	}
+	// ★ REMOVED (Phase 1, item 2): the legacy "same-box" block that called
+	// vs.AddValidator(vid, minSPX) for every synthesized peer ID without a
+	// balance check. There is no longer any localhost-only trust path: every
+	// non-genesis validator must enter through stakeValidatorFromRewardAddress
+	// (verified on-chain balance, one reward address per node ID), and
+	// genesis-listed validators come from the genesis file once it is loaded
+	// into consensus (Phase 2: ValidatorSetAt).
 
 	bc.SetConsensusEngine(cons)
 	bc.SetConsensus(cons)
@@ -1271,30 +1210,23 @@ func StartNodeWithOptions(
 		return out
 	}
 
-	// ★ FIX: Only pre-register same-box peers if this node has --seeds
-	// (i.e. it expects peers to already exist). The bootstrap node
-	// (no --seeds) must NOT pre-register peers because they may not be
-	// running yet — doing so makes effectivePeerCount() > 0, and the
-	// block production loop then jumps straight to PBFT mode without
-	// ever entering SOLO_MODE, leaving the bootstrap node stuck at
-	// genesis forever.
-	//
-	// Instead, same-box peers are registered later via key exchange
-	// (see "=== EXCHANGING PUBLIC KEYS (SYNC) BEFORE CONSENSUS ==="
-	// below) once they actually connect. For the SAME-BOX DEVNET MODE
-	// fallback (below, around line 975), we only pre-register when
-	// the node has --seeds, so late-joiners can discover the bootstrap
-	// node. The bootstrap node itself registers no one in advance.
-	if seeds != "" {
-		for i, addr := range networkAddresses {
-			if i == nodeIndex {
-				continue
-			}
-			peerRegistryMu.Lock()
-			peerRegistry[validatorIDs[i]] = addr
-			peerRegistryMu.Unlock()
+	// peerAddrsFunc is the live peer address book (discovery only, never a
+	// synthesized roster). Both the block-sync loop and the checkpoint-sync
+	// loop read it, so a node with zero peers simply has an empty list.
+	peerAddrsFunc := func() []string {
+		peerRegistryMu.Lock()
+		defer peerRegistryMu.Unlock()
+		addrs := make([]string, 0, len(peerRegistry))
+		for _, addr := range peerRegistry {
+			addrs = append(addrs, addr)
 		}
+		return addrs
 	}
+
+	// Peers are not pre-registered from any static roster. The address book is
+	// populated only by real discovery (--seeds/PEX/DNS) and by verified key
+	// exchanges, so a node that starts alone simply has an empty address book
+	// until a peer actually connects.
 
 	// SECTION 11 — TCP listener
 	ctx, cancelCtx := context.WithCancel(context.Background())
@@ -1305,6 +1237,12 @@ func StartNodeWithOptions(
 		return fmt.Errorf("failed to bind TCP listener: %w", err)
 	}
 	logger.Info("TCP listener bound on %s", currentAddress)
+	// Register this node's OWN datadir as its PUBLIC bundle source for the
+	// devnet bundle endpoint (handleIncomingConn "devnet_bundle_request").
+	// Only devnet nodes serve; only allowlisted PUBLIC files; custody/ never.
+	if core.DevnetAutoCustodyRequested(networkType) {
+		core.RegisterDevnetBundleDataDir(currentAddress, dataDir)
+	}
 
 	var wg sync.WaitGroup
 
@@ -1349,10 +1287,10 @@ func StartNodeWithOptions(
 	// actually implements that protocol: PerformHandshake, then a decode
 	// loop that dispatches msg.Type == "jsonrpc" to rpcServer.HandleRequest
 	// and writes back an encrypted, framed response. It already exists and
-	// is already correct — bind.BindTCPServers wires it up for the
-	// same-box devnet harness (legacy.go) — but production StartNode never
-	// instantiated one, so it sat unused while wallets dialed the P2P port
-	// instead and got silently misrouted or dropped.
+	// is already correct, but before this section production StartNode
+	// never instantiated one (only the now-deleted same-box harness did), so
+	// it sat unused while wallets dialed the P2P port instead and got
+	// silently misrouted or dropped.
 	//
 	// Rather than teach handleIncomingConn a second, incompatible wire
 	// format (the two protocols aren't reliably distinguishable by peeking
@@ -1365,26 +1303,14 @@ func StartNodeWithOptions(
 	// separate WebSocket server is started here — so we reuse that slot
 	// rather than adding a new flag/config field.
 	//
-	// ★ FIX: cli.go's --ws-port flag is declared with a fixed literal
-	// default ("127.0.0.1:8600"). Go's flag package can't distinguish "the
-	// operator explicitly passed --ws-port=127.0.0.1:8600" from "the
-	// operator didn't touch the flag at all" — both look identical after
-	// parsing — so cli.go's flagOverrides always sets wsPort<N> to that
-	// same literal string for every node index, and GetNodePortConfigs
-	// dutifully assigns it to every same-box node's WSPort. Multiple
-	// same-box nodes therefore all report nodeConfig.WSPort ==
-	// "127.0.0.1:8600" and the second one to reach Start() panics with
-	// "address already in use" (exactly the failure mode
-	// StartTCPListener above works around for --tcp-addr via
-	// userProvidedTCP). We apply the same technique here: treat the
-	// well-known unmodified default as "not actually set for this node"
-	// and derive a per-nodeIndex address instead. An operator who
-	// deliberately passes a distinct --ws-port for each node (i.e. any
-	// value other than the bare default) is still honoured as-is.
+	// ★ wallet/JSON-RPC listen address. cli.go's --ws-port flag is declared
+	// with the fixed literal default "127.0.0.1:8600", so an unmodified value
+	// means "not set". Derive the wallet-RPC port as 8700 + --port-offset in
+	// that case; any explicit --ws-port value is honoured as-is.
 	const unsetWSPortDefault = "127.0.0.1:8600"
 	rpcListenAddr := nodeConfig.WSPort
 	if rpcListenAddr == "" || rpcListenAddr == unsetWSPortDefault {
-		rpcListenAddr = fmt.Sprintf("127.0.0.1:%d", 8700+nodeIndex)
+		rpcListenAddr = fmt.Sprintf("127.0.0.1:%d", 8700+portOffset)
 	}
 	rpcMsgCh := make(chan *security.Message, 100)
 	walletRPCServer := transport.NewTCPServer(rpcListenAddr, rpcMsgCh, rpcServer, nil)
@@ -1395,21 +1321,15 @@ func StartNodeWithOptions(
 
 	// SECTION 11b — dynamic peer discovery via --seeds with DNS support
 	//
-	// The hardcoded default enrtree:// URL only makes sense for real-device
-	// nodes (totalNodes==1) and production clusters (totalNodes>100) — those
-	// are the modes where peers actually need to be discovered dynamically.
-	// Same-box devnet runs (2..100 nodes on one machine) already register
-	// every peer statically a few sections above, so defaulting to DNS there
-	// just burns a lookup against a placeholder domain and logs a scary WARN
-	// for a path that was never going to contribute any peers.
+	// Discovery behaviour is decided by flags/config, never by a node count:
+	// an absent --seeds simply means "use the network's default DNS discovery
+	// tree", exactly as a real-device node does. There is no count-based
+	// branch that disables it.
 	noSeedsProvided := seeds == "" || strings.TrimSpace(seeds) == ""
-	useDefaultDNSTree := totalNodes == 1 || isProduction
 
-	if noSeedsProvided && useDefaultDNSTree {
+	if noSeedsProvided {
 		logger.Info("No --seeds provided; using default DNS discovery tree: %s", dnsdiscovery.DefaultENRTreeURL)
 		seeds = dnsdiscovery.DefaultENRTreeURL
-	} else if noSeedsProvided {
-		logger.Info("Same-box devnet mode (%d nodes) — skipping default DNS discovery tree; relying on statically-registered peers", totalNodes)
 	}
 
 	if seeds != "" && strings.TrimSpace(seeds) != "" {
@@ -1585,6 +1505,64 @@ func StartNodeWithOptions(
 		return ready
 	}
 
+	// stakedReadyValidatorCount counts validators that are BOTH in the ACTIVE
+	// STAKED set (from chain state) and READY to receive consensus messages
+	// (the probe-settled peers above), plus this node when it is staked. It is
+	// the only count that gates PBFT startup. Unstaked peers are connectivity
+	// only and are never counted — they do not enter quorum math or leader
+	// rotation either.
+	stakedReadyValidatorCount := func() int {
+		if cons == nil {
+			return 0
+		}
+		vs := cons.GetValidatorSet()
+		if vs == nil {
+			return 0
+		}
+		staked := make(map[string]bool)
+		for _, id := range vs.ActiveValidatorIDs(0) {
+			staked[id] = true
+		}
+		if len(staked) == 0 {
+			return 0
+		}
+		ready := 0
+		if staked[currentNodeID] {
+			ready++
+		}
+
+		// Map registered peer node IDs -> addresses, then keep the ones that
+		// are staked AND probe-settled.
+		registeredMu.Lock()
+		peerIDs := make([]string, 0, len(registeredPeers))
+		for id := range registeredPeers {
+			peerIDs = append(peerIDs, id)
+		}
+		registeredMu.Unlock()
+
+		peerRegistryMu.Lock()
+		idAddrs := make(map[string]string, len(peerIDs))
+		for _, id := range peerIDs {
+			if a, ok := peerRegistry[id]; ok && a != "" {
+				idAddrs[id] = a
+			}
+		}
+		peerRegistryMu.Unlock()
+
+		now := time.Now()
+		peerReadyMu.Lock()
+		defer peerReadyMu.Unlock()
+		for id, a := range idAddrs {
+			if !staked[id] {
+				continue
+			}
+			if since, ok := peerReadySince[a]; ok && now.Sub(since) >= peerReadySettle {
+				ready++
+			}
+		}
+		return ready
+	}
+
 	if knownPeerCount() > 0 {
 		logger.Info("Waiting for other nodes to be ready (3 seconds)...")
 		time.Sleep(3 * time.Second)
@@ -1623,32 +1601,9 @@ func StartNodeWithOptions(
 			return false
 		}
 
-		for _, addr := range networkAddresses {
-			if addr == currentAddress {
-				continue
-			}
-			if exchangedAddrs[addr] || addrAlreadyVerified(addr) {
-				logger.Info("Key exchange with %s already completed — skipping repeat handshake", addr)
-				exchangedAddrs[addr] = true
-				continue
-			}
-			logger.Info("Exchanging keys with same-box peer: %s", addr)
-			if kx, err := exchangeKeyWithPeerSync(addr, currentAddress, currentNodeID, rewardAddress, core.GetGenesisHash(), signingService, sthincsParams); err != nil {
-				logger.Warn("Failed to exchange keys with %s: %v", addr, err)
-			} else {
-				exchangedAddrs[addr] = true
-				// The handshake to addr just succeeded — that satisfies the
-				// dial-back requirement, so admit the transport entry directly
-				// (registerDiscoveredPeer would otherwise schedule a
-				// redundant dial-back to the same address).
-				admitVerifiedPeer(kx.NodeID, addr)
-				// Register the peer's node ID and address from the key exchange
-				registerDiscoveredPeer(kx.NodeID, addr)
-				if kx.RewardAddress != "" {
-					registerPeerStakeClaim(kx.NodeID, kx.RewardAddress)
-				}
-			}
-		}
+		// No static roster exists anymore: peers reach this point only via
+		// discovery (seeds/DNS/PEX) and are handled by the discovered-peer
+		// loop below.
 		peerRegistryMu.Lock()
 		var discoveredAddrs []string
 		for _, addr := range peerRegistry {
@@ -1673,24 +1628,8 @@ func StartNodeWithOptions(
 			}
 		}
 		logger.Info("Key exchange completed with all known peers")
-	} else if seeds != "" {
-		// Same-box devnet mode with --seeds: pre-register peers so the sync
-		// loop can find them. The bootstrap node (no --seeds) must NOT
-		// pre-register — it needs to enter SOLO_MODE and mine blocks alone
-		// until peers actually connect via TCP.
-		logger.Info("=== SAME-BOX DEVNET MODE: Registering static peers ===")
-		for i, addr := range networkAddresses {
-			if i == nodeIndex {
-				continue
-			}
-			// Register in peerRegistry with correct node ID for effectivePeerCount()
-			peerRegistry[validatorIDs[i]] = addr
-			logger.Info("[%s] Pre-registered same-box peer: %s at %s", currentNodeID, validatorIDs[i], addr)
-		}
-	} else if totalNodes <= 1 {
-		logger.Info("[%s] No --seeds — single-node mode; no peers pre-registered (will enter SOLO_MODE)", currentNodeID)
 	} else {
-		logger.Info("[%s] No --seeds — bootstrap node; no peers pre-registered, waiting for %d ready validators before proposing", currentNodeID, totalNodes)
+		logger.Info("[%s] No peers known yet — waiting for inbound connections / --seeds discovery; consensus starts from chain state, never from a count", currentNodeID)
 	}
 
 	logger.Info("=== VERIFYING KEY SERIALIZATION ROUND-TRIP ===")
@@ -1705,7 +1644,7 @@ func StartNodeWithOptions(
 
 	logger.Info("Self-stake and key exchange complete; remaining validator admission happens per-peer as reward addresses are verified")
 
-	if knownPeerCount() > 0 && nodeIndex == 0 {
+	if knownPeerCount() > 0 {
 		logger.Info("Waiting for genesis transactions to propagate (2 seconds)...")
 		time.Sleep(2 * time.Second)
 	}
@@ -1716,7 +1655,7 @@ func StartNodeWithOptions(
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		runCheckpointSyncLoop(ctx, bc, cons, currentNodeID, networkAddresses, nodeIndex)
+		runCheckpointSyncLoop(ctx, bc, cons, currentNodeID, peerAddrsFunc, currentAddress)
 	}()
 	logger.Info("Consensus engine started AFTER key exchange")
 
@@ -1724,8 +1663,18 @@ func StartNodeWithOptions(
 	progress.CompleteNodeStartup()
 
 	phase2State := &phase2InitState{}
+	if genesisFile != nil {
+		// The genesis file already established the staked validator set. The
+		// legacy "Phase 2" pass re-derives stakes from balances at block 1 and
+		// only knows this node's own ID — running it would rewrite our stake
+		// (possibly below the genesis value) and leave each node with a
+		// different local set. Mark it done so every node keeps the
+		// genesis-defined set identically.
+		phase2State.finish(true)
+		logger.Info("Genesis file present — legacy Phase-2 stake re-derivation skipped (the staked set comes from the genesis file)")
+	}
 
-	if knownPeerCount() > 0 || !usingRealAddress && synthCount > 1 {
+	if knownPeerCount() > 0 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -1734,7 +1683,7 @@ func StartNodeWithOptions(
 	}
 
 	// SECTION 12 — HTTP server
-	httpPort := 8545 + nodeIndex
+	httpPort := 8545 + portOffset
 	httpListenAddr := fmt.Sprintf(":%d", httpPort)
 	if nodeConfig.HTTPPort != "" {
 		// ★ FIX: Parse the full address (could be "127.0.0.1:8546" or just "8546")
@@ -1772,41 +1721,10 @@ func StartNodeWithOptions(
 	var syncState SyncState = SyncStateSyncing
 	var syncStateMu sync.Mutex
 
-	// ★ FIX: Build a live peer-address accessor instead of a one-time
-	// snapshot. A static []string captured here reflects peerRegistry only
-	// as of THIS instant — for the bootstrap node (no --seeds) that's always
-	// empty, since peers connect in and get added to peerRegistry afterward.
-	// The old snapshot never grew again for the sync goroutine's lifetime,
-	// so the bootstrap node could join PBFT (which does read peerRegistry
-	// live via effectivePeerCount) but could never actually sync/catch-up
-	// against those same peers. peerAddrsFunc re-reads the mutex-protected
-	// registry plus same-box network addresses on every call, so the sync
-	// loop always sees currently-known peers.
-	peerAddrsFunc := func() []string {
-		peerRegistryMu.Lock()
-		addrs := make([]string, 0, len(peerRegistry)+len(networkAddresses))
-		for _, addr := range peerRegistry {
-			addrs = append(addrs, addr)
-		}
-		peerRegistryMu.Unlock()
-
-		for _, addr := range networkAddresses {
-			if addr != currentAddress {
-				found := false
-				for _, existing := range addrs {
-					if existing == addr {
-						found = true
-						break
-					}
-				}
-				if !found {
-					addrs = append(addrs, addr)
-				}
-			}
-		}
-		return addrs
-	}
-
+	// ★ peerAddrsFunc (defined in SECTION 8, right after getKnownPeers) is a
+	// live accessor over the mutex-protected address book, not a one-time
+	// snapshot, so this sync goroutine always sees currently-known peers —
+	// including peers that connect AFTER the node started.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -1885,9 +1803,9 @@ func StartNodeWithOptions(
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		runBlockProductionLoop(ctx, bc, cons, currentNodeID, totalNodes, networkType,
+		runBlockProductionLoop(ctx, bc, cons, currentNodeID, networkType,
 			validatorIDs, validatorAddressMap, phase2State, effectivePeerCount,
-			&syncState, &syncStateMu, progress)
+			stakedReadyValidatorCount, &syncState, &syncStateMu, progress)
 	}()
 
 	// SECTION 15 — state persistence loop
@@ -1904,19 +1822,14 @@ func StartNodeWithOptions(
 	logger.Info("HTTP: http://127.0.0.1:%d", httpPort)
 
 	knownPeers := discoveredPeerCount()
+	// The startup banner reports CONNECTIVITY only. PBFT readiness is decided
+	// by runBlockProductionLoop from the staked validator set, not from a
+	// configured node count, so a small peer count is not an error.
 	switch {
 	case knownPeers == 0:
-		logger.Info("Mode: SOLO (no peers yet — waiting for connections)")
-	case knownPeers < 2:
-		logger.Warn("Mode: INSUFFICIENT PEERS (%d known, PBFT needs ≥ 2 more)", knownPeers)
+		logger.Info("Mode: no peers connected yet — waiting for discovered peers; consensus follows chain state")
 	default:
-		logger.Info("Mode: PBFT (%d known peer(s))", knownPeers)
-	}
-
-	if knownPeers >= 2 {
-		logger.Info("PBFT CONSENSUS ACTIVE with %d known validators", knownPeers+1)
-	} else if usingRealAddress {
-		logger.Info("Real-device mode: consensus activates as peers join via --seeds discovery")
+		logger.Info("Mode: connected (%d known peer(s))", knownPeers)
 	}
 
 	logger.Info("Press Ctrl+C to stop")
@@ -1934,9 +1847,9 @@ func StartNodeWithOptions(
 	reason := waitForShutdown(ctx, opts.Stop, sigCh)
 	if reason == shutdownBySignal {
 		// Unchanged CLI wording.
-		logger.Info("Shutdown signal received — stopping node %d…", nodeIndex+1)
+		logger.Info("Shutdown signal received — stopping node…")
 	} else {
-		logger.Info("Shutdown requested (%s) — stopping node %d…", reason, nodeIndex+1)
+		logger.Info("Shutdown requested (%s) — stopping node…", reason)
 	}
 
 	// Ordered teardown — context → consensus → transports → DHT → wait →
@@ -1962,8 +1875,17 @@ func StartNodeWithOptions(
 		databases: []io.Closer{mainDatabase, stateDatabase},
 	}).run()
 
-	logger.Info("Node %d stopped cleanly", nodeIndex+1)
+	logger.Info("Node stopped cleanly")
 	return nil
+}
+
+// discoveryModeDesc describes how this node will look for peers, purely from
+// flags/config — never from a node count.
+func discoveryModeDesc(seeds string) string {
+	if strings.TrimSpace(seeds) == "" {
+		return "default DNS discovery tree + PEX (no --seeds given)"
+	}
+	return "operator-provided --seeds + DNS trees + PEX"
 }
 
 // isLoopbackHost reports whether host refers to this same machine.

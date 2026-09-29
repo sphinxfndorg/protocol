@@ -11,11 +11,13 @@ package bind
 import (
 	"context"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"math/big"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -25,6 +27,8 @@ import (
 	"github.com/sphinxfndorg/protocol/src/core"
 	svm "github.com/sphinxfndorg/protocol/src/core/kernel/opcodes"
 	vmachine "github.com/sphinxfndorg/protocol/src/core/kernel/vm"
+	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/parameters"
+	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/sthincs"
 
 	logger "github.com/sphinxfndorg/protocol/src/console"
 	security "github.com/sphinxfndorg/protocol/src/handshake"
@@ -124,24 +128,29 @@ func readFramedMessageWithTimeout(conn net.Conn, timeout time.Duration) ([]byte,
 
 // baseWalletRPCPort is the base port of a node's dedicated wallet/JSON-RPC
 // listener (the transport.TCPServer started in StartNode SECTION 11a). It
-// mirrors network.port.go's baseWSPort (8700) and nodes.go's "8700+nodeIndex"
-// fallback used when --ws-port is unset or left at the CLI default
-// ("127.0.0.1:8600").
+// mirrors network.port.go's baseWSPort (8700) and nodes.go's
+// "8700+port-offset" fallback used when --ws-port is unset or left at the CLI
+// default ("127.0.0.1:8600").
 const baseWalletRPCPort = 8700
+
+// devnetBaseTCPPort is the P2P gossip port used by --port-offset 0 and the
+// anchor of the local port convention (tcp = 30303+offset, wallet RPC =
+// 8700+offset) used when several node processes share one machine.
+const devnetBaseTCPPort = 30303
 
 // peerWaitLogInterval rate-limits the two "waiting for peers" messages in this
 // file: runBlockSyncLoop's "No peers reachable" WARN and
 // runBlockProductionLoop's "Sync in progress" INFO heartbeat. Both are emitted
 // from retry/poll loops that run for as long as a node waits on peers which
-// simply are not up yet — the normal state during a same-box network's startup
-// race, and again whenever a peer process dies. Unthrottled they produced
-// 20-40 near-identical lines a minute, burying the actionable lines around
-// them. 30s keeps an operator informed without the flood, and the limiter's
+// simply are not up yet — the normal state during a network's startup race,
+// and again whenever a peer process dies. Unthrottled they produced 20-40
+// near-identical lines a minute, burying the actionable lines around them.
+// 30s keeps an operator informed without the flood, and the limiter's
 // "(+N suppressed)" suffix preserves the count of folded attempts.
 const peerWaitLogInterval = 30 * time.Second
 
-// walletRPCAddressForNode returns the wallet/JSON-RPC listener address of the
-// same-box peer with the given node index.
+// walletRPCAddressForNode translates a peer's P2P gossip address to its
+// dedicated wallet/JSON-RPC listener.
 //
 // bc.SyncCheckpoints → rpc.CallRPC speaks handshake-authenticated, encrypted
 // JSON-RPC 2.0 framing and therefore MUST dial the peer's dedicated wallet
@@ -151,43 +160,67 @@ const peerWaitLogInterval = 30 * time.Second
 // server reads the client's raw Kyber768/X25519 handshake bytes as a message
 // length, rejects the frame and resets the connection ("RPC call failed:
 // handshake ... connection reset by peer").
-func walletRPCAddressForNode(peerP2PAddr string, peerNodeIndex int) string {
-	host := "127.0.0.1"
-	if h, _, err := net.SplitHostPort(peerP2PAddr); err == nil && h != "" {
-		host = h
+//
+// There is no static peer roster any more, so the translation uses the
+// --port-offset port convention above. A peer whose TCP port does not sit in
+// that range has no derivable wallet port and is skipped (""), never dialled
+// at a guessed one.
+func walletRPCAddressForNode(peerP2PAddr string) string {
+	host, portStr, err := net.SplitHostPort(peerP2PAddr)
+	if err != nil {
+		return ""
 	}
-	return fmt.Sprintf("%s:%d", host, baseWalletRPCPort+peerNodeIndex)
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	tcp, convErr := strconv.Atoi(portStr)
+	if convErr != nil {
+		return ""
+	}
+	offset := tcp - devnetBaseTCPPort
+	if offset < 0 || offset > 1000 {
+		return ""
+	}
+	return fmt.Sprintf("%s:%d", host, baseWalletRPCPort+offset)
 }
 
 // runCheckpointSyncLoop periodically syncs checkpoints.
+//
+// peerAddrsFunc returns the CURRENT discovered peer address book (the same
+// source the block-sync loop uses). selfAddr is this node's own P2P address,
+// which is always excluded from the peer pull. There is no static roster: a
+// node with no peers still broadcasts its own checkpoints when leader.
 func runCheckpointSyncLoop(
 	ctx context.Context,
 	bc *core.Blockchain,
 	cons *consensus.Consensus,
 	nodeID string,
-	networkAddresses []string,
-	nodeIndex int,
+	peerAddrsFunc func() []string,
+	selfAddr string,
 ) {
-	// syncFromPeers pulls a checkpoint from the first responsive same-box
-	// peer. The addresses in networkAddresses are peers' P2P gossip ports, but
-	// SyncCheckpoints → rpc.CallRPC requires each peer's dedicated
-	// wallet/JSON-RPC listener (handshake-authenticated jsonrpc wire, nodes.go
-	// SECTION 11a), so we translate before dialing. Returns true once at least
-	// one peer answered.
+	// syncFromPeers pulls a checkpoint from the first responsive peer.
 	syncFromPeers := func() bool {
 		if bc.GetLatestBlock() == nil {
 			logger.Debug("[%s] No local chain yet; skipping checkpoint sync until genesis is installed", nodeID)
 			return false
 		}
-		if len(networkAddresses) <= 1 {
+		if peerAddrsFunc == nil {
+			return false
+		}
+		peers := peerAddrsFunc()
+		if len(peers) == 0 {
 			return false
 		}
 		logger.Info("[%s] Syncing checkpoint with peers...", nodeID)
-		for i, p2pAddr := range networkAddresses {
-			if i == nodeIndex {
+		for _, p2pAddr := range peers {
+			if p2pAddr == selfAddr {
 				continue
 			}
-			peerRPCAddr := walletRPCAddressForNode(p2pAddr, i)
+			peerRPCAddr := walletRPCAddressForNode(p2pAddr)
+			if peerRPCAddr == "" {
+				logger.Debug("[%s] No derivable wallet-RPC port for peer %s — skipping", nodeID, p2pAddr)
+				continue
+			}
 			if err := bc.SyncCheckpoints(peerRPCAddr); err != nil {
 				logger.Debug("[%s] Failed to sync checkpoint from %s: %v", nodeID, peerRPCAddr, err)
 				continue
@@ -449,6 +482,73 @@ func stakeValidatorFromRewardAddress(bc *core.Blockchain, cons *consensus.Consen
 	}
 	logger.Info("[%s] Validator %s admitted with verified stake from %s", selfNodeID, validatorID, address)
 	return true
+}
+
+// seedGenesisValidators loads the initial validator set from the genesis file
+// into consensus. This is the ONLY place initial membership is established:
+// every node that reads the same file computes the same set, hence the same
+// leader rotation and the same quorum denominators. It also pins each
+// validator's reward address to its node ID (so a remote peer can never claim
+// a genesis-bound address) and registers the peer public keys up front, so
+// attestation signatures from genesis validators verify without waiting for a
+// key-exchange handshake.
+//
+// It never invents a validator that the file does not list, and it never
+// touches the number of nodes.
+func seedGenesisValidators(
+	cons *consensus.Consensus,
+	signingService *consensus.SigningService,
+	params *parameters.Parameters,
+	gf *core.GenesisStateFile,
+	selfNodeID string,
+	claims *rewardClaimLedger,
+	bc *core.Blockchain,
+) (bool, error) {
+	vs := cons.GetValidatorSet()
+	if vs == nil {
+		return false, fmt.Errorf("consensus validator set is unavailable")
+	}
+	selfSeeded := false
+	for _, v := range gf.Validators {
+		stakeNSPX := gf.StakeNSPX(v.NodeID)
+		if stakeNSPX == nil || stakeNSPX.Sign() <= 0 {
+			return false, fmt.Errorf("validator %s: bad genesis stake %q", v.NodeID, v.StakeNSPX)
+		}
+		stakeSPX := new(big.Int).Div(stakeNSPX, big.NewInt(denom.SPX)).Uint64()
+		if err := vs.AddValidator(v.NodeID, stakeSPX); err != nil {
+			return false, fmt.Errorf("validator %s: %w", v.NodeID, err)
+		}
+		if v.RewardAddress != "" && bc != nil {
+			addr := common.CanonicalSPIFAddress(v.RewardAddress)
+			bc.SetValidatorRewardAddress(v.NodeID, addr)
+			// One reward address ↔ one node ID, enforced for every later
+			// (remote) claim as well.
+			claims.reserve(addr, v.NodeID)
+		}
+		if v.NodeID == selfNodeID {
+			selfSeeded = true
+			continue // self's key is registered by StartNode itself
+		}
+		if v.PublicKey == "" || signingService == nil || params == nil {
+			continue
+		}
+		pkHex := v.PublicKey
+		if len(pkHex) >= 2 && (pkHex[:2] == "0x" || pkHex[:2] == "0X") {
+			pkHex = pkHex[2:]
+		}
+		pkBytes, derr := hex.DecodeString(pkHex)
+		if derr != nil {
+			logger.Warn("genesis file: validator %s has unparseable public key: %v", v.NodeID, derr)
+			continue
+		}
+		pk, kerr := sthincs.DeserializePK(params, pkBytes)
+		if kerr != nil {
+			logger.Warn("genesis file: cannot deserialize public key for %s: %v", v.NodeID, kerr)
+			continue
+		}
+		signingService.RegisterPublicKey(v.NodeID, pk)
+	}
+	return selfSeeded, nil
 }
 
 // ============================================================================
@@ -1399,12 +1499,12 @@ func runBlockProductionLoop(
 	bc *core.Blockchain,
 	cons *consensus.Consensus,
 	nodeID string,
-	totalNodes int,
 	networkType string,
 	validatorIDs []string,
 	validatorAddressMap map[string]string,
 	phase2State *phase2InitState,
 	peerCountFunc func() int,
+	validatorReadyCountFunc func() int,
 	syncState *SyncState,
 	syncStateMu *sync.Mutex,
 	progress *logger.BlockchainProgress, // NEW
@@ -1422,38 +1522,48 @@ func runBlockProductionLoop(
 	// onward — a fork the reorg path couldn't heal (see
 	// FindCommonAncestor/handleReorg fixes in sync.go).
 	//
-	// NOTE: this deliberately does NOT key off nodeIndex. In real-device
-	// mode, bind/nodes.go force-resets nodeIndex to 0 for EVERY node
-	// (`nodeIndex = 0` when usingRealAddress/userProvidedTCP — see
-	// StartNode), so nodeIndex cannot distinguish "the bootstrap node" from
-	// "any other real node" in production. IsLateJoiner (driven by whether
-	// --seeds was given at startup) is the only signal that's correct in
-	// both same-box and real-device deployments.
+	// NOTE: this deliberately does NOT key off any node index or count — there
+	// is no longer a node-count flag, and IsLateJoiner (driven by whether
+	// --seeds was given at startup) is the only signal that distinguishes "the
+	// bootstrap node" from "any other node" in every deployment.
 	isBootstrapNode := !bc.IsLateJoiner()
 	const (
 		singleNodeInterval  = 10 * time.Second
 		multiNodeRoundDelay = 3 * time.Second
 	)
 
-	// effectiveValidatorCount reports how many validators this node actually
-	// knows about right now. It must NOT short-circuit to the static
-	// totalNodes config when totalNodes >= 3 — doing so made the "wait for
-	// peers" gate below a no-op for the canonical 3-node network, letting a
-	// node jump straight into leader election and propose for view 0 before
-	// its peers had finished connecting on the P2P broadcast layer (distinct
-	// from the one-off key-exchange handshake, which only proves the peer
-	// was reachable at that instant, not that a persistent broadcast link
-	// exists yet).
+	// effectiveValidatorCount reports how many validators can take part in
+	// PBFT right now: validators in the ACTIVE STAKED set (chain state) that
+	// are also READY (probe-settled), plus self when staked. It never clamps
+	// to a configured node count — there is no such count any more — and it
+	// never counts raw peers: an unstaked peer is connectivity only and does
+	// not appear here, in quorum math, or in leader rotation.
 	effectiveValidatorCount := func() int {
-		if peerCountFunc != nil {
-			known := peerCountFunc() + 1 // +1 for self
-			if totalNodes > 1 && known > totalNodes {
-				known = totalNodes
-			}
-			return known
+		if validatorReadyCountFunc != nil {
+			return validatorReadyCountFunc()
 		}
-		return totalNodes
+		return 0
 	}
+
+	// stakedSetSize is the size of the active staked validator set from chain
+	// state. It is used only to bound the solo-mode check and the dashboard
+	// denominator — never to gate PBFT by a configured count.
+	stakedSetSize := func() int {
+		if cons == nil {
+			return 0
+		}
+		vs := cons.GetValidatorSet()
+		if vs == nil {
+			return 0
+		}
+		return len(vs.ActiveValidatorIDs(0))
+	}
+
+	// requiredValidators is the BFT genesis sanity floor (consensus.MinValidators),
+	// NOT the size of any configured set: membership and the strict >2/3 stake
+	// check come from chain state. This number only stops PBFT from starting on
+	// a set that could never be safe.
+	requiredValidators := consensus.MinValidators
 
 	// ──────────────────────────────────────────────────────────────────────
 	// SYNC STATE GATE: A node in SYNCING state must NOT participate in PBFT.
@@ -1507,16 +1617,20 @@ func runBlockProductionLoop(
 		break
 	}
 
-	// ── SOLO MODE (single-node network only) ──
-	// Solo mining exists solely for a genuine single-node network
-	// (totalNodes <= 1). In a multi-node deployment the bootstrap node must
-	// wait for its peers to connect and then produce PBFT-attested blocks:
-	// mining solo first was producing an unattested chain (previously blocks
-	// 2..N) that late joiners accepted via the "solo-mined before PBFT —
-	// skipping quorum check" path, letting it become canonical ahead of the
-	// real consensus chain. The PBFT gate below already waits for
-	// `--nodes`-sized validator sets; this stops the branch that bypassed it.
-	if isBootstrapNode && totalNodes <= 1 && effectiveValidatorCount() == 1 {
+	// ── SOLO MODE (genuine single-validator network only) ──
+	// Entered ONLY when the ACTIVE STAKED set has exactly one member and no
+	// peers are known at all. In any multi-validator network the bootstrap
+	// node must wait for its peers and then produce PBFT-attested blocks:
+	// mining solo first produced an unattested chain that late joiners
+	// accepted via the "solo-mined before PBFT — skipping quorum check" path,
+	// letting it become canonical ahead of the real consensus chain.
+	//
+	// OPEN QUESTION (Phase 1, reported not decided): with membership now
+	// chain-driven, whether solo mining should exist at all is an operator
+	// decision. This gate is the minimal, strictly narrower replacement for
+	// the old single-node check.
+	noPeersKnown := peerCountFunc == nil || peerCountFunc() == 0
+	if isBootstrapNode && stakedSetSize() == 1 && noPeersKnown {
 		logger.Info("[%s] SOLO MODE — bootstrap node, no peers detected yet, mining blocks independently", nodeID)
 		progress.SetConsensusStatus("ACTIVE — solo mining")
 
@@ -1554,7 +1668,11 @@ func runBlockProductionLoop(
 				progress.UpdateMempoolActivity(len(pending), 0)
 
 			case <-peerCheckTicker.C:
-				if effectiveValidatorCount() >= 3 {
+				// Solo→PBFT handoff uses the same full-set gate as the
+				// INSUFFICIENT VALIDATORS check below (see requiredValidators):
+				// handing off with a partial set would re-introduce the
+				// silent >2/3-stake stall that gate exists to prevent.
+				if effectiveValidatorCount() >= requiredValidators {
 					logger.Info("[%s] %d validators now known — initiating solo-to-PBFT handoff", nodeID, effectiveValidatorCount())
 					soloTip := bc.GetLatestBlock()
 					soloHeight := uint64(0)
@@ -1625,10 +1743,14 @@ func runBlockProductionLoop(
 		// continue to PBFT setup below
 	}
 
-	// ── INSUFFICIENT VALIDATORS ──
-	if effectiveValidatorCount() < 3 {
-		logger.Warn("[%s] Block-production suspended (need ≥ 3 validators for PBFT, have %d — waiting for peers to connect)",
-			nodeID, effectiveValidatorCount())
+	// ── PBFT QUORUM GATE ──
+	// requiredValidators is the genesis sanity floor (consensus.MinValidators).
+	// It is NOT the configured set size: the on-chain validator set and the
+	// strict >2/3 stake check are the real gate. This floor only prevents PBFT
+	// from starting on a set that could never be safe.
+	// ── INSUFFICIENT READY VALIDATORS ──
+	if effectiveValidatorCount() < requiredValidators {
+		logger.Warn("[%s] Block-production suspended (need ≥ %d staked+ready validators for PBFT, have %d — waiting for validators to become reachable)", nodeID, requiredValidators, effectiveValidatorCount())
 		progress.SetConsensusStatus("PAUSED — insufficient validators")
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
@@ -1638,16 +1760,16 @@ func runBlockProductionLoop(
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				// effectiveValidatorCount() counts only peers that are READY
-				// (genesis installed + settled, see effectivePeerCount in
-				// nodes.go), not merely peers that completed a key exchange.
-				if effectiveValidatorCount() >= 3 {
-					logger.Info("[%s] %d validators now known and ready — starting PBFT block production",
+				// effectiveValidatorCount() counts only validators that are
+				// BOTH in the active staked set AND ready (genesis installed
+				// + probe-settled). Unstaked peers never appear here.
+				if effectiveValidatorCount() >= requiredValidators {
+					logger.Info("[%s] %d staked validators now known and ready — starting PBFT block production",
 						nodeID, effectiveValidatorCount())
 					progress.SetConsensusStatus("ACTIVE — validating")
 					goto startPBFT
 				}
-				validatorWaitLog.Info("[%s] Waiting for validators to be ready (%d/3 minimum)…", nodeID, effectiveValidatorCount())
+				validatorWaitLog.Info("[%s] Waiting for staked validators to be ready (%d/%d minimum)…", nodeID, effectiveValidatorCount(), requiredValidators)
 			}
 		}
 	}
@@ -1677,7 +1799,7 @@ startPBFT:
 				continue
 			}
 
-			if peerCountFunc != nil && peerCountFunc() >= 2 {
+			if effectiveValidatorCount() >= requiredValidators {
 				time.Sleep(500 * time.Millisecond)
 				continue
 			}
@@ -1714,10 +1836,9 @@ startPBFT:
 
 	go watchAndUpdateStakes(ctx, bc, cons, nodeID, validatorIDs, validatorAddressMap, phase2State)
 
-	// The validator set includes configured peers before they are connected,
-	// so it cannot represent "active" in the terminal. Report the live
-	// discovery count instead, against the configured network size.
-	progress.UpdateValidatorStatus(effectiveValidatorCount(), totalNodes)
+	// The dashboard denominator is the active staked set (chain state), never
+	// a configured network size — "ready" is the staked+ready count.
+	progress.UpdateValidatorStatus(effectiveValidatorCount(), stakedSetSize())
 
 	const roundStallObservationInterval = 15 * time.Second
 	var (
@@ -1763,7 +1884,7 @@ startPBFT:
 			// Estimate TPS: we don't have a real TPS counter, just pass 0 or compute from block times
 			progress.UpdateMempoolActivity(len(pending), 0)
 		}
-		progress.UpdateValidatorStatus(effectiveValidatorCount(), totalNodes)
+		progress.UpdateValidatorStatus(effectiveValidatorCount(), stakedSetSize())
 
 		proposalView, electedLeader, isLeader := cons.RefreshLeaderStatus()
 		if electedLeader == "" {

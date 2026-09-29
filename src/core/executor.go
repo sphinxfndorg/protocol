@@ -943,6 +943,52 @@ func (bc *Blockchain) seedValidatorStakesFromGenesis(stateDB *StateDB) {
 	}
 }
 
+// seedGenesisFileAllocations credits the pre-funded accounts the genesis FILE
+// lists (validator reward addresses + extra devnet reward addresses used by
+// later Stake transactions). It runs during block-0 execution, exactly like
+// seedValidatorStakesFromGenesis, so every node that reads the same genesis
+// file derives the same balances and therefore the same state root.
+//
+// It does NOT change block 0's hash: block 0 is still built from the canonical
+// DefaultGenesisState() (see getCachedGenesisBlock). The genesis file
+// describes membership and balances; it never rewrites block 0.
+//
+// A network without a genesis file is unaffected (no file → no-op), which is
+// what keeps every existing devnet/testnet/mainnet chain byte-identical.
+func (bc *Blockchain) seedGenesisFileAllocations(stateDB *StateDB) {
+	if stateDB == nil {
+		return
+	}
+	gf, err := LoadGenesisFile(common.GetDataDir())
+	if err != nil {
+		// A present-but-unreadable genesis file is fatal at startup; reaching
+		// here means it was valid when loaded, so treat a read failure as
+		// "seed nothing" rather than corrupting block-0 determinism silently.
+		logger.Error("genesis file: cannot re-read for block-0 allocations: %v", err)
+		return
+	}
+	if gf == nil {
+		return
+	}
+	for _, a := range gf.FundedAccounts {
+		addr := common.CanonicalSPIFAddress(a.Address)
+		balance, err := parseDecimalNSPX(a.BalanceNSPX)
+		if err != nil || balance.Sign() <= 0 {
+			logger.Warn("genesis file: skipping unparseable funded account %s (%q)", addr, a.BalanceNSPX)
+			continue
+		}
+		// Idempotent: never top up an account that already holds a balance
+		// (block-0 execution runs once, but a replayed/rewound node may call
+		// this again).
+		existing, err := stateDB.GetBalance(addr)
+		if err == nil && existing != nil && existing.Sign() > 0 {
+			continue
+		}
+		stateDB.AddBalance(addr, balance)
+		logger.Info("genesis file: credited %s nSPX to %s (%s)", balance.String(), addr, a.Label)
+	}
+}
+
 // distributeEpochStakingRewards credits the epoch's staking-reward slice to
 // validators in proportion to their state-persisted stake, using policy's
 // exact integer commission math (CalculateValidatorRewardExact). The
@@ -1152,6 +1198,10 @@ func (bc *Blockchain) applyBlockTransitions(block *types.Block, stateDB *StateDB
 		// Persist the genesis validator stakes so the first epoch-boundary
 		// inflation distribution has a deterministic on-chain stake snapshot.
 		bc.seedValidatorStakesFromGenesis(stateDB)
+		// Credit the genesis FILE's pre-funded accounts (validator reward
+		// addresses + spare devnet reward addresses). Same deterministic,
+		// file-driven rules as the validator set above.
+		bc.seedGenesisFileAllocations(stateDB)
 	}
 
 	if err := bc.applyTransactions(block, stateDB); err != nil {

@@ -638,7 +638,10 @@ func TestApplyGenesis_ConflictReturnsError(t *testing.T) {
 	}
 }
 
-// TestApplyGenesis_WritesGenesisStateJSON — genesis_state.json is written and non-empty.
+// TestApplyGenesis_WritesGenesisStateJSON — the ONE genesis document is written
+// and non-empty. It lives at <datadir>/config/genesis_state.json (R9), which is
+// where the devnet helper, custody provisioning and the witness sink also write,
+// so there is exactly one genesis file per node.
 func TestApplyGenesis_WritesGenesisStateJSON(t *testing.T) {
 	bc := newMinimalBlockchain(t)
 
@@ -646,18 +649,24 @@ func TestApplyGenesis_WritesGenesisStateJSON(t *testing.T) {
 		t.Fatalf("ApplyGenesis: %v", err)
 	}
 
-	jsonPath := filepath.Join(bc.storage.GetStateDir(), "genesis_state.json")
+	jsonPath := GenesisStateFilePathForDataDir(common.GetDataDir())
 	info, err := os.Stat(jsonPath)
 	if err != nil {
-		t.Fatalf("genesis_state.json not found at %s: %v", jsonPath, err)
+		t.Fatalf("%s not found at %s: %v", GenesisStateFileName, jsonPath, err)
 	}
 	if info.Size() == 0 {
-		t.Error("genesis_state.json is empty")
+		t.Errorf("%s is empty", GenesisStateFileName)
+	}
+	// The chain state dir must NOT hold a second genesis document.
+	legacy := filepath.Join(bc.storage.GetStateDir(), GenesisStateFileName)
+	if _, err := os.Stat(legacy); err == nil {
+		t.Errorf("a second genesis document exists at %s — there must be exactly one", legacy)
 	}
 }
 
-// TestApplyGenesis_JSONContainsAllocations — genesis_state.json holds real allocation data.
-// Directly guards the blank-array regression that was the original bug.
+// TestApplyGenesis_JSONContainsAllocations — the genesis document holds real
+// allocation data. Directly guards the blank-array regression that was the
+// original bug.
 func TestApplyGenesis_JSONContainsAllocations(t *testing.T) {
 	bc := newMinimalBlockchain(t)
 
@@ -665,7 +674,7 @@ func TestApplyGenesis_JSONContainsAllocations(t *testing.T) {
 		t.Fatalf("ApplyGenesis: %v", err)
 	}
 
-	jsonPath := filepath.Join(bc.storage.GetStateDir(), "genesis_state.json")
+	jsonPath := GenesisStateFilePathForDataDir(common.GetDataDir())
 	raw, err := os.ReadFile(jsonPath)
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
@@ -674,7 +683,7 @@ func TestApplyGenesis_JSONContainsAllocations(t *testing.T) {
 	content := string(raw)
 	for _, key := range []string{`"address"`, `"balance_spx"`, `"total_allocated_spx"`} {
 		if !containsSubstring(content, key) {
-			t.Errorf("genesis_state.json missing key %s — allocations array is blank", key)
+			t.Errorf("%s missing key %s — allocations array is blank", GenesisStateFileName, key)
 		}
 	}
 }

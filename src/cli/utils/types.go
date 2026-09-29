@@ -15,7 +15,6 @@ import (
 // This struct is used to store all command-line flag values for node configuration
 type Config struct {
 	configFile    string // Path to JSON configuration file
-	numNodes      int    // Number of nodes to initialize in the network
 	roles         string // Comma-separated list of node roles (validator, sender, receiver, none)
 	tcpAddr       string // TCP address for P2P communication (e.g., "127.0.0.1:30303")
 	udpPort       string // UDP port for node discovery (e.g., "30304")
@@ -23,16 +22,8 @@ type Config struct {
 	wsPort        string // WebSocket port for real-time subscriptions (e.g., "127.0.0.1:8600")
 	seedNodes     string // Comma-separated list of seed node UDP addresses for network bootstrap
 	dataDir       string // Directory path for LevelDB storage (default: "data")
-	nodeIndex     int    // Index of the node to run when managing multiple nodes (0 to numNodes-1)
+	portOffset    int    // Per-process port offset; shifts ONLY default tcp/http/udp/wallet-RPC ports and datadir
 	rewardAddress string // SPIF wallet address to stake and receive block rewards from
-	legacyCluster bool   // Explicit opt-in to the deprecated same-process 3-node devnet harness
-}
-
-// TestConfig holds the parameters that the test harness uses.
-// This struct is specifically for the PBFT integration test configuration
-type TestConfig struct {
-	NumNodes int // number of validator nodes to spin up for the consensus test (default 3)
-	// Minimum of 3 nodes required for PBFT consensus to function properly
 }
 
 // Update the ChainIdentificationJSON struct - FIXED THE TYPE ISSUE

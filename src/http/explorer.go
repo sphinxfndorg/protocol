@@ -464,8 +464,9 @@ func (s *Server) handleExplorerMine(c *gin.Context) {
 	}
 
 	// Solo/devnet only: refuse to mint at tip+1 while a quorum is responsible
-	// for proposing.
-	if vs := bc.GetValidatorSet(); vs != nil {
+	// for proposing. Reads the LIVE set, so the count cannot be a stale
+	// projection of it.
+	if vs := bc.LiveValidatorSet(); vs != nil {
 		if active := len(vs.GetValidators()); active > 1 {
 			c.JSON(http.StatusConflict, gin.H{
 				"error": fmt.Sprintf(

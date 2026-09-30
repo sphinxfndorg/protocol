@@ -16,7 +16,6 @@ import (
 	"github.com/sphinxfndorg/protocol/src/consensus"
 	logger "github.com/sphinxfndorg/protocol/src/console"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
-	denom "github.com/sphinxfndorg/protocol/src/params/denom"
 )
 
 const (
@@ -1186,20 +1185,26 @@ func (sm *StateMachine) applyStateTransitionOperation(op *Operation) error {
 	// Handle different types of state transitions
 	switch op.StateTransition.TransitionType {
 	case "validator_add":
-		// Call the consensus validator set's AddValidator method
-		if sm.consensus != nil && sm.consensus.GetValidatorSet() != nil {
-			// Convert stake from nSPX to SPX for the AddValidator method
-			stakeSPX := new(big.Int).Div(op.StateTransition.StakeAmount, big.NewInt(denom.SPX))
-			err := sm.consensus.GetValidatorSet().AddValidator(
-				op.StateTransition.ValidatorID,
-				stakeSPX.Uint64(),
-			)
-			if err != nil {
-				return fmt.Errorf("failed to add validator: %w", err)
-			}
-		}
-		// Use op.StateTransition.ValidatorID instead of undefined validatorID
+		// ★ REMOVED (Checkpoint 1b 1d). This used to call
+		// consensus.ValidatorSet.AddValidator, which CREATED a live member with
+		// vote weight and no activation epoch, from a peer's state-transition
+		// operation. That let a remote peer put a node into the quorum
+		// denominator at will, with no balance check, no boundary, and no
+		// agreement from the rest of the set — and it was reachable at runtime
+		// via applyStateTransitionOperation, i.e. outside both genesis seeding
+		// and the epoch transition.
+		//
+		// Membership is now chain state. A validator enters ONLY through the
+		// genesis document (AddGenesisValidator) or by being QUEUED
+		// (QueueValidator) and gaining weight at a boundary, where every node
+		// derives the same answer from the same blocks. This state-machine hint
+		// is recorded locally but grants nothing.
+		sm.mu.Lock()
 		sm.validators[op.StateTransition.ValidatorID] = true
+		sm.mu.Unlock()
+		log.Printf("validator_add for %s recorded as a local hint only; "+
+			"membership changes are decided by the epoch transition, not by a peer operation",
+			op.StateTransition.ValidatorID)
 
 	case "validator_remove":
 		// Remove an existing validator

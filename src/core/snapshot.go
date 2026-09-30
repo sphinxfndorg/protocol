@@ -29,6 +29,8 @@ import (
 	"sort"
 	"time"
 
+	"github.com/sphinxfndorg/protocol/src/consensus"
+
 	logger "github.com/sphinxfndorg/protocol/src/console"
 	denom "github.com/sphinxfndorg/protocol/src/params/denom"
 )
@@ -245,16 +247,17 @@ func (sm *StateSnapshotManager) collectAccounts(accounts map[string]*SnapshotAcc
 
 // collectValidators reads the current validator set into the snapshot.
 func (sm *StateSnapshotManager) collectValidators(validators map[string]*SnapshotValidator) error {
-	vs := sm.bc.GetValidatorSet()
+	vs := sm.bc.liveValidatorSet()
 	if vs == nil {
 		logger.Warn("No validator set available for snapshot")
 		return nil
 	}
 
-	vs.mu.RLock()
-	defer vs.mu.RUnlock()
-
-	for id, v := range vs.validators {
+	for _, v := range vs.GetValidators() {
+		if v == nil {
+			continue
+		}
+		id := v.ID
 		validators[id] = &SnapshotValidator{
 			StakeNSPX:       v.StakeAmount.String(),
 			RewardAddress:   v.RewardAddress,
@@ -402,17 +405,18 @@ func (sm *StateSnapshotManager) restoreAccounts(snapshot *StateSnapshotData) err
 
 // restoreValidators writes all validators from the snapshot into the validator set.
 func (sm *StateSnapshotManager) restoreValidators(snapshot *StateSnapshotData) error {
-	vs := sm.bc.GetValidatorSet()
+	vs := sm.bc.liveValidatorSet()
 	if vs == nil {
 		logger.Warn("No validator set available — cannot restore validators")
 		return nil
 	}
 
-	vs.mu.Lock()
-	defer vs.mu.Unlock()
-
-	vs.validators = make(map[string]*StakedValidator)
-	vs.totalStake = big.NewInt(0)
+	// Build the replacement set fully, THEN swap it in atomically via ReplaceAll.
+	// The old code cleared the live set and re-added members one at a time under
+	// a lock it held only on the shadow copy — a reader on the live set could
+	// observe an empty or half-restored set. ReplaceAll takes the live set's
+	// lock once, so the swap is all-or-nothing.
+	rows := make(map[string]*consensus.StakedValidator, len(snapshot.Validators))
 
 	for id, val := range snapshot.Validators {
 		stake, ok := new(big.Int).SetString(val.StakeNSPX, 10)
@@ -421,7 +425,7 @@ func (sm *StateSnapshotManager) restoreValidators(snapshot *StateSnapshotData) e
 			continue
 		}
 
-		vs.validators[id] = &StakedValidator{
+		rows[id] = &consensus.StakedValidator{
 			ID:              id,
 			StakeAmount:     stake,
 			RewardAddress:   val.RewardAddress,
@@ -429,10 +433,11 @@ func (sm *StateSnapshotManager) restoreValidators(snapshot *StateSnapshotData) e
 			ExitEpoch:       val.ExitEpoch,
 			IsSlashed:       val.IsSlashed,
 		}
-		vs.totalStake.Add(vs.totalStake, stake)
 	}
 
-	logger.Info("INFO Restored %d validators to validator set", len(snapshot.Validators))
+	vs.ReplaceAll(rows)
+
+	logger.Info("INFO Restored %d validators to validator set", len(rows))
 	return nil
 }
 

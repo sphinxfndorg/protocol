@@ -38,9 +38,14 @@ const (
 	addressTxPrefix    = "addrtx:"
 	receiptPrefix      = "rcpt:"
 	bloomPrefix        = "bloom:"
-	headBlockKey       = "head:block"
-	headHeaderKey      = "head:header"
-	genesisHashKey     = "genesis:hash"
+	// vsnap: is the validator-snapshot namespace. The epoch is encoded with the
+	// same fixed-width big-endian hex as encodeHeight, so a prefix scan returns
+	// snapshots in ascending epoch order and a height→epoch mapping is
+	// reproducible from the key alone.
+	validatorSnapshotPrefix = "vsnap:"
+	headBlockKey            = "head:block"
+	headHeaderKey           = "head:header"
+	genesisHashKey          = "genesis:hash"
 )
 
 // encodeHeight returns the fixed-width, hex-encoded big-endian
@@ -106,3 +111,38 @@ const addressTxKeySuffixLen = 16 + 1 + 8
 func addressTxScanPrefix(addr string) string {
 	return addressTxPrefix + addr + ":"
 }
+
+// ---------------------------------------------------------------------------
+// Validator snapshots
+// ---------------------------------------------------------------------------
+
+// ValidatorSnapshotRow is the on-disk shape of one epoch's validator snapshot.
+//
+// The epoch is stored BOTH in the key and in the row. The key makes the
+// namespace scannable in ascending epoch order; the in-row copy is what
+// ValidatorSetAt is checked against on read, so a corrupt or mis-keyed row is
+// detectable instead of being silently trusted.
+type ValidatorSnapshotRow struct {
+	Epoch      uint64           `json:"epoch"`
+	TotalStake string           `json:"total_stake"`
+	Validators map[string]VSRow `json:"validators"`
+}
+
+// VSRow is one validator's frozen state inside a snapshot row. Stake is a
+// decimal string because big.Int does not round-trip through JSON as a number
+// (it marshals as an integer literal, and any value beyond float64's exact
+// range would lose precision in a JS or Python reader).
+type VSRow struct {
+	Stake           string `json:"stake"`
+	RewardAddress   string `json:"reward_address,omitempty"`
+	ActivationEpoch uint64 `json:"activation_epoch"`
+	ExitEpoch       uint64 `json:"exit_epoch"`
+	IsSlashed       bool   `json:"is_slashed,omitempty"`
+}
+
+func validatorSnapshotKey(epoch uint64) string {
+	return validatorSnapshotPrefix + encodeHeight(epoch)
+}
+
+// ValidatorSnapshotScanPrefix is the scan prefix for every stored snapshot.
+func ValidatorSnapshotScanPrefix() string { return validatorSnapshotPrefix }

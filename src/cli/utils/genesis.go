@@ -30,6 +30,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+
 	"strings"
 
 	"github.com/sphinxfndorg/protocol/src/common"
@@ -62,9 +63,25 @@ type devnetRewardKeyFile struct {
 	PublicKey  string `json:"public_key"`
 }
 
+// flagWasSet reports whether name was explicitly given on the command line.
+// flag.FlagSet.Visit only walks the flags that were actually set, which is how we
+// tell "the operator chose a number" from "we are about to use the zero value".
+func flagWasSet(fs *flag.FlagSet, name string) bool {
+	set := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			set = true
+		}
+	})
+	return set
+}
+
+// promptValidatorCount is gone: `genesis create` no longer asks. Omitting
+// --validators uses the BFT floor, so the common case is a bare command.
+
 func runGenesisCreate(args []string) error {
 	fs := flag.NewFlagSet("genesis create", flag.ContinueOnError)
-	k := fs.Int("validators", 0, "number of genesis validators (must be >= consensus.MinValidators)")
+	k := fs.Int("validators", 0, "number of genesis validators; omit for the BFT floor (consensus.MinValidators). Pass a larger value to tolerate offline validators")
 	m := fs.Int("funded-accounts", 0, "extra devnet reward addresses to fund with stake-sized balances, so validators added later can send Stake txs")
 	root := fs.String("root", "data", "root directory holding node<N> datadirs for the validators")
 	host := fs.String("host", "127.0.0.1", "host used to derive each node's Node-<host:port> identity")
@@ -75,6 +92,25 @@ func runGenesisCreate(args []string) error {
 	chainID := fs.Uint64("chain-id", core.DevnetChainID, "chain id written into the genesis file")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+
+	// The validator count is required input to this authoring step — a document
+	// listing validators has to be told how many to list. When it is omitted we
+	// use the BFT floor (consensus.MinValidators), so the common case — "open
+	// three terminals and run" — needs no number, no flag and no prompt at all.
+	//
+	// The floor is a floor, not a verdict on how many you SHOULD run: it is the
+	// smallest set that can produce blocks at all, and it has NO fault
+	// tolerance — under strict >2/3 stake, a 3-validator set needs all 3 to vote
+	// (2 of 3 is exactly 2/3, not strictly more). Anyone who wants to survive
+	// an offline validator passes a larger number explicitly, and that choice
+	// is theirs, never inferred.
+	//
+	// Either way the count lives here and nowhere else: it is written into the
+	// document and from then on is just data. No node flag carries it, and no
+	// node derives it from a peer count.
+	if !flagWasSet(fs, "validators") {
+		*k = consensus.MinValidators
 	}
 
 	if *k < consensus.MinValidators {
@@ -195,8 +231,45 @@ func runGenesisCreate(args []string) error {
 	}
 	fmt.Println()
 	fmt.Printf("funded devnet staking keys: %d genesis validator(s) + %d spare(s), in %s\n", *k, *m, rewardKeys.dir)
-	fmt.Printf("start node 0 with e.g. --tcp-addr %s --datadir %s\n", plans[0].tcpAddr, plans[0].datadir)
+	fmt.Println()
+	fmt.Printf("Next: open %d terminals, one per validator, and run in each:\n\n", *k)
+	fmt.Printf("  terminal 1:  ./sphinx node --role=validator --tcp-addr %s --http-port 127.0.0.1:8545 --datadir %s --pbft\n",
+		plans[0].tcpAddr, plans[0].datadir)
+	for _, p := range plans[1:] {
+		fmt.Printf("  terminal %d:  ./sphinx node --role=validator --port-offset=%d --seeds=%s --pbft\n",
+			p.index+1, p.index, plans[0].tcpAddr)
+	}
+	fmt.Println()
+	// ★ FAULT-TOLERANCE TABLE, derived from the one rule that decides it:
+	// strict `voted*3 > total*2` with equal stakes. K validators at stake s
+	// need a strict majority of 2/3, so the number that must vote is
+	// floor(2K/3)+1 — NOT "two thirds of K", which for K=3 is 2 and fails.
+	fmt.Printf("Fault tolerance for a set of %d validators at %d SPX each (strict >2/3 stake):\n", *k, denom.MinValidatorStakeSPX)
+	fmt.Printf("  votes needed to commit a block: %d of %d\n", offlineTolerantVotes(*k), *k)
+	fmt.Printf("  offline validators tolerated:   %d\n", (*k-1)/3)
+	if *k < 4 {
+		fmt.Printf("\n  ⚠ A set of %d has NO fault tolerance: if any ONE validator stops, the chain halts.\n", *k)
+		fmt.Printf("    The smallest set that survives one offline validator is 4 (3 of 4 still clear 2/3).\n")
+	} else {
+		fmt.Printf("\n  This set continues with up to %d validator(s) offline.\n", (*k-1)/3)
+	}
 	return nil
+}
+
+// offlineTolerantVotes is how many validators must vote for a block to commit
+// under the strict `voted*3 > total*2` rule, for a set of K equal-stake
+// validators. It is floor(2K/3)+1.
+//
+//	 K=1 -> 1        K=2 -> 2        K=3 -> 3        K=4 -> 3
+//	 K=5 -> 4        K=6 -> 5        K=7 -> 5
+//
+// K=3 needing all 3 is the counter-intuitive case: 2 of 3 is exactly 2/3, and
+// the rule is STRICTLY more than 2/3, so 2 of 3 does not commit.
+func offlineTolerantVotes(k int) int {
+	if k <= 0 {
+		return 0
+	}
+	return (2*k)/3 + 1
 }
 
 // nodePlan is one validator's identity and datadir, derived purely from --tcp-addr.

@@ -13,8 +13,62 @@ import (
 )
 
 // Ensure your Block type has these methods to implement consensus.Block
+// GetHeight returns the block's chain height.
+//
+// ★ IT READS Header.Block, NOT Header.Height. The two fields are documented as
+// equal, with JSON tags "nblock" and "height", so a block built with only one of
+// them set looks plausible and silently reads as height 0 — i.e. GENESIS. That
+// is not hypothetical: a header literal missing `Block:` produces exactly this,
+// and every genesis-exempt path (attestation verification, epoch derivation)
+// then treats a real block as block 0.
+//
+// The reconciliation below repairs a malformed header. Header.Block stays
+// authoritative; Height is brought into line. Constructors should set BOTH —
+// NewBlockHeader does.
 func (b *Block) GetHeight() uint64 {
+	if b.Header == nil {
+		return 0
+	}
+	// Header.Block wins. If only Height was populated, mirror it up so the
+	// block does not masquerade as genesis.
+	if b.Header.Block == 0 && b.Header.Height > 0 {
+		return b.Header.Height
+	}
 	return b.Header.Block
+}
+
+// ValidateHeightFields reports an error when Header.Block and Header.Height
+// disagree, i.e. the header is malformed and a hash over it will not match what
+// peers compute.
+//
+// It deliberately does NOT auto-fix: silently repairing a height during
+// validation would accept a block whose committed fields disagree, and that
+// disagreement is exactly what a header commitment would catch.
+func (b *Block) ValidateHeightFields() error {
+	if b.Header == nil {
+		return fmt.Errorf("block has no header")
+	}
+	if b.Header.Block != b.Header.Height {
+		return fmt.Errorf("block height fields disagree: Header.Block=%d, Header.Height=%d "+
+			"(GetHeight reads Block, so a header built with only Height set reads as height %d)",
+			b.Header.Block, b.Header.Height, b.GetHeight())
+	}
+	return nil
+}
+
+// NormalizeHeights makes the two height fields agree, preferring Header.Block.
+// It is called on the JSON decode path only, where a producer may have emitted
+// one field or the other. It is NOT called during validation.
+func (b *Block) NormalizeHeights() {
+	if b.Header == nil {
+		return
+	}
+	switch {
+	case b.Header.Block == 0 && b.Header.Height > 0:
+		b.Header.Block = b.Header.Height
+	case b.Header.Height == 0 && b.Header.Block > 0:
+		b.Header.Height = b.Header.Block
+	}
 }
 
 // GetPrevHash returns the parent block hash as printable string

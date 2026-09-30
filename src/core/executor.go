@@ -944,10 +944,25 @@ func (bc *Blockchain) seedValidatorStakesFromGenesis(stateDB *StateDB) {
 }
 
 // seedGenesisFileAllocations credits the pre-funded accounts the genesis FILE
-// lists (validator reward addresses + extra devnet reward addresses used by
-// later Stake transactions). It runs during block-0 execution, exactly like
-// seedValidatorStakesFromGenesis, so every node that reads the same genesis
-// file derives the same balances and therefore the same state root.
+// lists (validator self-stake addresses + the devnet faucet + extra devnet
+// reward addresses used by later Stake transactions). It runs during block-0
+// execution, exactly like seedValidatorStakesFromGenesis, so every node that
+// reads the same genesis file derives the same balances and therefore the same
+// state root.
+//
+// ★ SUPPLY ACCOUNTING. Every amount credited here is NEWLY CREATED value: the
+// account did not have it and the vault did not send it (a funded_accounts row
+// is not a block-0 allocation, so it is not in block 0's TxsRoot and no vault
+// balance moves). Crediting a balance without creating the matching supply
+// would leave spendable coins that the ledger does not account for, so this
+// function increments total supply by EXACTLY the total it credits — once, after
+// the loop, so the counter moves a single time per block-0 execution and
+// replays stay idempotent (an account that already holds a balance is skipped
+// and contributes nothing to `credited`).
+//
+// Burn accounting is unaffected: burns are computed as totalSupply −
+// balance(DEAD), so both terms move together and the burn identity
+// (circulating == sum of non-DEAD balances) is preserved.
 //
 // It does NOT change block 0's hash: block 0 is still built from the canonical
 // DefaultGenesisState() (see getCachedGenesisBlock). The genesis file
@@ -970,6 +985,22 @@ func (bc *Blockchain) seedGenesisFileAllocations(stateDB *StateDB) {
 	if gf == nil {
 		return
 	}
+	if len(gf.FundedAccounts) > 0 && !gf.Bootstrap {
+		// A `genesis create` document for a non-devnet network must not carry
+		// funded_accounts: those rows create supply that is invisible to the
+		// allocation schedule the chain's economics are derived from, and they
+		// are not in block 0's TxsRoot, so no node could ever audit them. Such a
+		// document has to fund accounts through real `allocations` rows instead,
+		// which DO feed block 0 and therefore the genesis hash.
+		logger.Error("genesis file: REFUSING %d funded_accounts row(s) on a non-bootstrap network. "+
+			"funded_accounts create supply outside block 0's allocation schedule and are not part of the genesis hash, so they cannot be audited. "+
+			"Fund these accounts with `allocations` rows instead (they are inside block 0). Refusing to seed them.",
+			len(gf.FundedAccounts))
+		return
+	}
+
+	// credited is the exact total supply this function creates.
+	credited := big.NewInt(0)
 	for _, a := range gf.FundedAccounts {
 		addr := common.CanonicalSPIFAddress(a.Address)
 		balance, err := parseDecimalNSPX(a.BalanceNSPX)
@@ -979,13 +1010,20 @@ func (bc *Blockchain) seedGenesisFileAllocations(stateDB *StateDB) {
 		}
 		// Idempotent: never top up an account that already holds a balance
 		// (block-0 execution runs once, but a replayed/rewound node may call
-		// this again).
+		// this again). A skipped account also contributes no supply.
 		existing, err := stateDB.GetBalance(addr)
 		if err == nil && existing != nil && existing.Sign() > 0 {
 			continue
 		}
 		stateDB.AddBalance(addr, balance)
+		credited.Add(credited, balance)
 		logger.Info("genesis file: credited %s nSPX to %s (%s)", balance.String(), addr, a.Label)
+	}
+	if credited.Sign() > 0 {
+		// Exactly the amount credited — never more, never less.
+		stateDB.IncrementTotalSupply(credited)
+		logger.Info("genesis file: funded_accounts created %s nSPX of supply (total supply now %s nSPX)",
+			credited.String(), stateDB.GetTotalSupply().String())
 	}
 }
 

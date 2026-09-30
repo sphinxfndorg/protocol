@@ -632,112 +632,38 @@ type StateDB struct {
 	blockchain    *Blockchain
 }
 
-// StakedValidator represents a validator with SPX stake
-// This type is used for validator set snapshots in sync verification
-type StakedValidator struct {
-	ID              string   `json:"id"`
-	PublicKey       []byte   `json:"public_key,omitempty"`
-	StakeAmount     *big.Int `json:"stake_amount"` // In nSPX (base units)
-	ActivationEpoch uint64   `json:"activation_epoch"`
-	ExitEpoch       uint64   `json:"exit_epoch"`
-	IsSlashed       bool     `json:"is_slashed"`
-	LastAttested    uint64   `json:"last_attested"`
-	RewardAddress   string   `json:"reward_address"` // SPIF address that receives block rewards
-}
-
-// ValidatorSet manages staked validators
-// This is a minimal implementation for sync verification purposes
-type ValidatorSet struct {
-	validators     map[string]*StakedValidator
-	totalStake     *big.Int
-	mu             sync.RWMutex
-	minStakeAmount *big.Int
-}
-
-// GetTotalStake returns the total stake in nSPX (implements validatorSetProvider)
-func (vs *ValidatorSet) GetTotalStake() *big.Int {
-	vs.mu.RLock()
-	defer vs.mu.RUnlock()
-	if vs.totalStake == nil {
-		return big.NewInt(0)
-	}
-	return new(big.Int).Set(vs.totalStake)
-}
-
-// GetMinStakeSPX returns the minimum stake in SPX.
-func (vs *ValidatorSet) GetMinStakeSPX() uint64 {
-	vs.mu.RLock()
-	defer vs.mu.RUnlock()
-	if vs.minStakeAmount == nil {
-		return 0
-	}
-	minSPX := new(big.Int).Div(vs.minStakeAmount, big.NewInt(1e18))
-	return minSPX.Uint64()
-}
-
-// GetValidators returns all validators in the set.
-func (vs *ValidatorSet) GetValidators() []*StakedValidator {
-	vs.mu.RLock()
-	defer vs.mu.RUnlock()
-	vals := make([]*StakedValidator, 0, len(vs.validators))
-	for _, v := range vs.validators {
-		if v == nil {
-			continue
-		}
-		vals = append(vals, &StakedValidator{
-			ID:              v.ID,
-			StakeAmount:     new(big.Int).Set(v.StakeAmount),
-			ActivationEpoch: v.ActivationEpoch,
-			ExitEpoch:       v.ExitEpoch,
-			IsSlashed:       v.IsSlashed,
-			LastAttested:    v.LastAttested,
-			RewardAddress:   v.RewardAddress,
-		})
-	}
-	return vals
-}
-
-// GetValidator returns a validator by ID (implements validatorSetProvider)
-// Returns interface{} to avoid import cycles with consensus package
-func (vs *ValidatorSet) GetValidator(id string) interface{} {
-	vs.mu.RLock()
-	defer vs.mu.RUnlock()
-	v, exists := vs.validators[id]
-	if !exists || v == nil {
-		return nil
-	}
-	// Return a copy to prevent external modification
-	return &StakedValidator{
-		ID:              v.ID,
-		StakeAmount:     new(big.Int).Set(v.StakeAmount),
-		ActivationEpoch: v.ActivationEpoch,
-		ExitEpoch:       v.ExitEpoch,
-		IsSlashed:       v.IsSlashed,
-		LastAttested:    v.LastAttested,
-		RewardAddress:   v.RewardAddress,
-	}
-}
-
-// validatorSetProvider is an interface for accessing validator set data
-// This allows VerifyBlockAttestations to work with both consensus.ValidatorSet
-// and core.ValidatorSet without creating circular dependencies
-type validatorSetProvider interface {
-	GetTotalStake() *big.Int
-	// GetValidator returns a core-compatible view of a validator.
-	// To avoid import cycles between core<->consensus, this method is
-	// intentionally flexible: implementations may return either *StakedValidator
-	// or a consensus.StakedValidator pointer that core can interpret.
-	GetValidator(id string) interface{}
-}
-
-// ValidatorSetSnapshot stores a frozen copy of the validator set at a given
-// epoch, so that blocks from that epoch can be verified even after the live
-// validator set has changed (validators joined/left/slashed).
-type ValidatorSetSnapshot struct {
-	Epoch      uint64
-	Validators map[string]*StakedValidator // copy of validators at this epoch
-	TotalStake *big.Int
-}
+// ============================================================================
+// DELETED: the duplicate validator-set layer
+// ============================================================================
+//
+// These types and every method on them were removed:
+//
+//	StakedValidator      (core-local copy of consensus.StakedValidator)
+//	ValidatorSet         (core-local copy of consensus.ValidatorSet)
+//	ValidatorSetSnapshot (core-local copy of consensus.ValidatorSnapshot)
+//	validatorSetProvider (the interface that let both satisfy the above)
+//	GetValidatorSet()    (which built a fresh SHADOW copy per call)
+//	SnapshotValidatorSet / ValidatorSetAt / GetValidatorSetAtEpoch /
+//	EpochForHeight / IsEpochBoundary / ActivationEpochForStake
+//
+// The single live set is consensus.ValidatorSet; the single frozen record is
+// consensus.ValidatorSnapshot; the single epoch parameter is
+// consensus.epochBlocksOverride. core reaches them directly via
+// Blockchain.liveValidatorSet() and the exported LiveValidatorSet().
+//
+// Why the shadow was dangerous, not merely redundant:
+//
+//   - Blockchain.GetValidatorSet() allocated a NEW copy on every call and
+//     filtered it at a hardcoded epoch 0, so the epoch transition ran against a
+//     throwaway and the live set never changed on a real node.
+//   - Two copies of membership mean two answers to "who governs this block",
+//     and the two production callers of block verification disagreed about it
+//     (one used height/100, the other height/SlotsPerEpoch(32)).
+//   - A verification path handed a LIVE set can accept a block against a
+//     membership that did not exist when the block was made.
+//
+// Do not reintroduce a core-side copy. If core needs membership, read the live
+// set or the height-keyed snapshot.
 
 // StateDBInterface is a simplified interface for state DB operations
 // used by the state snapshot system. It avoids exposing internal StateDB.

@@ -365,43 +365,6 @@ func SetGlobalStateDB(sdb StateDBInterface) {
 	globalStateDB = sdb
 }
 
-// GetValidatorSet returns the blockchain's validator set.
-func (bc *Blockchain) GetValidatorSet() *ValidatorSet {
-	// Access the ValidatorSet from consensus if available
-	if bc.consensusEngine != nil {
-		// Try to get from consensus engine
-		if cs, ok := bc.consensusEngine.(*consensus.Consensus); ok {
-			vs := cs.GetValidatorSet()
-			if vs == nil {
-				return nil
-			}
-			// Convert consensus.ValidatorSet to core.ValidatorSet
-			coreVS := &ValidatorSet{
-				validators:     make(map[string]*StakedValidator),
-				totalStake:     vs.GetTotalStake(),
-				minStakeAmount: vs.GetMinStakeAmount(),
-			}
-			// Copy validators by iterating through the consensus validator set
-			// Use GetActiveValidators to get all active validators
-			activeVals := vs.GetActiveValidators(0) // epoch 0 = all active
-			for _, val := range activeVals {
-				if val == nil {
-					continue
-				}
-				coreVS.validators[val.ID] = &StakedValidator{
-					ID:              val.ID,
-					StakeAmount:     val.StakeAmount,
-					RewardAddress:   val.RewardAddress,
-					ActivationEpoch: val.ActivationEpoch,
-					ExitEpoch:       val.ExitEpoch,
-					IsSlashed:       val.IsSlashed,
-				}
-			}
-			return coreVS
-		}
-	}
-	return nil
-}
 
 // SetChainTip sets the chain tip to a specific height and hash.
 // This is used after restoring from a state snapshot to fast-forward past
@@ -2128,6 +2091,23 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 	logger.Info("SUCCESS Block added to in-memory chain at height %d", typeBlock.GetHeight())
 	// ================================================================
 
+	// ════════════════════════════════════════════════════════════════════
+	// ★ EPOCH BOUNDARY (Phase 2, step 8) — activate queued validators and
+	// freeze the snapshot that governs this epoch.
+	//
+	// ORDER MATTERS. This runs AFTER the block is stored and after the chain
+	// tip moves, because the transition is a function of committed state: the
+	// snapshot it takes must describe the set that will validate the blocks
+	// from here on. It also runs before any further proposal, so the next
+	// leader election sees the post-transition set.
+	//
+	// Determinism: the boundary is a pure function of the block height, so
+	// every node that commits the same block runs the same transition with the
+	// same input set and reaches the same totalStake. Nothing here reads a
+	// clock, a peer count, or a flag.
+	// ════════════════════════════════════════════════════════════════════
+	bc.applyEpochTransitionIfBoundary(typeBlock.GetHeight())
+
 	if err := bc.validateBlockTransactionAuth(typeBlock, true); err != nil {
 		return fmt.Errorf("CommitBlock: failed to store canonical transaction evidence: %w", err)
 	}
@@ -2190,6 +2170,80 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 		finalStats["avg_transactions_per_block"], finalStats["current_tps"])
 
 	return nil
+}
+
+// applyEpochTransitionIfBoundary runs the epoch transition when `height` starts
+// a new epoch, and snapshots the resulting set.
+//
+// Phase 2, step 8. Two things happen at a boundary, in this order:
+//
+//  1. ProcessEpochTransition promotes every validator whose ActivationEpoch has
+//     arrived and rebuilds totalStake from the set that can actually vote.
+//  2. SnapshotValidatorSet freezes that set under the NEW epoch, so a block at
+//     any later height resolves its governing set by height (ValidatorSetAt).
+//
+// It is a no-op on a non-boundary height, so the cost on an ordinary block is
+// one modulo. Height 0 is skipped: genesis is not a transition, and the set at
+// genesis is the authored one with activation epoch 0.
+func (bc *Blockchain) applyEpochTransitionIfBoundary(height uint64) {
+	if height == 0 || !consensus.IsEpochBoundary(height) {
+		return
+	}
+	epoch := consensus.EpochForHeight(height)
+
+	// ★ THE SINGLE, LIVE VALIDATOR SET. This used to call
+	// bc.GetValidatorSet(), which allocated a fresh SHADOW copy of the consensus
+	// set on every call (and filtered it at a hardcoded epoch 0), so the
+	// transition mutated a throwaway and the live set never changed. It now
+	// reaches the one authoritative set directly.
+	vs := bc.liveValidatorSet()
+	if vs == nil {
+		// A node with no validator set has nothing to activate.
+		logger.Debug("Epoch %d boundary at height %d: no validator set attached", epoch, height)
+		return
+	}
+
+	activated, retired := vs.ProcessEpochTransition(epoch)
+	if len(activated) == 0 && len(retired) == 0 {
+		logger.Debug("Epoch %d boundary at height %d: no membership change (%d validators, %s nSPX)",
+			epoch, height, len(vs.GetValidators()), vs.GetTotalStake().String())
+	}
+
+	// Freeze the set that governs this epoch. The snapshot's TotalStake is the
+	// post-transition total, which is exactly the denominator quorum is measured
+	// against for blocks in this epoch.
+	vs.TakeSnapshot(epoch)
+}
+
+// liveValidatorSet returns THE validator set this node is running, or nil.
+//
+// It unwraps the consensus engine rather than copying it. A shadow projection
+// is precisely the bug this replaces: it forked the truth into two copies that
+// could disagree, and it filtered membership at a hardcoded epoch 0.
+func (bc *Blockchain) liveValidatorSet() *consensus.ValidatorSet {
+	if bc == nil {
+		return nil
+	}
+	cs, ok := bc.consensusEngine.(*consensus.Consensus)
+	if !ok || cs == nil {
+		return nil
+	}
+	return cs.GetValidatorSet()
+}
+
+// LiveValidatorSet returns THE validator set this node is running, or nil.
+//
+// It replaces the deleted GetValidatorSet(), which returned a *core.ValidatorSet
+// shadow — a fresh copy built on every call, filtered at a hardcoded epoch 0.
+// That shadow was the root of the drift this whole deletion removes: two copies
+// of membership, only one of which the chain actually consulted.
+//
+// Callers get the live set itself, so a read here is the same read the epoch
+// transition and the proposer schedule make. Read-only use only; mutating code
+// belongs behind a consensus method so the lock and the invariants stay in one
+// place.
+func (bc *Blockchain) LiveValidatorSet() *consensus.ValidatorSet {
+	return bc.liveValidatorSet()
 }
 
 // initializeChain loads existing chain or creates genesis block.

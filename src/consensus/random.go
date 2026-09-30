@@ -607,9 +607,20 @@ func (r *RANDAO) ValidateState() error {
 	return nil // Returns success if state is consistent
 }
 
-// FinaliseEpoch is called at the epoch boundary.
-// This processes the epoch and slashes validators that missed their VDF submission
-func (r *RANDAO) FinaliseEpoch(epoch uint64, activeValidators []string) []string {
+// FinaliseEpoch records the epoch's VDF bookkeeping. Call it at the epoch
+// boundary.
+//
+// ★ IT NO LONGER RETURNS A SLASH LIST (Phase 1, decision 3). It used to return
+// the validators that missed a submission so the caller could mutate the live
+// validator set. That made a node's stake depend on what that node happened to
+// observe, so two nodes could compute different validator sets and different
+// quorums for the same height. The `missed` set is still recorded, but purely
+// for observability and for a future on-chain evidence record to reference — it
+// is not an instruction to slash anything.
+//
+// The bookkeeping is kept because epochFinalized gates the VDF reveal
+// schedule, which the leader seed depends on.
+func (r *RANDAO) FinaliseEpoch(epoch uint64, activeValidators []string) {
 	r.mu.Lock()         // Acquires write lock for state modification
 	defer r.mu.Unlock() // Releases write lock when function returns
 
@@ -619,23 +630,18 @@ func (r *RANDAO) FinaliseEpoch(epoch uint64, activeValidators []string) []string
 
 	subs := r.submissions[epoch] // Gets submissions for epoch
 
-	var slashList []string                // Creates slice for validators to slash
 	for _, id := range activeValidators { // Iterates through active validators
 		submitted := subs != nil && subs[id] != nil // Checks if validator submitted VDF
 		if !submitted {                             // If validator did not submit
-			r.missed[epoch][id] = true        // Marks as missed
-			slashList = append(slashList, id) // Adds to slash list
+			// Recorded as an observation ONLY. Nothing is slashed here: slashing
+			// requires on-chain evidence applied by the executor at an epoch
+			// boundary, so that every node applies the same decision.
+			r.missed[epoch][id] = true
 		}
 	}
 
 	// Mark epoch as finalized
 	r.epochFinalized[epoch] = true // Sets finalized flag
-
-	for _, id := range slashList { // Iterates through slashed validators
-		logger.Warn("Validator %s did not submit VDF for epoch %d — slashing", id, epoch) // Logs slashing
-	}
-
-	return slashList // Returns list of validators to slash
 }
 
 // AddOutput is kept for the genesis/bootstrap path and backward compatibility.

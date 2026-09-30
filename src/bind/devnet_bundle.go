@@ -142,8 +142,28 @@ func ensureDevnetBundleFromSeeds(networkType, seeds, dataDir string) (time.Durat
 	attempts := map[string]int{}
 	optionalGiveUp := 3 // rounds an optional file may stay missing before we stop asking
 	lastLog := time.Now().Add(-time.Hour)
+	// ★ 30 MINUTES, deliberately generous, and now explained in the log. The
+	// bootstrap node cannot serve the bundle until it has finished signing the
+	// block-0 witness set, which is 26 SPHINCS+ signatures (13 distribution
+	// slices x 2-of-3). Measured at 1m03s with a worker pool and ~3m17s
+	// serial, so a short deadline would fail legitimate fast-start races where
+	// T2/T3 are launched at the same moment as T1.
 	deadline := start.Add(30 * time.Minute)
 	waitedLog := false
+
+	// ★ WHY WE ARE STILL WAITING. The single most confusing failure in this
+	// flow is a joiner that sits silent for minutes, because "waiting" looks
+	// identical whether the seed is DOWN or the seed is UP and still signing.
+	// Those need completely different operator actions, so they are tracked and
+	// reported separately:
+	//
+	//   unreachable: no seed accepted a TCP connection (refused / timed out)
+	//                 -> action: start the seed node
+	//   notReady:    a seed answered, but reports the bundle is not ready yet
+	//                 -> action: wait, it is still signing
+	var lastErr error
+	sawUnreachable := false
+	sawNotReady := false
 	for {
 		allDone := true
 		for _, name := range files {
@@ -154,9 +174,14 @@ func ensureDevnetBundleFromSeeds(networkType, seeds, dataDir string) (time.Durat
 			for _, addr := range addrs {
 				resp, err := fetchDevnetBundleFile(addr, name)
 				if err != nil {
+					// No answer at all from this seed.
+					sawUnreachable = true
+					lastErr = err
 					continue
 				}
+				// It answered. Either it has the file or it is still working.
 				if !resp.Ready || len(resp.Data) == 0 {
+					sawNotReady = true
 					continue
 				}
 				if err := core.ValidateDevnetBundleBytes(name, resp.Data); err != nil {
@@ -170,7 +195,21 @@ func ensureDevnetBundleFromSeeds(networkType, seeds, dataDir string) (time.Durat
 			break
 		}
 		if time.Now().After(deadline) {
-			return time.Since(start), fmt.Errorf("timed out waiting for the bootstrap bundle")
+			// Report the CAUSE, not just the fact that time ran out.
+			switch {
+			case sawUnreachable && !sawNotReady:
+				return time.Since(start), fmt.Errorf("timed out after %s waiting for the devnet bundle: none of the seed addresses %v ever accepted a connection (last error: %v). "+
+					"The seed node is not running, or is not reachable at that address. Start it (Terminal 1) and this joiner will retry",
+					time.Since(start).Round(time.Second), addrs, lastErr)
+			case sawUnreachable && sawNotReady:
+				return time.Since(start), fmt.Errorf("timed out after %s waiting for the devnet bundle: some seeds were unreachable (last error: %v) and the reachable ones answered but had not finished writing it yet. "+
+					"The bootstrap is still signing block-0 witnesses; give it more time, or check its logs",
+					time.Since(start).Round(time.Second), lastErr)
+			default:
+				return time.Since(start), fmt.Errorf("timed out after %s waiting for the devnet bundle: the seed answered but has not produced it yet. "+
+					"The bootstrap node is still signing its block-0 witness set (26 SPHINCS+ signatures); check its logs if this persists",
+					time.Since(start).Round(time.Second))
+			}
 		}
 		// Optional files may legitimately never exist on a network that was not
 		// provisioned with `genesis create`. Give up on them after a few rounds
@@ -190,7 +229,18 @@ func ensureDevnetBundleFromSeeds(networkType, seeds, dataDir string) (time.Durat
 			}
 		}
 		if time.Since(lastLog) >= 15*time.Second {
-			logger.Info("DEVNET BUNDLE: waiting for the bootstrap node to finish signing — retrying bundle fetch over the network (elapsed %s)", time.Since(start).Round(time.Second))
+			// Say WHICH situation we are in, and what to do about it.
+			switch {
+			case sawUnreachable && !sawNotReady:
+				logger.Warn("DEVNET BUNDLE: no seed has answered yet (tried %v, last error: %v) — retrying every 5s. ACTION: start the seed node in Terminal 1. This joiner will NOT author its own genesis; it will wait (elapsed %s, ceiling 30m)",
+					addrs, lastErr, time.Since(start).Round(time.Second))
+			case sawUnreachable && sawNotReady:
+				logger.Warn("DEVNET BUNDLE: some seeds unreachable (last error: %v), the rest are up but have not written the bundle yet — retrying every 5s (elapsed %s, ceiling 30m)",
+					lastErr, time.Since(start).Round(time.Second))
+			default:
+				logger.Info("DEVNET BUNDLE: seed is reachable but still finishing block-0 witness signing (26 SPHINCS+ signatures) — retrying bundle fetch every 5s (elapsed %s, ceiling 30m)",
+					time.Since(start).Round(time.Second))
+			}
 			lastLog = time.Now()
 			waitedLog = true
 		}

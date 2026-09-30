@@ -3,7 +3,12 @@
 
 package utils
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"github.com/sphinxfndorg/protocol/src/network"
+)
 
 // TestApplyPortOffset_MatchesGenesisCreateNodeIDs is the guard for the
 // SAME-MACHINE / DEV QUICK START in printHelp().
@@ -78,3 +83,48 @@ func TestApplyPortOffset_RespectsExplicitValues(t *testing.T) {
 		t.Errorf("explicit --datadir was shifted: %q", dir)
 	}
 }
+// TestConfigFileEntry_NeverIndexesByPortOffset pins decision 2: --port-offset is
+// file this process uses. A multi-entry file is a de-facto pre-agreed node
+// roster, which is exactly the knowledge this design deletes, so it is refused
+// rather than silently resolved.
+func TestConfigFileEntry_NeverIndexesByPortOffset(t *testing.T) {
+	single := []network.NodePortConfig{{ID: "a", TCPAddr: "127.0.0.1:30303"}}
+
+	// A single entry is used whatever the offset is — the offset has already
+	// shifted the flag defaults, and --config wins over them.
+	for _, offset := range []int{0, 1, 2, 7, 99} {
+		got, err := configFileEntry(single, offset)
+		if err != nil {
+			t.Errorf("offset %d: single-entry config must be accepted, got %v", offset, err)
+			continue
+		}
+		if got.TCPAddr != "127.0.0.1:30303" {
+			t.Errorf("offset %d: got TCPAddr %q, want the single entry's 127.0.0.1:30303", offset, got.TCPAddr)
+		}
+	}
+
+	// A multi-entry file is refused, for EVERY offset — including offset 0,
+	// which under the old indexing behaviour would have silently picked
+	// configs[0].
+	multi := []network.NodePortConfig{
+		{ID: "a", TCPAddr: "127.0.0.1:30303"},
+		{ID: "b", TCPAddr: "127.0.0.1:30304"},
+	}
+	for _, offset := range []int{0, 1, 5} {
+		_, err := configFileEntry(multi, offset)
+		if err == nil {
+			t.Errorf("offset %d: a %d-entry --config file must be refused, not indexed", offset, len(multi))
+			continue
+		}
+		// The message must explain the rule, not just fail.
+		if !strings.Contains(err.Error(), "ONE node") {
+			t.Errorf("offset %d: error should explain that a config file describes ONE node, got: %v", offset, err)
+		}
+	}
+
+	// An empty file is refused too.
+	if _, err := configFileEntry(nil, 0); err == nil {
+		t.Error("an empty --config file must be refused")
+	}
+}
+

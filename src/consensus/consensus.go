@@ -175,13 +175,10 @@ func NewConsensus(
 		// skew), but that is acceptable because this path is unreachable
 		// once the genesis block exists — and if it DOES fire, the slot
 		// mismatch will be corrected as soon as the genesis block is synced
-		// from peers (the TimeConverter is rebuilt on genesis sync).
+		// from peers.
 		genesisTime = time.Now()
 	}
-	// Create time converter for slot calculations
-	timeConverter := NewTimeConverter(genesisTime)
-
-	// ── MEMBERSHIP IS NOT DECIDED HERE ──────────────────────────────────────
+		// ── MEMBERSHIP IS NOT DECIDED HERE ──────────────────────────────────────
 	// This constructor used to grant the local node a seat in the validator
 	// set, twice:
 	//
@@ -247,8 +244,7 @@ func NewConsensus(
 		validatorSet:         validatorSet,                      // Set of active validators
 		randao:               randao,                            // VDF-based RANDAO instance
 		selector:             selector,                          // Leader selector
-		timeConverter:        timeConverter,                     // Slot time converter
-		useStakeWeighted:     true,                              // Use stake-weighted leader election
+				useStakeWeighted:     true,                              // Use stake-weighted leader election
 		weightedPrepareVotes: make(map[string]*big.Int),         // Weighted prepare votes by stake
 		weightedCommitVotes:  make(map[string]*big.Int),         // Weighted commit votes by stake
 		attestations:         make(map[uint64][]*Attestation),   // Attestations by epoch
@@ -441,7 +437,7 @@ func (c *Consensus) updateLeaderStatusLocked() {
 
 	// PIN: use currentView as the canonical slot for this round.
 	viewSlot := c.currentView
-	viewEpoch := viewSlot / SlotsPerEpoch
+	viewEpoch := c.membershipEpoch()
 
 	// Handle epoch transition if we've moved to a new epoch.
 	if viewEpoch > c.currentEpoch {
@@ -1011,6 +1007,26 @@ func (c *Consensus) GetCurrentHeight() uint64 {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.currentHeight
+}
+
+// membershipEpoch returns the epoch that decides WHO IS IN THE SET for proposer
+// selection, derived from the chain HEIGHT.
+//
+// ★ THIS IS THE WHOLE POINT OF THE FUNCTION. It used to be
+// `c.currentView / SlotsPerEpoch` at five call sites. A view is a local,
+// per-node round counter: two nodes at the SAME HEIGHT in DIFFERENT views — a
+// routine situation immediately after a view change — computed DIFFERENT epochs
+// and therefore ran SelectProposer over different membership, electing
+// different leaders. The new leader's own proposal was then rejected by every
+// peer as "invalid leader", which is the livelock the round-robin/RANDAO
+// mismatch comments in this file were written to paper over.
+//
+// Membership is a function of chain state, never of a local counter, so it is
+// derived from the height. The view still supplies RANDOMNESS (the RANDAO
+// seed) — that is legitimate, because a seed only needs to be unpredictable,
+// not identical across nodes — but it no longer decides who is eligible.
+func (c *Consensus) membershipEpoch() uint64 {
+	return EpochForHeight(c.GetCurrentHeight())
 }
 
 // ── Consensus timing constants ─────────────────────────────────────────────
@@ -1862,7 +1878,7 @@ func (c *Consensus) processProposal(proposal *Proposal) {
 	// The leader sets SlotNumber = currentView (view-pinned slot), so every
 	// follower that applies the same seed to SelectProposer gets the same winner.
 	if proposal.SlotNumber > 0 {
-		slotEpoch := proposal.SlotNumber / SlotsPerEpoch
+		slotEpoch := c.membershipEpoch()
 		seed := c.randao.GetSeed(proposal.SlotNumber)
 		selected := c.selector.SelectProposer(slotEpoch, seed)
 		if selected != nil {
@@ -1879,7 +1895,7 @@ func (c *Consensus) processProposal(proposal *Proposal) {
 	} else {
 		// SlotNumber and ElectedLeaderID both absent — fall back to view-pinned election.
 		viewSlot := c.currentView
-		viewEpoch := viewSlot / SlotsPerEpoch
+		viewEpoch := c.membershipEpoch()
 		seed := c.randao.GetSeed(viewSlot)
 		if sel := c.selector.SelectProposer(viewEpoch, seed); sel != nil {
 			c.electedLeaderID = sel.ID
@@ -2849,7 +2865,7 @@ func (c *Consensus) processTimeout(timeout *TimeoutMsg) {
 		c.resetConsensusState()
 		// Use view-pinned RANDAO election so view-change leader matches proposal validation.
 		viewSlot := c.currentView
-		viewEpoch := viewSlot / SlotsPerEpoch
+		viewEpoch := c.membershipEpoch()
 		seed := c.randao.GetSeed(viewSlot)
 		if sel := c.selector.SelectProposer(viewEpoch, seed); sel != nil {
 			c.electedLeaderID = sel.ID
@@ -3014,6 +3030,31 @@ func meetsStakeQuorum(voted, total *big.Int) bool {
 	return lhs.Cmp(rhs) > 0
 }
 
+// MeetsStakeQuorum is the exported form of meetsStakeQuorum, so block
+// VERIFICATION in another package uses the identical rule rather than a
+// re-derivation of it.
+//
+// It is strict: voted*3 > total*2. For equal stakes that means K validators
+// need floor(2K/3)+1 votes — so 3 validators need all three, and 2 of 3 is
+// rejected because it is exactly 2/3, not strictly more.
+func MeetsStakeQuorum(voted, total *big.Int) bool { return meetsStakeQuorum(voted, total) }
+
+// StrictTwoThirdsCount returns how many DISTINCT voters are required out of an
+// N-member set, in integer math: (2N)/3 + 1.
+//
+//	N=1 -> 1    N=2 -> 2    N=3 -> 3    N=4 -> 3    N=5 -> 4    N=7 -> 5
+//
+// This is the distinct-voter floor that sits alongside the stake check. It is
+// what stops a single large validator from satisfying quorum alone, and it is
+// integer math on purpose — the old code used int(N*0.67), which floors to 2
+// for BOTH N=3 and N=4 and is therefore not a 2/3 rule at all.
+func StrictTwoThirdsCount(n int) int {
+	if n <= 0 {
+		return 0
+	}
+	return (2*n)/3 + 1
+}
+
 // hasQuorum checks if a block has achieved commit quorum based on stake weight
 func (c *Consensus) hasQuorum(blockHash string) bool {
 	// Get votes for this block
@@ -3124,12 +3165,29 @@ func (c *Consensus) getValidatorStake(validatorID string) *big.Int {
 
 // calculateQuorumSize returns the number of votes needed for quorum.
 // setSize is the size of the active staked validator set (chain state).
+// calculateQuorumSize returns the number of DISTINCT voters required out of a
+// set of `setSize`, in INTEGER math: (2N)/3 + 1.
+//
+// ★ This used to be `int(float64(setSize) * 0.67)`. That is not a 2/3 rule:
+//
+//	N=3 -> int(2.01) = 2      N=4 -> int(2.68) = 2
+//	N=6 -> int(4.02) = 4      N=7 -> int(4.69) = 4
+//
+// For N=3 it returned 2, so the "SAFETY FLOOR" this function exists to provide
+// permitted 2-of-3 — the exact case the surrounding comment says it was written
+// to catch. The stake check (meetsStakeQuorum) is strict and would still have
+// refused such a block, but a floor that is wrong on its own terms is a floor
+// that will not stay wrong on its own terms.
+//
+// It now returns exactly StrictTwoThirdsCount(N), so the vote-count floor and
+// the stake rule agree at the same boundary by construction:
+//
+//	N=1 -> 1    N=2 -> 2    N=3 -> 3    N=4 -> 3    N=6 -> 5
 func (c *Consensus) calculateQuorumSize(setSize int) int {
-	quorumSize := int(float64(setSize) * c.quorumFraction)
-	if quorumSize < 1 {
-		return 1 // Minimum quorum size is 1
-	}
-	return quorumSize
+	// ★ This used to be `int(float64(setSize) * 0.67)`. That is not a 2/3 rule:
+	// N=3 gave 2, permitting 2-of-3 — the exact case the surrounding SAFETY
+	// FLOOR comment says this function exists to prevent.
+	return StrictTwoThirdsCount(setSize)
 }
 
 // getTotalNodes returns the size of the ACTIVE STAKED validator set — chain
@@ -3607,7 +3665,7 @@ func (c *Consensus) startViewChange() {
 	// causing the new leader's own proposal to be rejected by every follower
 	// as "invalid leader".  Always use the same stake-weighted selector.
 	viewSlot := c.currentView
-	viewEpoch := viewSlot / SlotsPerEpoch
+	viewEpoch := c.membershipEpoch()
 	seed := c.randao.GetSeed(viewSlot)
 	if sel := c.selector.SelectProposer(viewEpoch, seed); sel != nil {
 		c.electedLeaderID = sel.ID

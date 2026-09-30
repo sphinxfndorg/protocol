@@ -60,6 +60,8 @@ import (
 	multisig "github.com/sphinxfndorg/protocol/src/core/musig"
 	key "github.com/sphinxfndorg/protocol/src/core/sthincs/key/backend"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
+
+	"github.com/sphinxfndorg/protocol/src/common"
 )
 
 // DevnetChainID is the chain ID every devnet parameter set resolves to
@@ -1291,4 +1293,172 @@ func ServeDevnetBundle(serveAddr string, req DevnetBundleRequest) (DevnetBundleR
 		return DevnetBundleResponse{File: entry.Name, Ready: false}, nil
 	}
 	return DevnetBundleResponse{File: entry.Name, Ready: true, Data: data}, nil
+}
+
+// ============================================================================
+// DEVNET-ONLY: the bootstrap faucet ledger.
+//
+// ★ WHAT THIS BUYS. The main flow is three `node` commands and nothing else:
+//
+//	./sphinx node --role=validator --tcp-addr=127.0.0.1:30303 --datadir=data/node0 --pbft
+//	./sphinx node --role=validator --port-offset=1 --seeds=127.0.0.1:30303 --pbft
+//	./sphinx node --role=validator --port-offset=2 --seeds=127.0.0.1:30303 --pbft
+//
+// so nobody may be asked to paste an address or supply a key. Each node
+// auto-generates ONE reward keypair in its own datadir on first start, the
+// bootstrap node's genesis document carries a faucet allocation (see
+// CreateGenesisForSelf), and the bootstrap pays each joiner's reward address
+// min-stake ON DEMAND — see bind.runDevnetFaucet.
+//
+// ★ NO NODE COUNT ANYWHERE. The faucet pays whoever asks; it holds a bounded
+// pool, not a list. A fixed list of pre-funded joiner addresses would be a
+// hidden node count — the exact knowledge this flow deletes — so it is never
+// used. Any number of joiners work, including none.
+//
+// ★ DEVNET ONLY, FAIL-CLOSED. Every entry point is reached only behind
+// DevnetAutoCustodyRequested(networkType), so none of this can arm on a chain
+// that carries value.
+// ============================================================================
+
+// devnetFaucetKeysSubdir holds the bootstrap node's faucet key + ledger. The
+// key is a PRIVATE key, so — unlike the public bundle — it is never served,
+// never fetched, and never appears in a genesis document.
+const devnetFaucetKeysSubdir = "custody/devnet-auto/faucet"
+
+// devnetRewardKeysSubdir holds a node's own auto-generated reward key. Also
+// private, also per-node, also never served.
+const devnetRewardKeysSubdir = "custody/devnet-auto/reward"
+
+// DevnetFaucetKeyDir is the bootstrap node's faucet key directory, for the
+// host (src/bind) that actually generates the key.
+//
+// ★ WHY GENERATION LIVES IN src/bind AND NOT HERE. Deriving a SPHINCS public
+// key's SPIF address needs usi/core/key, and that package imports core — so a
+// core→usi/core/key edge would be an import cycle. The host already imports
+// both, so it does the generate-or-load and hands us only the resulting
+// address. core keeps the ledger (pure state, no key material).
+func DevnetFaucetKeyDir(datadir string) string {
+	return perNodePath(datadir, devnetFaucetKeysSubdir)
+}
+
+// DevnetRewardKeyDir is a node's own reward key directory. See
+// DevnetFaucetKeyDir for why generation is the host's job.
+func DevnetRewardKeyDir(datadir string) string {
+	return perNodePath(datadir, devnetRewardKeysSubdir)
+}
+
+// DevnetFaucetState is the bootstrap node's running faucet ledger, persisted so
+// a restart never re-pays an address it already paid (which would silently
+// drain the pool) and never loses track of how much is left.
+type DevnetFaucetState struct {
+	// Address is the faucet's own reward address (its source of funds).
+	Address string `json:"address"`
+	// Paid maps an already-funded joiner address to true. It is the
+	// idempotence set: one address is funded at most once, ever.
+	Paid map[string]bool `json:"paid"`
+	// Nonce is the faucet's next transaction nonce. Transactions are
+	// nonce-checked, so this must advance exactly once per payout.
+	Nonce uint64 `json:"nonce"`
+}
+
+// devnetFaucetMu serialises read-modify-write cycles on the faucet ledger so
+// two concurrent funding requests cannot both read the same nonce.
+var devnetFaucetMu sync.Mutex
+
+// DevnetFaucetStatePath is the bootstrap node's faucet ledger path.
+func DevnetFaucetStatePath(datadir string) string {
+	return perNodePath(datadir, devnetFaucetKeysSubdir+"/faucet_state.json")
+}
+
+// LoadDevnetFaucetState reads the persisted faucet ledger, returning an empty
+// one when none exists yet (a faucet that has not paid anyone).
+func LoadDevnetFaucetState(datadir string) (*DevnetFaucetState, error) {
+	var st DevnetFaucetState
+	data, err := os.ReadFile(DevnetFaucetStatePath(datadir))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return &DevnetFaucetState{Paid: map[string]bool{}}, nil
+		}
+		return nil, err
+	}
+	if err := json.Unmarshal(data, &st); err != nil {
+		return nil, fmt.Errorf("devnet faucet state is unreadable: %w", err)
+	}
+	if st.Paid == nil {
+		st.Paid = map[string]bool{}
+	}
+	return &st, nil
+}
+
+// SaveDevnetFaucetState persists the faucet ledger atomically (temp+rename).
+func SaveDevnetFaucetState(datadir string, st *DevnetFaucetState) error {
+	path := DevnetFaucetStatePath(datadir)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	body, err := json.MarshalIndent(st, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, append(body, '\n'), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// ReserveDevnetFaucetPayout atomically claims the next faucet nonce for addr.
+//
+// It is the single choke point that makes "pay whoever asks" safe to run
+// concurrently: it refuses an address the faucet has already paid, and it hands
+// out each nonce exactly once, so two joiners can never emit a same-nonce pair
+// that the state transition would reject. The caller MUST release the
+// reservation if it fails to broadcast the payment.
+//
+// Returns (nonce, ok). ok=false means "already funded" or "no ledger yet" —
+// neither is an error, because both are ordinary outcomes.
+func ReserveDevnetFaucetPayout(datadir, addr string) (uint64, bool, error) {
+	devnetFaucetMu.Lock()
+	defer devnetFaucetMu.Unlock()
+
+	st, err := LoadDevnetFaucetState(datadir)
+	if err != nil {
+		return 0, false, err
+	}
+	canonical := common.CanonicalSPIFAddress(addr)
+	if st.Paid[canonical] {
+		return 0, false, nil // already funded — never pay the same address twice
+	}
+	nonce := st.Nonce
+	st.Nonce = nonce + 1
+	// Mark as paid BEFORE the broadcast commits. If the broadcast then fails,
+	// ReleaseDevnetFaucetPayout rolls this back, so a transient failure does
+	// not burn the joiner's one payout; a crash in between loses one payout,
+	// which is the safe direction to fail.
+	st.Paid[canonical] = true
+	if err := SaveDevnetFaucetState(datadir, st); err != nil {
+		return 0, false, err
+	}
+	return nonce, true, nil
+}
+
+// ReleaseDevnetFaucetPayout undoes a reservation whose payment never reached
+// the mempool, so the address can still be funded on a later attempt.
+func ReleaseDevnetFaucetPayout(datadir, addr string, nonce uint64) error {
+	devnetFaucetMu.Lock()
+	defer devnetFaucetMu.Unlock()
+
+	st, err := LoadDevnetFaucetState(datadir)
+	if err != nil {
+		return err
+	}
+	canonical := common.CanonicalSPIFAddress(addr)
+	// Only roll back OUR reservation: a later payout may already have claimed
+	// this nonce, in which case the ledger is ahead and must not be rewound.
+	if st.Paid[canonical] && st.Nonce == nonce+1 {
+		delete(st.Paid, canonical)
+		st.Nonce = nonce
+		return SaveDevnetFaucetState(datadir, st)
+	}
+	return nil
 }

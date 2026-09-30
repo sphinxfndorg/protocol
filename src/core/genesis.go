@@ -21,6 +21,7 @@ import (
 	logger "github.com/sphinxfndorg/protocol/src/console"
 	multisig "github.com/sphinxfndorg/protocol/src/core/musig"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
+	denom "github.com/sphinxfndorg/protocol/src/params/denom"
 	"github.com/sphinxfndorg/protocol/src/policy"
 )
 
@@ -956,25 +957,6 @@ func GenesisDistributionAuthorizerConfigured() bool {
 	return auth != nil
 }
 
-// resetGenesisCustodyForTest clears the authorizer, the witness sink and the
-// cached genesis block so a test can observe a first-build in isolation.
-// Production code never calls this: the cache is intentionally permanent.
-func resetGenesisCustody() {
-	SetGenesisDistributionAuthorizer(nil, 0)
-	SetGenesisWitnessSink(nil)
-	genesisDistributionAuthMu.Lock()
-	genesisOnce = sync.Once{}
-	genesisCached = nil
-	genesisHashValue = ""
-	genesisTimestampValue = 0
-	genesisDistributionAuthMu.Unlock()
-	// Forget the process-level idempotence marker too, so a test can exercise a
-	// fresh provisioning decision the way the next process start would.
-	devnetCustodyMu.Lock()
-	devnetCustodyApplied = nil
-	devnetCustodyMu.Unlock()
-}
-
 // ----------------------------------------------------------------------------
 // The ONE genesis document — <datadir>/config/genesis_state.json
 //
@@ -1130,6 +1112,28 @@ type GenesisStateFile struct {
 	// distribution slice plus the binding facts a replaying node must agree on.
 	// It lets a node rebuild block 0 identically while holding no custodian keys.
 	Witnesses *GenesisWitnessBook `json:"witnesses,omitempty"`
+
+	// ── Authorship provenance ────────────────────────────────────────────
+
+	// Bootstrap marks a document that a node AUTHORED FOR ITSELF as the first
+	// node to start on a devnet network (see CreateGenesisForSelf). It is a
+	// provenance record, not a safety mechanism, and it is the ONLY thing that
+	// relaxes the consensus.MinValidators floor below.
+	//
+	// ★ WHY THE FLOOR IS CONDITIONAL. A `genesis create` document names several
+	// validators up front, and an operator who names fewer than the BFT floor is
+	// provisioning a network that can never tolerate a fault — so that file is
+	// rejected. A self-authored document cannot: a node that has not started yet
+	// cannot appear in a document written before it existed, so the first node to
+	// run can only ever name ITSELF. Refusing that document would make a
+	// one-command devnet impossible, and it is not unsafe — the set grows as
+	// further nodes stake in, and a single active validator is a working chain
+	// (it commits its own blocks), which is exactly what a bootstrap node needs
+	// in order to produce the blocks the joining nodes sync.
+	//
+	// The floor is therefore an invariant of MULTI-NAME documents only, and
+	// consensus.MinValidators is never a runtime wait condition anywhere.
+	Bootstrap bool `json:"bootstrap,omitempty"`
 }
 
 // HasValidatorSet reports whether this document names an initial validator set at
@@ -1217,8 +1221,26 @@ func (gf *GenesisStateFile) Validate() error {
 	}
 
 	if hasSet {
-		if len(gf.Validators) < consensus.MinValidators {
-			return fmt.Errorf("genesis file must list at least %d validators, got %d",
+		// ★ THE BFT FLOOR IS AN AUTHORING RULE FOR MULTI-NAME DOCUMENTS.
+		//
+		// A document that names SEVERAL validators was written by an operator
+		// (`genesis create`), so it is held to consensus.MinValidators: naming
+		// fewer than the floor provisions a network that can never tolerate a
+		// fault, and refusing the file is correct.
+		//
+		// A `bootstrap: true` document is different in kind: it was authored by
+		// the first node to start and can only ever name ITSELF, because a node
+		// that has not started yet cannot appear in a document written before it
+		// existed. A one-validator seed is a legitimate starting point — the set
+		// grows as further nodes stake in, and a single active validator commits
+		// its own blocks. Refusing it would make a one-command devnet impossible.
+		//
+		// NOTE this is NOT the runtime gate. The runtime gate (bind/helpers.go)
+		// is stake-weighted — more than 2/3 of the ACTIVE snapshot's stake must
+		// be ready — so a 1-validator chain passes immediately and a 2-validator
+		// chain passes once both are ready.
+		if !gf.Bootstrap && len(gf.Validators) < consensus.MinValidators {
+			return fmt.Errorf("genesis file must list at least %d validators, got %d (only a self-authored `bootstrap: true` document may list fewer)",
 				consensus.MinValidators, len(gf.Validators))
 		}
 		if gf.Chain.EpochBlocks == 0 {
@@ -1381,4 +1403,176 @@ func stripHexPrefix(s string) string {
 		return s[2:]
 	}
 	return s
+}
+
+// SelfGenesisStakeNSPX is the stake a node records for itself in a document it
+// authors: the protocol minimum, in nSPX. It is a per-validator constant, not a
+// set size.
+func SelfGenesisStakeNSPX() string {
+	return new(big.Int).Mul(big.NewInt(denom.MinValidatorStakeSPX), big.NewInt(denom.SPX)).String()
+}
+
+// CreateGenesisForSelf writes a genesis document naming ONLY this node.
+//
+// This is the "whoever starts first creates genesis" path: no node is special,
+// there is no designated bootstrap terminal, and no node-count value appears in
+// any command.
+//
+// ★ It MERGES rather than overwrites. Devnet auto-custody runs earlier in
+// startup (it must, because block 0's distributions are signed by the custodian
+// keys) and that path already created the document carrying the `multisig` and
+// `witnesses` sections. Those must survive, so we fill in the `chain` and
+// `validators` sections and leave everything else exactly as it was.
+//
+// ★ It can only ever name ONE validator — itself. A node that has not started
+// yet cannot appear in a document written before it existed, so the set grows as
+// nodes join by STAKING (see bind.stakeValidatorFromRewardAddress), not here.
+// `genesis create` therefore remains the only way to name several validators
+// FaucetPayoutNSPX is what the bootstrap faucet pays one joining validator.
+//
+// ★ IT IS MIN STAKE + A FEE RESERVE, NOT MIN STAKE. A joining node must be
+// able to (a) lock the full minimum stake AND (b) still pay the gas fee for
+// its own Stake transaction out of what it received. Paying exactly min stake
+// leaves zero minus the fee, so the Stake tx can never be broadcast — the
+// joiner would be funded and still unable to join.
+//
+// The reserve is derived from the REAL policy fee floor, never a round number:
+//   - the joiner's Stake tx fee: policy.QuoteTransactionGas(0), i.e.
+//     BaseTransactionGas × MinimumGasPrice — the cheapest possible transaction;
+//   - the faucet's OWN transfer fee, paid by the faucet on top of the payout;
+//   - a margin factor, so a later policy change (a higher gas price) cannot
+//     retroactively leave already-funded joiners unable to stake.
+//
+// ★ THE EXACT NUMBERS, so nobody has to re-derive them:
+//
+//	BaseTransactionGas    = 21000
+//	MinimumGasPrice       = 1_000_000_000 nSPX per gas  (1 gSPX)
+//	Stake tx fee          = 21000 × 1e9 = 21_000_000_000_000 nSPX
+//	                       = 0.000021 SPX
+//	fee reserve           = 2 fees × 4 margin = 8 × 0.000021
+//	                       = 0.000168 SPX
+//	payout                = 32 SPX (min stake) + 0.000168 SPX
+//	                       = 32000168000000000000 nSPX = 32.000168 SPX
+//
+// Note the decimal places: the reserve is 0.000168, so the payout reads
+// "32.000168", NOT "32.00000168".
+//
+// All in nSPX, recomputed from policy at call time, so there is no second copy
+// of these numbers to drift.
+func FaucetPayoutNSPX() *big.Int {
+	params := policy.GetDefaultPolicyParams()
+	oneTx := params.QuoteTransactionGas(0).GasFee // cheapest tx: no return data
+
+	// 4x margin on the fee reserve only. The stake itself is never inflated.
+	feeReserve := new(big.Int).Mul(new(big.Int).Add(oneTx, oneTx), big.NewInt(4))
+	return new(big.Int).Add(denom.MinValidatorStakeNSPX(), feeReserve)
+}
+
+// FaucetPoolMultipliers is how many payouts the bootstrap faucet holds.
+//
+// ★ IT IS NOT A NODE COUNT AND MUST NEVER BE READ AS ONE. It is a treasury
+// cap: a bound on how much value the faucet can ever move, so a flood of
+// joiners cannot drain it without limit. The node never learns a network size
+// from it — nothing reads it except FaucetPoolNSPX, which bakes it into a
+// single literal in the genesis document at author time, and by then it is
+// indistinguishable from any other funded account.
+//
+// It is set far ABOVE any realistic devnet size on purpose. An earlier value of
+// 64 was wrong in kind, not just in magnitude: it was a hidden cap on how many
+// nodes the devnet could ever have, which is precisely the "how many nodes are
+// there" knowledge this design deletes. 100,000 payouts is ~3.2M SPX, about
+// 0.06% of the 5B SPX max supply, so exhausting it is not a reachable state
+// for a devnet.
+//
+// DOCUMENTED BEHAVIOUR WHEN EXHAUSTED: the faucet has nothing left to pay, so
+// a joining node is simply not funded. It then stays a PEER with no vote
+// weight and no effect on the chain — a liveness condition for that node, never
+// a safety problem, and never an error that halts the network.
+const FaucetPoolMultipliers = 100_000
+
+// FaucetPoolNSPX returns the bootstrap faucet's total allocation in nSPX.
+func FaucetPoolNSPX() *big.Int {
+	return new(big.Int).Mul(FaucetPayoutNSPX(), big.NewInt(FaucetPoolMultipliers))
+}
+
+// CreateGenesisForSelf writes a genesis document naming ONLY this node.
+//
+// This is the "whoever starts first creates genesis" path: no node is special,
+// there is no designated bootstrap terminal, and no node-count value appears in
+// any command.
+//
+// ★ It MERGES rather than overwrites. Devnet auto-custody runs earlier in
+// startup (it must, because block 0's distributions are signed by the custodian
+// keys) and that path already created the document carrying the `multisig` and
+// `witnesses` sections. Those must survive, so we fill in the `chain` and
+// `validators` sections and leave everything else exactly as it was.
+//
+// ★ It can only ever name ONE validator — itself, marked `bootstrap: true`. A
+// node that has not started yet cannot appear in a document written before it
+// existed, so the set grows as nodes join by staking, not here. `genesis
+// create` remains the only way to name several validators before any of them
+// exist; it is optional and never required.
+//
+// faucetAddressHex, when non-empty, is recorded as the bootstrap faucet: a
+// devnet-only pooled account this node pays each joiner's reward address from.
+func CreateGenesisForSelf(datadir, nodeID, publicKeyHex, rewardAddressHex, faucetAddressHex string) error {
+	params := GenesisChainParams{
+		ChainID:     DevnetChainID,
+		Network:     string(PhaseDevnet),
+		EpochBlocks: DevnetEpochBlocks,
+	}
+	params.MinStakeNSPX = SelfGenesisStakeNSPX()
+
+	return MutateGenesisFile(datadir, func(gf *GenesisStateFile) {
+		gf.Version = genesisStateFileVersion
+		gf.Bootstrap = true
+		gf.Chain = params
+		gf.Validators = []GenesisStakedValidator{{
+			NodeID:        nodeID,
+			PublicKey:     publicKeyHex,
+			StakeNSPX:     params.MinStakeNSPX,
+			RewardAddress: rewardAddressHex,
+		}}
+
+		// Funded accounts are MERGED, never replaced and never duplicated: this
+		// must be idempotent across restarts, and other writers own other rows.
+		existing := map[string]bool{}
+		for _, a := range gf.FundedAccounts {
+			existing[common.CanonicalSPIFAddress(a.Address)] = true
+		}
+		add := func(addr, balance, label string) {
+			if addr == "" {
+				return
+			}
+			canonical := common.CanonicalSPIFAddress(addr)
+			if existing[canonical] {
+				return
+			}
+			existing[canonical] = true
+			gf.FundedAccounts = append(gf.FundedAccounts, GenesisFundedAccount{
+				Address:     canonical,
+				BalanceNSPX: balance,
+				Label:       label,
+			})
+		}
+		add(rewardAddressHex, params.MinStakeNSPX, "genesis-self-stake")
+		add(faucetAddressHex, FaucetPoolNSPX().String(), "devnet-faucet")
+	})
+}
+
+// GenesisNeedsAuthoring reports whether datadir holds no genesis document that
+// actually names a validator set.
+//
+// A document can exist and still be unusable: devnet auto-custody creates one
+// early (it must sign block 0 first) carrying only the `multisig` and
+// `witnesses` sections. That is a partial document, not a validator set, and a
+// node reading it would find itself in an empty set and wait forever. Testing
+// for a real validator set — not merely for a file — is what makes "whoever
+// starts first authors genesis" work on a cold datadir.
+func GenesisNeedsAuthoring(datadir string) (bool, error) {
+	gf, err := LoadGenesisFile(datadir)
+	if err != nil {
+		return false, err
+	}
+	return !gf.HasValidatorSet(), nil
 }

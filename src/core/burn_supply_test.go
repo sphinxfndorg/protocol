@@ -5,6 +5,8 @@ package core
 
 import (
 	"math/big"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sphinxfndorg/protocol/src/common"
@@ -196,3 +198,269 @@ func TestCirculatingSupplyMatchesBurnAccounting(t *testing.T) {
 		t.Fatalf("totalSupply-DEAD = %s, want %s", calc, wantAfterManual)
 	}
 }
+
+// ============================================================================
+// funded_accounts supply accounting (Checkpoint 1, decision 1)
+//
+// A funded_accounts row is NOT a block-0 allocation: it is not in block 0's
+// TxsRoot, no vault balance moves, and the account did not previously hold the
+// coins. Crediting the balance without creating matching supply would leave
+// spendable value the ledger does not account for. seedGenesisFileAllocations
+// therefore increments total supply by exactly the amount it credits.
+// ============================================================================
+
+// TestFundedAccounts_IncrementSupplyExactly drives the real production path
+// (a real genesis document + Blockchain.seedGenesisFileAllocations) and asserts:
+//
+//  1. circulating supply AFTER == the credited total (nothing unaccounted);
+//  2. the burn identity still holds (burns are totalSupply - balance(DEAD)).
+func TestFundedAccounts_IncrementSupplyExactly(t *testing.T) {
+	dir := tempDir(t, "funded-supply")
+	previousDataDir := common.GetDataDir()
+	common.SetDataDir(dir)
+	defer common.SetDataDir(previousDataDir)
+
+	// A real bootstrap document: one self-stake row + one faucet row.
+	if err := CreateGenesisForSelf(dir, "Node-a", strings.Repeat("ab", 32),
+		strings.Repeat("11", 20), strings.Repeat("22", 20)); err != nil {
+		t.Fatalf("CreateGenesisForSelf: %v", err)
+	}
+	gf, err := LoadGenesisFile(dir)
+	if err != nil || gf == nil {
+		t.Fatalf("LoadGenesisFile: %v", err)
+	}
+	if !gf.HasValidatorSet() || !gf.Bootstrap {
+		t.Fatalf("expected a bootstrap document with a validator set; got set=%v bootstrap=%v",
+			gf.HasValidatorSet(), gf.Bootstrap)
+	}
+	wantCredited := big.NewInt(0)
+	for _, a := range gf.FundedAccounts {
+		b, perr := parseDecimalNSPX(a.BalanceNSPX)
+		if perr != nil {
+			t.Fatalf("row %s: %v", a.Address, perr)
+		}
+		wantCredited.Add(wantCredited, b)
+	}
+	if wantCredited.Sign() <= 0 {
+		t.Fatal("expected the bootstrap document to fund at least the self-stake account")
+	}
+
+	bc := newMinimalBlockchain(t)
+	// Use the *core.StateDB (not bc.NewStateDB, which returns the narrower
+	// pool.StateDB interface) because total-supply accounting lives on the
+	// concrete type.
+	db, err := database.NewLevelDB(filepath.Join(t.TempDir(), "supply-state"))
+	if err != nil {
+		t.Fatalf("NewLevelDB: %v", err)
+	}
+	defer db.Close()
+	sdb := NewStateDB(db)
+
+	dead := common.CanonicalAddress(common.DefaultBurnAddress)
+	totalBefore := sdb.GetTotalSupply()
+	deadBefore, _ := sdb.GetBalance(dead)
+
+	bc.seedGenesisFileAllocations(sdb)
+
+	totalAfter := sdb.GetTotalSupply()
+	deadAfter, _ := sdb.GetBalance(dead)
+
+	// (1) circulating supply rose by EXACTLY the credited amount.
+	circulatingDelta := new(big.Int).Sub(
+		new(big.Int).Sub(totalAfter, deadAfter),
+		new(big.Int).Sub(totalBefore, deadBefore))
+	if circulatingDelta.Cmp(wantCredited) != 0 {
+		t.Errorf("circulating supply rose by %s, want exactly the credited %s",
+			circulatingDelta, wantCredited)
+	}
+
+	// (2) The balances really exist and equal the credited total.
+	sumNonDead := big.NewInt(0)
+	for _, a := range gf.FundedAccounts {
+		addr := common.CanonicalSPIFAddress(a.Address)
+		if b, gerr := sdb.GetBalance(addr); gerr == nil && b != nil {
+			sumNonDead.Add(sumNonDead, b)
+		}
+	}
+	if sumNonDead.Cmp(wantCredited) != 0 {
+		t.Errorf("funded balances total %s, want %s", sumNonDead, wantCredited)
+	}
+
+	// (3) THE BURN IDENTITY HOLDS: circulating == sum of non-DEAD balances.
+	burned := new(big.Int).Sub(deadAfter, deadBefore)
+	identity := new(big.Int).Sub(totalAfter, deadAfter)
+	if identity.Cmp(sumNonDead) != 0 {
+		t.Errorf("burn identity broken: totalSupply-DEAD = %s, but funded balances = %s", identity, sumNonDead)
+	}
+	t.Logf("credited=%s circulatingDelta=%s totalSupply=%s burned=%s",
+		wantCredited, circulatingDelta, totalAfter, burned)
+}
+
+
+
+// TestFundedAccounts_RefusedOnNonBootstrapDocument covers decision 2: a
+// `genesis create` document (Bootstrap=false) carrying funded_accounts is
+// refused, because such rows create supply outside block 0's allocation
+// schedule and are invisible to the genesis hash.
+func TestFundedAccounts_RefusedOnNonBootstrapDocument(t *testing.T) {
+	dir := tempDir(t, "funded-refuse")
+	previousDataDir := common.GetDataDir()
+	common.SetDataDir(dir)
+	defer common.SetDataDir(previousDataDir)
+
+	minStake := SelfGenesisStakeNSPX()
+	// Bootstrap=false -> a `genesis create`-shaped document. It needs >= 3
+	// validators to pass Validate(), so name three.
+	mk := func(bootstrap bool) *GenesisStateFile {
+		return &GenesisStateFile{
+			Version:   genesisStateFileVersion,
+			Bootstrap: bootstrap,
+			Chain: GenesisChainParams{
+				ChainID: DevnetChainID, Network: "devnet",
+				EpochBlocks: DevnetEpochBlocks, MinStakeNSPX: minStake,
+			},
+			Validators: []GenesisStakedValidator{
+				{NodeID: "Node-a", StakeNSPX: minStake},
+				{NodeID: "Node-b", StakeNSPX: minStake},
+				{NodeID: "Node-c", StakeNSPX: minStake},
+			},
+			FundedAccounts: []GenesisFundedAccount{
+				{Address: strings.Repeat("33", 20), BalanceNSPX: minStake, Label: "test"},
+			},
+		}
+	}
+
+	// (a) A bootstrap document with funded_accounts validates.
+	if err := mk(true).Validate(); err != nil {
+		t.Fatalf("a bootstrap document with funded_accounts must validate: %v", err)
+	}
+
+	// (b) A non-bootstrap document with funded_accounts: the SEEDING path must
+	//     refuse — no balance, no supply.
+	if err := WriteGenesisFile(dir, mk(false)); err != nil {
+		t.Fatalf("WriteGenesisFile: %v", err)
+	}
+	bc := newMinimalBlockchain(t)
+	// Use the *core.StateDB (not bc.NewStateDB, which returns the narrower
+	// pool.StateDB interface) because total-supply accounting lives on the
+	// concrete type.
+	db, err := database.NewLevelDB(filepath.Join(t.TempDir(), "supply-state"))
+	if err != nil {
+		t.Fatalf("NewLevelDB: %v", err)
+	}
+	defer db.Close()
+	sdb := NewStateDB(db)
+
+	addr := strings.Repeat("33", 20)
+	totalBefore := sdb.GetTotalSupply()
+	bc.seedGenesisFileAllocations(sdb)
+	totalAfter := sdb.GetTotalSupply()
+
+	if bal, gerr := sdb.GetBalance(addr); gerr == nil && bal != nil && bal.Sign() > 0 {
+		t.Errorf("non-bootstrap funded_accounts must NOT be seeded, but %s holds %s", addr, bal)
+	}
+	if totalAfter.Cmp(totalBefore) != 0 {
+		t.Errorf("refused funded_accounts must not create supply (%s -> %s)", totalBefore, totalAfter)
+	}
+	t.Logf("non-bootstrap funded_accounts refused: balance 0, supply unchanged at %s", totalAfter)
+}
+
+// TestGenesisDocumentIdentityGap_DemonstratesTheGap is decision 3, part 1.
+//
+// ★ THE GAP. funded_accounts and validators are NOT inputs to block 0's hash.
+// FinalizeHash covers only header fields, and block 0's header is built from
+// DefaultGenesisState() — the genesis document is never read there. So two nodes
+// holding DIFFERENT genesis_state.json files compute the SAME block-0 hash.
+//
+// The key-exchange genesis check compares exactly that hash, so two nodes with
+// different membership and different funded balances PASS the check and then
+// disagree about who may vote and who holds coins.
+//
+// This demonstrates it rather than arguing it.
+func TestGenesisDocumentIdentityGap_DemonstratesTheGap(t *testing.T) {
+	minStake := SelfGenesisStakeNSPX()
+	mkChain := func() GenesisChainParams {
+		return GenesisChainParams{
+			ChainID: DevnetChainID, Network: "devnet",
+			EpochBlocks: DevnetEpochBlocks, MinStakeNSPX: minStake,
+		}
+	}
+
+	// Document A: ONE validator, one funded account.
+	docA := &GenesisStateFile{
+		Version:   genesisStateFileVersion,
+		Bootstrap: true,
+		Chain:     mkChain(),
+		Validators: []GenesisStakedValidator{
+			{NodeID: "Node-A", StakeNSPX: minStake},
+		},
+		FundedAccounts: []GenesisFundedAccount{
+			{Address: strings.Repeat("aa", 20), BalanceNSPX: minStake, Label: "A"},
+		},
+	}
+	// Document B: FOUR different validators and a different funded account.
+	docB := &GenesisStateFile{
+		Version:   genesisStateFileVersion,
+		Bootstrap: true,
+		Chain:     mkChain(),
+		Validators: []GenesisStakedValidator{
+			{NodeID: "Node-W", StakeNSPX: minStake},
+			{NodeID: "Node-X", StakeNSPX: minStake},
+			{NodeID: "Node-Y", StakeNSPX: minStake},
+			{NodeID: "Node-Z", StakeNSPX: minStake},
+		},
+		FundedAccounts: []GenesisFundedAccount{
+			{Address: strings.Repeat("bb", 20), BalanceNSPX: minStake, Label: "B"},
+		},
+	}
+
+	// Both documents are valid and genuinely different.
+	if err := docA.Validate(); err != nil {
+		t.Fatalf("doc A must be valid: %v", err)
+	}
+	if err := docB.Validate(); err != nil {
+		t.Fatalf("doc B must be valid: %v", err)
+	}
+	if len(docA.Validators) == len(docB.Validators) {
+		t.Fatal("test setup is wrong: the documents should differ in membership")
+	}
+	if docA.FundedAccounts[0].Address == docB.FundedAccounts[0].Address {
+		t.Fatal("test setup is wrong: the funded accounts should differ")
+	}
+
+	// THE PROOF. Neither document is an input: block 0 is built from the
+	// canonical DefaultGenesisState(), so the hash is the same regardless of
+	// which document (if any) sits in the datadir.
+	hashWithNoDocument := GetGenesisHash()
+
+	// Write each document in turn and re-read the hash. It must not move.
+	dirA, dirB := t.TempDir(), t.TempDir()
+	prev := common.GetDataDir()
+
+	common.SetDataDir(dirA)
+	if err := WriteGenesisFile(dirA, docA); err != nil {
+		t.Fatalf("write doc A: %v", err)
+	}
+	hashA := GetGenesisHash()
+
+	common.SetDataDir(dirB)
+	if err := WriteGenesisFile(dirB, docB); err != nil {
+		t.Fatalf("write doc B: %v", err)
+	}
+	hashB := GetGenesisHash()
+	common.SetDataDir(prev)
+
+	if hashA != hashB {
+		t.Errorf("expected the block-0 hash to be identical for both documents; got %s vs %s", hashA, hashB)
+	}
+	if hashA != hashWithNoDocument {
+		t.Errorf("expected the block-0 hash to be identical with and without a document; got %s vs %s",
+			hashA, hashWithNoDocument)
+	}
+
+	t.Logf("doc A: %d validator(s), funded %s", len(docA.Validators), docA.FundedAccounts[0].Address)
+	t.Logf("doc B: %d validator(s), funded %s", len(docB.Validators), docB.FundedAccounts[0].Address)
+	t.Logf("block-0 hash identical for doc A, doc B and no document at all: %s", hashA)
+	t.Logf("=> differing documents PASS the key-exchange genesis check, then disagree on membership and balances")
+}
+

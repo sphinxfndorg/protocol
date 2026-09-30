@@ -41,47 +41,158 @@ func (vs *ValidatorSet) GetMinStakeSPX() uint64 {
 	return minSPX.Uint64()
 }
 
-// AddValidator adds or updates a validator's stake (in SPX).
-// AddValidator adds or updates a validator's stake (in SPX).
-// This is the primary method for setting stakes - it handles both add and update
-func (vs *ValidatorSet) AddValidator(id string, stakeSPX uint64) error {
+// ---------------------------------------------------------------------------
+// Genesis seeding — the ONLY path that creates live members
+// ---------------------------------------------------------------------------
+
+// AddGenesisValidator adds or updates a GENESIS member's stake, in nSPX.
+//
+// ★ WHY big.Int AND NOT SPX (Checkpoint 1b 1b). The previous signature took
+// `stakeSPX uint64` and did `big.NewInt(int64(stakeSPX))`. That conversion
+// wraps NEGATIVE for any stake above 2^63-1 SPX, and it also truncated stake to
+// whole SPX before the comparison against the minimum. Both are silent
+// corruption on a value that becomes a quorum denominator. nSPX is a *big.Int
+// end to end here: no narrowing cast, no truncation.
+//
+// ★ WHY NO FREE MINIMUM (Checkpoint 1b 1a). The old code clamped a
+// below-minimum stake UP to the minimum and returned nil. So
+// AddValidator(id, 0) silently produced a full 32 SPX validator: a zero-cost
+// seat. It now returns an error, and only an explicitly-authorised genesis
+// seeding path can create a member at all.
+//
+// ★ GENESIS-ONLY (Checkpoint 1b 1d). Membership is chain state. This function
+// mutates the live set with no activation epoch and no boundary, so it is
+// restricted to genesis seeding (bind.seedGenesisValidators and
+// initializePhase2Stakes) and is guarded at runtime by genesisSealed. Runtime
+// admission goes through QueueValidator, which defers weight to a boundary.
+func (vs *ValidatorSet) AddGenesisValidator(id string, stakeNSPX *big.Int) error {
+	if id == "" {
+		return fmt.Errorf("genesis validator: empty node ID")
+	}
+	if stakeNSPX == nil {
+		return fmt.Errorf("genesis validator %s: nil stake", id)
+	}
+	if stakeNSPX.Sign() < 0 {
+		return fmt.Errorf("genesis validator %s: negative stake %s", id, stakeNSPX.String())
+	}
+	// ★ 1a: a below-minimum or zero stake is an ERROR, never a silent grant.
+	if stakeNSPX.Cmp(vs.minStakeAmount) < 0 {
+		return fmt.Errorf("genesis validator %s: stake %s is below the minimum %s",
+			id, stakeNSPX.String(), vs.minStakeAmount.String())
+	}
+
 	vs.mu.Lock()
 	defer vs.mu.Unlock()
 
-	stakeNSPX := new(big.Int).Mul(
-		big.NewInt(int64(stakeSPX)),
-		big.NewInt(denom.SPX),
-	)
-
-	// If below minimum, use minimum
-	if stakeNSPX.Cmp(vs.minStakeAmount) < 0 {
-		minStakeSPX := new(big.Int).Div(vs.minStakeAmount, big.NewInt(denom.SPX)).Uint64()
-		logger.Warn("Stake %d SPX below minimum %d SPX, using minimum", stakeSPX, minStakeSPX)
-		stakeSPX = minStakeSPX
-		stakeNSPX = new(big.Int).Mul(
-			big.NewInt(int64(stakeSPX)),
-			big.NewInt(denom.SPX),
-		)
+	if vs.sealed {
+		return fmt.Errorf("genesis validator %s: the set is sealed; membership can now only change at an epoch boundary", id)
 	}
 
-	// Check if validator already exists
 	if val, exists := vs.validators[id]; exists {
-		// Update existing validator
-		vs.totalStake.Sub(vs.totalStake, val.StakeAmount)
-		val.StakeAmount = stakeNSPX
-		vs.totalStake.Add(vs.totalStake, stakeNSPX)
-		logger.Info("Validator %s updated to %d SPX stake", id, stakeSPX)
-	} else {
-		// Add new validator
-		vs.validators[id] = &StakedValidator{
-			ID:          id,
-			StakeAmount: stakeNSPX,
-		}
-		vs.totalStake.Add(vs.totalStake, stakeNSPX)
-		logger.Info("Validator %s added with %d SPX stake", id, stakeSPX)
+		val.StakeAmount = new(big.Int).Set(stakeNSPX)
+		val.ActivationEpoch = 0 // a genesis member is active from epoch 0
+		logger.Info("Genesis validator %s stake set to %s", id, stakeNSPX.String())
+		return nil
+	}
+	vs.validators[id] = &StakedValidator{
+		ID:          id,
+		StakeAmount: new(big.Int).Set(stakeNSPX),
+		// ActivationEpoch 0 == active from genesis.
+	}
+	vs.rebuildTotalLocked(0)
+	logger.Info("Genesis validator %s seeded with %s", id, stakeNSPX.String())
+	return nil
+}
+
+// SealGenesis closes the set to genesis seeding. It is called once genesis
+// seeding is complete, so no later code path can add a member immediately —
+// from that point the only way into the set is QueueValidator (which defers
+// weight to a boundary) or ProcessEpochTransition.
+func (vs *ValidatorSet) SealGenesis() {
+	vs.mu.Lock()
+	vs.sealed = true
+	vs.mu.Unlock()
+	logger.Info("Validator set sealed: membership now changes only at epoch boundaries")
+}
+
+// Sealed reports whether the set has been closed to genesis seeding.
+func (vs *ValidatorSet) Sealed() bool {
+	vs.mu.RLock()
+	defer vs.mu.RUnlock()
+	return vs.sealed
+}
+
+// QueueValidator admits a RUNTIME validator, deferring all weight to
+// `activationEpoch`.
+//
+// This is the only path for a validator that is not in the genesis document.
+// It records the stake but adds NOTHING to the total and NOTHING to the active
+// set: weight arrives when ProcessEpochTransition rebuilds the total at the
+// boundary, which is the same rebuild every other member goes through. A node
+// admitted here is by definition still syncing, so granting it weight at
+// admission would put an unvalidated node into the quorum denominator.
+func (vs *ValidatorSet) QueueValidator(id string, stakeNSPX *big.Int, activationEpoch uint64) error {
+	if id == "" {
+		return fmt.Errorf("queued validator: empty node ID")
+	}
+	if stakeNSPX == nil {
+		return fmt.Errorf("queued validator %s: nil stake", id)
+	}
+	if stakeNSPX.Sign() < 0 {
+		return fmt.Errorf("queued validator %s: negative stake %s", id, stakeNSPX.String())
+	}
+	// ★ 1a: no free minimum here either.
+	if stakeNSPX.Cmp(vs.minStakeAmount) < 0 {
+		return fmt.Errorf("queued validator %s: stake %s is below the minimum %s",
+			id, stakeNSPX.String(), vs.minStakeAmount.String())
 	}
 
+	vs.mu.Lock()
+	defer vs.mu.Unlock()
+
+	v, exists := vs.validators[id]
+	if !exists {
+		v = &StakedValidator{ID: id}
+		vs.validators[id] = v
+	}
+	v.StakeAmount = new(big.Int).Set(stakeNSPX)
+	v.ActivationEpoch = activationEpoch
+	// The total is deliberately NOT touched: this member is pending, and the
+	// next ProcessEpochTransition rebuild will include it exactly when it
+	// becomes active.
+	logger.Info("Validator %s queued with %s nSPX, active from epoch %d", id, stakeNSPX.String(), activationEpoch)
 	return nil
+}
+
+// rebuildTotalLocked recomputes vs.totalStake from members that count AT
+// `epoch`: not slashed, not retired, and not still pending.
+//
+// ★ THIS IS THE ONLY WRITER of totalStake. It existed as a field mutated
+// incrementally by four different functions, which is how a slashed or ejected
+// validator could keep its full stake in the denominator (Checkpoint 1b 1c).
+// Rebuilding is O(n) per epoch boundary, which is irrelevant next to signing a
+// block, and it cannot drift.
+//
+// Callers must hold vs.mu.
+func (vs *ValidatorSet) rebuildTotalLocked(epoch uint64) {
+	total := big.NewInt(0)
+	for _, v := range vs.validators {
+		if v == nil || v.IsSlashed || v.StakeAmount == nil {
+			continue
+		}
+		if v.ActivationEpoch > epoch {
+			continue // still pending: no weight
+		}
+		if v.ExitEpoch != 0 && v.ExitEpoch <= epoch {
+			continue // retired: no weight
+		}
+		total.Add(total, v.StakeAmount)
+	}
+	vs.totalStake = total
+	// The epoch the total was computed AT. GetTotalStake() reads membership
+	// against this same epoch, so the cached field and the live read can never
+	// disagree about which epoch they mean.
+	vs.currentEpoch = epoch
 }
 
 // IsValidStakeAmount checks if a stake amount meets the minimum requirement.
@@ -156,17 +267,46 @@ func (vs *ValidatorSet) ActiveValidatorIDs(epoch uint64) []string {
 }
 
 // GetTotalStake returns total active stake in nSPX.
+// GetTotalStake returns the stake that counts toward quorum RIGHT NOW: the sum
+// of members that are active, not slashed and not retired as of the most recent
+// epoch boundary.
+//
+// ★ 1c: it RECOMPUTES rather than returning the cached field. The field used to
+// be maintained by four separate incremental updates, so a validator that was
+// slashed or ejected after the last boundary kept its FULL stake in the
+// denominator — inflating the threshold every honest node had to reach, and in
+// the ejected case permanently. Recomputing over the members is O(n) on a
+// read; n is the size of the validator set, and a read already walks it in
+// GetActiveValidators, so this is not a new cost class.
+//
+// The epoch used is vs.currentEpoch, i.e. the last boundary actually
+// processed. Membership between boundaries does not change (that is the whole
+// point of boundary activation), so this is exact, not an approximation.
 func (vs *ValidatorSet) GetTotalStake() *big.Int {
 	vs.mu.RLock()
 	defer vs.mu.RUnlock()
-	if vs.totalStake == nil {
-		return big.NewInt(0)
+
+	total := big.NewInt(0)
+	for _, v := range vs.validators {
+		if v == nil || v.IsSlashed || v.StakeAmount == nil {
+			continue
+		}
+		if v.ActivationEpoch > vs.currentEpoch {
+			continue // pending
+		}
+		if v.ExitEpoch != 0 && v.ExitEpoch <= vs.currentEpoch {
+			continue // ejected
+		}
+		total.Add(total, v.StakeAmount)
 	}
-	return new(big.Int).Set(vs.totalStake)
+	return total
 }
 
-// GetValidator returns the validator details mapped into core.StakedValidator
-// so core.VerifyBlockAttestations can verify quorum via validatorSetProvider.
+// GetValidator returns the validator details mapped into core.StakedValidator.
+//
+// It is retained for the diagnostic and RPC paths that want a decoupled view.
+// NOTE: block verification no longer calls this — it reads the snapshot's own
+// rows directly, so a stale live view cannot influence what is accepted.
 func (vs *ValidatorSet) GetValidator(id string) interface{} {
 	vs.mu.RLock()
 	defer vs.mu.RUnlock()
@@ -179,7 +319,7 @@ func (vs *ValidatorSet) GetValidator(id string) interface{} {
 	cs := &StakedValidator{ // reuse consensus.StakedValidator type
 		ID:          v.ID,
 		StakeAmount: new(big.Int).Set(v.StakeAmount),
-		// remaining fields are ignored by core.VerifyBlockAttestations
+		// remaining fields are ignored by callers that only need identity
 	}
 
 	if v.StakeAmount != nil {
@@ -221,6 +361,17 @@ func (c *Consensus) GetValidatorSet() *ValidatorSet {
 // (policy.CalculateSlashingPenaltyBPS) so consensus and policy always agree
 // on the economics; policy.SlashDowntimeBPS / SlashDoubleSignBPS /
 // SlashLivenessBPS are the canonical rates.
+//
+// ★ THIS FUNCTION CURRENTLY HAS ZERO CALLERS, AND THAT IS THE POINT (Phase 1,
+// decision 3). It is retained ONLY for the executor path that applies
+// ON-CHAIN EVIDENCE at an epoch boundary. It must never be called from a
+// consensus, VDF, or peer-observation path: slashing a validator because THIS
+// node saw it miss a VDF submission makes the validator set a function of local
+// observation, so two nodes reach different sets — and therefore different
+// quorums — for the same height.
+//
+// TestNoLocalObservationSlashing in the consensus package enforces that no
+// such caller is reintroduced.
 func (vs *ValidatorSet) SlashValidator(id, reason string, penaltyBps uint64) {
 	vs.mu.Lock()
 	defer vs.mu.Unlock()
@@ -253,133 +404,142 @@ func (vs *ValidatorSet) SlashValidator(id, reason string, penaltyBps uint64) {
 	}
 }
 
-// FinaliseEpochAndSlash is the epoch-boundary hook that ties the VDF beacon
-// and the validator set together.
+// ★ FinaliseEpochAndSlash HAS BEEN DELETED (Phase 1, decision 3).
 //
-// Call this from the Consensus engine at slot 0 of each new epoch:
+// It tied RANDAO's VDF bookkeeping directly to SlashValidator, i.e. it let a
+// node mutate the LIVE validator set from what that node happened to observe
+// locally. Two nodes that saw different sets of VDF submissions at the same
+// height would compute different validator sets, different totals, and
+// different quorums for the same block — exactly the divergence the
+// snapshot-based model exists to prevent.
 //
-//	slashList := c.randao.FinaliseEpoch(epoch, c.validatorSet.ActiveValidatorIDs(epoch))
-//	for _, id := range slashList {
-//	    c.validatorSet.SlashValidator(id, "missed VDF submission", policy.SlashDowntimeBPS)
-//	}
+// Slashing is now an EXECUTOR responsibility: an on-chain evidence record is
+// what justifies it, it is applied at an epoch boundary through the same queue
+// as Stake/Unstake, and every node applies the same evidence identically.
+// The one remaining caller of SlashValidator must be that executor path.
 //
-// The helper below wraps that pattern for convenience.
-func (c *Consensus) FinaliseEpochAndSlash(epoch uint64) {
-	c.mu.RLock()
-	vs := c.validatorSet
-	r := c.randao
-	c.mu.RUnlock()
+// RANDAO.FinaliseEpoch survives for its bookkeeping only (recording who
+// submitted, finalising the epoch, and the missed-set for observability). It
+// no longer returns a slash list, so no caller can turn local observation into
+// a stake mutation.
 
-	if vs == nil || r == nil {
-		return
+// UpdateStake sets a validator's stake to `stakeNSPX`.
+//
+// ★ 1b: the parameter is nSPX *big.Int, not SPX uint64. The old
+// `stakeSPX uint64` -> `big.NewInt(int64(stakeSPX))` conversion wraps NEGATIVE
+// above 2^63-1, and the whole-SPX truncation meant a 32.9-SPX stake compared as
+// 32. Both are silent corruption of a quorum denominator.
+//
+// ★ The total is rebuilt, never adjusted incrementally: GetTotalStake()
+// recomputes from membership, so keeping a parallel running total in sync was
+// both redundant and the source of the drift this removes.
+func (vs *ValidatorSet) UpdateStake(id string, stakeNSPX *big.Int) error {
+	if stakeNSPX == nil {
+		return fmt.Errorf("validator %s: nil stake", id)
+	}
+	// ★ 1a: zero or below-minimum is an ERROR, never a silent grant.
+	if stakeNSPX.Sign() <= 0 {
+		return fmt.Errorf("validator %s: stake %s is not positive", id, stakeNSPX.String())
+	}
+	if stakeNSPX.Cmp(vs.minStakeAmount) < 0 {
+		return fmt.Errorf("validator %s: stake %s is below the minimum %s",
+			id, stakeNSPX.String(), vs.minStakeAmount.String())
 	}
 
-	activeIDs := vs.ActiveValidatorIDs(epoch)
-	slashList := r.FinaliseEpoch(epoch, activeIDs)
-
-	for _, id := range slashList {
-		// Missing a VDF submission is a downtime offence — the policy-owned
-		// rate (1%) is used so consensus and policy share one slashing schedule.
-		vs.SlashValidator(id, "missed VDF submission", policy.SlashDowntimeBPS)
-	}
-}
-
-// UpdateStake updates a validator's stake amount (in SPX)
-// This is useful for updating stakes after distribution transactions are processed
-func (vs *ValidatorSet) UpdateStake(id string, stakeSPX uint64) error {
 	vs.mu.Lock()
 	defer vs.mu.Unlock()
 
-	// Check if validator exists
 	v, exists := vs.validators[id]
 	if !exists {
 		return fmt.Errorf("validator %s not found", id)
 	}
-
-	// Calculate stake in nSPX
-	stakeNSPX := new(big.Int).Mul(
-		big.NewInt(int64(stakeSPX)),
-		big.NewInt(denom.SPX),
-	)
-
-	// Validate minimum stake
-	if stakeNSPX.Cmp(vs.minStakeAmount) < 0 {
-		minStakeSPX := new(big.Int).Div(vs.minStakeAmount, big.NewInt(denom.SPX)).Uint64()
-		return fmt.Errorf("stake %d SPX below minimum %d SPX", stakeSPX, minStakeSPX)
-	}
-
-	// Update total stake (remove old, add new)
-	oldStake := v.StakeAmount
-	vs.totalStake.Sub(vs.totalStake, oldStake)
-
-	// Update validator's stake
-	v.StakeAmount = stakeNSPX
-	vs.totalStake.Add(vs.totalStake, stakeNSPX)
-
-	oldSPX := new(big.Int).Div(oldStake, big.NewInt(denom.SPX))
-	logger.Info("Validator %s stake updated from %d SPX to %d SPX",
-		id, oldSPX.Uint64(), stakeSPX)
-
+	old := new(big.Int).Set(v.StakeAmount)
+	v.StakeAmount = new(big.Int).Set(stakeNSPX)
+	vs.rebuildTotalLocked(vs.currentEpoch)
+	logger.Info("Validator %s stake updated from %s to %s nSPX", id, old.String(), stakeNSPX.String())
 	return nil
 }
 
 // SetStakeFromBalance sets a validator's stake from their actual balance
 func (vs *ValidatorSet) SetStakeFromBalance(validatorID string, balanceNSPX *big.Int) error {
+	// ★ 1a: NO FREE MINIMUM. The old body had two clamps — "balance < 1 SPX =>
+	// use minimum" and "stake < min => use minimum" — so a ZERO balance, or any
+	// dust balance, produced a full-stake validator and returned nil. A claim
+	// that proves nothing could therefore buy a seat. Below-minimum is now an
+	// error.
+	if balanceNSPX == nil {
+		return fmt.Errorf("validator %s: nil balance", validatorID)
+	}
+	if balanceNSPX.Sign() <= 0 {
+		return fmt.Errorf("validator %s: balance %s is not positive", validatorID, balanceNSPX.String())
+	}
+	// ★ 1b: the comparison is against the balance in nSPX directly. The old
+	// path truncated to whole SPX, compared that, then re-multiplied — so a
+	// 32.9-SPX balance compared as 32 and a 1.5-SPX balance was treated as
+	// below-minimum-then-clamped-up. big.Int end to end, no narrowing.
+	if balanceNSPX.Cmp(vs.minStakeAmount) < 0 {
+		return fmt.Errorf("validator %s: balance %s is below the minimum stake %s",
+			validatorID, balanceNSPX.String(), vs.minStakeAmount.String())
+	}
+
 	vs.mu.Lock()
 	defer vs.mu.Unlock()
 
-	if balanceNSPX == nil || balanceNSPX.Sign() < 0 {
-		return fmt.Errorf("invalid balance for validator %s", validatorID)
-	}
-
-	// Convert balance to SPX for stake
-	stakeSPX := new(big.Int).Div(balanceNSPX, big.NewInt(denom.SPX))
-	minStakeSPX := new(big.Int).Div(vs.minStakeAmount, big.NewInt(denom.SPX)).Uint64()
-	if stakeSPX.Sign() == 0 {
-		// If balance is less than 1 SPX, use minimum stake
-		stakeSPX = new(big.Int).SetUint64(minStakeSPX)
-		logger.Warn("Validator %s balance %s nSPX is less than 1 SPX, using minimum stake",
-			validatorID, balanceNSPX.String())
-	}
-
-	// Get stake amount in SPX as uint64
-	stakeSPXUint := stakeSPX.Uint64()
-
-	// Ensure minimum stake
-	if stakeSPXUint < minStakeSPX {
-		logger.Warn("Validator %s stake %d SPX below minimum %d SPX, using minimum",
-			validatorID, stakeSPXUint, minStakeSPX)
-		stakeSPXUint = minStakeSPX
-	}
-
-	// Check if validator exists
 	v, exists := vs.validators[validatorID]
 	if !exists {
-		v = &StakedValidator{
-			ID:          validatorID,
-			StakeAmount: new(big.Int),
-		}
+		v = &StakedValidator{ID: validatorID}
 		vs.validators[validatorID] = v
 	}
+	old := new(big.Int).Set(v.StakeAmount)
+	v.StakeAmount = new(big.Int).Set(balanceNSPX)
+	// Rebuild rather than adjust: the total is derived from membership, never
+	// maintained in parallel.
+	vs.rebuildTotalLocked(vs.currentEpoch)
+	logger.Info("Validator %s stake set to %s nSPX from balance (was %s)",
+		validatorID, balanceNSPX.String(), old.String())
+	return nil
+}
 
-	// Calculate stake in nSPX
-	stakeNSPX := new(big.Int).Mul(
-		big.NewInt(int64(stakeSPXUint)),
-		big.NewInt(denom.SPX),
-	)
+// SetStakeFromBalanceAtEpoch is SetStakeFromBalance for a validator that must
+// NOT be able to vote immediately.
+//
+// ★ WHY THIS EXISTS. SetStakeFromBalance above credits the stake to
+// vs.totalStake at once and leaves ActivationEpoch at 0, which reads as "active
+// since genesis". For a GENESIS validator that is right. For a validator
+// admitted at RUNTIME it is a stake-integrity hole: the node is by definition
+// still syncing at the moment it is admitted, and it would immediately hold a
+// full share of the quorum DENOMINATOR — voting on, and being weighted in, a
+// tip it has not validated. It also inflates the denominator the rest of the
+// set must reach, which is how a chain stalls rather than admits.
+//
+// So a runtime admitter passes an activation epoch strictly ahead of the
+// current one, via ActivationEpochForStake(height) = height/EpochBlocks + 2.
+// The node then has a full epoch to catch up, and gains weight only at a
+// boundary, through the same ProcessEpochTransition rebuild every other member
+// uses.
+//
+// The stake is recorded but deliberately NOT added to vs.totalStake here: the
+// total is REBUILT from active membership at the next transition, and counting
+// a pending validator early is precisely the incremental-update bug the rebuild
+// exists to prevent.
+func (vs *ValidatorSet) SetStakeFromBalanceAtEpoch(validatorID string, balanceNSPX *big.Int, activationEpoch uint64) error {
+	// A member already in the set is being topped up, not admitted: it keeps
+	// its existing activation, and the below-minimum check below still applies
+	// to the new balance.
+	vs.mu.RLock()
+	_, preExisting := vs.validators[validatorID]
+	vs.mu.RUnlock()
 
-	// Update total stake
-	oldStake := v.StakeAmount
-	if oldStake != nil && oldStake.Sign() > 0 {
-		vs.totalStake.Sub(vs.totalStake, oldStake)
+	if preExisting {
+		if err := vs.SetStakeFromBalance(validatorID, balanceNSPX); err != nil {
+			return err
+		}
+		return nil
 	}
 
-	v.StakeAmount = stakeNSPX
-	vs.totalStake.Add(vs.totalStake, stakeNSPX)
-
-	logger.Info("Validator %s stake set to %d SPX from balance",
-		validatorID, stakeSPXUint)
-	return nil
+	// A new member is QUEUED, not admitted: no weight, no place in the
+	// denominator, until ProcessEpochTransition rebuilds at its boundary.
+	return vs.QueueValidator(validatorID, balanceNSPX, activationEpoch)
 }
 
 // BroadcastCheckpoint broadcasts the current checkpoint to all peers

@@ -7,10 +7,8 @@ package network
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"net"
 	"os"
-	"strings"
 	"sync"
 )
 
@@ -92,32 +90,19 @@ func LoadFromFile(file string) ([]NodePortConfig, error) {
 	return configs, nil
 }
 
-const (
-	// Base port numbers for different services
-	// These are starting points for port allocation
-	baseTCPPort  = 32307 // Base TCP port for P2P communication
-	baseUDPPort  = 32418 // Base UDP port for DHT communication
-	baseHTTPPort = 8645  // Base HTTP port for RPC API
-	baseWSPort   = 8700  // Base WebSocket port for real-time updates
-	portStep     = 10    // Increased to reduce localhost conflicts
-)
-
-// isPortInUse checks whether a TCP or UDP port is already bound on localhost.
-func isPortInUse(port int) bool {
-	// Try TCP first
-	if ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port)); err == nil {
-		_ = ln.Close()
-	} else {
-		return true
-	}
-	// Try UDP
-	if ln, err := net.Listen("udp", fmt.Sprintf("127.0.0.1:%d", port)); err == nil {
-		_ = ln.Close()
-	} else {
-		return true
-	}
-	return false
-}
+// ★ PORT BASES. The 32307-family arithmetic that used to live here
+// (baseTCPPort/baseUDPPort/baseHTTPPort/portStep, used only by the deleted
+// GetNodePortConfigs) is GONE: GetNodePortConfigs had zero callers, and its
+// 32307 base contradicted the real CLI default of 127.0.0.1:30303, so it was a
+// second, wrong port base that nothing used. --port-offset now derives
+// addresses from the CLI defaults alone (30303 + offset), and the devnet flow
+// is 30303 / 30304 / 30305.
+//
+// baseWSPort is kept because it names the wallet/JSON-RPC base (8700) and is
+// cited by name in bind, transport and gui comments as the canonical value.
+// It is documentation, not an allocator: the node computes 8700 + portOffset
+// directly in bind.
+const baseWSPort = 8700
 
 // FindFreePort finds an available port starting from basePort.
 // Parameters:
@@ -160,209 +145,3 @@ func FindFreePort(basePort int, protocol string) (int, error) {
 	return 0, fmt.Errorf("no free %s ports available starting from %d", protocol, basePort)
 }
 
-// GetNodePortConfigs generates or retrieves a list of node port configurations.
-// Parameters:
-//   - count: Number of nodes to configure
-//   - roles: Slice of node roles (length should match count)
-//   - overrides: Map of port overrides (e.g., "tcpAddr0": "127.0.0.1:32307")
-//
-// Returns:
-//   - Slice of node port configurations
-//   - Error if configuration fails
-func GetNodePortConfigs(count int, roles []NodeRole, overrides map[string]string) ([]NodePortConfig, error) {
-	// First, check if configurations already exist in the global store
-	// Acquire read lock to check existing configs
-	NodeConfigsLock.RLock()
-	if len(NodeConfigs) >= count {
-		// We have enough configurations in the store, retrieve them
-		configs := make([]NodePortConfig, 0, count)
-		for i := 0; i < count; i++ {
-			id := fmt.Sprintf("Node-%d", i) // Generate node ID
-			if config, exists := NodeConfigs[id]; exists {
-				configs = append(configs, config) // Add existing config
-			} else {
-				// Configuration missing for required node
-				NodeConfigsLock.RUnlock()
-				return nil, fmt.Errorf("configuration for node %s not found", id)
-			}
-		}
-		NodeConfigsLock.RUnlock()
-		return configs, nil // Return existing configs
-	}
-	NodeConfigsLock.RUnlock()
-
-	// Generate new configurations if none exist or insufficient
-	configs := make([]NodePortConfig, count)
-
-	// ★ FIX: Track used ports globally across all nodes to prevent conflicts
-	// even when nodes are started independently in seed-based mode
-	usedPorts := make(map[int]bool)
-
-	// Pre-populate with currently used ports to avoid conflicts with
-	// already-running nodes
-	checkBasePorts := []int{baseTCPPort, baseUDPPort, baseHTTPPort, baseWSPort}
-	scannedCount := 0
-	for _, base := range checkBasePorts {
-		for port := base; port < base+count*portStep+100; port++ {
-			scannedCount++
-			if isPortInUse(port) {
-				usedPorts[port] = true
-			}
-		}
-	}
-	log.Printf("GetNodePortConfigs: scanned %d candidate ports, %d already in use", scannedCount, len(usedPorts))
-
-	// Generate configuration for each node
-	for i := 0; i < count; i++ {
-		// Generate node name and ID
-		name := fmt.Sprintf("Node-%d", i)
-		id := name // Use name as ID for consistency
-
-		// Determine node role (default to RoleNone if not specified)
-		role := RoleNone
-		if i < len(roles) {
-			role = roles[i] // Use provided role
-		}
-
-		// Default ports based on node index
-		tcpPort := baseTCPPort + i*portStep // TCP port increments by portStep
-		udpPort := baseUDPPort + i*portStep // UDP port increments by portStep
-		httpPort := baseHTTPPort + i        // HTTP port increments by 1
-		wsPort := baseWSPort + i            // WebSocket port increments by 1
-
-		// Override keys for each port type
-		tcpAddrKey := fmt.Sprintf("tcpAddr%d", i)   // Key for TCP address override
-		udpPortKey := fmt.Sprintf("udpPort%d", i)   // Key for UDP port override
-		httpPortKey := fmt.Sprintf("httpPort%d", i) // Key for HTTP port override
-		wsPortKey := fmt.Sprintf("wsPort%d", i)     // Key for WebSocket port override
-
-		// TCP port configuration
-		var tcpAddr string
-		if override, ok := overrides[tcpAddrKey]; ok {
-			// Use override if provided
-			tcpAddr = override
-		} else {
-			// Find a free port if the default is in use
-			for usedPorts[tcpPort] {
-				var err error
-				tcpPort, err = FindFreePort(tcpPort+portStep, "tcp")
-				if err != nil {
-					return nil, fmt.Errorf("failed to find free TCP port for node %s: %v", id, err)
-				}
-			}
-			usedPorts[tcpPort] = true                      // Mark port as used
-			tcpAddr = fmt.Sprintf("127.0.0.1:%d", tcpPort) // Format TCP address
-		}
-
-		// UDP port configuration
-		var udpPortStr string
-		if override, ok := overrides[udpPortKey]; ok {
-			// Use override if provided
-			udpPortStr = override
-		} else {
-			// Find a free port if the default is in use
-			for usedPorts[udpPort] {
-				var err error
-				udpPort, err = FindFreePort(udpPort+portStep, "udp")
-				if err != nil {
-					return nil, fmt.Errorf("failed to find free UDP port for node %s: %v", id, err)
-				}
-			}
-			usedPorts[udpPort] = true               // Mark port as used
-			udpPortStr = fmt.Sprintf("%d", udpPort) // Format UDP port as string
-		}
-
-		// HTTP port configuration
-		var httpAddr string
-		if override, ok := overrides[httpPortKey]; ok {
-			// Use override if provided
-			httpAddr = override
-		} else {
-			// Find a free port if the default is in use
-			for usedPorts[httpPort] {
-				var err error
-				httpPort, err = FindFreePort(httpPort+1, "tcp")
-				if err != nil {
-					return nil, fmt.Errorf("failed to find free HTTP port for node %s: %v", id, err)
-				}
-			}
-			usedPorts[httpPort] = true                       // Mark port as used
-			httpAddr = fmt.Sprintf("127.0.0.1:%d", httpPort) // Format HTTP address
-		}
-
-		// WebSocket port configuration
-		var wsAddr string
-		if override, ok := overrides[wsPortKey]; ok {
-			// Use override if provided
-			wsAddr = override
-		} else {
-			// Find a free port if the default is in use
-			for usedPorts[wsPort] {
-				var err error
-				wsPort, err = FindFreePort(wsPort+1, "tcp")
-				if err != nil {
-					return nil, fmt.Errorf("failed to find free WebSocket port for node %s: %v", id, err)
-				}
-			}
-			usedPorts[wsPort] = true                     // Mark port as used
-			wsAddr = fmt.Sprintf("127.0.0.1:%d", wsPort) // Format WebSocket address
-		}
-
-		// Seed nodes configuration (for peer discovery)
-		seedNodes := []string{}
-		if seeds, ok := overrides["seeds"]; ok {
-			// Split comma-separated seed list
-			seedNodes = strings.Split(seeds, ",")
-			// Validate seed nodes
-			validSeeds := []string{}
-			for _, seed := range seedNodes {
-				// Verify seed address is valid UDP address
-				if _, err := net.ResolveUDPAddr("udp", seed); err == nil {
-					validSeeds = append(validSeeds, seed) // Keep valid seed
-				} else {
-					log.Printf("GetNodePortConfigs: Invalid seed address %s for node %s: %v", seed, id, err)
-				}
-			}
-			seedNodes = validSeeds // Use only valid seeds
-		} else {
-			// Generate default seeds (all other nodes in the network)
-			for j := 0; j < count; j++ {
-				if j != i { // Exclude self
-					seedPort := baseUDPPort + j*portStep
-					// Ensure seed port is not already used
-					for usedPorts[seedPort] && seedPort != udpPort {
-						var err error
-						seedPort, err = FindFreePort(seedPort+portStep, "udp")
-						if err != nil {
-							return nil, fmt.Errorf("failed to find free seed UDP port for node %s: %v", id, err)
-						}
-					}
-					// Add seed node to list
-					seedNodes = append(seedNodes, fmt.Sprintf("127.0.0.1:%d", seedPort))
-				}
-			}
-		}
-
-		// Create node configuration
-		configs[i] = NodePortConfig{
-			ID:        id,         // Node identifier
-			Name:      name,       // Node name
-			TCPAddr:   tcpAddr,    // TCP address for P2P
-			UDPPort:   udpPortStr, // UDP port for DHT
-			HTTPPort:  httpAddr,   // HTTP address for RPC
-			WSPort:    wsAddr,     // WebSocket address for real-time
-			Role:      role,       // Node role
-			SeedNodes: seedNodes,  // Seed nodes for discovery
-		}
-	}
-
-	// Store generated configs in global store for future use
-	// Acquire write lock to update the global config map
-	NodeConfigsLock.Lock()
-	for _, config := range configs {
-		NodeConfigs[config.ID] = config // Store each configuration
-	}
-	NodeConfigsLock.Unlock()
-
-	return configs, nil
-}

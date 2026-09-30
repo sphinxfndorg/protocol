@@ -18,6 +18,7 @@ import (
 	utils "github.com/sphinxfndorg/protocol/src/accounts/key/utils"
 	"github.com/sphinxfndorg/protocol/src/common"
 	"github.com/sphinxfndorg/protocol/src/core"
+
 	sphincs "github.com/sphinxfndorg/protocol/src/core/sthincs/key/backend"
 )
 

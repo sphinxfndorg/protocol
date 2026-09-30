@@ -45,7 +45,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
-	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -1740,74 +1739,6 @@ func (sm *SyncManager) DisableStateSync() {
 	logger.Info("INFO State sync disabled")
 }
 
-// validatorSetHistory stores per-epoch snapshots of the validator set.
-// It is populated at each epoch transition and queried by
-// VerifyBlockAttestations to find the correct set for a block's epoch.
-var (
-	validatorSetHistory   map[uint64]*ValidatorSetSnapshot
-	validatorSetHistoryMu sync.RWMutex
-)
-
-func init() {
-	validatorSetHistory = make(map[uint64]*ValidatorSetSnapshot)
-}
-
-// SnapshotValidatorSet creates a frozen copy of the current validator set
-// for the given epoch and stores it in the history. Call this at each epoch
-// transition (slot 0 of each new epoch) so that historical blocks can be
-// verified against the correct validator set.
-//
-// NOTE: validator snapshots are taken from core.ValidatorSet.
-func SnapshotValidatorSet(epoch uint64, vs *ValidatorSet) {
-	if vs == nil {
-		return
-	}
-
-	vs.mu.RLock()
-	defer vs.mu.RUnlock()
-
-	snapshot := &ValidatorSetSnapshot{
-		Epoch:      epoch,
-		Validators: make(map[string]*StakedValidator),
-		TotalStake: new(big.Int).Set(vs.totalStake),
-	}
-
-	for id, v := range vs.validators {
-		// Deep copy the StakedValidator
-		copy := &StakedValidator{
-			ID:              v.ID,
-			StakeAmount:     new(big.Int).Set(v.StakeAmount),
-			ActivationEpoch: v.ActivationEpoch,
-			ExitEpoch:       v.ExitEpoch,
-			IsSlashed:       v.IsSlashed,
-			LastAttested:    v.LastAttested,
-			RewardAddress:   v.RewardAddress,
-		}
-		snapshot.Validators[id] = copy
-	}
-
-	validatorSetHistoryMu.Lock()
-	validatorSetHistory[epoch] = snapshot
-	validatorSetHistoryMu.Unlock()
-
-	logger.Info("📸 Snapshot validator set for epoch %d: %d validators, %s SPX total",
-		epoch, len(snapshot.Validators),
-		new(big.Float).Quo(new(big.Float).SetInt(snapshot.TotalStake), new(big.Float).SetFloat64(denom.SPX)))
-}
-
-// GetValidatorSetAtEpoch retrieves the validator set snapshot for a given
-// epoch. Returns nil if no snapshot exists for that epoch (falls back to
-// the current live set).
-func GetValidatorSetAtEpoch(epoch uint64) *ValidatorSetSnapshot {
-	validatorSetHistoryMu.RLock()
-	defer validatorSetHistoryMu.RUnlock()
-	snap, exists := validatorSetHistory[epoch]
-	if !exists {
-		return nil
-	}
-	return snap
-}
-
 // VerifyBlockAttestations checks that a block carries valid commit attestations
 // representing ≥2/3+ of total validator stake. This is the sync-time equivalent
 // of the PBFT commit quorum check.
@@ -1822,11 +1753,32 @@ func GetValidatorSetAtEpoch(epoch uint64) *ValidatorSetSnapshot {
 // Parameters:
 //   - block: the block whose Body.Attestations should be verified
 //   - vs: the current ValidatorSet (used as fallback if no epoch snapshot)
-//   - epoch: the epoch in which this block was committed (0 for genesis)
+//   - vs: the current ValidatorSet (used only for the genesis-epoch fallback)
 //
 // Returns nil if attestations are valid and meet quorum, or an error describing
 // the failure.
-func VerifyBlockAttestations(block *types.Block, vs validatorSetProvider, epoch uint64) error {
+//
+// ★ THE EPOCH IS DERIVED FROM block.GetHeight(), NEVER SUPPLIED BY THE CALLER.
+// It used to be a parameter, and the two callers disagreed about its value:
+// core/sync.go computed height/100 ("Assuming 100 blocks per epoch") while
+// bind/helpers.go computed height/consensus.SlotsPerEpoch (=32). The same block
+// was therefore verified against two different validator sets depending on
+// which path accepted it. Deriving it here from the chain parameter makes that
+// class of disagreement impossible to express.
+// ★ THE OLD SIGNATURE WAS:
+//
+//	func VerifyBlockAttestations(block *types.Block, vs validatorSetProvider) error
+//
+// — it took a LIVE validator-set provider, and fell back to it whenever no
+// snapshot existed. That fallback is the bug this signature removes: a block
+// could be verified against whatever the local set happened to be, rather than
+// against the set that actually governed it. There is now NO live-set parameter
+// at all, so that class of mistake is not expressible.
+//
+// The epoch is likewise not a parameter: it is derived from block.GetHeight()
+// inside consensus.ValidatorSetAt, so no caller can verify a block against a
+// different epoch than the one it was produced in.
+func VerifyBlockAttestations(block *types.Block) error {
 	if block == nil {
 		return fmt.Errorf("block is nil")
 	}
@@ -1840,96 +1792,81 @@ func VerifyBlockAttestations(block *types.Block, vs validatorSetProvider, epoch 
 		return nil
 	}
 
-	if vs == nil {
-		return fmt.Errorf("validator set is nil")
-	}
-
 	attestations := block.Body.Attestations
 	if len(attestations) == 0 {
 		return fmt.Errorf("block height %d has zero attestations — no quorum certificate", block.GetHeight())
 	}
 
-	// ── Determine which validator set to use ──
-	// Try to find a snapshot for the block's epoch. If none exists, fall back
-	// to the current live validator set. This handles the common case where
-	// the validator set hasn't changed since the block was committed.
-	var totalStake *big.Int
-	var validatorLookup func(id string) *StakedValidator
-
-	snap := GetValidatorSetAtEpoch(epoch)
-	if snap != nil {
-		totalStake = snap.TotalStake
-		validatorLookup = func(id string) *StakedValidator {
-			v, exists := snap.Validators[id]
-			if !exists {
-				return nil
-			}
-			return v
-		}
-		logger.Info(" Using epoch %d validator set snapshot (%d validators) for block %d verification",
-			epoch, len(snap.Validators), block.GetHeight())
-	} else {
-		// Fall back to current live set via the interface
-		totalStake = vs.GetTotalStake()
-		validatorLookup = func(id string) *StakedValidator {
-			// Use resolveValidatorID which tries alternative key formats
-			// (e.g. "Node-127.0.0.1:30303" vs bare address) before giving up.
-			_, val := resolveValidatorID(vs, id)
-			return val
-		}
-
-		logger.Info(" Using current validator set (no epoch %d snapshot) for block %d verification",
-			epoch, block.GetHeight())
+	// ★ FAIL CLOSED. The snapshot for this height is the ONLY authority. If it
+	// is missing — the node has not crossed that boundary yet, or a restart lost
+	// it — the block is REJECTED. There is deliberately no fallback to any live
+	// set: a node that guesses is a node that can accept a block no quorum ever
+	// certified.
+	snap := consensus.ValidatorSetAt(block.GetHeight())
+	if snap == nil {
+		return fmt.Errorf("no validator set snapshot for height %d (epoch %d) — refusing to verify against a live set; the node must sync past that epoch boundary first",
+			block.GetHeight(), consensus.EpochForHeight(block.GetHeight()))
 	}
-
-	if totalStake == nil || totalStake.Sign() == 0 {
-		return fmt.Errorf("total stake is zero — cannot verify quorum")
+	if snap.TotalStake == nil || snap.TotalStake.Sign() <= 0 {
+		return fmt.Errorf("validator set snapshot for height %d (epoch %d) has zero total stake — cannot verify quorum",
+			block.GetHeight(), snap.Epoch)
 	}
+	blockEpoch := snap.Epoch
+	totalStake := snap.TotalStake
+	logger.Debug("Verifying block %d against the epoch %d snapshot (%d validators, %s nSPX)",
+		block.GetHeight(), blockEpoch, len(snap.Validators), totalStake.String())
 
-	// Collect unique validators that attested
+	// Distinct attesters, resolved ONLY against the snapshot's own set. An
+	// attestation from a validator that is not in this snapshot counts for
+	// nothing — including a validator that was valid in a different epoch.
 	attestedStake := big.NewInt(0)
 	seen := make(map[string]bool)
+	distinct := 0
 
 	for _, att := range attestations {
-		if att == nil {
-			continue
-		}
-		if att.ValidatorID == "" {
+		if att == nil || att.ValidatorID == "" {
 			continue
 		}
 		if seen[att.ValidatorID] {
-			continue // duplicate
+			continue // duplicate attester counts once
 		}
 		seen[att.ValidatorID] = true
 
-		// Look up the validator's stake from the appropriate set
-		val := validatorLookup(att.ValidatorID)
-		if val == nil {
-			logger.Debug("VerifyBlockAttestations: validator %s not in active set for epoch %d", att.ValidatorID, epoch)
+		v, inSet := snap.Validators[att.ValidatorID]
+		if !inSet || v == nil || v.StakeAmount == nil || v.StakeAmount.Sign() <= 0 {
+			logger.Debug("VerifyBlockAttestations: %s is not in the epoch %d snapshot — attestation ignored",
+				att.ValidatorID, blockEpoch)
 			continue
 		}
-		attestedStake.Add(attestedStake, val.StakeAmount)
+		attestedStake.Add(attestedStake, v.StakeAmount)
+		distinct++
 	}
 
-	// Calculate required stake: 2/3 of total
-	requiredStake := new(big.Int).Mul(totalStake, big.NewInt(2))
-	requiredStake.Div(requiredStake, big.NewInt(3))
-
-	// Check quorum
-	if attestedStake.Cmp(requiredStake) < 0 {
+	// ★ STRICT: voted*3 > total*2, against the SNAPSHOT's own total. The old
+	// code computed `required = total*2/3` (truncating) and then compared with
+	// `>=`, which is strictly weaker than the protocol rule: for 3 validators at
+	// 32 SPX, 2 of 3 is exactly 2/3 and the old check ACCEPTED it.
+	if !consensus.MeetsStakeQuorum(attestedStake, totalStake) {
 		attestedSPX := new(big.Float).Quo(new(big.Float).SetInt(attestedStake), new(big.Float).SetFloat64(denom.SPX))
 		totalSPX := new(big.Float).Quo(new(big.Float).SetInt(totalStake), new(big.Float).SetFloat64(denom.SPX))
-		requiredSPX := new(big.Float).Quo(new(big.Float).SetInt(requiredStake), new(big.Float).SetFloat64(denom.SPX))
-		return fmt.Errorf("block %d attestation quorum not met: %.2f / %.2f SPX attested (need ≥ %.2f) from %d unique validators (epoch %d)",
-			block.GetHeight(), attestedSPX, totalSPX, requiredSPX, len(seen), epoch)
+		return fmt.Errorf("block %d attestation quorum not met: %.2f / %.2f SPX attested from %d unique validators (epoch %d, snapshot of %d) — need strictly more than 2/3",
+			block.GetHeight(), attestedSPX, totalSPX, distinct, blockEpoch, len(snap.Validators))
+	}
+
+	// ★ DISTINCT-VOTER FLOOR, also from the snapshot, in integer math:
+	// (2N)/3 + 1, no floats. For N=3 that is 3 — all three must have voted.
+	n := len(snap.Validators)
+	if want := consensus.StrictTwoThirdsCount(n); distinct < want {
+		return fmt.Errorf("block %d has only %d distinct attester(s); the epoch %d snapshot of %d validators needs %d (strict 2/3 distinct-voter floor)",
+			block.GetHeight(), distinct, blockEpoch, n, want)
 	}
 
 	attestedSPX := new(big.Float).Quo(new(big.Float).SetInt(attestedStake), new(big.Float).SetFloat64(denom.SPX))
 	totalSPX := new(big.Float).Quo(new(big.Float).SetInt(totalStake), new(big.Float).SetFloat64(denom.SPX))
 	pct := new(big.Float).Quo(attestedSPX, totalSPX)
 	pct.Mul(pct, big.NewFloat(100))
-	logger.Info("SUCCESS Block %d attestation quorum verified: %.2f / %.2f SPX (%.1f%%) from %d validators (epoch %d)",
-		block.GetHeight(), attestedSPX, totalSPX, pct, len(seen), epoch)
+	logger.Info("SUCCESS Block %d attestation quorum verified: %.2f / %.2f SPX (%.1f%%) from %d validators (epoch %d snapshot)",
+		block.GetHeight(), attestedSPX, totalSPX, pct, distinct, blockEpoch)
 
 	return nil
 }
@@ -2167,12 +2104,12 @@ func (sm *SyncManager) comprehensiveBlockVerification(block *types.Block) error 
 	// re-synced and accepted; only blocks that actually went through PBFT
 	// carry attestations, and only those need quorum verification on top.
 	if block.GetHeight() > 0 && len(block.Body.Attestations) > 0 {
-		// Get validator set for this block's epoch
-		epoch := block.GetHeight() / 100 // Assuming 100 blocks per epoch
-		// FIX: Pass the actual validator set instead of nil
-		// VerifyBlockAttestations needs access to stake weights to verify quorum
-		vs := sm.bc.GetValidatorSet()
-		if err := VerifyBlockAttestations(block, vs, epoch); err != nil {
+		// ★ NO live validator set and NO epoch argument. The verification
+		// resolves consensus.ValidatorSetAt(block.Height) itself and fails
+		// closed if that snapshot is missing. This call site used to pass
+		// height/100 while bind/helpers.go passed height/SlotsPerEpoch(32), so
+		// the same block could be checked against two different sets.
+		if err := VerifyBlockAttestations(block); err != nil {
 			return fmt.Errorf("attestation verification failed: %w", err)
 		}
 	}
@@ -2188,92 +2125,4 @@ func (sm *SyncManager) comprehensiveBlockVerification(block *types.Block) error 
 
 	logger.Info("SUCCESS Comprehensive block verification passed for height %d", block.GetHeight())
 	return nil
-}
-
-// extractStakedValidator extracts stake information from a validator returned by GetValidator.
-// This function handles both core.StakedValidator and consensus.StakedValidator,
-// which have identical struct layouts but live in different packages.
-// It uses reflection to safely extract the StakeAmount field.
-func extractStakedValidator(v interface{}) *StakedValidator {
-	if v == nil {
-		return nil
-	}
-
-	// Handle direct core.StakedValidator (our own type)
-	if sv, ok := v.(*StakedValidator); ok {
-		return sv
-	}
-
-	// Handle consensus.StakedValidator via reflection
-	// Both types have identical field layout, so we can extract the data
-	val := reflect.ValueOf(v)
-	if val.Kind() == reflect.Ptr && !val.IsNil() {
-		val = val.Elem()
-	}
-
-	if val.Kind() != reflect.Struct {
-		return nil
-	}
-
-	// Extract StakeAmount field (both structs have this field)
-	stakeField := val.FieldByName("StakeAmount")
-	if !stakeField.IsValid() {
-		return nil
-	}
-
-	stakeAmount := stakeField.Interface()
-	if stakeInt, ok := stakeAmount.(*big.Int); ok && stakeInt != nil {
-		// Extract ID field (may be named "ID", "ValidatorID", or "NodeID")
-		var id string
-		for _, fieldName := range []string{"ID", "ValidatorID", "NodeID"} {
-			idField := val.FieldByName(fieldName)
-			if idField.IsValid() {
-				if idStr, ok := idField.Interface().(string); ok && idStr != "" {
-					id = idStr
-					break
-				}
-			}
-		}
-
-		return &StakedValidator{
-			ID:          id,
-			StakeAmount: stakeInt,
-		}
-	}
-
-	return nil
-}
-
-// resolveValidatorID attempts to find a validator in the validator set even
-// when the exact key format (e.g. "Node-127.0.0.1:30303" vs just the address)
-// doesn't match. This handles key-format mismatches between validator attestation
-// IDs and the consensus validator set keys.
-func resolveValidatorID(vs validatorSetProvider, rawID string) (string, *StakedValidator) {
-	// Try the raw ID first (exact match)
-	vAny := vs.GetValidator(rawID)
-	val := extractStakedValidator(vAny)
-	if val != nil && val.StakeAmount != nil && val.StakeAmount.Sign() > 0 {
-		return rawID, val
-	}
-
-	// Not found — try alternative formats.
-	// If the attestation carries just an address but the validator set keys
-	// include a "Node-" prefix, try prepending it.
-	alternatives := []string{
-		"Node-" + rawID,
-	}
-	// If it already has "Node-", try the suffix alone.
-	if len(rawID) > 5 && rawID[:5] == "Node-" {
-		alternatives = append(alternatives, rawID[5:])
-	}
-
-	for _, alt := range alternatives {
-		vAny := vs.GetValidator(alt)
-		val := extractStakedValidator(vAny)
-		if val != nil && val.StakeAmount != nil && val.StakeAmount.Sign() > 0 {
-			return alt, val
-		}
-	}
-
-	return rawID, nil
 }

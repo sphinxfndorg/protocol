@@ -124,7 +124,7 @@ type ExplorerValidatorsResponse struct {
 
 // GetExplorerValidators returns validator data formatted for the block explorer.
 func (bc *Blockchain) GetExplorerValidators() *ExplorerValidatorsResponse {
-	vs := bc.GetValidatorSet()
+	vs := bc.liveValidatorSet()
 	if vs == nil {
 		return &ExplorerValidatorsResponse{
 			Validators: make([]*ExplorerValidatorInfo, 0),
@@ -189,10 +189,10 @@ func (bc *Blockchain) GetExplorerValidators() *ExplorerValidatorsResponse {
 		}
 	}
 
-	// Total stake in SPX
-	if vs.totalStake != nil {
+	// Total stake in SPX, read through the accessor on the single live set.
+	if total := vs.TotalStake(); total != nil && total.Sign() > 0 {
 		totalSPX := new(big.Float).Quo(
-			new(big.Float).SetInt(vs.totalStake),
+			new(big.Float).SetInt(total),
 			new(big.Float).SetFloat64(1e18),
 		)
 		response.TotalStakeSPX = totalSPX.Text('f', 2)

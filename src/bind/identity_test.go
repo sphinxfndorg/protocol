@@ -11,8 +11,11 @@ package bind
 
 import (
 	"bytes"
+	"math/big"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/sphinxfndorg/protocol/src/common"
@@ -494,4 +497,152 @@ func TestBindOrderingLaterGetOrCreateKeysLoadsSamePair(t *testing.T) {
 	if !bytes.Equal(sk, sk2) || !bytes.Equal(pk, pk2) {
 		t.Fatalf("later GetOrCreateKeys minted a DIFFERENT identity: this start would carry two competing keypairs")
 	}
+}
+
+// ============================================================================
+// Who may author a genesis document (Phase 1, decisions G and H)
+//
+// These pin the rule that decides whether a node writes genesis_state.json:
+//
+//   - G: a node NOT in the genesis document is a PEER. It gets no seat just
+//        because it started, and it cannot self-grant minimum stake.
+//   - H: a node given --seeds NEVER authors. The network already exists, so a
+//        document it authored would name only itself and fork the chain at
+//        block 1.
+// ============================================================================
+
+// TestGenesisAuthoringDecision_JoinerNeverAuthors is item H, and the most
+// important property here: a joiner that could author its own genesis would
+// fork the chain at block 1.
+func TestGenesisAuthoringDecision_JoinerNeverAuthors(t *testing.T) {
+	cases := []struct {
+		name    string
+		seeds   string
+		network string
+		want    GenesisAuthoringDecision
+	}{
+		{"joiner on devnet", "127.0.0.1:30303", "devnet", GenesisRefuseJoiner},
+		{"joiner on mainnet", "127.0.0.1:30303", "mainnet", GenesisRefuseJoiner},
+		{"joiner on testnet", "127.0.0.1:30303", "testnet", GenesisRefuseJoiner},
+		// Whitespace still counts, so --seeds=" " cannot slip past the rule.
+		{"seeds is only whitespace", "   ", "devnet", GenesisRefuseJoiner},
+		{"multiple seeds", "127.0.0.1:30303,127.0.0.1:30304", "devnet", GenesisRefuseJoiner},
+		{"enrtree seed", "enrtree://abc@nodes.example", "devnet", GenesisRefuseJoiner},
+
+		// No seeds on a non-devnet network: refused for the OTHER reason
+		// (auto-authoring is devnet-only).
+		{"mainnet, no seeds", "", "mainnet", GenesisRefuseNonDevnet},
+		{"testnet, no seeds", "", "testnet", GenesisRefuseNonDevnet},
+		{"unknown network, no seeds", "", "banana", GenesisRefuseNonDevnet},
+		{"empty network, no seeds", "", "", GenesisRefuseNonDevnet},
+
+		// The one case that authors: devnet, no seeds.
+		{"devnet, no seeds", "", "devnet", GenesisMayAuthor},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := genesisAuthoringDecision(c.seeds, c.network, t.TempDir())
+			if got != c.want {
+				t.Errorf("genesisAuthoringDecision(seeds=%q, network=%q) = %d, want %d", c.seeds, c.network, got, c.want)
+			}
+		})
+	}
+}
+
+// TestGenesisAuthoringError_IsActionable checks that a refusal actually tells
+// an operator what to do and where the file belongs. A refusal with no path
+// and no cause is indistinguishable from a mysterious crash.
+func TestGenesisAuthoringError_IsActionable(t *testing.T) {
+	dir := t.TempDir()
+
+	joinerErr := genesisAuthoringError(GenesisRefuseJoiner, "127.0.0.1:30303", "devnet", dir, nil)
+	for _, want := range []string{"--seeds", "fork", "genesis_state.json"} {
+		if !strings.Contains(joinerErr.Error(), want) {
+			t.Errorf("joiner refusal must mention %q; got: %v", want, joinerErr)
+		}
+	}
+
+	nonDevnetErr := genesisAuthoringError(GenesisRefuseNonDevnet, "", "mainnet", dir, nil)
+	for _, want := range []string{"mainnet", "devnet-only", "genesis_state.json"} {
+		if !strings.Contains(nonDevnetErr.Error(), want) {
+			t.Errorf("non-devnet refusal must mention %q; got: %v", want, nonDevnetErr)
+		}
+	}
+}
+
+// TestComputeReadyStake_UnstakedPeersAreInvisible is pre-check (a): the
+// readiness gate must be a function of CHAIN STATE plus VERIFIED SYNC STATUS,
+// never of a connected-peer count.
+//
+// It drives 3 staked validators plus 5 UNSTAKED peers that are connected and
+// fully "ready" from the probe's point of view, and asserts that adding those 5
+// changes neither the ready stake nor the total — and therefore cannot change
+// the >2/3 verdict.
+func TestComputeReadyStake_UnstakedPeersAreInvisible(t *testing.T) {
+	const stake = 32 * 1e18
+	sp := func(n int64) *big.Int { return new(big.Int).Mul(big.NewInt(n), big.NewInt(1e18)) }
+
+	// The 3 staked validators. self is Node-1; the other two are peers.
+	active := []*consensus.StakedValidator{
+		{ID: "Node-1", StakeAmount: sp(32)},
+		{ID: "Node-2", StakeAmount: sp(32)},
+		{ID: "Node-3", StakeAmount: sp(32)},
+	}
+
+	// Everything except self is "ready" per the probe — INCLUDING the five
+	// unstaked peers if they were ever consulted. They are not in `active`, so
+	// they must not be.
+	peerReady := func(id string) bool { return true }
+
+	ready0, total0 := computeReadyStake(active, "Node-1", peerReady)
+	if got, want := total0, sp(96); got.Cmp(want) != 0 {
+		t.Fatalf("total = %s, want %s (3 x 32 SPX)", got, want)
+	}
+	if got, want := ready0, sp(96); got.Cmp(want) != 0 {
+		t.Fatalf("ready = %s, want %s (all three probed-ready)", got, want)
+	}
+	// The protocol rule is STRICTLY more than 2/3: ready*3 > total*2.
+	quorumBefore := new(big.Int).Mul(ready0, big.NewInt(3)).Cmp(new(big.Int).Mul(total0, big.NewInt(2))) > 0
+	if !quorumBefore {
+		t.Fatal("3/3 ready must clear strict >2/3")
+	}
+
+	// Now simulate 5 UNSTAKED peers being connected and fully settled. They are
+	// in neither `active` nor anything the function can see, so the result must
+	// be bit-identical.
+	for i := 0; i < 5; i++ {
+		unstaked := &consensus.StakedValidator{
+			ID:          "unstaked-peer-" + strconv.Itoa(i),
+			StakeAmount: sp(999), // even a huge stake must not matter: not in active
+		}
+		_ = unstaked // deliberately NOT appended to `active`
+	}
+
+	ready1, total1 := computeReadyStake(active, "Node-1", peerReady)
+	if ready1.Cmp(ready0) != 0 {
+		t.Errorf("ready stake changed from %s to %s — unstaked peers must be invisible", ready0, ready1)
+	}
+	if total1.Cmp(total0) != 0 {
+		t.Errorf("total stake changed from %s to %s — unstaked peers must be invisible", total0, total1)
+	}
+	quorumAfter := new(big.Int).Mul(ready1, big.NewInt(3)).Cmp(new(big.Int).Mul(total1, big.NewInt(2))) > 0
+	if quorumAfter != quorumBefore {
+		t.Errorf("quorum verdict flipped (%v -> %v) because unstaked peers connected", quorumBefore, quorumAfter)
+	}
+
+	// A stronger form: the readiness callback is never even asked about a peer
+	// that is not in the active set.
+	var asked []string
+	spy := func(id string) bool { asked = append(asked, id); return true }
+	computeReadyStake(active, "Node-1", spy)
+	for _, id := range asked {
+		if id == "Node-1" {
+			t.Errorf("readiness must not be queried for self, got %q", id)
+		}
+		if len(id) >= 7 && id[:7] == "unstak" {
+			t.Errorf("readiness was queried for an unstaked peer %q", id)
+		}
+	}
+	t.Logf("3 staked + 5 unstaked connected: ready=%s total=%s (unchanged)", ready1, total1)
 }

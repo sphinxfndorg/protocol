@@ -17,6 +17,8 @@ import (
 	"io"
 	"math/big"
 	"net"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,8 +29,10 @@ import (
 	"github.com/sphinxfndorg/protocol/src/core"
 	svm "github.com/sphinxfndorg/protocol/src/core/kernel/opcodes"
 	vmachine "github.com/sphinxfndorg/protocol/src/core/kernel/vm"
+	spxKey "github.com/sphinxfndorg/protocol/src/core/sthincs/key/backend"
 	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/parameters"
 	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/sthincs"
+	usiKey "github.com/sphinxfndorg/protocol/src/usi/core/key"
 
 	logger "github.com/sphinxfndorg/protocol/src/console"
 	security "github.com/sphinxfndorg/protocol/src/handshake"
@@ -326,17 +330,21 @@ func watchAndUpdateStakes(
 // key exchange. There must be exactly one such check; having two copies of
 // this logic is how the two paths drifted apart before (one checked balance,
 // the other blindly granted minimum stake to anyone who dialed in).
-func stakeIfSufficientBalance(vs *consensus.ValidatorSet, stateDB pool.StateDB, selfNodeID, validatorID, rewardAddress string) bool {
+func stakeIfSufficientBalance(vs *consensus.ValidatorSet, stateDB pool.StateDB, selfNodeID, validatorID, rewardAddress string, activationEpoch uint64) bool {
 	balanceNSPX, address, ok := verifyRewardBalance(vs, stateDB, selfNodeID, validatorID, rewardAddress)
 	if !ok {
 		return false
 	}
 
-	if err := vs.SetStakeFromBalance(validatorID, balanceNSPX); err != nil {
+	// ★ AtEpoch, not the bare call: a runtime-admitted node is still syncing, so
+	// it must not hold vote weight — or a share of the quorum denominator —
+	// until it has caught up. See consensus.SetStakeFromBalanceAtEpoch.
+	if err := vs.SetStakeFromBalanceAtEpoch(validatorID, balanceNSPX, activationEpoch); err != nil {
 		logger.Warn("[%s] Failed to stake %s from verified balance: %v", selfNodeID, validatorID, err)
 		return false
 	}
-	logger.Info("[%s] Validator %s admitted with verified stake from %s", selfNodeID, validatorID, address)
+	logger.Info("[%s] Validator %s admitted with verified stake from %s, active from epoch %d",
+		selfNodeID, validatorID, address, activationEpoch)
 	return true
 }
 
@@ -454,6 +462,40 @@ func stakeValidatorFromRewardAddress(bc *core.Blockchain, cons *consensus.Consen
 	if vs == nil {
 		return false
 	}
+
+	// ★★ CHECKPOINT 1b ITEM 5 GUARD — READ THIS BEFORE TOUCHING THE BODY. ★★
+	//
+	// This function is a TEMPORARY SHIM, removed in Phase 3. It decides
+	// validator admission from a node's LOCAL view: a key-exchange handshake
+	// plus a local balance read. Neither is chain state. Two consequences, both
+	// disqualifying on their own:
+	//
+	//   1. DIFFERENT NODES CAN DISAGREE. This node reads its own replicated
+	//      balance for the peer's address. A node that has not yet replayed
+	//      that state sees a different (or zero) balance and reaches a different
+	//      admission decision. Membership is therefore not a function of the
+	//      chain, which is the property the whole epoch/snapshot design exists
+	//      to provide.
+	//   2. THE ACTIVATION EPOCH IS LOCAL. It comes from this node's own
+	//      currentHeight, not from a committed block.
+	//
+	// On a node running with a GENESIS FILE, membership is already fully
+	// determined by that document, and the set is SEALED (SealGenesis is called
+	// immediately after seeding). Admitting anyone here would both contradict
+	// the document and produce a set no other node could derive. So this is
+	// refused outright rather than merely discouraged.
+	//
+	// With the faucet and auto-join disabled, no funded joiner exists in the
+	// T1/T2/T3 devnet flow, so this guard removes the only runtime admission
+	// path without changing observable behaviour.
+	if vs.Sealed() {
+		logger.Warn("[%s] REFUSING local admission of %s: the validator set is sealed by a "+
+			"genesis document, so membership is chain state and cannot be granted from a "+
+			"local handshake/balance view (stakeValidatorFromRewardAddress is a Phase-2 shim)",
+			selfNodeID, validatorID)
+		return false
+	}
+
 	stateDB, err := bc.NewStateDB()
 	if err != nil {
 		logger.Warn("[%s] Cannot verify stake for %s: StateDB unavailable: %v", selfNodeID, validatorID, err)
@@ -473,14 +515,19 @@ func stakeValidatorFromRewardAddress(bc *core.Blockchain, cons *consensus.Consen
 		return false
 	}
 
-	if err := vs.SetStakeFromBalance(validatorID, balanceNSPX); err != nil {
+	// ★ Scheduled, not immediate: this node is by definition still syncing when
+	// it is admitted, so it gets no vote weight until it has had a full epoch to
+	// catch up. ActivationEpochForStake(height) = height/EpochBlocks + 2.
+	activationEpoch := consensus.ActivationEpochForStake(cons.GetCurrentHeight())
+	if err := vs.SetStakeFromBalanceAtEpoch(validatorID, balanceNSPX, activationEpoch); err != nil {
 		if fresh {
 			claims.release(address, validatorID)
 		}
 		logger.Warn("[%s] Failed to stake %s from verified balance: %v", selfNodeID, validatorID, err)
 		return false
 	}
-	logger.Info("[%s] Validator %s admitted with verified stake from %s", selfNodeID, validatorID, address)
+	logger.Info("[%s] Validator %s admitted with verified stake from %s, active from epoch %d",
+		selfNodeID, validatorID, address, activationEpoch)
 	return true
 }
 
@@ -514,8 +561,8 @@ func seedGenesisValidators(
 		if stakeNSPX == nil || stakeNSPX.Sign() <= 0 {
 			return false, fmt.Errorf("validator %s: bad genesis stake %q", v.NodeID, v.StakeNSPX)
 		}
-		stakeSPX := new(big.Int).Div(stakeNSPX, big.NewInt(denom.SPX)).Uint64()
-		if err := vs.AddValidator(v.NodeID, stakeSPX); err != nil {
+		// nSPX straight through: no whole-SPX truncation (Checkpoint 1b 1b).
+		if err := vs.AddGenesisValidator(v.NodeID, stakeNSPX); err != nil {
 			return false, fmt.Errorf("validator %s: %w", v.NodeID, err)
 		}
 		if v.RewardAddress != "" && bc != nil {
@@ -603,7 +650,9 @@ func initializePhase2Stakes(
 	}
 	defer stateDB.Close()
 
-	minStakeSPX := vs.GetMinStakeSPX()
+	// ★ 1b: the minimum is carried as nSPX *big.Int, not a whole-SPX uint64,
+	// so no stake is truncated on its way into the comparison.
+	minStakeNSPX := vs.GetMinStakeAmount()
 	successCount := 0
 
 	for _, vid := range validatorIDs {
@@ -613,7 +662,7 @@ func initializePhase2Stakes(
 			// a verified reward-address claim, it deliberately receives only the
 			// configured bootstrap stake; do not attempt an acct:<node-id> lookup.
 			logger.Info("[%s] Validator %s has no verified reward address yet — using configured minimum stake", nodeID, vid)
-			if err := vs.AddValidator(vid, minStakeSPX); err == nil {
+			if err := vs.AddGenesisValidator(vid, minStakeNSPX); err == nil {
 				successCount++
 			} else {
 				logger.Warn("[%s] Failed to set minimum stake for %s: %v", nodeID, vid, err)
@@ -621,7 +670,12 @@ func initializePhase2Stakes(
 			continue
 		}
 
-		if stakeIfSufficientBalance(vs, stateDB, nodeID, vid, address) {
+		// ★ activationEpoch is 0 HERE, and that is correct: this is the GENESIS
+		// bulk path, running before any block exists. Every genesis validator is
+		// active from epoch 0 by definition. Only the runtime path in
+		// stakeValidatorFromRewardAddress schedules a future epoch, because only
+		// there is the node still syncing.
+		if stakeIfSufficientBalance(vs, stateDB, nodeID, vid, address, 0) {
 			successCount++
 			continue
 		}
@@ -630,7 +684,7 @@ func initializePhase2Stakes(
 		// yet — bootstrap at minimum stake rather than excluding them;
 		// this is a trusted, operator-configured ID, not a remote claim.
 		logger.Info("[%s] Validator %s (%s) balance not yet available — using minimum stake", nodeID, vid, address)
-		if err := vs.AddValidator(vid, minStakeSPX); err != nil {
+		if err := vs.AddGenesisValidator(vid, minStakeNSPX); err != nil {
 			logger.Warn("[%s] Failed to set fallback stake for %s: %v", nodeID, vid, err)
 			continue
 		}
@@ -680,6 +734,13 @@ func tryInitPhase2(
 	if !initializePhase2Stakes(bc, cons, nodeID, validatorIDs, validatorAddressMap) {
 		logger.Error("[%s] Phase 2 initialization failed!", nodeID)
 		return false
+	}
+
+	// ★ Seal the set here too. This is the no-genesis-file startup path, where
+	// Phase 2 is what establishes membership; after it, nothing may add a live
+	// member outside an epoch boundary.
+	if vs := cons.GetValidatorSet(); vs != nil {
+		vs.SealGenesis()
 	}
 
 	logger.Info("[%s] Phase 2: refreshing leader status", nodeID)
@@ -749,12 +810,12 @@ func tryInitPhase2WithRetry(
 
 	vs := cons.GetValidatorSet()
 	if vs != nil {
-		minStake := vs.GetMinStakeSPX()
+		minStakeNSPX := vs.GetMinStakeAmount()
 		for _, vid := range validatorIDs {
-			if err := vs.AddValidator(vid, minStake); err != nil {
+			if err := vs.AddGenesisValidator(vid, minStakeNSPX); err != nil {
 				logger.Warn("[%s] Failed to set fallback stake for %s: %v", nodeID, vid, err)
 			} else {
-				logger.Info("[%s] Set fallback stake %d SPX for %s", nodeID, minStake, vid)
+				logger.Info("[%s] Set fallback stake %s nSPX for %s", nodeID, minStakeNSPX.String(), vid)
 			}
 		}
 
@@ -1396,15 +1457,14 @@ func runBlockSyncLoop(
 			if cons != nil && blk.GetHeight() > 0 {
 				// ── Attestation quorum check ──
 				if len(blk.Body.Attestations) > 0 {
-					vs := cons.GetValidatorSet()
-					if vs != nil {
-						blockEpoch := blk.GetHeight() / consensus.SlotsPerEpoch
-						if err := core.VerifyBlockAttestations(blk, vs, blockEpoch); err != nil {
-							logger.Error("[%s] Block %d failed attestation quorum check: %v — rejecting batch from peer %s",
-								nodeID, blk.GetHeight(), err, bestPeerAddr)
-							applied = 0
-							break
-						}
+					// ★ NO live validator set and NO epoch argument: the
+					// verification resolves consensus.ValidatorSetAt(height)
+					// itself and fails closed if that snapshot is missing.
+					if err := core.VerifyBlockAttestations(blk); err != nil {
+						logger.Error("[%s] Block %d failed attestation quorum check: %v — rejecting batch from peer %s",
+							nodeID, blk.GetHeight(), err, bestPeerAddr)
+						applied = 0
+						break
 					}
 				} else {
 					logger.Info("[%s] Block %d has no attestations (solo-mined before PBFT) — skipping quorum check, verified by chain continuity",
@@ -1505,6 +1565,11 @@ func runBlockProductionLoop(
 	phase2State *phase2InitState,
 	peerCountFunc func() int,
 	validatorReadyCountFunc func() int,
+	// readyStakeFunc returns the stake of validators that are both in the
+	// ACTIVE staked set and READY, plus the total active stake. The readiness
+	// GATE uses this (strictly > 2/3 of stake), not validatorReadyCountFunc,
+	// which is retained only for the dashboard's "active/total" display.
+	readyStakeFunc func() (ready, total *big.Int),
 	syncState *SyncState,
 	syncStateMu *sync.Mutex,
 	progress *logger.BlockchainProgress, // NEW
@@ -1559,11 +1624,38 @@ func runBlockProductionLoop(
 		return len(vs.ActiveValidatorIDs(0))
 	}
 
-	// requiredValidators is the BFT genesis sanity floor (consensus.MinValidators),
-	// NOT the size of any configured set: membership and the strict >2/3 stake
-	// check come from chain state. This number only stops PBFT from starting on
-	// a set that could never be safe.
-	requiredValidators := consensus.MinValidators
+	// readyStakeHoldsQuorum is the readiness gate: STRICTLY more than 2/3 of the
+	// active snapshot's stake must be ready (ready*3 > total*2) — the same
+	// arithmetic a block commit uses. No node COUNT appears anywhere in it.
+	//
+	// readyStakeFunc is supplied by the caller because the peer-readiness
+	// bookkeeping (peerRegistry / registeredPeers / peerReadySince) lives in
+	// StartNodeWithOptions, not here. Keeping the ARITHMETIC here and the
+	// READINESS INPUT outside means the gate itself has no access to peer or
+	// node counts at all.
+	readyStakeHoldsQuorum := func() (bool, *big.Int, *big.Int) {
+		if readyStakeFunc == nil {
+			return false, big.NewInt(0), big.NewInt(0)
+		}
+		ready, total := readyStakeFunc()
+		if ready == nil {
+			ready = big.NewInt(0)
+		}
+		if total == nil || total.Sign() <= 0 {
+			return false, ready, big.NewInt(0)
+		}
+		lhs := new(big.Int).Mul(new(big.Int).Set(ready), big.NewInt(3))
+		rhs := new(big.Int).Mul(new(big.Int).Set(total), big.NewInt(2))
+		return lhs.Cmp(rhs) > 0, ready, total
+	}
+
+	// toSPX renders nSPX for the human-readable wait message.
+	toSPX := func(n *big.Int) string {
+		if n == nil {
+			return "0"
+		}
+		return new(big.Float).Quo(new(big.Float).SetInt(n), new(big.Float).SetInt64(1e18)).Text('f', 2)
+	}
 
 	// ──────────────────────────────────────────────────────────────────────
 	// SYNC STATE GATE: A node in SYNCING state must NOT participate in PBFT.
@@ -1668,12 +1760,20 @@ func runBlockProductionLoop(
 				progress.UpdateMempoolActivity(len(pending), 0)
 
 			case <-peerCheckTicker.C:
-				// Solo→PBFT handoff uses the same full-set gate as the
-				// INSUFFICIENT VALIDATORS check below (see requiredValidators):
-				// handing off with a partial set would re-introduce the
-				// silent >2/3-stake stall that gate exists to prevent.
-				if effectiveValidatorCount() >= requiredValidators {
-					logger.Info("[%s] %d validators now known — initiating solo-to-PBFT handoff", nodeID, effectiveValidatorCount())
+				// Solo→PBFT handoff uses the SAME stake-weighted gate as the
+				// readiness check below: handing off while only part of the
+				// stake is ready would re-introduce the silent >2/3-stake stall
+				// that gate exists to prevent.
+				//
+				// ★ Note this is deliberately NOT "ready*3 > total*2" alone:
+				// this node alone already satisfies that (it holds 100% of a
+				// 1-validator set), so the handoff additionally requires the
+				// active set to have actually GROWN past just this node.
+				// Otherwise a solo node would hand off to PBFT on its own,
+				// which is the same chain in a worse shape.
+				handoffOK, hReady, hTotal := readyStakeHoldsQuorum()
+				if handoffOK && stakedSetSize() > 1 {
+					logger.Info("[%s] validators holding %s / %s SPX (> 2/3 of the active stake) are ready — initiating solo-to-PBFT handoff", nodeID, toSPX(hReady), toSPX(hTotal))
 					soloTip := bc.GetLatestBlock()
 					soloHeight := uint64(0)
 					if soloTip != nil {
@@ -1743,14 +1843,21 @@ func runBlockProductionLoop(
 		// continue to PBFT setup below
 	}
 
-	// ── PBFT QUORUM GATE ──
-	// requiredValidators is the genesis sanity floor (consensus.MinValidators).
-	// It is NOT the configured set size: the on-chain validator set and the
-	// strict >2/3 stake check are the real gate. This floor only prevents PBFT
-	// from starting on a set that could never be safe.
-	// ── INSUFFICIENT READY VALIDATORS ──
-	if effectiveValidatorCount() < requiredValidators {
-		logger.Warn("[%s] Block-production suspended (need ≥ %d staked+ready validators for PBFT, have %d — waiting for validators to become reachable)", nodeID, requiredValidators, effectiveValidatorCount())
+	// ── PBFT READINESS GATE ──
+	// The ONE condition is the protocol's own: strictly more than 2/3 of the
+	// ACTIVE snapshot's stake must be ready (ready*3 > total*2). There is no
+	// node count here, and no reference to consensus.MinValidators.
+	//
+	// ★ WHY THE OLD COUNT GATE WAS WRONG. It waited for
+	// consensus.MinValidators (3) staked+ready validators. A node that authored
+	// its own genesis is a legitimate 1-validator chain: its single validator
+	// holds 100% of the stake, so it clears >2/3 immediately and commits its
+	// own blocks. Requiring 3 made a self-authored network unable to leave
+	// SOLO MODE at all — it would wait forever for two peers that had no reason
+	// to exist yet.
+	if ok, ready, total := readyStakeHoldsQuorum(); !ok {
+		logger.Warn("[%s] Block-production suspended: validators holding > 2/3 of the active stake must be ready (have %s / %s SPX) — waiting for validators to become reachable",
+			nodeID, toSPX(ready), toSPX(total))
 		progress.SetConsensusStatus("PAUSED — insufficient validators")
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
@@ -1760,16 +1867,17 @@ func runBlockProductionLoop(
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				// effectiveValidatorCount() counts only validators that are
-				// BOTH in the active staked set AND ready (genesis installed
-				// + probe-settled). Unstaked peers never appear here.
-				if effectiveValidatorCount() >= requiredValidators {
-					logger.Info("[%s] %d staked validators now known and ready — starting PBFT block production",
-						nodeID, effectiveValidatorCount())
+				// Only validators that are BOTH in the active staked set AND
+				// ready (genesis installed + probe-settled) contribute. Unstaked
+				// peers never appear here.
+				if ok, ready, total := readyStakeHoldsQuorum(); ok {
+					logger.Info("[%s] Validators holding %s / %s SPX (> 2/3 of the active stake) are ready — starting PBFT block production",
+						nodeID, toSPX(ready), toSPX(total))
 					progress.SetConsensusStatus("ACTIVE — validating")
 					goto startPBFT
 				}
-				validatorWaitLog.Info("[%s] Waiting for staked validators to be ready (%d/%d minimum)…", nodeID, effectiveValidatorCount(), requiredValidators)
+				validatorWaitLog.Info("[%s] Waiting for validators holding > 2/3 of the active stake to be ready (%s / %s SPX)…",
+					nodeID, toSPX(ready), toSPX(total))
 			}
 		}
 	}
@@ -1799,7 +1907,10 @@ startPBFT:
 				continue
 			}
 
-			if effectiveValidatorCount() >= requiredValidators {
+			// While syncing, a node that is already ready for more than 2/3 of
+			// the stake polls faster, because it is about to be able to
+			// propose. Same stake-weighted condition, no node count.
+			if ok, _, _ := readyStakeHoldsQuorum(); ok {
 				time.Sleep(500 * time.Millisecond)
 				continue
 			}
@@ -2139,5 +2250,199 @@ startPBFT:
 			return
 		case <-time.After(multiNodeRoundDelay):
 		}
+	}
+}
+
+// ============================================================================
+// DEVNET-ONLY: per-node reward keys and the bootstrap faucet key.
+//
+// ★ WHY THIS IS HERE AND NOT IN core. Deriving a SPHINCS public key's SPIF
+// address requires usi/core/key, and that package imports core — so a
+// core -> usi/core/key edge is an import cycle. This host already imports both,
+// so generate-or-load lives here and core keeps only the pure ledger.
+//
+// ★ WHAT IT BUYS. The main flow is three `node` commands and nothing else, so
+// nobody is asked to supply a key or paste an address. Each node auto-generates
+// ONE reward keypair in its own datadir on first start, and the node that
+// authored genesis additionally generates the faucet key it pays joiners from.
+//
+// ★ LOAD-OR-CREATE, NEVER REPLACE. A restart must yield the SAME address: it
+// is what peers verify a balance for and what block rewards accrue to. Minting
+// a fresh key each start would strand the old balance.
+//
+// ★ DEVNET ONLY, FAIL-CLOSED. Every entry point is reached only behind
+// core.DevnetAutoCustodyRequested(networkType).
+// ============================================================================
+
+// devnetKeyFile is the on-disk shape of a generated reward/faucet key. The
+// private key is hex so the file is inspectable without a Go runtime.
+type devnetKeyFile struct {
+	Address    string `json:"address"`
+	PrivateKey string `json:"private_key"`
+	PublicKey  string `json:"public_key"`
+}
+
+// LoadOrCreateDevnetRewardKey returns this node's own devnet reward key,
+// generating and persisting one under the datadir on first use.
+func LoadOrCreateDevnetRewardKey(datadir string) (address string, sk, pk []byte, err error) {
+	return loadOrCreateDevnetKey(core.DevnetRewardKeyDir(datadir))
+}
+
+// LoadOrCreateDevnetFaucetKey is LoadOrCreateDevnetRewardKey for the bootstrap
+// node's faucet. Only the node that authored genesis creates one.
+func LoadOrCreateDevnetFaucetKey(datadir string) (address string, sk, pk []byte, err error) {
+	return loadOrCreateDevnetKey(core.DevnetFaucetKeyDir(datadir))
+}
+
+// loadOrCreateDevnetKey is the shared load-or-create for both key kinds.
+func loadOrCreateDevnetKey(dir string) (string, []byte, []byte, error) {
+	if dir == "" {
+		return "", nil, nil, fmt.Errorf("devnet key needs a datadir")
+	}
+	path := filepath.Join(dir, "key.json")
+
+	// Existing key: load it, never replace.
+	if data, readErr := os.ReadFile(path); readErr == nil {
+		var rec devnetKeyFile
+		if json.Unmarshal(data, &rec) == nil && rec.PublicKey != "" && rec.PrivateKey != "" {
+			skBytes, derr := hex.DecodeString(strings.TrimPrefix(rec.PrivateKey, "0x"))
+			if derr != nil {
+				return "", nil, nil, fmt.Errorf("devnet key %s holds an unparseable private_key: %w", path, derr)
+			}
+			pkBytes, derr := hex.DecodeString(strings.TrimPrefix(rec.PublicKey, "0x"))
+			if derr != nil {
+				return "", nil, nil, fmt.Errorf("devnet key %s holds an unparseable public_key: %w", path, derr)
+			}
+			return rec.Address, skBytes, pkBytes, nil
+		}
+		// Present-but-unreadable is FATAL, never silently replaced: minting a
+		// fresh key here would orphan a funded address.
+		return "", nil, nil, fmt.Errorf("devnet key %s is present but unreadable — refusing to replace it (a new key would strand the existing balance)", path)
+	}
+
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", nil, nil, fmt.Errorf("create devnet key dir %s: %w", dir, err)
+	}
+	km, err := spxKey.NewKeyManager()
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("devnet key manager: %w", err)
+	}
+	skKey, pkKey, err := km.GenerateKey()
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("generate devnet key: %w", err)
+	}
+	skBytes, pkBytes, err := km.SerializeKeyPair(skKey, pkKey)
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("serialize devnet key: %w", err)
+	}
+	addr, err := devnetAddressForPublicKey(pkBytes)
+	if err != nil {
+		return "", nil, nil, err
+	}
+	body, err := json.MarshalIndent(devnetKeyFile{
+		Address:    addr,
+		PrivateKey: hex.EncodeToString(skBytes),
+		PublicKey:  hex.EncodeToString(pkBytes),
+	}, "", "  ")
+	if err != nil {
+		return "", nil, nil, err
+	}
+	if err := os.WriteFile(path, append(body, '\n'), 0o600); err != nil {
+		return "", nil, nil, fmt.Errorf("write %s: %w", path, err)
+	}
+	return addr, skBytes, pkBytes, nil
+}
+
+// devnetAddressForPublicKey renders a SPHINCS public key as the canonical
+// raw-hex SPIF address that state keys and balance lookups use — the same
+// derivation `genesis create` uses for devnet staking keys, so a faucet-funded
+// address and a `genesis create` address are indistinguishable to the state DB.
+func devnetAddressForPublicKey(pkBytes []byte) (string, error) {
+	formatted := usiKey.GetPublicKeyFingerprintFromBytes(pkBytes, usiKey.OrgSPIF)
+	canonical := common.CanonicalSPIFAddress(formatted)
+	if !common.ValidateSPIFAddress(canonical) {
+		return "", fmt.Errorf("derived address %q is not a valid SPIF address", formatted)
+	}
+	return canonical, nil
+}
+
+// ============================================================================
+// Genesis authoring decision
+//
+// Extracted from StartNodeWithOptions so the "who may author genesis" rule is
+// a pure, testable function rather than an inline branch buried in a long
+// startup path. It is the single place that answers: may this process write a
+// genesis document?
+//
+// The rule, in order:
+//  1. A node given --seeds is a JOINER. The network already exists; a document
+//     it authored would name only itself and fork the chain at block 1. Never.
+//  2. Auto-authoring is DEVNET-ONLY. On any other network a missing document is
+//     a provisioning error, and guessing membership/chain parameters on a
+//     value-bearing chain is exactly what must not happen.
+//  3. Otherwise, and only otherwise, this node is the first one up and may
+//     author a document naming only itself.
+//
+// It is consulted ONLY when core.GenesisNeedsAuthoring reported that the
+// datadir holds no validator set. A node that already has a document never
+// reaches here, so it can never overwrite one.
+// ============================================================================
+
+// GenesisAuthoringDecision is the outcome of genesisAuthoringDecision.
+type GenesisAuthoringDecision int
+
+const (
+	// GenesisMayAuthor: devnet, no --seeds, no document — author it.
+	GenesisMayAuthor GenesisAuthoringDecision = iota
+	// GenesisRefuseJoiner: --seeds was given but no document arrived.
+	GenesisRefuseJoiner
+	// GenesisRefuseNonDevnet: not devnet and no document.
+	GenesisRefuseNonDevnet
+)
+
+// genesisAuthoringDecision decides whether a node with no genesis document may
+// author one. seeds is the raw --seeds value; networkType the resolved
+// --network. It reads NO globals and touches NO disk, so every branch is
+// testable in isolation.
+func genesisAuthoringDecision(seeds, networkType, dataDir string) GenesisAuthoringDecision {
+	// 1. A joiner never authors. Checked FIRST: a joiner pointed at a non-devnet
+	//  network must still get the joiner rule, because that is the condition
+	//  that makes authoring unsafe here.
+	//
+	//  ★ DELIBERATELY NOT strings.TrimSpace(seeds) == "" (the test used by the
+	//  peer-DISCOVERY path, which treats a blank seed list as "no outbound
+	//  dials"). Here the question is different and the answer is stricter: if
+	//  the operator passed --seeds AT ALL, they believe a network already
+	//  exists. Treating --seeds="   " as "no seeds" would let that node author
+	//  its own genesis and fork the chain at block 1 — the exact failure this
+	//  rule exists to prevent. Blank seeds are an operator typo, and failing
+	//  closed on a typo is correct.
+	if seeds != "" {
+		return GenesisRefuseJoiner
+	}
+	// 2. Devnet only.
+	if !core.DevnetAutoCustodyRequested(networkType) {
+		return GenesisRefuseNonDevnet
+	}
+	// 3. First node up on devnet: author.
+	return GenesisMayAuthor
+}
+
+// genesisAuthoringError renders the operator-facing message for a refusal. It
+// names the document path and the reason, because "it did not start" with no
+// explanation is the failure mode this decision exists to prevent.
+func genesisAuthoringError(d GenesisAuthoringDecision, seeds, networkType, dataDir string, fetchErr error) error {
+	path := core.GenesisStateFilePathForDataDir(dataDir)
+	switch d {
+	case GenesisRefuseJoiner:
+		return fmt.Errorf("refusing to author genesis: this node was given --seeds=%q, so the network already has a genesis document, but none was fetched (fetch error: %v). "+
+			"A joiner must never create its own genesis — a document naming only this node would fork the chain at block 1. "+
+			"Check that the seed is running and serving its public bundle; the document lives at %s", seeds, fetchErr, path)
+	case GenesisRefuseNonDevnet:
+		return fmt.Errorf("no genesis document at %s and --network=%q is not devnet: auto-authoring genesis is devnet-only, "+
+			"so this node cannot safely guess the network's membership or chain parameters. Place the document at %s (copy it from a peer) and start again",
+			path, networkType, path)
+	default:
+		return fmt.Errorf("internal error: unexpected genesis authoring decision %d", d)
 	}
 }

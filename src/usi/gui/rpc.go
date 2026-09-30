@@ -32,7 +32,8 @@ import (
 //
 // nodeAddr MUST be the node's dedicated wallet/JSON-RPC address — the
 // nodeConfig.WSPort slot (see port.go's baseWSPort, default
-// 127.0.0.1:8700), NOT the P2P gossip TCP address (baseTCPPort/32307) and
+// 127.0.0.1:8700), NOT the P2P gossip TCP address (the --tcp-addr default,
+// 127.0.0.1:30303) and
 // NOT the HTTP/Gin address.
 //
 //   - The P2P gossip port (bind.StartNode's SECTION 11 listener) is served

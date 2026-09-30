@@ -19,8 +19,8 @@ import (
 // `result` field of the response as json.RawMessage.
 //
 // address MUST be the node's P2P TCP address — the tcpAddr passed to
-// server.NewServer / transport.NewTCPServer (see port.go's baseTCPPort,
-// default 32307) — NOT the HTTP/Gin address (go/src/http). The HTTP server
+// server.NewServer / transport.NewTCPServer (the --tcp-addr default,
+// 127.0.0.1:30303) — NOT the HTTP/Gin address (go/src/http). The HTTP server
 // is a plain REST API (/transaction, /blockcount, ...) with no JSON-RPC
 // bridge at all; posting this protocol's bytes to it just confuses the
 // net/http parser.

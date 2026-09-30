@@ -1,0 +1,65 @@
+{
+  "header": {
+    "hash": "GENESIS_e914f4215337073de4231c6f0b0c46fbcdc9a7a778c62a5bfbdf81fb19f3aea7",
+    "txs_root": "5c67f5f3932f37252d559b6ed7d69e86dafe0b9c25dbcdf72adf68d2c13cac0f",
+    "state_root": "99f5b68bf8d4581ca572a1e541fc04766d82ac8b502b40d004a41999313aa153",
+    "parent_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "uncles_hash": "3916d45c66e84c612c8a4a403702ec44cc575fc2383dbe4e861dd29ef892bee3",
+    "extra_data": "Sphinx Network Genesis Block - Decentralized Future",
+    "miner": "0000000000000000000000000000000000000000",
+    "version": 1,
+    "nblock": 0,
+    "height": 0,
+    "timestamp": "2024-11-20T02:40:00Z",
+    "difficulty": "17179869184",
+    "nonce": "0000000000000001",
+    "gas_limit": "5000",
+    "gas_used": "0",
+    "proposer_signature": "",
+    "proposer_id": "0000000000000000000000000000000000000001",
+    "sig_data_hash": "e914f4215337073de4231c6f0b0c46fbcdc9a7a778c62a5bfbdf81fb19f3aea7",
+    "commit_status": "committed",
+    "signature_valid": false
+  },
+  "body": {
+    "txs_list": [
+      {
+        "amount": "5000000000000000000000000",
+        "chain_id": 0,
+        "gas_limit": "0",
+        "gas_price": "0",
+        "id": "2f6d8b33e026a96d2522362b68899cf87bb7b58204c3841f20b2828791e6db11",
+        "nonce": 0,
+        "receiver": "SPIF 1000 0000 0000 0000 0000 0000 0000 0000 0000 0001",
+        "sender": "SPIF 0000 0000 0000 0000 0000 0000 0000 0000 0000 0001",
+        "signature": "",
+        "timestamp": "2024-11-20T02:40:00Z"
+      },
+      {
+        "amount": "50000000000000000000000000",
+        "chain_id": 0,
+        "gas_limit": "0",
+        "gas_price": "0",
+        "id": "32b30b32ca60568de7f443c2603bfbcad00514c0499bd3ee08e4cdd318f89795",
+        "nonce": 1,
+        "receiver": "SPIF 0000 0000 0000 0000 0000 0000 0000 0000 0000 0002",
+        "sender": "SPIF 0000 0000 0000 0000 0000 0000 0000 0000 0000 0001",
+        "signature": "",
+        "timestamp": "2024-11-20T02:40:00Z"
+      },
+      {
+        "amount": "50000000000000000000000000",
+        "chain_id": 0,
+        "gas_limit": "0",
+        "gas_price": "0",
+        "id": "271e69fec273f3e5260ab337b965809c67f674733ad889d7fbcc030d4326ebf3",
+        "nonce": 2,
+        "receiver": "SPIF 2000 0000 0000 0000 0000 0000 0000 0000 0000 0001",
+        "sender": "SPIF 0000 0000 0000 0000 0000 0000 0000 0000 0000 0001",
+        "signature": "",
+        "timestamp": "2024-11-20T02:40:00Z"
+      }
+    ],
+    "uncles_hash": "3916d45c66e84c612c8a4a403702ec44cc575fc2383dbe4e861dd29ef892bee3"
+  }
+}

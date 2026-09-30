@@ -184,6 +184,15 @@ type ValidatorSet struct {
 	totalStake     *big.Int
 	mu             sync.RWMutex
 	minStakeAmount *big.Int
+	// sealed is set once genesis seeding finishes. While it is false,
+	// AddGenesisValidator may create members; afterwards the only ways into
+	// the set are QueueValidator (deferred to a boundary) and
+	// ProcessEpochTransition. See AddGenesisValidator.
+	sealed bool
+	// currentEpoch is the last epoch ProcessEpochTransition processed. It is
+	// what GetTotalStake() evaluates membership at, so the live total always
+	// means "the set as of the most recent boundary".
+	currentEpoch uint64
 }
 
 // VDFParams holds the public parameters for the VDF evaluation and verification.
@@ -217,8 +226,10 @@ type VDFSubmission struct {
 //     valid submission per epoch is accepted and mixed in; duplicate submitters
 //     are ignored (not slashed).
 //   - missed maps epoch → set of validator IDs that were in the active set
-//     for that epoch but did not submit before the window closed.  These are
-//     returned by FinaliseEpoch for slashing by the caller.
+//     for that epoch but did not submit before the window closed.  This is an
+//     OBSERVATION ONLY: FinaliseEpoch records it and returns nothing, so no
+//     caller can turn "this node saw a missed submission" into a stake
+//     mutation. A future on-chain evidence record may reference it.
 //   - epochFinalized maps epoch → bool to prevent submissions after epoch finalization.
 //   - impl can be swapped for a deterministic stub in unit tests.
 type RANDAO struct {
@@ -238,11 +249,6 @@ type RANDAO struct {
 // StakeWeightedSelector selects proposers and committees based on stake
 type StakeWeightedSelector struct {
 	validatorSet *ValidatorSet
-}
-
-// TimeConverter converts between slots/epochs and time
-type TimeConverter struct {
-	genesisTime time.Time
 }
 
 // pendingSyncRequest tracks a block fetch request waiting for a peer response
@@ -308,8 +314,7 @@ type Consensus struct {
 	validatorSet     *ValidatorSet
 	randao           *RANDAO
 	selector         *StakeWeightedSelector
-	timeConverter    *TimeConverter
-	useStakeWeighted bool
+		useStakeWeighted bool
 	currentEpoch     uint64
 	justifiedEpoch   uint64
 	finalizedEpoch   uint64

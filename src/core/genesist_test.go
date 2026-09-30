@@ -19,6 +19,46 @@ import (
 )
 
 // ============================================================================
+// TestMain — keep every test in this package out of the repository
+// ============================================================================
+
+// TestMain redirects the process-wide common data dir into a temporary tree for
+// the whole package, once, before any test runs.
+//
+// ★ WHY IT HAS TO BE HERE AND NOT IN A HELPER. common.GetDataDir() defaults to
+// the RELATIVE path "data". Several code paths compose output paths from it —
+// GenesisStateFilePathForDataDir, seedGenesisFileAllocations, and some of
+// storage.NewStorage's files — so any test that touches those writes into
+// <package dir>/data/... . Scoping it per helper is fragile: it only protects
+// the helpers that remember to do it, so the next test written without that
+// habit silently re-creates the litter. Doing it once here makes it structural —
+// a test cannot forget, because nothing needs to remember.
+//
+// This also means a failing test can no longer overwrite a developer's real
+// ./data directory.
+//
+// SAFETY: it mutates a package-level global, so it would be racy under
+// t.Parallel(). No test in this package calls t.Parallel() today; if one ever
+// does, this function is the single place that has to be revisited.
+func TestMain(m *testing.M) {
+	// os.MkdirTemp (not t.TempDir) because there is no *testing.T at this level.
+	tmp, err := os.MkdirTemp("", "core-test-datadir-")
+	if err != nil {
+		// Without this we would write into the repository, so fail loudly
+		// instead of degrading silently.
+		panic("TestMain: cannot create a temp data dir: " + err.Error())
+	}
+	previous := common.GetDataDir()
+	common.SetDataDir(filepath.Join(tmp, "data"))
+
+	code := m.Run()
+
+	common.SetDataDir(previous)
+	_ = os.RemoveAll(tmp)
+	os.Exit(code)
+}
+
+// ============================================================================
 // Test helpers
 // ============================================================================
 
@@ -94,6 +134,10 @@ func expectedGenesisParts(allocs []*GenesisAllocation) []genesisPart {
 // newMinimalBlockchain builds a *Blockchain containing only the storage layer
 // and mutex — the minimum ApplyGenesis requires.
 // No goroutines, no consensus engine, no state machine, no mempool are started.
+//
+// The process-wide common data dir is already redirected into a temp tree by
+// TestMain (see that function for why), so this helper does not have to — which
+// is the point of doing it once at package level rather than per helper.
 func newMinimalBlockchain(t *testing.T) *Blockchain {
 	t.Helper()
 	dir := tempDir(t, "bc-minimal")
@@ -910,5 +954,52 @@ func TestMerkleRootFromLeaves_OddLeafCount(t *testing.T) {
 	root2 := merkleRootFromLeaves(leaves)
 	if hex.EncodeToString(root) != hex.EncodeToString(root2) {
 		t.Error("merkleRootFromLeaves is not deterministic for odd leaf counts")
+	}
+}
+
+// ============================================================================
+// Phase 2, steps 8-10: epoch snapshots, queued stakes, ValidatorSetAt(height)
+//
+// These tests pin the three properties the new admission path depends on:
+//
+//   1. A stake is PENDING: it grants no weight, and no vote.
+//   2. It activates only at a scheduled epoch, at an epoch BOUNDARY.
+//   3. totalStake is rebuilt from the set that can actually vote, so a pending
+//      validator can never sit in the quorum denominator.
+//
+// The liveness scenarios at the bottom are the ones that matter most: they
+// encode the exact arithmetic of strict >2/3 stake, including the
+// counter-intuitive K=3 case where two of three is NOT enough.
+// TestBootstrapGenesis_AllowsOneValidatorButCreateDoesNot is the conditional
+// MinValidators floor: a `bootstrap: true` document may list one validator (the
+// node that authored it), while a `genesis create` document may not.
+func TestBootstrapGenesis_AllowsOneValidatorButCreateDoesNot(t *testing.T) {
+	minStake := SelfGenesisStakeNSPX()
+
+	// A `genesis create`-style document (Bootstrap=false) with 1 validator is
+	// refused: an operator naming a multi-node set below the floor is
+	// provisioning something that can never tolerate a fault.
+	notBootstrap := &GenesisStateFile{
+		Version: genesisStateFileVersion,
+		Chain:   GenesisChainParams{ChainID: DevnetChainID, Network: "devnet", EpochBlocks: DevnetEpochBlocks, MinStakeNSPX: minStake},
+		Validators: []GenesisStakedValidator{
+			{NodeID: "Node-a", StakeNSPX: minStake},
+		},
+	}
+	if err := notBootstrap.Validate(); err == nil {
+		t.Error("a non-bootstrap document listing fewer than MinValidators must be refused")
+	}
+
+	// The same document marked bootstrap: true is accepted.
+	bootstrap := &GenesisStateFile{
+		Version:   genesisStateFileVersion,
+		Bootstrap: true,
+		Chain:     GenesisChainParams{ChainID: DevnetChainID, Network: "devnet", EpochBlocks: DevnetEpochBlocks, MinStakeNSPX: minStake},
+		Validators: []GenesisStakedValidator{
+			{NodeID: "Node-a", StakeNSPX: minStake},
+		},
+	}
+	if err := bootstrap.Validate(); err != nil {
+		t.Errorf("a `bootstrap: true` document with one validator must be accepted: %v", err)
 	}
 }

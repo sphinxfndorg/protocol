@@ -1,13 +1,109 @@
 # Sphinx CLI — Running Nodes
 
-How to build the CLI, author the genesis document, run validator nodes as
-separate processes, and add nodes to a live network.
+How to build the CLI and run validator nodes as separate processes on one
+machine.
 
-Every command below was executed against this tree.
+**Every command and every log excerpt below was executed against this tree.**
+Raw output is quoted verbatim; nothing here is aspirational.
+
+> ## ⚠️ State of automatic joining — read this first
+>
+> After Phase 1, **the three-command flow below works, and the three nodes end
+> up on the same chain at the same height and block hash — but only ONE of them
+> is a validator.** The other two are **peers**.
+>
+> This is expected and temporary. Automatic joining is built in stages and only
+> the first has landed:
+>
+> | Stage | Status | What it does |
+> |---|---|---|
+> | Auto-authored genesis | **Working** | The first node to start writes `genesis_state.json` naming only itself. |
+> | Genesis fetch over the network | **Working** | Later nodes fetch that exact document from `--seeds`. |
+> | Faucet payout | **Disabled** | Written, not yet enabled. Waits for the Phase 2 tests. |
+> | Node submits its own Stake tx | **Disabled** | Waits for the Phase 2 tests. |
+> | Activation at an epoch boundary | **Built, not yet wired to the live set** | Waits for the Phase 2 validator-set merge. |
+>
+> Consequence, stated plainly: **a joining node stays a peer** and contributes
+> no vote weight. A one-validator devnet is a real, working chain — its single
+> validator holds 100% of the stake, so it commits its own blocks — but a
+> three-node devnet is a *one*-validator devnet with two spectators.
+>
+> Nothing here describes a 3-validator network as working, because it is not
+> yet. §5 shows the log lines that prove the current state.
 
 ---
 
 ## 1. Prerequisites and build
+
+Requires Go (built and tested on darwin/arm64).
+
+```bash
+cd /Users/kusuma/Desktop/protocol
+go build ./...          # exit 0
+go build -o sphinx ./src/cli
+```
+
+```
+$ go build -o sphinx ./src/cli
+35586240 sphinx
+```
+
+Run the tests the way the `Makefile` does (the SPHINCS+ suites in `src/core`
+take about 3 minutes, which is why the default 10m `go test` timeout is too
+tight on a loaded machine):
+
+```bash
+make test        # test-policy test-musig test-cli test-core
+```
+
+---
+
+## 2. The zero-setup flow
+
+Three terminals. Three commands. No `genesis create`, no `--datadir`, no
+`--tcp-addr`, no key material, no addresses to paste.
+
+```bash
+# Terminal 1
+./sphinx node --pbft
+
+# Terminal 2
+./sphinx node --pbft --port-offset=1 --seeds=127.0.0.1:30303
+
+# Terminal 3
+./sphinx node --pbft --port-offset=2 --seeds=127.0.0.1:30303
+```
+
+| Terminal | Command | P2P TCP | HTTP | Wallet RPC | Datadir |
+|---|---|---|---|---|---|
+| 1 | `--pbft` | `127.0.0.1:30303` | `127.0.0.1:8545` | `127.0.0.1:8700` | `data` |
+| 2 | `--port-offset=1` | `127.0.0.1:30304` | `127.0.0.1:8546` | `127.0.0.1:8701` | `data/node1` |
+| 3 | `--port-offset=2` | `127.0.0.1:30305` | `127.0.0.1:8547` | `127.0.0.1:8702` | `data/node2` |
+
+- **`--port-offset N`** shifts only the *default* ports and the *default*
+  datadir: TCP `30303+N`, HTTP `8545+N`, wallet RPC `8700+N`, datadir
+  `data/node<N>`. It never changes a node's identity and never affects
+  validator membership.
+- **UDP = TCP + 1000** for peer discovery.
+- **Node identity** is derived from the TCP address as `Node-<host:port>`.
+
+Verified from the run:
+
+```
+$ grep 'Starting node role=' T1.log T2.log T3.log
+T1.log: Starting node role=validator tcp=127.0.0.1:30303 udp= rpc=127.0.0.1:8545 seeds=""               data=data      pbft=true mode=development network=devnet
+T2.log: Starting node role=validator tcp=127.0.0.1:30304 udp= rpc=127.0.0.1:8546 seeds="127.0.0.1:30303" data=data/node1 pbft=true mode=development network=devnet
+T3.log: Starting node role=validator tcp=127.0.0.1:30305 udp= rpc=127.0.0.1:8547 seeds="127.0.0.1:30303" data=data/node2 pbft=true mode=development network=devnet
+
+$ grep 'Wallet/JSON-RPC listener bound' T2.log
+Wallet/JSON-RPC listener bound on 127.0.0.1:8701
+```
+
+**First startup is slow.** Terminal 1 spends roughly 1–2 minutes generating
+SPHINCS+ keys and signing the 13 block-0 distribution witness sets (2-of-3 each,
+26 signatures) before it can serve anything. Let Terminal 1 reach
+`GENESIS AUTHORED` before launching the others, or they will wait (§4).
+
 
 Go 1.25+ (`go version` — this tree is developed on go1.27.1).
 
@@ -37,525 +133,304 @@ make test-cli      # just the CLI
 go test ./... -timeout 40m
 ```
 
----
-
-## 2. The one genesis document
-
-A node has **exactly one** genesis file: `<datadir>/config/genesis_state.json`.
-It is the only source of the initial validator set; nothing else on the node
-records membership. It carries:
-
-| Section | Contents |
-|---|---|
-| `chain` | `chain_id`, `network`, `epoch_blocks`, `min_stake_nspx` |
-| `validators` | `node_id`, `public_key`, `stake_nspx`, `reward_address` |
-| `funded_accounts` | pre-funded reward addresses (`address`, `balance_nspx`, `label`) |
-| `multisig` | the genesis vault M-of-N custody policy |
-| `witnesses` | the pre-signed block-0 witness book |
-| top-level | block-0 audit fields (identity, supply totals, CGE allocation rows) |
-
-There is no `genesis.json`, no `genesis_multisig.json`, no
-`devnet_genesis_witnesses.json`, and no fallback that reads any of them.
-
-**How a node gets it:**
-
-- **devnet** — `genesis create` writes one per node datadir. A node started with
-  `--seeds` also fetches the missing public sections from its seeds
-  automatically, retrying while the bootstrap node is still signing.
-- **any other network** — there is **no automatic fetch**. Place the file at
-  `<datadir>/config/genesis_state.json` out of band (copy/scp) before the node
-  starts. A node started without it still runs, but it has no genesis validators
-  and no funded accounts, so it stays a peer until it is staked.
-
-**Block 0's hash does not depend on these sections.** It is built from the frozen
-canonical parameters, so every node derives the same genesis hash.
-
-**Identity is derived from `--tcp-addr`** as `Node-<host:port>`. That exact
-string must appear as `node_id` in `genesis_state.json`, or the node is not in
-the set. `--port-offset` never changes it.
 
 ---
 
-## 3. Author the genesis document (`genesis create`)
+## 3. What Terminal 1 does: authors the genesis
 
-`K` is a parameter you choose. It is **not** a constant of the system, and no
-running node ever learns it from a flag — the value is written once into the
-document and thereafter read from chain state like any other data.
+There is no "bootstrap terminal" and no node count anywhere. The **first node to
+start** writes the document, and it names only itself.
 
-```bash
-./sphinx genesis create --validators=K     # K = 3, 4, 5, … 1000
+```
+$ grep -E 'DEVNET REWARD KEY|GENESIS AUTHORED|DEVNET FAUCET|GENESIS FILE' T1.log
+DEVNET REWARD KEY: auto-generated DA852F4FFDE0B7B89A3B5327271D2CEC1614F0DC34A91209EAE00C523E5E8627 (datadir data/custody/devnet-auto/reward) — no --reward-address needed
+GENESIS AUTHORED: no document existed, so this node created it naming only itself (Node-127.0.0.1:30303)
+DEVNET FAUCET: 55F1239553FC2E7B0A5910806CB9C04E57E47E6050AB9FE551D1E3498E1A734A holds 3200016800000000000000000 nSPX, paying 32000168000000000000 nSPX per joiner (min stake + fee reserve); any number of joiners, no fixed list
+GENESIS FILE: 1 initial validator(s), epoch_blocks=10, network=devnet
+GENESIS FILE: seeded 1 validators into the consensus set (32 SPX total)
 ```
 
-The only rule is a floor: **`K >= 3`** (`consensus.MinValidators`), because a
-smaller set can never be safe. What `K` you pick is a liveness choice, not a
-correctness one — see §8. The node behaves identically whether `K` is 3 or 1000;
-`K` only decides how many validators exist and how many must vote.
+Four things to notice:
 
-Flags:
+1. **No reward address needed.** Each devnet node auto-generates one keypair in
+   its own datadir on first start, so no address is ever pasted or copied.
+2. **The document is marked `bootstrap: true`** and lists exactly one
+   validator: itself. That is legitimate, and it is what makes the
+   one-command flow possible at all.
+3. **A faucet allocation is recorded** (§6) — *written*, but not yet paid out.
+4. **`epoch_blocks=10`** is a chain parameter read from the document, not a
+   flag.
+
+Then it produces blocks:
+
+```
+$ grep -E 'SOLO MODE|Solo-mined and committed' T1.log | head -4
+[Node-127.0.0.1:30303] SOLO MODE — bootstrap node, no peers detected yet, mining blocks independently
+[Node-127.0.0.1:30303] Solo-mined and committed block height=1 txs=0
+[Node-127.0.0.1:30303] Solo-mined and committed block height=2 txs=0
+[Node-127.0.0.1:30303] Solo-mined and committed block height=3 txs=0
+```
+
+A single validator holds 100% of the staked stake, so it satisfies the strict
+`> 2/3` rule on its own and does not need a second node to make progress.
+
+### Where the document lives
+
+```
+data/config/genesis_state.json          # Terminal 1 (authored here)
+data/node1/config/genesis_state.json    # Terminal 2 (fetched)
+data/node2/config/genesis_state.json    # Terminal 3 (fetched)
+```
+
+Exactly **one** genesis file per node. It carries the chain parameters, the
+initial validator set, the funded accounts, the custody policy and the block-0
+witness book as sections of the same document.
+
+---
+
+## 4. What Terminals 2 and 3 do: fetch, never author
+
+A node given `--seeds` is a **joiner**. It fetches the complete document over
+the network from its seed and **never authors one of its own** — a joiner that
+authored a document naming only itself would fork the chain at block 1.
+
+```
+$ grep -E 'DEVNET BUNDLE|GENESIS FILE|Not listed' T2.log
+DEVNET BUNDLE: seed is reachable but still finishing block-0 witness signing (26 SPHINCS+ signatures) — retrying bundle fetch every 5s (elapsed 0s, ceiling 30m)
+DEVNET BUNDLE: fetched + verified the public bundle over the network in 5s
+DEVNET BUNDLE: joiner waited 5s for the bootstrap bundle
+GENESIS FILE: 1 initial validator(s), epoch_blocks=10, network=devnet
+GENESIS FILE: seeded 1 validators into the consensus set (32 SPX total)
+[Node-127.0.0.1:30304] Not listed in the genesis file — participating as a peer only until a Stake transaction admits this node
+```
+
+The wait log distinguishes two very different problems, and says what to do:
+
+| Log line | Meaning | Action |
+|---|---|---|
+| `no seed has answered yet ... ACTION: start the seed node` | Nothing is listening on the seed address | Start Terminal 1 |
+| `seed is reachable but still finishing block-0 witness signing` | The seed is up and working; still signing | Wait (ceiling 30m) |
+
+The 30-minute ceiling is deliberate: the seed cannot serve the bundle until it
+has finished 26 SPHINCS+ signatures, which takes 1–3 minutes depending on core
+count. A short deadline would fail legitimate cases where all three terminals
+are launched at once.
+
+**A node with `--seeds` never authors a genesis.** Verified:
+
+```
+$ grep -c 'GENESIS AUTHORED' T2.log T3.log
+
+---
+
+## 5. The three nodes converge — as one validator and two peers
+
+Same height, same block hash, on all three terminals:
+
+```
+$ for f in T1 T2 T3; do printf "%s: " $f; grep -oE 'height=30, hash=[0-9a-f]{16}' $f.log | tail -1; done
+T1: height=30, hash=e536f53f8db465ee
+T2: height=30, hash=e536f53f8db465ee
+T3: height=30, hash=e536f53f8db465ee
+
+$ grep -c 'attestation quorum not met' T1.log T2.log T3.log
+T1.log:0
+T2.log:0
+T3.log:0
+```
+
+The validator set is identical in every terminal — **one** validator, 32 SPX:
+
+```
+$ for f in T1 T2 T3; do echo "-- $f:"; grep 'seeded .* validators into the consensus set' $f.log | head -1; done
+-- T1: GENESIS FILE: seeded 1 validators into the consensus set (32 SPX total)
+-- T2: GENESIS FILE: seeded 1 validators into the consensus set (32 SPX total)
+-- T3: GENESIS FILE: seeded 1 validators into the consensus set (32 SPX total)
+```
+
+So T2 and T3 reach consensus about block 30 without holding any weight: they
+verify and follow the chain, they just do not vote. That is the intended
+behaviour for an unstaked node, and it is what the warning at the top of this
+document describes.
+
+---
+
+## 6. The devnet faucet (written, not yet paying out)
+
+The bootstrap node's document carries a faucet account. The numbers are derived
+from the real policy fee floor, not chosen:
+
+| Quantity | Value |
+|---|---|
+| `BaseTransactionGas` | `21000` |
+| `MinimumGasPrice` | `1000000000` nSPX/gas |
+| Stake tx fee | `21000 × 1e9 = 21000000000000` nSPX = `0.000021` SPX |
+| Fee reserve (2 fees × 4 margin) | `0.000168` SPX |
+| **Payout per joiner** | **32.000168 SPX** = `32000168000000000000` nSPX |
+| **Faucet pool** | `3200016800000000000000000` nSPX = 100,000 payouts |
+
+The reserve exists because a joiner must be able to (a) lock the full minimum
+stake **and** (b) still pay the gas fee for its own Stake transaction. Paying
+exactly 32 SPX would leave zero minus the fee, so the Stake tx could never be
+broadcast.
+
+The pool is a **large fixed literal**, not `K × stake` and not a node count.
+Nothing ever reads it as a network size; it is a treasury cap. If it were ever
+exhausted, a joining node would simply not be funded and would remain a peer — a
+liveness condition for that node, never a safety problem.
+
+**It is not active yet.** Automatic joining is disabled pending the Phase 2
+tests.
+
+---
+
+## 7. Validator math
+
+A block commits when validators holding **strictly more than two thirds** of the
+active staked set vote (`voted × 3 > total × 2`). For `K` validators at equal
+stake that is `floor(2K/3) + 1` validators:
+
+| `K` | Votes needed to commit | Offline tolerated |
+|---|---|---|
+| 1 | 1 | 0 |
+| 2 | **2** (both) | 0 |
+| 3 | **3** (all three) | 0 |
+| 4 | 3 | **1** |
+| 5 | 4 | 1 |
+
+---
+
+## 8. All flags
+
+Run `./sphinx node --help` for the authoritative list. Defaults as of this tree:
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--validators=K` | `0` | number of genesis validators. **Rejected if `K < 3`** (`consensus.MinValidators`). Pick for the fault tolerance you want, not for convenience |
-| `--funded-accounts=M` | `0` | extra reward addresses pre-funded with a stake-sized balance, so validators added later can be staked |
-| `--root` | `data` | root directory holding the per-validator `node<N>` datadirs |
-| `--host` | `127.0.0.1` | host used to derive each node's `Node-<host:port>` identity |
-| `--tcp-base` | `30303` | P2P TCP port of validator 0; validator `i` gets `tcp-base+i` |
-| `--stake-spx` | `32` | initial stake per validator, in whole SPX (`denom.MinValidatorStakeSPX`) |
-| `--epoch-blocks` | `10` | `epoch_blocks` chain parameter written into the document |
-| `--chain-id` | `73310` | chain id written into the document |
-| `--network` | `devnet` | network label written into the document |
+| `--role` | `validator` | `validator \| sender \| receiver \| none` |
+| `--tcp-addr` | `127.0.0.1:30303` | P2P gossip address; also the node identity |
+| `--http-port` | `127.0.0.1:8545` | HTTP JSON-RPC |
+| `--ws-port` | `127.0.0.1:8600` | WebSocket / wallet RPC base (`8700 + offset`) |
+| `--datadir` | `data` | Storage root; becomes `data/node<N>` with an offset |
+| `--seeds` | *(empty)* | Seed addresses. **Non-empty makes this node a joiner** |
+| `--port-offset` | `0` | Shifts only the default ports and default datadir |
+| `--udp-port` | TCP + 1000 | Peer discovery |
+| `--pbft` | off | Enable PBFT consensus mode |
+| `--network` | `devnet` | `devnet \| testnet \| mainnet` |
+| `--reward-address` | *(empty)* | Optional on devnet; one is auto-generated |
+| `--config` | *(empty)* | JSON file describing **one** node's addresses |
+| `--mode` | `development` | `development \| production` |
 
-This tool is the **only** place `K` exists. It is never written into any node's
-flags, never inferred from a connected-peer count, and never re-read by a
-running node — once the document is written, the count is just data.
-
-It writes one entry per validator. For the `N = 3` case, i.e.
-`--root=data --tcp-base=30303 --validators=3`:
-
-```
-data/node0/config/genesis_state.json      validator Node-127.0.0.1:30303
-data/node1/config/genesis_state.json      validator Node-127.0.0.1:30304
-data/node2/config/genesis_state.json      validator Node-127.0.0.1:30305
-data/node0/Node-127.0.0.1:30303/          that node's generated SPHINCS+ identity key
-data/node1/Node-127.0.0.1:30304/
-data/node2/Node-127.0.0.1:30305/
-data/custody/devnet-rewards/validator-0.key.json   … one per genesis validator
-data/custody/devnet-rewards/funded-3.key.json      … M extra funded reward keys
-```
-
-Every node reads a **byte-identical** copy of the document.
-
-`--validators` tells **only this tool** how many validators to write. The value
-never reaches a running node, and no node flag carries a count.
-
-Re-running `genesis create` against existing datadirs is **refused** if it would
-rename, drop or re-key a validator identity the document already binds, and a
-re-run with identical parameters rewrites the same bytes. Reward keys are loaded,
-never regenerated, so addresses are stable across runs.
-
-Both refusals, shown against the `N = 3` datadir above:
-
-```bash
-$ ./sphinx genesis create --validators=2
---validators=2 is below the BFT minimum (consensus.MinValidators=3): a genesis file listing fewer can never be safe
-
-$ ./sphinx genesis create --validators=3 --tcp-base=41403
-refusing to rewrite .../config/genesis_state.json: it already binds validator Node-127.0.0.1:30303, but this run does not include it (it would rename or drop a validator identity). ...
-```
+**`--config` describes one node.** A single-entry file is used whatever
+`--port-offset` is. A multi-entry file is **refused** with an explanatory error,
+because indexing into it by `--port-offset` would turn it into a de-facto
+pre-agreed node roster — exactly the knowledge this design removes.
 
 ---
 
-## 4. Starting a node
+## 9. Non-devnet networks
 
-```bash
-./sphinx node --role=validator --tcp-addr=127.0.0.1:30303 --datadir=data/node0 --pbft
+Auto-authoring genesis is **devnet only**. On `testnet` or `mainnet` a node with
+no genesis document **refuses to start** and tells you where to put it:
+
+```
+no genesis document at <datadir>/config/genesis_state.json and --network="mainnet"
+is not devnet: auto-authoring genesis is devnet-only, so this node cannot safely
+guess the network's membership or chain parameters. Place the document at
+<datadir>/config/genesis_state.json (copy it from a peer) and start again
 ```
 
-### `node` flags
+You must place `genesis_state.json` at `<datadir>/config/genesis_state.json` out
+of band, by copying it from a peer. The node will not create it for you.
+
+---
+
+## 10. Removed flags
+
+These existed previously and are gone. They appear nowhere in this document
+except here:
+
+| Removed | Why |
+|---|---|
+| `--nodes` | A node count must never be configuration |
+| `--node-index` | Ditto — identity comes from `--tcp-addr` |
+| `-legacy-cluster` | Hardcoded a 3-node cluster on fixed ports |
+| fixed `32307+` ports | Contradicted the real `30303` default; removed as dead code |
+
+---
+
+## 11. Optional: `genesis create`
+
+**Not part of the main flow.** You do not need it to run a devnet, and nothing
+above uses it.
+
+`genesis create` authors a genesis document that names **several** validators
+before any of them have started. Use it when you want a specific,
+pre-declared set — for example to test fault tolerance with four validators.
+
+```bash
+./sphinx genesis create --validators=4
+./sphinx genesis create --validators=3 --funded-accounts=2
+```
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--role` | `validator` | `validator` \| `sender` \| `receiver` \| `none` |
-| `--tcp-addr` | `127.0.0.1:30303` | P2P gossip listen address. **Also defines this node's `Node-<host:port>` identity** |
-| `--http-port` | `127.0.0.1:8545` | HTTP JSON-RPC listen address |
-| `--ws-port` | `127.0.0.1:8600` | wallet/JSON-RPC listen address. Left at the default it becomes **`8700 + --port-offset`** |
-| `--udp-port` | `""` | DHT UDP port. Defaults to **this node's TCP port + 1000** |
-| `--datadir` | `data` | LevelDB/storage directory. Left at the default it becomes **`data/node<offset>`** |
-| `--port-offset` | `0` | **Local addressing only.** Shifts the *default* TCP/HTTP/WS/UDP ports and the *default* datadir. Never changes a node ID, a validator set, or membership |
-| `--seeds` | `""` | comma-separated seed TCP addresses, and/or `enrtree://` DNS discovery URLs. Empty ⇒ the built-in default DNS discovery tree |
-| `--network` | `devnet` | `devnet` \| `testnet` \| `mainnet` |
-| `--reward-address` | `""` | SPIF wallet address that stakes this node and receives its block rewards |
-| `--pbft` | `false` | tunes startup logging. Consensus itself is driven by the on-chain set, so this is not what turns PBFT on |
-| `--config` | `""` | path to a JSON node-config file. Must describe **one** node |
-| `--mode` | `development` | `development` \| `production` |
+| `--validators` | `3` (the BFT floor) | How many validators to name |
+| `--funded-accounts` | `0` | Extra pre-funded reward addresses |
+| `--root` | `data` | Root holding `node<N>` datadirs |
+| `--host` | `127.0.0.1` | Host used to derive identities |
+| `--tcp-base` | `30303` | Base TCP port |
 
-**Derived addressing.** With `--port-offset=N` and no explicit overrides:
+It refuses fewer than the BFT floor of 3, because a multi-node network
+provisioned below the floor can never tolerate a fault.
 
-| | value |
-|---|---|
-| P2P TCP | `127.0.0.1:(30303+N)` |
-| HTTP JSON-RPC | `127.0.0.1:(8545+N)` |
-| wallet RPC (`--ws-port`) | `127.0.0.1:(8700+N)` |
-| DHT UDP | P2P TCP + 1000 = `31303+N` |
-| datadir | `data/node<N>` |
-
-An explicit `--tcp-addr` / `--http-port` / `--ws-port` / `--datadir` always wins
-and is never shifted. If you pass an explicit `--tcp-addr`, you must also pass a
-`--datadir` (the default would otherwise still be derived from the offset).
-
-UDP discovery is always **TCP + 1000** for a given node, so the DHT port of
-`127.0.0.1:30304` is `31304`.
-
-### Consensus and quorum, in one paragraph
-
-Membership comes from chain state only: the genesis document's `validators`, then
-on-chain Stake transactions. A block commits only when validators holding
-**strictly more than 2/3 of the staked set's total stake** have voted
-(`voted*3 > total*2`). Peers are not validators: a node that is not in the set
-still gossips, syncs and relays, but its vote weighs zero and it is never a
-leader. Offline validators do not change the set size — they simply do not vote.
+**Limitation — important.** `genesis create` does **not** support per-validator
+reward addresses or public keys, and it cannot generate per-validator
+identities for machines you do not control. It is therefore appropriate for a
+single-machine devnet and for nothing else. Do not use it to author a
+multi-machine production network.
 
 ---
 
-## 5. Single-machine devnet — running N nodes, one per terminal
+## 12. Troubleshooting
 
-The walkthrough below uses **N = 3** because that is the minimum legal set and
-the smallest thing that produces blocks. It is an example, not a requirement.
-For any `N` the commands are the same shape — see the general rule at the end of
-this section.
-
-Everything runs as separate processes on `127.0.0.1` with unique ports and
-datadirs. There is **no node-count flag**.
-
-All commands below are relative to the **repository root** (the directory holding
-`go.mod`), and assume you built the binary in §1. Adjust the path if your clone
-lives somewhere else.
-
-**Step 0 — once, before any node starts:**
-
-```bash
-./sphinx genesis create --validators=N
-```
-
-Substitute your own `N` (`>= 3`). The three-terminal walkthrough below is the
-`N = 3` case, expanded for each node:
-
-This writes `data/node0`, `data/node1`, `data/node2` with validators
-`Node-127.0.0.1:30303`, `:30304`, `:30305`.
-
-**Terminal 1 — the bootstrap node** (holds the datadir `genesis create` wrote for validator 0):
-
-```bash
-./sphinx node --role=validator \
-    --tcp-addr=127.0.0.1:30303 \
-    --http-port=127.0.0.1:8545 \
-    --datadir=data/node0 \
-    --pbft
-```
-
-**Terminal 2** (`--port-offset=1` ⇒ TCP `30304`, wallet RPC `8701`, datadir `data/node1`):
-
-```bash
-./sphinx node --role=validator \
-    --port-offset=1 \
-    --seeds=127.0.0.1:30303 \
-    --pbft
-```
-
-**Terminal 3** (`--port-offset=2` ⇒ TCP `30305`, wallet RPC `8702`, datadir `data/node2`):
-
-```bash
-./sphinx node --role=validator \
-    --port-offset=2 \
-    --seeds=127.0.0.1:30303 \
-    --pbft
-```
-
-Terminals 2 and 3 derive the **same** `Node-<host:port>` identities that
-`genesis create` wrote, because the offset shifts `--tcp-addr` and `--datadir`
-together (`30304`↔`data/node1`, `30305`↔`data/node2`).
-
-Start them in **any order**. Terminals 2/3 wait on their own and fetch the public
-bundle from node 1.
-
-### What you should see
-
-Node 1 alone:
-
-```
-GENESIS FILE: seeded 3 validators into the consensus set (96 SPX total)
-Block-production suspended (need ≥ 3 staked+ready validators for PBFT, have 1 — waiting for validators to become reachable)
-```
-
-Node 1 is **waiting**, not stalled or mining a solo chain. Once all three are up,
-each node logs:
-
-```
-Quorum achieved: 96.00 / 96.00 SPX voted (100.0%)
-committed block <same-hash> at height 1
-```
-
-96 SPX = 3 × 32. All three must report the **identical** block hash at each
-height, and there must be **zero** `attestation quorum not met` errors.
-
-### The general rule for N nodes
-
-Nothing above is specific to 3. For a set of `N` validators, author it with
-`--validators=N` and start node `i` (0-based) as:
-
-```bash
-./sphinx genesis create --validators=N          # once, for any N >= 3
-
-# node 0 — the bootstrap
-./sphinx node --role=validator --tcp-addr=127.0.0.1:30303 --http-port=127.0.0.1:8545 --datadir=data/node0 --pbft
-
-# node i (i >= 1)
-./sphinx node --role=validator --port-offset=i --seeds=127.0.0.1:30303 --pbft
-```
-
-| | value for node `i` |
-|---|---|
-| `--port-offset` | `i` |
-| P2P TCP | `127.0.0.1:(30303+i)` |
-| HTTP JSON-RPC | `127.0.0.1:(8545+i)` |
-| wallet RPC | `127.0.0.1:(8700+i)` |
-| DHT UDP | `(30303+i) + 1000` |
-| `--datadir` | `data/node<i>` |
-| identity | `Node-127.0.0.1:(30303+i)` |
-
-Every validator except node 0 is started **identically** — same command, only
-the offset differs. `genesis create` derives exactly these identities, so each
-node finds itself in the set. A node with `i >= N` was never written into the
-document, so it joins as a **peer** (see §6).
-
-The staked total and the quorum threshold scale with `N` automatically:
-`N × 32` SPX total, and each block needs strictly more than `2/3 × N × 32`
-SPX voting. The nodes do not need to be told any of this.
-
-
----
-
-## 6. Adding nodes to a live network
-
-A later node needs **only `--seeds`** plus its own identity/ports. It does not
-need the genesis document in advance: on devnet it fetches the public sections
-from its seeds.
-
-```bash
-# Pick any offset i >= N — it is not in the document, so this node is a PEER.
-# For an N=3 network the first such offset is 3 (a 4th, unlisted node):
-
-./sphinx node --role=validator \
-    --port-offset=3 \
-    --seeds=127.0.0.1:30303 \
-    --pbft
-```
-
-That node is `Node-127.0.0.1:30306` on datadir `data/node3`. Unless
-`genesis create` listed it, it is **a peer only**:
-
-```
-Not listed in the genesis file — participating as a peer only until a Stake transaction admits this node
-```
-
-It syncs the full chain, relays gossip and can answer RPC — but it contributes
-**0 SPX** to the quorum denominator and never becomes leader. You can verify the
-denominator is unaffected: the three listed validators keep reporting
-`96.00 / 96.00 SPX`, not `96.00 / 128.00`.
-
-To add several at once, give each its own offset (they map to `data/node<N>`
-and `30303+N`):
-
-```bash
-./sphinx node --role=validator --port-offset=3 --seeds=127.0.0.1:30303 --pbft
-./sphinx node --role=validator --port-offset=4 --seeds=127.0.0.1:30303 --pbft
-./sphinx node --role=validator --port-offset=5 --seeds=127.0.0.1:30303 --pbft
-```
-
-If the node's datadir is empty, the first thing it must do is obtain the genesis
-document. On devnet that happens automatically over the network:
-
-```
-DEVNET BUNDLE: waiting for the bootstrap node to finish signing — retrying bundle fetch over the network (elapsed 15s)
-DEVNET BUNDLE: fetched + verified the public bundle over the network in 21s
-```
-
-If it instead exits with `devnet late joiner has no custody bundle …`, the fetch
-failed — the seeds were unreachable, or the bootstrap node was not running yet.
-That refusal is deliberate: starting without the document would build a
-*different* block 0, and every peer would reject it at key exchange.
-
-> **Restarting a node with an existing datadir never refetches and never
-> overwrites.** It logs `DEVNET BUNDLE: local bundle already complete — no
-> fetch, no overwrite` and keeps the files byte-for-byte.
-
----
-
-## 7. Becoming a validator: staking
-
-**Current state of this build.** Unstaked nodes are peers only (§6). The
-mechanism that turns a peer into a validator is a **Stake transaction**, which —
-at the time of writing — is **not yet exposed as a CLI subcommand**. The
-`funded-accounts` reward addresses and keys that `genesis create` produces are
-the inputs it will consume:
-
-```
-data/custody/devnet-rewards/funded-3.key.json   private_key + public_key (hex)
-data/custody/devnet-rewards/validator-0.key.json
-```
-
-Those keys are real spendable SPIF accounts, already funded with a stake-sized
-balance, and their addresses are listed in the document's `funded_accounts`.
-Until the Stake subcommand lands, a non-genesis node cannot be added to the set.
-
-> **`--reward-address`** declares which address a node stakes from and receives
-> rewards at. Admission from a reward address is **balance-verified**: the
-> address must hold at least the minimum stake on-chain, and one reward address
-> admits at most one node ID. There is no localhost trust path and no
-> self-grant — an unlisted node can never award itself a seat by starting up.
->
-> Keep `data/custody/` private. `devnet-rewards/*.key.json` contain private keys.
-
----
-
-## 8. Liveness
-
-Under strict 2/3 stake the chain proceeds only while more than two thirds of the
-staked set votes. For a staked set of `K` validators at 32 SPX each, a block
-needs strictly more than `2/3 × K × 32` SPX voting.
-
-| Staked set `K` | Stop one validator | Why |
+| Symptom | Cause | Fix |
 |---|---|---|
-| `K = 3` (the minimum) | **chain halts** — 2 remaining hold 64 SPX, and `64*3 = 192` is not `> 192` | expected, not a bug |
-| `K >= 4` | **chain continues** — 3 of 4 hold 96 SPX, and `96*3 = 288 > 256` | one offline validator tolerated |
+| `refusing to author genesis: this node was given --seeds=...` | A joiner has no document | Start the seed node |
+| `no seed has answered yet ... ACTION: start the seed node` | Nothing listening on the seed | Start Terminal 1 |
+| `seed is reachable but still finishing block-0 witness signing` | Seed is working, just slow | Wait; ceiling is 30m |
+| `... is not devnet: auto-authoring genesis is devnet-only` | Non-devnet with no document | Copy `genesis_state.json` into `<datadir>/config/` |
+| A joiner never votes | Expected after Phase 1 | Automatic joining is disabled; see the warning at the top |
+| `--config file holds N node entries` | Multi-entry config | Use one file per node, or explicit flags |
 
-So the floor of 3 buys you a working chain, not fault tolerance. Choose `K` for
-the availability you actually need: `K = 3` has none, `K = 4` tolerates one
-offline validator, `K = 5` tolerates two, and so on (`f = floor((K-1)/3)`).
-The node computes this itself; you do not configure it.
+On one machine, SPHINCS+ signing is slow: a PBFT round needs several signatures
+and each costs seconds of CPU. The generous timeouts are deliberate.
 
-Practical notes for a single machine:
+### Known limitation: the reported `default_port` does not match reality
 
-- **View-change timeouts are generous on purpose.** A full PBFT round needs
-  several SPHINCS+ signatures (block header, proposal, prepare, commit), and each
-  costs seconds of CPU. Six signers on one laptop is slow; the leader waits up to
-  ~90s for a round to commit before advancing the view. Give a loaded machine
-  time before concluding something is wrong.
-- **Offline validators do not change the set size.** They stop voting and the
-  remaining stake simply may not clear 2/3 — which is exactly the halt above.
-- **Keep the datadirs separate.** One terminal → one `--tcp-addr` → one matching
-  `--datadir`. Two nodes sharing a datadir is the most common setup mistake.
-- **Preserve `Node-<addr>/keys`.** That is the node's persistent identity. Peers
-  pin `node_id`↔public key, so deleting it and regenerating makes the node a
-  stranger under a familiar name.
+The chain-info record reports `default_port: 32307` (it comes from
+`params/commit/header.go` and is persisted in chain state), but the node
+actually listens on `30303 + port-offset`. It is **display-only** — the value
+is never used to dial anything — so it affects nothing functionally, but the
+P2P chain handshake and the HTTP explorer both advertise a port the node is not
+listening on. Left as-is deliberately: changing it would alter persisted chain
+parameters.
 
+| 7 | 5 | 2 |
 
----
+**`K = 3` tolerates nothing.** Two of three is exactly 2/3, and the rule is
+*strictly* more, so it does not commit. The smallest set that survives one
+offline validator is **4**.
 
-## 9. Removed flags — and what replaced them
+Offline validators do not change the set size — they simply stop voting.
 
-`--nodes`, `--node-index` and `--legacy-cluster` **no longer exist**. Use of any
-of them fails immediately with `flag provided but not defined`.
+Readiness uses the same arithmetic: block production waits until validators
+holding more than 2/3 of the active snapshot's stake are ready. There is no
+node count in that condition.
 
-| Removed | Was used for | Now |
-|---|---|---|
-| `--nodes=N` | told a node how many validators to expect, and sized its local validator set | **Nothing.** The set comes from `genesis_state.json`, then on-chain Stake transactions. No flag or peer count can influence it |
-| `--node-index=<i>` | selected this node's slot in a pre-agreed roster (ports, identity, datadir, wallet-RPC port) | **`--port-offset=<i>`** — shifts *default* ports and *default* datadir only. It never selects an identity or a place in the validator set |
-| `--legacy-cluster` | ran the deprecated same-process 3-node harness (`RunMultipleNodesInternal`) | **Nothing.** The harness, `bind/legacy.go`, and the flag are deleted. There is **no same-box mode** |
-| `--test-nodes` | set a `TestConfig.NumNodes` field that nothing ever read | **Nothing.** Deleted |
-| derived wallet RPC `8700 + --node-index` | per-node wallet-RPC port | **`8700 + --port-offset`**, or an explicit `--ws-port` |
-
-Consequences to be aware of:
-
-- **No "sized up front" requirement.** Earlier versions of this document told you
-  to start every node with the same `--nodes=N` and warned that growing a running
-  network was limited (3→4 worked, 4→5 did not). That limitation was an artefact
-  of `--nodes` overriding the validator set. Membership is chain state now, so
-  there is no up-front sizing and no growth limit.
-- **No "synthetic / same-box addressing" fallback.** Previously, omitting
-  `--tcp-addr` fell back to fixed ports starting at 32307 and ignored
-  `--datadir`. That path is gone; `--tcp-addr` and `--datadir` are always honoured
-  as given (or derived from `--port-offset`).
-- **The `legacyExecute` function name is not legacy.** It is the normal
-  flag-parsing path for flag-style invocation. Only its `--legacy-cluster` branch
-  was legacy, and that branch is gone.
-
----
-
-## 10. Inspecting a running node
-
-Query **that node's** wallet-RPC port (`8700 + --port-offset`):
-
-```bash
-# node 1 (offset 0 → 8700)
-./sphinx get-balance --rpc 127.0.0.1:8700 \
-    --address <ADDRESS>
-
-# node 2 (offset 1 → 8701)
-./sphinx get-balance --rpc 127.0.0.1:8701 \
-    --address <ADDRESS>
+T2.log:0
+T3.log:0
 ```
 
-**The vault and escrow addresses are not fixed constants on a devnet.** Node 1
-generates an M-of-N custody policy on first start and uses its derived address as
-block 0's vault, so the address to query is whatever that node logged:
-
-```
-DEVNET AUTO-CUSTODY ACTIVE: vault=7A4399BF09033F3F9DB7D311A1949F3CEF938C2A escrow=B2B87E290E2D2EA57008DDF1CF684E259781FC6A
-```
-
-Query those and you get the expected shape — the escrow holds the time-locked
-remainder, and the vault has already paid every allocation out of itself in block
-0, so it reads `0`:
-
-```bash
-$ ./sphinx get-balance --rpc 127.0.0.1:8700 --address 7A4399BF09033F3F9DB7D311A1949F3CEF938C2A
-Balance for 7A4399BF09033F3F9DB7D311A1949F3CEF938C2A: 0.000000 SPX (confirmed=0 nSPX, ...)
-
-$ ./sphinx get-balance --rpc 127.0.0.1:8700 --address B2B87E290E2D2EA57008DDF1CF684E259781FC6A
-Balance for B2B87E290E2D2EA57008DDF1CF684E259781FC6A: 424999981.513632 SPX (confirmed=424999981513631687242798355 nSPX, ...)
-```
-
-`0000000000000000000000000000000000000001` is only the **legacy** fallback vault
-address, used when a network has no custody policy at all. On a devnet with
-auto-custody it correctly reads `0` — it is not the address block 0 funded.
-
-> Pointing `--rpc` at an `--http-port` value fails — that listener speaks HTTP,
-> not the handshake-authenticated JSON-RPC wire format `get-balance` needs.
-
-Useful log lines and what they mean:
-
-| Line | Meaning |
-|---|---|
-| `GENESIS FILE: <K> initial validators, epoch_blocks=<E>, network=<N>` | the document was loaded |
-| `seeded <K> validators into the consensus set (<S> SPX total)` | the staked set is exactly the document's, at its declared stakes |
-| `Not listed in the genesis file — participating as a peer only …` | this node is not in the set; it is a peer |
-| `No genesis file at … — validator membership will come from runtime stake admission only` | no document on disk |
-| `Waiting for staked validators to be ready (<r>/<min> minimum)…` | the node is waiting for liveness, not misconfigured |
-| `Quorum achieved: <voted> / <total> SPX voted` | a round reached > 2/3 |
-| `committed block <hash> at height <h>` | the hash must match on every validator |
-| `DEVNET BUNDLE: fetched + verified the public bundle over the network` | a joiner obtained the document itself |
-
-Tear down and start over:
-
-```bash
-# Ctrl+C in each terminal, then:
-rm -rf data/
-```
-
-
----
-
-## 11. Troubleshooting
-
-| Symptom | Cause |
-|---|---|
-| `flag provided but not defined: …` | you used a flag this build no longer has — see §9 |
-| `--validators=2 is below the BFT minimum …` | a genesis document needs ≥ 3 validators |
-| `refusing to rewrite … it already binds validator …` | re-running `genesis create` with parameters that would rename/re-key existing identities. Re-run with the same `--host`/`--tcp-base`, or delete the old document deliberately |
-| `address already in use` on bind | two processes on the same port. Give each a distinct `--port-offset`, or explicit `--tcp-addr`/`--http-port`/`--ws-port` |
-| node runs but never produces a block; logs `Waiting for staked validators to be ready (r/min …)` | fewer than `consensus.MinValidators` (3) staked+ready validators are reachable. Start more of the listed validators |
-| node logs `Not listed in the genesis file …` and never votes | it is not in the document's `validators`; see §7 |
-| `attestation quorum not met` | some validators' votes are missing for that block — a liveness problem, not a config error. Check which validators are up |
-| `devnet late joiner has no custody bundle …` | the network bundle fetch failed: seeds unreachable, or the bootstrap node was not yet running. Check `--seeds` |
-| `genesis hash mismatch` at key exchange | the peer holds a different genesis document. All nodes in one network must read byte-identical documents |
-| a node started with `--port-offset=0` next to an existing node fails to bind | offset 0 collides with node 1; use a distinct offset |
-
----
-
-## 12. File reference
-
-| File | Purpose |
-|---|---|
-| `src/cli/main.go` | CLI entry point |
-| `src/cli/utils/cli.go` | subcommand routing, `node` flags, `--port-offset`, help text |
-| `src/cli/utils/genesis.go` | `genesis create` — the only place the validator count exists |
-| `src/core/genesis.go` | the one genesis document: struct, loader, writer, `Validate` |
-| `src/bind/nodes.go` | `StartNode` — full node startup, listener binding, shutdown |
-| `src/bind/helpers.go` | block sync, block production, peer handshake, genesis seeding |
-| `src/bind/node_shutdown.go` | ordered teardown |
-| `src/bind/devnet_bundle.go` | devnet joiner-side public-bundle fetch |
-| `src/consensus/validators.go` | `MinValidators` |
-| `src/consensus/consensus.go` | quorum (`meetsStakeQuorum` = `voted*3 > total*2`), leader selection |
-| `src/bind/types.go` | `SyncState`, `GetBlocksRequest` / `GetBlocksResponse` |
+If the seed is unreachable and no document ever arrives, the joiner **waits and
+then fails loudly**. It does not invent a genesis.
 

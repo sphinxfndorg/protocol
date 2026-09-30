@@ -7,12 +7,15 @@ package core
 import (
 	"fmt"
 	"math/big"
-	"sync"
 	"time"
 
 	"github.com/sphinxfndorg/protocol/src/accounts/key"
-	denom "github.com/sphinxfndorg/protocol/src/params/denom"
+	"github.com/sphinxfndorg/protocol/src/consensus"
+	logger "github.com/sphinxfndorg/protocol/src/console"
+	"github.com/sphinxfndorg/protocol/src/core/rawdb"
+	database "github.com/sphinxfndorg/protocol/src/core/state"
 	"github.com/sphinxfndorg/protocol/src/params/commit"
+	denom "github.com/sphinxfndorg/protocol/src/params/denom"
 	"github.com/sphinxfndorg/protocol/src/policy"
 	"github.com/sphinxfndorg/protocol/src/pool"
 )
@@ -34,38 +37,40 @@ var NetworkNames = map[string]string{
 // computes epoch(h) = h / EpochBlocks from them (or from the genesis file's
 // value, which wins — see SetGenesisEpochBlocks). They are never read from a
 // CLI flag.
+//
+// ★ DefaultEpochBlocks is an ALIAS of consensus.DefaultEpochBlocks, not a
+// second copy. It used to be an independent `const ... = 1000` here, so a
+// change to the epoch length in one package silently failed to apply in the
+// other. The default and the genesis value now come from exactly one place:
+// consensus.epochBlocksOverride, which consensus.SetEpochBlocks is the only
+// writer of.
 const (
 	// DefaultEpochBlocks is the production epoch length: large, so epoch
 	// boundaries (validator activations/exits, inflation) are rare events.
-	DefaultEpochBlocks uint64 = 1000
+	DefaultEpochBlocks = consensus.DefaultEpochBlocks
 	// DevnetEpochBlocks is the small devnet epoch length the devnet genesis
 	// helper writes into the genesis file, so devnet tests see epoch
 	// boundaries without producing thousands of blocks.
 	DevnetEpochBlocks uint64 = 10
 )
 
-// genesisEpochBlocksOverride, when non-zero, is the value read from the
-// genesis file and therefore wins over the per-network defaults above.
-var (
-	epochBlocksMu          sync.Mutex
-	genesisEpochBlocksOvrd uint64
-)
-
 // SetGenesisEpochBlocks records the EpochBlocks value the genesis file
 // carries. Must be called before chain params are first constructed (i.e.
 // before core.NewBlockchain). Zero is a no-op.
+//
+// It no longer stores anything here: consensus owns the single epoch parameter,
+// so forwarding to it is the whole job. There used to be a core-local
+// `genesisEpochBlocksOvrd` as well, and the two could disagree.
 func SetGenesisEpochBlocks(n uint64) {
-	epochBlocksMu.Lock()
-	defer epochBlocksMu.Unlock()
-	genesisEpochBlocksOvrd = n
+	consensus.SetEpochBlocks(n)
 }
 
-// epochBlocksOrDefault returns the genesis-file override when set, else def.
-func epochBlocksOrDefault(def uint64) uint64 {
-	epochBlocksMu.Lock()
-	defer epochBlocksMu.Unlock()
-	if genesisEpochBlocksOvrd != 0 {
-		return genesisEpochBlocksOvrd
+// effectiveEpochBlocks returns the genesis-file value when one was supplied,
+// else the per-network default, and reads the answer from consensus — the one
+// place the epoch parameter lives.
+func effectiveEpochBlocks(def uint64) uint64 {
+	if n := consensus.EpochBlocksOverride(); n != 0 {
+		return n
 	}
 	return def
 }
@@ -175,7 +180,7 @@ func GetSphinxChainParams() *SphinxChainParameters {
 		ConsensusConfig: GetDefaultConsensusConfig(),
 
 		// Epoch length in blocks (chain parameter, never a flag).
-		EpochBlocks: epochBlocksOrDefault(DefaultEpochBlocks),
+		EpochBlocks: effectiveEpochBlocks(DefaultEpochBlocks),
 
 		// Performance Configuration - node optimization settings
 		PerformanceConfig: GetDefaultPerformanceConfig(),
@@ -343,8 +348,8 @@ func GetDevnetChainParams() *SphinxChainParameters {
 
 	// Devnet uses a SMALL epoch length in blocks so tests observe epoch
 	// boundaries quickly. A genesis file's epoch_blocks value still wins
-	// (epochBlocksOrDefault), so `genesis create` can override this.
-	params.EpochBlocks = epochBlocksOrDefault(DevnetEpochBlocks)
+	// (effectiveEpochBlocks), so `genesis create` can override this.
+	params.EpochBlocks = effectiveEpochBlocks(DevnetEpochBlocks)
 
 	devnetMinStake := new(big.Int).Mul(big.NewInt(1), big.NewInt(1e18))
 	params.ConsensusConfig.MinStakeAmount = devnetMinStake
@@ -528,4 +533,100 @@ func (p *SphinxChainParameters) GetAnnualMinting(
 ) *big.Int {
 	govPolicy := p.GetGovernancePolicy()
 	return govPolicy.GetAnnualMinting(totalSupply, year, currentStakeRatio)
+}
+
+// rawdbSnapshotStore is the production SnapshotStore: it puts snapshots into
+// rawdb under the vsnap: namespace and reads them all back on replay.
+//
+// It lives in core rather than consensus because rawdb is a core subpackage;
+// consensus depends only on the SnapshotStore interface, so the storage layer
+// does not leak into the epoch arithmetic.
+type rawdbSnapshotStore struct{ db *database.DB }
+
+func (s *rawdbSnapshotStore) PutSnapshot(epoch uint64, snap *consensus.ValidatorSnapshot) error {
+	if snap == nil {
+		return fmt.Errorf("nil snapshot for epoch %d", epoch)
+	}
+	row := &rawdb.ValidatorSnapshotRow{
+		Epoch:      snap.Epoch,
+		TotalStake: snap.TotalStake.String(),
+		Validators: make(map[string]rawdb.VSRow, len(snap.Validators)),
+	}
+	for id, v := range snap.Validators {
+		if v == nil {
+			continue
+		}
+		stake := "0"
+		if v.StakeAmount != nil {
+			stake = v.StakeAmount.String()
+		}
+		row.Validators[id] = rawdb.VSRow{
+			Stake:           stake,
+			RewardAddress:   v.RewardAddress,
+			ActivationEpoch: v.ActivationEpoch,
+			ExitEpoch:       v.ExitEpoch,
+			IsSlashed:       v.IsSlashed,
+		}
+	}
+	return rawdb.WriteValidatorSnapshot(s.db, row)
+}
+
+func (s *rawdbSnapshotStore) AllSnapshots() ([]*consensus.ValidatorSnapshot, error) {
+	rows, err := rawdb.ReadAllValidatorSnapshots(s.db)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*consensus.ValidatorSnapshot, 0, len(rows))
+	for _, row := range rows {
+		total, ok := new(big.Int).SetString(row.TotalStake, 10)
+		if !ok {
+			return nil, fmt.Errorf("rawdb: unparseable total %q in epoch %d", row.TotalStake, row.Epoch)
+		}
+		snap := &consensus.ValidatorSnapshot{
+			Epoch:      row.Epoch,
+			TotalStake: total,
+			Validators: make(map[string]*consensus.StakedValidator, len(row.Validators)),
+		}
+		for id, v := range row.Validators {
+			stake, ok := new(big.Int).SetString(v.Stake, 10)
+			if !ok {
+				return nil, fmt.Errorf("rawdb: unparseable stake %q for %s in epoch %d", v.Stake, id, row.Epoch)
+			}
+			snap.Validators[id] = &consensus.StakedValidator{
+				ID:              id,
+				StakeAmount:     stake,
+				RewardAddress:   v.RewardAddress,
+				ActivationEpoch: v.ActivationEpoch,
+				ExitEpoch:       v.ExitEpoch,
+				IsSlashed:       v.IsSlashed,
+			}
+		}
+		out = append(out, snap)
+	}
+	return out, nil
+}
+
+// AttachSnapshotStore wires consensus's snapshot store to this node's rawdb and
+// replays any snapshots already on disk into memory.
+//
+// It MUST be called during node startup, before the node verifies or accepts
+// any block. Without the replay, a node restarting mid-epoch has no snapshot for
+// the epoch it is currently serving, and VerifyBlockAttestations correctly — but
+// uselessly — fails closed on every block until it re-crosses a boundary.
+func (bc *Blockchain) AttachSnapshotStore() error {
+	db, err := bc.storage.GetDB()
+	if err != nil {
+		return fmt.Errorf("core: attaching snapshot store: %w", err)
+	}
+	consensus.SetSnapshotStore(&rawdbSnapshotStore{db: db})
+	n, err := consensus.ReplaySnapshotsFromStore()
+	if err != nil {
+		// Not fatal: the node may still hold in-memory snapshots taken this
+		// process. Log loudly, because a first-ever start legitimately has
+		// none while a restart that lost them does not.
+		logger.Warn("Validator snapshot replay found nothing to restore: %v", err)
+		return nil
+	}
+	logger.Info("Validator snapshot store attached: %d snapshot(s) restored from disk", n)
+	return nil
 }

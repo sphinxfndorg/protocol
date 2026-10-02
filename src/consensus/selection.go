@@ -23,8 +23,8 @@ func NewStakeWeightedSelector(vs *ValidatorSet) *StakeWeightedSelector {
 	}
 }
 
-// SelectProposer deterministically selects exactly one block proposer for the
-// given epoch using stake-weighted random selection seeded by the RANDAO output.
+// SelectProposer deterministically selects exactly one proposer for the block
+// at height using the immutable snapshot that governs that height.
 //
 // Algorithm:
 //  1. Collect active validators and sort them by ID (canonical order).
@@ -37,62 +37,47 @@ func NewStakeWeightedSelector(vs *ValidatorSet) *StakeWeightedSelector {
 // that calls SelectProposer with the same epoch and seed returns the same winner.
 // SelectProposer deterministically selects exactly one block proposer for the
 // given epoch using stake-weighted random selection seeded by the RANDAO output.
-func (s *StakeWeightedSelector) SelectProposer(epoch uint64, seed [32]byte) *StakedValidator {
-	// Gather all validators that are active in the given epoch.
-	active := s.validatorSet.GetActiveValidators(epoch)
-	if len(active) == 0 {
-		return nil // no validators registered — cannot elect a leader
+func (s *StakeWeightedSelector) SelectProposer(height uint64, seed [32]byte) *StakedValidator {
+	snapshot := ValidatorSetAt(height)
+	if snapshot == nil || snapshot.TotalStake == nil || snapshot.TotalStake.Sign() <= 0 {
+		return nil
 	}
 
-	// ── SORT — the critical fix ───────────────────────────────────────────────
-	// GetActiveValidators iterates a map, so the returned slice order is random.
-	// Sorting by ID gives every node the exact same iteration order, ensuring
-	// that the cumulative-stake walk below produces the same winner everywhere.
-	sort.Slice(active, func(i, j int) bool {
-		return active[i].ID < active[j].ID // lexicographic by node ID string
-	})
-	// ─────────────────────────────────────────────────────────────────────────
-
-	// Sum the stake of all active validators to define the full stake-space range.
-	totalStake := s.validatorSet.GetTotalStake()
-
-	// ========== DEBUG: Log all validator stakes ==========
-	logger.Info("SelectProposer: epoch=%d, totalStake=%s SPX, validators=%d",
-		epoch,
-		new(big.Int).Div(totalStake, big.NewInt(denom.SPX)).String(),
-		len(active))
-	for _, v := range active {
-		stakeSPX := new(big.Int).Div(v.StakeAmount, big.NewInt(denom.SPX))
-		logger.Info("  Validator %s: stake=%d SPX", v.ID, stakeSPX.Uint64())
+	active := make([]*StakedValidator, 0, len(snapshot.Validators))
+	totalStake := big.NewInt(0)
+	for _, validator := range snapshot.Validators {
+		if validator == nil || validator.IsSlashed || validator.StakeAmount == nil ||
+			validator.StakeAmount.Sign() <= 0 ||
+			validator.ActivationEpoch > snapshot.Epoch ||
+			(validator.ExitEpoch != 0 && validator.ExitEpoch <= snapshot.Epoch) {
+			continue
+		}
+		active = append(active, validator)
+		totalStake.Add(totalStake, validator.StakeAmount)
 	}
-	// =============================================
-
-	// Check if total stake is zero or nil - SINGLE CHECK
-	if totalStake == nil || totalStake.Sign() == 0 {
-		// No stake recorded — fall back to the first validator in sorted order.
-		logger.Warn("Total stake is zero! Using round-robin fallback to first validator: %s", active[0].ID)
-		return active[0]
+	if len(active) == 0 || totalStake.Cmp(snapshot.TotalStake) != 0 {
+		logger.Warn("SelectProposer: invalid validator snapshot for height %d", height)
+		return nil
 	}
+	sort.Slice(active, func(i, j int) bool { return active[i].ID < active[j].ID })
+	logger.Debug("SelectProposer: height=%d epoch=%d totalStake=%s SPX validators=%d",
+		height, snapshot.Epoch,
+		new(big.Int).Div(totalStake, big.NewInt(denom.SPX)).String(), len(active))
 
-	// Interpret the 32-byte RANDAO seed as a big-endian unsigned integer.
 	seedNum := new(big.Int).SetBytes(seed[:])
-
-	// Map the seed into [0, totalStake) so it identifies a point in stake-space.
 	target := new(big.Int).Mod(seedNum, totalStake)
 
-	// Walk the sorted validator list, accumulating stake.  The first validator
-	// whose cumulative stake exceeds the target wins the election.
 	cumulative := big.NewInt(0)
 	for _, v := range active {
-		cumulative.Add(cumulative, v.StakeAmount) // add this validator's stake
-		if target.Cmp(cumulative) < 0 {           // target is now covered
-			return v // this validator is the elected proposer
+		cumulative.Add(cumulative, v.StakeAmount)
+		if target.Cmp(cumulative) < 0 {
+			selected := *v
+			selected.StakeAmount = new(big.Int).Set(v.StakeAmount)
+			return &selected
 		}
 	}
 
-	// Fallback (should only be reached due to rounding in integer division):
-	// return the last validator in sorted order so the result is still deterministic.
-	return active[len(active)-1]
+	return nil
 }
 
 // SelectCommittee selects a committee of up to `size` validators for attestation

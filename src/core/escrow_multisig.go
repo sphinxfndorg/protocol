@@ -5,17 +5,14 @@
 package core
 
 import (
-	"encoding/json"
+	"fmt"
 	"math/big"
-	"os"
 	"sync"
 
 	logger "github.com/sphinxfndorg/protocol/src/console"
 	multisig "github.com/sphinxfndorg/protocol/src/core/musig"
 	"github.com/sphinxfndorg/protocol/src/policy"
 )
-
-const defaultEscrowMultisigPath = "config/escrow_multisig.json"
 
 const escrowMultisigDomain = "sphinx-escrow-v1"
 
@@ -25,17 +22,6 @@ var (
 	escrowMultisigAddr     string
 	escrowMultisigEnforced bool
 )
-
-func init() {
-	// Auto-load config/escrow_multisig.json if present at process startup.
-	// When absent, GetCGEEscrowAddress falls back to policy.CGEEscrowAddress.
-	// Skipped inside `go test` binaries so a locally generated demo policy
-	// cannot change every test's escrow address (see core.policyAutoLoadDisabled).
-	if policyAutoLoadDisabled() {
-		return
-	}
-	InitEscrowAddress()
-}
 
 func EscrowMultisigEnforced() bool {
 	escrowMultisigMu.RLock()
@@ -64,45 +50,33 @@ func GetCGEEscrowAddress() string {
 	return policy.CGEEscrowAddress
 }
 
-func LoadEscrowPolicy(path string) (string, error) {
-	if path == "" {
-		path = defaultEscrowMultisigPath
-	}
-	data, err := os.ReadFile(path)
+func LoadEscrowPolicy(datadir string) (string, error) {
+	gf, err := LoadGenesisFile(datadirOf(datadir))
 	if err != nil {
 		return "", err
 	}
-	var p multisig.MultiPartyPolicy
-	if err := json.Unmarshal(data, &p); err != nil {
-		return "", err
+	if gf == nil || gf.EscrowMultisig == nil {
+		return "", fmt.Errorf("genesis document for %s has no escrow_multisig section", datadir)
+	}
+	return RegisterEscrowPolicy(gf.EscrowMultisig)
+}
+
+func RegisterEscrowPolicy(p *multisig.MultiPartyPolicy) (string, error) {
+	if p == nil {
+		return "", fmt.Errorf("escrow multisig policy is nil")
 	}
 	// Register before publishing the address: block validation, mempool
 	// admission and gossip all resolve a sender through this registry.
-	addr, err := multisig.RegisterPolicy(&p)
+	addr, err := multisig.RegisterPolicy(p)
 	if err != nil {
 		return "", err
 	}
 	escrowMultisigMu.Lock()
 	defer escrowMultisigMu.Unlock()
-	cp := p
+	cp := *p
 	escrowMultisigPolicy = &cp
 	escrowMultisigAddr = addr
 	return addr, nil
-}
-
-func InitEscrowAddress() string {
-	if addr, err := LoadEscrowPolicy(defaultEscrowMultisigPath); err == nil {
-		// ★ The policy file changes WHERE escrow coins live; it does not by
-		// itself gate the vesting schedule's own block-body releases. Say so
-		// out loud, because the two are easy to conflate and a silent default
-		// here would let an operator believe releases are witness-gated when
-		// they are not.
-		if !EscrowMultisigEnforced() {
-			logger.Warn("escrow custody policy loaded (%s): time-based CGE releases are NOT witness-gated until SetEscrowMultisigEnforced(true) is called; ordinary spends from the escrow address still require M-of-N", addr)
-		}
-		return addr
-	}
-	return policy.CGEEscrowAddress
 }
 
 func activeEscrowPolicy() *multisig.MultiPartyPolicy {
@@ -183,7 +157,7 @@ func verifyCGEWitness(bc *Blockchain, w multisig.MultiSigWitness, recipient stri
 // escrow address; it does not by itself gate the schedule's own releases. That
 // additionally needs escrowMultisigEnforced, which has no production caller
 // today, so in production this returns false — with OR without
-// config/escrow_multisig.json.
+// the escrow_multisig section of config/genesis_state.json.
 func CGEReleasesAuthorised() bool {
 	return escrowEnforced()
 }

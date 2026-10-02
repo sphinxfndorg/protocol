@@ -42,9 +42,11 @@
 package core
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -218,8 +220,8 @@ func (sm *SyncManager) processState() {
 		// handleConsensusReady() unconditionally afterwards meant a node
 		// could be told "you still need to sync" and, on the very same
 		// tick, be flipped to NodeValidatorActive anyway — because
-		// shouldBecomeValidator() only checks stake and peer count, never
-		// whether sync actually completed. Re-read the state after
+		// shouldBecomeValidator() did not check whether sync actually
+		// completed. Re-read the state after
 		// handleSynchronized() and only proceed to handleConsensusReady()
 		// if we're still genuinely NodeReady.
 		// ────────────────────────────────────────────────────────────────
@@ -1606,19 +1608,13 @@ func (sm *SyncManager) verifyChainLinks() error {
 	return nil
 }
 
-// shouldBecomeValidator determines if this node should participate in consensus
+// shouldBecomeValidator determines whether this chain-state validator is
+// synchronized and may participate in consensus.
 func (sm *SyncManager) shouldBecomeValidator() bool {
-	// ────────────────────────────────────────────────────────────────────
-	// BUG FIX: this function used to check only stake and peer count. It
-	// never verified that this node's local chain height actually matches
-	// the network's canonical tip height — which is the one check whose
-	// entire purpose is to answer "has this node finished synchronizing?"
-	// Without it, a node could be promoted to NodeValidatorActive (and
-	// therefore start proposing/voting in PBFT) while still one or more
-	// blocks behind the peers it just finished talking to, which is
-	// precisely how a late joiner ends up permanently a block behind and
-	// eventually diverges onto a different tip hash.
-	// ────────────────────────────────────────────────────────────────────
+	if sm == nil || sm.bc == nil || sm.consensus == nil {
+		return false
+	}
+
 	localHeight := sm.bc.GetBlockCount()
 	targetHeight := sm.getMaxPeerHeight()
 	if targetHeight > 0 && localHeight < targetHeight {
@@ -1626,29 +1622,21 @@ func (sm *SyncManager) shouldBecomeValidator() bool {
 		return false
 	}
 
-	// Check if node has sufficient stake
-	stake := sm.bc.GetValidatorStake("node")
-	if stake == nil {
+	// Membership comes from the active validator set, not a balance fallback
+	// or the number of peers currently connected.
+	vs := sm.consensus.GetValidatorSet()
+	if vs == nil {
 		return false
 	}
-
-	// Compare against the shared minimum-validator-stake constant.
-	if stake.Cmp(denom.MinValidatorStakeNSPX()) < 0 {
-		return false
+	epoch := consensus.EpochForHeight(sm.consensus.GetCurrentHeight())
+	for _, validator := range vs.GetActiveValidators(epoch) {
+		if validator != nil && validator.ID == sm.consensus.GetNodeID() {
+			return true
+		}
 	}
 
-	// Check if we have enough peers for quorum
-	sm.mu.RLock()
-	peerCount := len(sm.peerInfo)
-	sm.mu.RUnlock()
-
-	// Need at least 3 validators for PBFT (2/3 quorum)
-	if peerCount < 2 {
-		logger.Info("Not enough peers for validator role (need >=2, have %d)", peerCount)
-		return false
-	}
-
-	return true
+	logger.Info("Node is not an active validator in chain state")
+	return false
 }
 
 // isDownloading checks if a height is currently being downloaded
@@ -1739,6 +1727,121 @@ func (sm *SyncManager) DisableStateSync() {
 	logger.Info("INFO State sync disabled")
 }
 
+// OperatorKeyResolver returns the chain-committed operator public key for a
+// validator ID, as of the state replayed up to the block being verified.
+//
+// ★ WHY A RESOLVER AND NOT THE SIGNING REGISTRY. The live path can look a key
+// up in SigningService.publicKeyRegistry, which is populated by handshake. A
+// syncing node has NOT handshook with the peers whose blocks it is replaying,
+// so a registry lookup would fail for exactly the validators whose votes it
+// must check — and skipping unknown keys would restore the forgery hole. The
+// key therefore comes from chain state (protocol:validator_identity:), the
+// same source the double-sign evidence path already uses
+// (executor.go getValidatorIdentity), so a replayed chain verifies on a node
+// that never met a peer.
+//
+// A missing or malformed record is a chain-integrity failure, returned as an
+// error; the caller rejects the block.
+type OperatorKeyResolver func(validatorID string) ([]byte, error)
+
+// AttestationSignatureVerifier reports whether one attestation's signature is
+// valid for the given validator and block. It is a parameter so the
+// verification step is expressed explicitly at the call site, and so tests can
+// inject a deterministic stand-in instead of generating real SPHINCS+ keys.
+//
+// ★ THE DEFAULT MUST NEVER BE SKIPPED. There is no "no verifier configured"
+// path: a caller that cannot verify must reject, not accept. That is why this
+// is a required parameter and why FastForward no longer has an optional hook.
+type AttestationSignatureVerifier func(att *types.Attestation, publicKey []byte) error
+
+// MaxAttestationsPerBlock bounds how many attestations a block may carry. A
+// block cannot need more signers than the governing snapshot has members, so
+// anything above that is malformed and is rejected BEFORE any SPHINCS+ work.
+// Without this cap, one hostile block could force unbounded verifications on a
+// syncing node.
+const MaxAttestationsPerBlock = consensus.MaxValidatorSetSize
+
+// attestationVerifyConcurrency bounds parallel signature verification.
+// SPHINCS+ verification is CPU-bound and costs seconds per signature, so this
+// is capped well below the validator count: with K=100 a block carries ~67
+// attestations, and verifying them serially would stall sync for minutes.
+var attestationVerifyConcurrency = func() int {
+	n := runtime.NumCPU()
+	switch {
+	case n > 8:
+		return 8
+	case n < 1:
+		return 1
+	default:
+		return n
+	}
+}
+
+// verifyAttestationSignatures runs the cryptographic checks over exactly the
+// attestations that already passed the cheap structural gate.
+//
+// ★ THE VERDICT MUST NOT DEPEND ON COMPLETION ORDER. Results are stored by
+// index and the lowest failing index is reported, so both the accept/reject
+// decision and the error message are deterministic regardless of which worker
+// finished first. The pool stops handing out work after a failure, but a
+// cancellation can never turn a rejection into an acceptance, because the
+// final decision scans every index.
+func verifyAttestationSignatures(
+	attestations []*types.Attestation,
+	keys map[string][]byte,
+	verify func(*types.Attestation, []byte) error,
+) error {
+	if len(attestations) == 0 {
+		return nil
+	}
+	workers := attestationVerifyConcurrency()
+	if workers > len(attestations) {
+		workers = len(attestations)
+	}
+	if workers < 1 {
+		workers = 1
+	}
+
+	type job struct {
+		index int
+		att   *types.Attestation
+	}
+	jobs := make(chan job)
+	results := make([]error, len(attestations))
+
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			draining := false
+			for j := range jobs {
+				if draining {
+					continue // accept and discard; the index stays nil
+				}
+				if err := verify(j.att, keys[j.att.ValidatorID]); err != nil {
+					results[j.index] = err
+					draining = true
+				}
+			}
+		}()
+	}
+
+	for i, att := range attestations {
+		jobs <- job{index: i, att: att}
+	}
+	close(jobs)
+	wg.Wait()
+
+	for i, err := range results {
+		if err != nil {
+			return fmt.Errorf("attestation %d from %s failed signature verification: %w",
+				i, attestations[i].ValidatorID, err)
+		}
+	}
+	return nil
+}
+
 // VerifyBlockAttestations checks that a block carries valid commit attestations
 // representing ≥2/3+ of total validator stake. This is the sync-time equivalent
 // of the PBFT commit quorum check.
@@ -1775,10 +1878,158 @@ func (sm *SyncManager) DisableStateSync() {
 // against the set that actually governed it. There is now NO live-set parameter
 // at all, so that class of mistake is not expressible.
 //
+// NewChainStateKeyResolver returns the production OperatorKeyResolver: it reads
+// the chain-committed operator key from the StateDB produced by replaying every
+// block up to (but not including) the one being verified.
+//
+// ★ THIS IS WHY A LATE JOINER WORKS. The verifier runs BEFORE the block is
+// committed, so it sees the state left by all prior blocks — the same replay a
+// syncing node performs. Nothing here consults the peer registry, so a node
+// that has never handshook with anybody can still verify the votes it replays.
+//
+// Genesis validators are covered because block-0 execution writes their
+// identity records (seedGenesisFileAllocations -> setValidatorIdentity), so by
+// the time height 1 is verified the records exist.
+func NewChainStateKeyResolver(bc *Blockchain) OperatorKeyResolver {
+	return func(validatorID string) ([]byte, error) {
+		if bc == nil {
+			return nil, fmt.Errorf("no blockchain available")
+		}
+		stateDB, err := bc.newStateDB()
+		if err != nil {
+			return nil, fmt.Errorf("open state DB for operator key %s: %w", validatorID, err)
+		}
+		identity, err := stateDB.getValidatorIdentity(validatorID)
+		if err != nil {
+			return nil, fmt.Errorf("read chain identity for %s: %w", validatorID, err)
+		}
+		if identity.OperatorPublicKey == "" {
+			return nil, fmt.Errorf("validator %s has no chain-committed operator key", validatorID)
+		}
+		key, err := hex.DecodeString(identity.OperatorPublicKey)
+		if err != nil {
+			return nil, fmt.Errorf("decode chain-committed operator key for %s: %w", validatorID, err)
+		}
+		return key, nil
+	}
+}
+
+// NewConsensusAttestationVerifier returns the production
+// AttestationSignatureVerifier. It delegates to the single shared verifier in
+// consensus, which builds the one canonical vote preimage, so the sync path and
+// the live path cannot disagree about what was signed.
+//
+// The full serialized SignedMessage blob is required (Attestation.Signature),
+// not the extracted signature bytes: the signed timestamp and nonce are part of
+// the message and are what binds the vote to its content.
+func NewConsensusAttestationVerifier() AttestationSignatureVerifier {
+	return func(att *types.Attestation, publicKey []byte) error {
+		if att == nil {
+			return fmt.Errorf("nil attestation")
+		}
+		return consensus.VerifyAttestationSignature(publicKey, att.ChainID, att.Phase,
+			att.Height, att.View, att.BlockHash, att.ValidatorID, att.Signature)
+	}
+}
+
 // The epoch is likewise not a parameter: it is derived from block.GetHeight()
 // inside consensus.ValidatorSetAt, so no caller can verify a block against a
 // different epoch than the one it was produced in.
-func VerifyBlockAttestations(block *types.Block) error {
+// BlockProposerSignatureVerifier verifies a block's proposer signature against a
+// caller-supplied public key. The production implementation is
+// consensus.VerifyBlockProposerSignature, which resolves nothing itself: the
+// caller passes the key it read from REPLAYED CHAIN STATE.
+type BlockProposerSignatureVerifier func(block *types.Block, publicKey []byte) error
+
+// NewConsensusBlockProposerSignatureVerifier returns the production block
+// signature verifier.
+func NewConsensusBlockProposerSignatureVerifier() BlockProposerSignatureVerifier {
+	return consensus.VerifyBlockProposerSignature
+}
+
+// VerifyBlockAuthority decides whether a block may be committed, and it decides
+// from the SNAPSHOT THAT GOVERNS ITS HEIGHT — never from a flag carried on the
+// block, a "solo-mined" marker, or the local peer count.
+//
+// ★ THE BYPASS THIS CLOSES. The sync loop used to read an empty attestation
+// list as "solo-mined before PBFT — skipping quorum check, verified by chain
+// continuity". A malicious peer could therefore hand a joining node an
+// arbitrarily long chain of empty-attestation blocks whose only property was
+// that each parent hash linked to the last, and every one of them would be
+// committed. That discarded the entire attestation-verification layer for
+// exactly the case a joining node is in.
+//
+// The rule is now:
+//
+//   - attestations present  -> VerifyBlockAttestations, unchanged and strict.
+//   - attestations absent   -> permitted ONLY when the governing snapshot has
+//     exactly ONE member, and the block carries a valid proposer signature from
+//     that member, verified against its chain-committed key.
+//
+// Because the test is "how many validators are in the snapshot for this height",
+// the permission expires by itself at the epoch boundary where the set grows:
+// from that height on, an empty-attestation block is rejected. No flag, so
+// nothing has to be kept in sync.
+func VerifyBlockAuthority(block *types.Block, resolveKey OperatorKeyResolver, verifySig AttestationSignatureVerifier, verifyBlockSig BlockProposerSignatureVerifier) error {
+	if block == nil {
+		return fmt.Errorf("block is nil")
+	}
+	// Genesis is configuration, not consensus: its identity is established by
+	// the document digest and the pinned hash, not by votes.
+	if block.GetHeight() == 0 {
+		return nil
+	}
+
+	if len(block.Body.Attestations) > 0 {
+		return VerifyBlockAttestations(block, resolveKey, verifySig)
+	}
+
+	// ── EMPTY ATTESTATIONS ────────────────────────────────────────────────
+	snap := consensus.ValidatorSetAt(block.GetHeight())
+	if snap == nil {
+		return fmt.Errorf("block %d carries no attestations and there is no validator set snapshot for height %d (epoch %d); refusing to accept an unattested block without knowing who governed it",
+			block.GetHeight(), block.GetHeight(), consensus.EpochForHeight(block.GetHeight()))
+	}
+	if len(snap.Validators) != 1 {
+		return fmt.Errorf("block %d carries no attestations, but the epoch %d snapshot has %d validators; only a single-validator snapshot may finalize a block without a quorum certificate",
+			block.GetHeight(), snap.Epoch, len(snap.Validators))
+	}
+	if block.Header == nil || block.Header.ProposerID == "" {
+		return fmt.Errorf("block %d carries no attestations and no proposer ID; a single-validator chain still requires the proposer to be identified", block.GetHeight())
+	}
+
+	var memberID string
+	for id := range snap.Validators {
+		memberID = id
+	}
+	if block.Header.ProposerID != memberID {
+		return fmt.Errorf("block %d carries no attestations and is proposed by %s, which is not the sole member %s of the epoch %d snapshot",
+			block.GetHeight(), block.Header.ProposerID, memberID, snap.Epoch)
+	}
+
+	if resolveKey == nil || verifyBlockSig == nil {
+		return fmt.Errorf("block %d proposer signature verification is not configured; refusing to accept an unattested block with an unverified producer",
+			block.GetHeight())
+	}
+	key, err := resolveKey(memberID)
+	if err != nil {
+		return fmt.Errorf("block %d: no chain-committed operator key for the sole epoch %d validator %s: %w",
+			block.GetHeight(), snap.Epoch, memberID, err)
+	}
+	if len(key) != OperatorPublicKeyLength {
+		return fmt.Errorf("block %d: chain-committed operator key for %s is %d bytes, want exactly %d",
+			block.GetHeight(), memberID, len(key), OperatorPublicKeyLength)
+	}
+	if err := verifyBlockSig(block, key); err != nil {
+		return fmt.Errorf("block %d: %w", block.GetHeight(), err)
+	}
+
+	logger.Info("Block %d accepted on a single-validator epoch %d snapshot: no attestations required, proposer %s signature verified against its chain-committed key",
+		block.GetHeight(), snap.Epoch, memberID)
+	return nil
+}
+
+func VerifyBlockAttestations(block *types.Block, resolveKey OperatorKeyResolver, verifySig AttestationSignatureVerifier) error {
 	if block == nil {
 		return fmt.Errorf("block is nil")
 	}
@@ -1795,6 +2046,13 @@ func VerifyBlockAttestations(block *types.Block) error {
 	attestations := block.Body.Attestations
 	if len(attestations) == 0 {
 		return fmt.Errorf("block height %d has zero attestations — no quorum certificate", block.GetHeight())
+	}
+	// ★ CHEAP CHECK FIRST. A block cannot carry more signers than the snapshot
+	// has members, so an oversized list is malformed. Rejecting it here means a
+	// hostile block cannot make this node perform unbounded SPHINCS+ work.
+	if len(attestations) > MaxAttestationsPerBlock {
+		return fmt.Errorf("block height %d carries %d attestations, above the maximum of %d",
+			block.GetHeight(), len(attestations), MaxAttestationsPerBlock)
 	}
 
 	// ★ FAIL CLOSED. The snapshot for this height is the ONLY authority. If it
@@ -1819,27 +2077,37 @@ func VerifyBlockAttestations(block *types.Block) error {
 	// Distinct attesters, resolved ONLY against the snapshot's own set. An
 	// attestation from a validator that is not in this snapshot counts for
 	// nothing — including a validator that was valid in a different epoch.
+	//
+	// ★ STRICT: a duplicate signer or a non-member signer now REJECTS the
+	// block instead of being skipped. Skipping them let a proposer pad a block
+	// with junk entries and still reach quorum, and it hid the fact that a
+	// non-member had been counted as a participant at all.
 	attestedStake := big.NewInt(0)
 	seen := make(map[string]bool)
 	distinct := 0
+	verified := make([]*types.Attestation, 0, len(attestations))
 
 	for _, att := range attestations {
 		if att == nil || att.ValidatorID == "" {
-			continue
+			return fmt.Errorf("block %d contains a malformed attestation with no validator ID", block.GetHeight())
+		}
+		if att.Height != block.GetHeight() {
+			return fmt.Errorf("block %d contains attestation for height %d from %s",
+				block.GetHeight(), att.Height, att.ValidatorID)
 		}
 		if seen[att.ValidatorID] {
-			continue // duplicate attester counts once
+			return fmt.Errorf("block %d contains duplicate attestations from %s", block.GetHeight(), att.ValidatorID)
 		}
 		seen[att.ValidatorID] = true
 
 		v, inSet := snap.Validators[att.ValidatorID]
 		if !inSet || v == nil || v.StakeAmount == nil || v.StakeAmount.Sign() <= 0 {
-			logger.Debug("VerifyBlockAttestations: %s is not in the epoch %d snapshot — attestation ignored",
-				att.ValidatorID, blockEpoch)
-			continue
+			return fmt.Errorf("block %d contains an attestation from %s, which is not a member of the epoch %d snapshot",
+				block.GetHeight(), att.ValidatorID, blockEpoch)
 		}
 		attestedStake.Add(attestedStake, v.StakeAmount)
 		distinct++
+		verified = append(verified, att)
 	}
 
 	// ★ STRICT: voted*3 > total*2, against the SNAPSHOT's own total. The old
@@ -1861,12 +2129,48 @@ func VerifyBlockAttestations(block *types.Block) error {
 			block.GetHeight(), distinct, blockEpoch, n, want)
 	}
 
+	// ── STRICT SIGNATURE VERIFICATION ─────────────────────────────────────
+	// Everything above is cheap arithmetic over block CONTENTS. Nothing above
+	// proves anybody actually signed anything: the proposer chooses this list,
+	// and att.Signature was previously never examined at all, so a block
+	// fabricated wholesale passed every check above. That is the hole #5 closes.
+	//
+	// The keys come from chain state, not the handshake registry, so this works
+	// on a node that has never met the peers it is replaying.
+	if resolveKey == nil || verifySig == nil {
+		return fmt.Errorf("block %d attestation verification is not configured; refusing to accept unverified attestations",
+			block.GetHeight())
+	}
+
+	// INVARIANT: every member of the governing snapshot must have a chain
+	// identity with a correctly sized operator key. A missing one is a
+	// chain-integrity failure, not something to work around: a validator whose
+	// key we cannot resolve can never be checked, and skipping it would
+	// silently shrink the verified set below quorum.
+	keys := make(map[string][]byte, len(snap.Validators))
+	for id := range snap.Validators {
+		key, err := resolveKey(id)
+		if err != nil {
+			return fmt.Errorf("block %d: no chain-committed operator key for snapshot member %s: %w",
+				block.GetHeight(), id, err)
+		}
+		if len(key) != OperatorPublicKeyLength {
+			return fmt.Errorf("block %d: chain-committed operator key for %s is %d bytes, want exactly %d",
+				block.GetHeight(), id, len(key), OperatorPublicKeyLength)
+		}
+		keys[id] = key
+	}
+
+	if err := verifyAttestationSignatures(verified, keys, verifySig); err != nil {
+		return fmt.Errorf("block %d: %w", block.GetHeight(), err)
+	}
+
 	attestedSPX := new(big.Float).Quo(new(big.Float).SetInt(attestedStake), new(big.Float).SetFloat64(denom.SPX))
 	totalSPX := new(big.Float).Quo(new(big.Float).SetInt(totalStake), new(big.Float).SetFloat64(denom.SPX))
 	pct := new(big.Float).Quo(attestedSPX, totalSPX)
 	pct.Mul(pct, big.NewFloat(100))
-	logger.Info("SUCCESS Block %d attestation quorum verified: %.2f / %.2f SPX (%.1f%%) from %d validators (epoch %d snapshot)",
-		block.GetHeight(), attestedSPX, totalSPX, pct, distinct, blockEpoch)
+	logger.Info("SUCCESS Block %d attestation quorum verified AND %d signature(s) verified: %.2f / %.2f SPX (%.1f%%) from %d validators (epoch %d snapshot)",
+		block.GetHeight(), len(verified), attestedSPX, totalSPX, pct, distinct, blockEpoch)
 
 	return nil
 }
@@ -2109,7 +2413,13 @@ func (sm *SyncManager) comprehensiveBlockVerification(block *types.Block) error 
 		// closed if that snapshot is missing. This call site used to pass
 		// height/100 while bind/helpers.go passed height/SlotsPerEpoch(32), so
 		// the same block could be checked against two different sets.
-		if err := VerifyBlockAttestations(block); err != nil {
+		//
+		// The key resolver reads the StateDB of the REPLAYED chain, and the
+		// signature verifier is the shared consensus primitive — so this
+		// verifies cryptographically on a node that never handshook with a peer.
+		if err := VerifyBlockAttestations(block,
+			NewChainStateKeyResolver(sm.bc),
+			NewConsensusAttestationVerifier()); err != nil {
 			return fmt.Errorf("attestation verification failed: %w", err)
 		}
 	}

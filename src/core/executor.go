@@ -22,6 +22,7 @@ import (
 	"github.com/sphinxfndorg/protocol/src/consensus"
 	logger "github.com/sphinxfndorg/protocol/src/console"
 	"github.com/sphinxfndorg/protocol/src/contracts"
+	database "github.com/sphinxfndorg/protocol/src/core/state"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
 	denom "github.com/sphinxfndorg/protocol/src/params/denom"
 	"github.com/sphinxfndorg/protocol/src/policy"
@@ -626,19 +627,173 @@ func (bc *Blockchain) applyTransactions(block *types.Block, stateDB *StateDB) er
 	// GasUsed is set to 0 when the block is created (CreateBlock) and
 	// updated here so the explorer and other consumers see the real total.
 	var gasUsedAcc *big.Int
+	block.Header.GasUsed = new(big.Int)
 
 	for i, tx := range block.Body.TxsList {
 		if tx == nil || tx.Amount == nil {
 			return fmt.Errorf("transaction %d is missing amount", i)
 		}
-		// Accumulate gas used for this transaction.
-		if tx.GasLimit != nil {
-			if gasUsedAcc == nil {
-				gasUsedAcc = new(big.Int)
-			}
-			gasUsedAcc.Add(gasUsedAcc, tx.GasLimit)
+		stakeAction, isStakeAction, err := types.ParseStakeAction(tx.ReturnData)
+		if err != nil {
+			return fmt.Errorf("transaction %d has invalid stake action: %w", i, err)
 		}
+		slashEvidence, isSlashEvidence, err := types.ParseDoubleSignEvidence(tx.ReturnData)
+		if err != nil {
+			return fmt.Errorf("transaction %d has invalid double-sign evidence: %w", i, err)
+		}
+		if isStakeAction && isSlashEvidence {
+			return fmt.Errorf("transaction %d cannot combine stake and slashing actions", i)
+		}
+		slashRecordKey := ""
+		if isStakeAction {
+			if tx.ToContract != "" || tx.IsContractDeployment() || len(tx.CallData) > 0 {
+				return fmt.Errorf("transaction %d combines staking with contract execution", i)
+			}
+			switch stakeAction.Action {
+			case "stake":
+				if tx.Amount.Sign() <= 0 || tx.Receiver != types.StakingEscrowAddress {
+					return fmt.Errorf("transaction %d stake must transfer a positive amount to the staking escrow", i)
+				}
+				publicKey, err := hex.DecodeString(stakeAction.ValidatorPublicKey)
+				// ★ C2a: exactly OperatorPublicKeyLength, not merely non-empty.
+				// Genesis has always required 32; admitting a shorter or longer
+				// key here produced a validator that could never verify a vote,
+				// which would then fail replay for every node.
+				if err != nil || len(publicKey) != OperatorPublicKeyLength {
+					return fmt.Errorf("transaction %d validator public key must be %d bytes of hex", i, OperatorPublicKeyLength)
+				}
 
+				// ★ PROOF OF POSSESSION IS VERIFIED BEFORE ANY STATE MUTATION.
+				//
+				// This must run before reserveOperatorKey, before the escrow
+				// Transfer below, and before the queue append. The operator
+				// signature is what proves the submitter actually holds the
+				// private key for the public key being registered — without it,
+				// anyone could stake 32 SPX against someone ELSE's public key
+				// (validator keys are visible via handshake and in
+				// genesis_state.json), exit, withdraw, and leave the victim's
+				// key permanently reserved by the index below.
+				//
+				// Reserving first was not exploitable only because a failed
+				// transaction aborts the whole block and discards staged
+				// writes. That is an accident of the surrounding control flow,
+				// not a property of this check: the moment any per-transaction
+				// error path stopped aborting the block, a junk proof would
+				// leave a permanent reservation behind — a cheap denial of
+				// service against a specific validator's key.
+				proofMessage, err := types.StakeIdentityProofMessage(
+					tx.ChainID, stakeAction.Action, stakeAction.ValidatorID, tx.Sender, tx.Amount,
+				)
+				if err != nil {
+					return fmt.Errorf("transaction %d create identity proof message: %w", i, err)
+				}
+				if err := consensus.VerifyStakeIdentityProof(publicKey, stakeAction.ValidatorProof, proofMessage); err != nil {
+					return fmt.Errorf("transaction %d validator identity proof failed: %w", i, err)
+				}
+
+				// ★ C2b: reserve the operator key AT QUEUE TIME, now that
+				// possession is proven. Activation is deferred to the e+2
+				// boundary, so reserving later would let two Stake transactions
+				// in the same block both claim one key and collide only after
+				// the sender was told it succeeded. The lookup reads staged
+				// writes, so the second one in a block sees the first's
+				// reservation.
+				if err := stateDB.reserveOperatorKey(stakeAction.ValidatorID, publicKey); err != nil {
+					return fmt.Errorf("transaction %d reserve operator key: %w", i, err)
+				}
+			case "unstake":
+				if tx.Amount.Sign() != 0 || tx.Receiver != tx.Sender {
+					return fmt.Errorf("transaction %d unstake must have zero amount and return to its signer", i)
+				}
+			}
+		}
+		if isSlashEvidence {
+			if tx.ToContract != "" || tx.IsContractDeployment() || len(tx.CallData) > 0 ||
+				tx.Amount.Sign() != 0 || tx.Receiver != tx.Sender {
+				return fmt.Errorf("transaction %d double-sign evidence must be a zero-value self transaction", i)
+			}
+			targetHeight := slashEvidence.First.Height
+			if targetHeight > block.GetHeight() {
+				return fmt.Errorf("transaction %d double-sign evidence is for future height %d", i, targetHeight)
+			}
+			if slashEvidence.First.ChainID != bc.GetChainID() {
+				return fmt.Errorf("transaction %d double-sign evidence chain ID %d does not match chain %d",
+					i, slashEvidence.First.ChainID, bc.GetChainID())
+			}
+			evidenceWindow := MaxEvidenceAgeEpochs * consensus.EpochBlocks()
+			if evidenceWindow == 0 || block.GetHeight()-targetHeight > evidenceWindow {
+				return fmt.Errorf("transaction %d double-sign evidence at height %d exceeds the maximum age of %d epochs",
+					i, targetHeight, MaxEvidenceAgeEpochs)
+			}
+			snapshot := consensus.ValidatorSetAt(targetHeight)
+			validator := (*consensus.StakedValidator)(nil)
+			if snapshot != nil {
+				validator = snapshot.Validators[slashEvidence.First.ValidatorID]
+			}
+			if validator == nil || validator.StakeAmount == nil || validator.StakeAmount.Sign() <= 0 {
+				return fmt.Errorf("transaction %d evidence signer %s was not a member at height %d",
+					i, slashEvidence.First.ValidatorID, targetHeight)
+			}
+			identity, err := stateDB.getValidatorIdentity(slashEvidence.First.ValidatorID)
+			if err != nil {
+				return fmt.Errorf("transaction %d read chain-committed key for %s: %w",
+					i, slashEvidence.First.ValidatorID, err)
+			}
+			publicKey, err := hex.DecodeString(identity.OperatorPublicKey)
+			if err != nil {
+				return fmt.Errorf("transaction %d decode chain-committed operator key for %s: %w",
+					i, slashEvidence.First.ValidatorID, err)
+			}
+			firstVote := &consensus.Vote{
+				ChainID:   slashEvidence.First.ChainID,
+				Height:    slashEvidence.First.Height,
+				Phase:     slashEvidence.First.Phase,
+				View:      slashEvidence.First.View,
+				VoterID:   slashEvidence.First.ValidatorID,
+				BlockHash: slashEvidence.First.BlockHash,
+				Signature: slashEvidence.First.Signature,
+			}
+			secondVote := &consensus.Vote{
+				ChainID:   slashEvidence.Second.ChainID,
+				Height:    slashEvidence.Second.Height,
+				Phase:     slashEvidence.Second.Phase,
+				View:      slashEvidence.Second.View,
+				VoterID:   slashEvidence.Second.ValidatorID,
+				BlockHash: slashEvidence.Second.BlockHash,
+				Signature: slashEvidence.Second.Signature,
+			}
+			if err := consensus.VerifyDoubleSignEvidence(firstVote, secondVote, publicKey); err != nil {
+				return fmt.Errorf("transaction %d invalid double-sign evidence: %w", i, err)
+			}
+			firstHash, secondHash := slashEvidence.First.BlockHash, slashEvidence.Second.BlockHash
+			if secondHash < firstHash {
+				firstHash, secondHash = secondHash, firstHash
+			}
+			offense, err := json.Marshal(struct {
+				Domain      string `json:"domain"`
+				ValidatorID string `json:"validator_id"`
+				Height      uint64 `json:"height"`
+				View        uint64 `json:"view"`
+				FirstHash   string `json:"first_hash"`
+				SecondHash  string `json:"second_hash"`
+			}{
+				Domain:      "SPHINX_DOUBLE_SIGN_V1",
+				ValidatorID: slashEvidence.First.ValidatorID,
+				Height:      slashEvidence.First.Height,
+				View:        slashEvidence.First.View,
+				FirstHash:   firstHash,
+				SecondHash:  secondHash,
+			})
+			if err != nil {
+				return fmt.Errorf("transaction %d canonicalize slashing offense: %w", i, err)
+			}
+			slashRecordKey = slashingEvidenceKeyPrefix + hex.EncodeToString(common.SpxHash(offense))
+			if _, err := stateDB.GetContractValue(slashRecordKey); err == nil {
+				return fmt.Errorf("transaction %d double-sign evidence was already applied", i)
+			} else if !errors.Is(err, database.ErrNotFound) {
+				return fmt.Errorf("transaction %d check double-sign replay state: %w", i, err)
+			}
+		}
 		// Genesis (block 0) distribution transactions have
 		// Sender: GenesisVaultAddress and are processed here as normal
 		// transfers, same as any other block. ExecuteBlock funds the vault
@@ -661,6 +816,9 @@ func (bc *Blockchain) applyTransactions(block *types.Block, stateDB *StateDB) er
 
 		gasFee := tx.GetGasFee()
 		totalCost := new(big.Int).Add(tx.Amount, gasFee)
+		if isStakeAction && stakeAction.Action == "unstake" {
+			totalCost = new(big.Int).Set(gasFee)
+		}
 
 		bal, err := stateDB.GetBalance(tx.Sender)
 		if err != nil {
@@ -705,8 +863,72 @@ func (bc *Blockchain) applyTransactions(block *types.Block, stateDB *StateDB) er
 			}
 		}
 
-		if err := bc.executeContractTransaction(tx, stateDB, block.GetHeight()); err != nil {
+		if isSlashEvidence {
+			validatorID := slashEvidence.First.ValidatorID
+			if err := bc.applyDoubleSignPenalty(stateDB, validatorID); err != nil {
+				return fmt.Errorf("transaction %d apply double-sign penalty: %w", i, err)
+			}
+			stateDB.SetContractValue(slashRecordKey, []byte(tx.ID))
+		}
+
+		if isStakeAction {
+			activationEpoch := consensus.ActivationEpochForStake(block.GetHeight())
+			switch stakeAction.Action {
+			case "stake":
+				if err := bc.validateStakeAdmission(stateDB, stakeAction.ValidatorID); err != nil {
+					return fmt.Errorf("transaction %d validator admission: %w", i, err)
+				}
+				currentStake, err := stateDB.GetValidatorStake(stakeAction.ValidatorID)
+				if err != nil && !errors.Is(err, database.ErrNotFound) {
+					return fmt.Errorf("transaction %d read validator stake: %w", i, err)
+				}
+				if currentStake != nil && currentStake.Sign() > 0 {
+					return fmt.Errorf("transaction %d validator %s already has active stake", i, stakeAction.ValidatorID)
+				}
+				change := queuedStakeChange{
+					Action:          "stake",
+					ValidatorID:     stakeAction.ValidatorID,
+					Owner:           tx.Sender,
+					PublicKey:       stakeAction.ValidatorPublicKey,
+					AmountNSPX:      tx.Amount.String(),
+					ActivationEpoch: activationEpoch,
+				}
+				if err := stateDB.queueStakeChange(change); err != nil {
+					return fmt.Errorf("transaction %d queue stake: %w", i, err)
+				}
+			case "unstake":
+				identity, err := stateDB.getValidatorIdentity(stakeAction.ValidatorID)
+				if err != nil {
+					return fmt.Errorf("transaction %d read stake owner: %w", i, err)
+				}
+				if identity.OwnerAddress != tx.Sender {
+					return fmt.Errorf("transaction %d sender does not own validator %s stake", i, stakeAction.ValidatorID)
+				}
+				amount, err := stateDB.GetValidatorStake(stakeAction.ValidatorID)
+				if err != nil || amount == nil || amount.Sign() <= 0 {
+					return fmt.Errorf("transaction %d validator %s has no active stake to unstake", i, stakeAction.ValidatorID)
+				}
+				change := queuedStakeChange{
+					Action:          "unstake",
+					ValidatorID:     stakeAction.ValidatorID,
+					Owner:           tx.Sender,
+					ActivationEpoch: activationEpoch,
+				}
+				if err := stateDB.queueStakeChange(change); err != nil {
+					return fmt.Errorf("transaction %d queue unstake: %w", i, err)
+				}
+			}
+		}
+
+		actualGasUsed := new(big.Int)
+		if err := bc.executeContractTransaction(tx, stateDB, actualGasUsed, block.GetHeight()); err != nil {
 			return fmt.Errorf("contract execution for tx[%d]: %w", i, err)
+		}
+		if block.GetHeight() > 0 {
+			if gasUsedAcc == nil {
+				gasUsedAcc = new(big.Int)
+			}
+			gasUsedAcc.Add(gasUsedAcc, actualGasUsed)
 		}
 
 		if gasFee.Sign() > 0 {
@@ -924,13 +1146,46 @@ func (bc *Blockchain) mintEpochInflation(block *types.Block, stateDB *StateDB) {
 // (InitialValidators) into StateDB. It runs exactly once, during block-0
 // execution, so chains that boot with a known validator set get a
 // deterministic on-chain stake snapshot before the first epoch boundary.
-func (bc *Blockchain) seedValidatorStakesFromGenesis(stateDB *StateDB) {
+func (bc *Blockchain) seedValidatorStakesFromGenesis(stateDB *StateDB) error {
 	if stateDB == nil || bc.chainParams == nil {
-		return
+		return nil
 	}
 	existing, err := stateDB.GetAllValidatorStakes()
 	if err == nil && len(existing) > 0 {
-		return // already seeded — never overwrite a committed set
+		return nil // already seeded — never overwrite a committed set
+	}
+	genesisFile, err := LoadGenesisFile(common.GetDataDir())
+	if err != nil {
+		return fmt.Errorf("load genesis validator stakes: %w", err)
+	}
+	if genesisFile != nil {
+		for _, validator := range genesisFile.Validators {
+			stake, ok := new(big.Int).SetString(validator.StakeNSPX, 10)
+			if validator.NodeID == "" || !ok || stake.Sign() <= 0 {
+				return fmt.Errorf("invalid genesis stake for validator %q: %q", validator.NodeID, validator.StakeNSPX)
+			}
+			stateDB.SetValidatorStake(validator.NodeID, stake)
+			if validator.PublicKey != "" {
+				publicKey, err := hex.DecodeString(validator.PublicKey)
+				if err != nil || len(publicKey) != OperatorPublicKeyLength {
+					return fmt.Errorf("genesis public key for validator validator.NodeID is %d bytes, want exactly %d",
+						len(publicKey), OperatorPublicKeyLength)
+				}
+				owner := validator.OwnerAddress
+				if owner == "" {
+					owner = validator.RewardAddress
+				}
+				if owner != "" {
+					owner = common.CanonicalSPIFAddress(owner)
+					if err := stateDB.setValidatorIdentity(validator.NodeID, owner, publicKey); err != nil {
+						return err
+					}
+				} else {
+					stateDB.SetContractValue(stakePublicKeyPrefix+validator.NodeID, publicKey)
+				}
+			}
+		}
+		return nil
 	}
 	gs := GenesisStateFromChainParams(bc.chainParams)
 	for _, v := range gs.InitialValidators {
@@ -939,8 +1194,27 @@ func (bc *Blockchain) seedValidatorStakesFromGenesis(stateDB *StateDB) {
 		}
 		if v.StakeNSPX != nil && v.StakeNSPX.Sign() > 0 {
 			stateDB.SetValidatorStake(v.NodeID, v.StakeNSPX)
+			if v.PublicKey != "" {
+				publicKey, err := hex.DecodeString(v.PublicKey)
+				if err != nil || len(publicKey) != OperatorPublicKeyLength {
+					return fmt.Errorf("genesis public key for validator v.NodeID is %d bytes, want exactly %d",
+						len(publicKey), OperatorPublicKeyLength)
+				}
+				owner := v.OwnerAddress
+				if owner == "" {
+					owner = v.Address
+				}
+				if owner != "" {
+					if err := stateDB.setValidatorIdentity(v.NodeID, owner, publicKey); err != nil {
+						return err
+					}
+				} else {
+					stateDB.SetContractValue(stakePublicKeyPrefix+v.NodeID, publicKey)
+				}
+			}
 		}
 	}
+	return nil
 }
 
 // seedGenesisFileAllocations credits the pre-funded accounts the genesis FILE
@@ -986,7 +1260,7 @@ func (bc *Blockchain) seedGenesisFileAllocations(stateDB *StateDB) {
 		return
 	}
 	if len(gf.FundedAccounts) > 0 && !gf.Bootstrap {
-		// A `genesis create` document for a non-devnet network must not carry
+		// A non-bootstrap genesis document for a non-devnet network must not carry
 		// funded_accounts: those rows create supply that is invisible to the
 		// allocation schedule the chain's economics are derived from, and they
 		// are not in block 0's TxsRoot, so no node could ever audit them. Such a
@@ -1235,15 +1509,28 @@ func (bc *Blockchain) applyBlockTransitions(block *types.Block, stateDB *StateDB
 		bc.mintBlockReward(block, stateDB)
 		// Persist the genesis validator stakes so the first epoch-boundary
 		// inflation distribution has a deterministic on-chain stake snapshot.
-		bc.seedValidatorStakesFromGenesis(stateDB)
+		if err := bc.seedValidatorStakesFromGenesis(stateDB); err != nil {
+			return fmt.Errorf("seed genesis validator stakes: %w", err)
+		}
 		// Credit the genesis FILE's pre-funded accounts (validator reward
 		// addresses + spare devnet reward addresses). Same deterministic,
 		// file-driven rules as the validator set above.
 		bc.seedGenesisFileAllocations(stateDB)
 	}
 
+	if height > 0 {
+		if err := bc.applyQueuedStakeChanges(block, stateDB); err != nil {
+			return fmt.Errorf("apply scheduled stake changes: %w", err)
+		}
+	}
+
 	if err := bc.applyTransactions(block, stateDB); err != nil {
 		return err
+	}
+	if block.GetHeight() == 0 {
+		if err := bc.escrowGenesisStakes(stateDB); err != nil {
+			return fmt.Errorf("escrow genesis validator stake: %w", err)
+		}
 	}
 
 	// Persist THIS block's finalized gas footprint for the next block's
@@ -1257,6 +1544,10 @@ func (bc *Blockchain) applyBlockTransitions(block *types.Block, stateDB *StateDB
 	if height > 0 {
 		bc.mintBlockReward(block, stateDB)
 		bc.mintEpochInflation(block, stateDB)
+	}
+
+	if err := bc.applyMissedRoundPolicy(block, stateDB); err != nil {
+		return fmt.Errorf("apply missed-round policy: %w", err)
 	}
 
 	return nil
@@ -1445,12 +1736,37 @@ func (bc *Blockchain) ExecuteGenesisBlock() error {
 	}
 	if nonce > 0 {
 		logger.Info("ExecuteGenesisBlock: already executed (vault nonce=%d), skipping", nonce)
-		return nil
+		// ★ THE SNAPSHOT MUST STILL BE ENSURED HERE. This is the branch every
+		// RESTART takes, and it previously returned without touching the
+		// snapshot. A restart that recovered zero snapshot rows therefore had no
+		// epoch-0 snapshot and could never produce block 1. Ensuring here makes
+		// the two branches behave identically.
+		return bc.ensureEpoch0Snapshot()
 	}
 
 	if _, err := bc.ExecuteBlock(genesisBlock); err != nil {
 		logger.Error("ExecuteGenesisBlock: ExecuteBlock failed: %v", err)
 		return errors.New("ExecuteBlock failed")
+	}
+
+	// ★★ CHECKPOINT 2 ITEM 0: the genesis epoch's snapshot.
+	//
+	// Epoch 0's set is the AUTHORED set, taken here rather than by an
+	// epoch-boundary transition. Without it every block in the genesis epoch —
+	// heights 1..EpochBlocks-1 — has NO snapshot to verify against and fails
+	// closed, so block 1 could never commit on a real node.
+	//
+	// The snapshot is now BUILT FROM THE GENESIS DOCUMENT by the single shared
+	// builder, not taken from whatever the live set happens to contain. It used
+	// to be taken from the live set behind a nil check, which is order-dependent:
+	// on a fresh devnet the validator set is attached AFTER this function runs, so
+	// the check saw no set, skipped the snapshot, never retried, and the node then
+	// logged "validator snapshot for height 1 is unavailable" forever.
+	//
+	// The error is PROPAGATED, not logged: a node that cannot build the snapshot
+	// governing height 1 must fail to start, not start and spin.
+	if err := bc.ensureEpoch0Snapshot(); err != nil {
+		return fmt.Errorf("ExecuteGenesisBlock: ensure epoch-0 validator snapshot: %w", err)
 	}
 
 	logger.Info("SUCCESS ExecuteGenesisBlock: vault %s funded", GenesisVaultAddress)
@@ -1927,6 +2243,15 @@ func (bc *Blockchain) CreateBlock() (block *types.Block, err error) {
 		currentTimestamp,
 		emptyUncles,
 	)
+	snapshot := consensus.ValidatorSetAt(nextHeight)
+	if snapshot == nil {
+		return nil, fmt.Errorf("CreateBlock: validator snapshot for height %d is unavailable", nextHeight)
+	}
+	if prevBlock.Header.GenesisDocumentDigest == "" {
+		return nil, fmt.Errorf("CreateBlock: parent block %d has no genesis-document commitment", prevBlock.GetHeight())
+	}
+	newHeader.ActiveSnapshotHash = snapshot.Hash()
+	newHeader.GenesisDocumentDigest = prevBlock.Header.GenesisDocumentDigest
 
 	newBody := types.NewBlockBody(selectedTxs, emptyUncles, nextHeight)
 	newBody.CGEWitnesses = blockWitnesses

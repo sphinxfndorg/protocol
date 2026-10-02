@@ -117,6 +117,7 @@ func TestTransactRaisesCallGasToTheStoredCodeFloor(t *testing.T) {
 		t.Fatal("transaction ID missing from broadcast")
 	}
 }
+
 // TestTransactKeepsTheBuiltQuoteWhenCodeIsUnreadable pins the fallback: a
 // getcontract miss (unknown address, older node without the code field, or a
 // transport error) must leave the calldata-only quote untouched rather than
@@ -200,4 +201,3 @@ func TestRequiredContractGasMirrorsTheNodeFormula(t *testing.T) {
 		t.Fatalf("return-data quote = %s, want %s", got, want)
 	}
 }
-

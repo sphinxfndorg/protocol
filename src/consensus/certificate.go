@@ -45,8 +45,8 @@ import (
 // incoming certificate before caching it — each one must carry a valid
 // SPHINCS+ signature from its claimed ValidatorID (via SigningService.VerifyVote),
 // AND the payload actually signed must hash-match a freshly recomputed
-// "VOTE:<view>:<blockHash>:<voterID>" binding for the EXACT (View, BlockHash,
-// ValidatorID) the attestation claims (via SigningService.serializeVoteForSigning).
+// v2 chain/phase/height/view/block-hash binding for the exact attestation
+// fields claimed by each certificate entry.
 //
 // That second check matters: SigningService.VerifySignature/VerifyVote (as
 // they exist in sign.go today) verify that the claimed signer produced a
@@ -147,48 +147,50 @@ func evictCommitCertificate(blockHash string) {
 }
 
 // attestationsMeetStakeQuorum reports whether the distinct validator IDs
-// named in atts collectively hold strictly more than 2/3 of total
-// validator-set stake, mirroring hasQuorum's threshold math (meetsStakeQuorum).
+// named in atts meet strict 2/3 against the SNAPSHOT that governed the height
+// those attestations cover.
+//
+// ★ CHECKPOINT 2 ITEM 1: it takes a snapshot parameter. It previously took the
+// denominator from the LIVE validator set and the voter floor from
+// getTotalNodes(), i.e. from a membership that could already have moved on. The
+// snapshot is immutable, height-keyed and identical on every node that replayed
+// the same blocks.
+//
 // This runs in addition to (not instead of) the per-attestation signature
 // verification in HandleCommitCertificate — it rejects certificates that are
 // cryptographically valid but assembled from too small a set of (legitimately)
 // attesting validators to actually represent quorum.
-func (c *Consensus) attestationsMeetStakeQuorum(atts []*types.Attestation) bool {
+func (c *Consensus) attestationsMeetStakeQuorum(atts []*types.Attestation, snap *ValidatorSnapshot) bool {
 	if len(atts) == 0 {
 		return false
 	}
-
-	// SAFETY FLOOR: same reasoning as hasQuorum/hasPrepareQuorum in
-	// consensus.go — don't let an incomplete local stake registry make a
-	// too-small attester set look like 2/3 of the network.
-	distinct := make(map[string]bool, len(atts))
-	for _, a := range atts {
-		if a != nil && a.ValidatorID != "" {
-			distinct[a.ValidatorID] = true
-		}
-	}
-	if len(distinct) < c.calculateQuorumSize(c.getTotalNodes()) {
+	// Fail closed: no chain-state record of who governed this height means no
+	// defensible denominator.
+	if snap == nil {
+		logger.Warn("Refusing attestation quorum: no validator snapshot for the height covered")
 		return false
 	}
 
-	totalStake := c.validatorSet.GetTotalStake()
-	if totalStake == nil || totalStake.Cmp(big.NewInt(0)) == 0 {
-		return false
-	}
-
+	// Sum DISTINCT voters using the SNAPSHOT's own stake. An attester absent
+	// from the governing snapshot contributes nothing, however well signed its
+	// attestation is.
 	seen := make(map[string]bool, len(atts))
 	staked := big.NewInt(0)
+	distinct := 0
 	for _, a := range atts {
 		if a == nil || a.ValidatorID == "" || seen[a.ValidatorID] {
 			continue // skip nil/empty/duplicate entries rather than let them inflate stake
 		}
 		seen[a.ValidatorID] = true
-		if stake := c.getValidatorStake(a.ValidatorID); stake != nil {
-			staked.Add(staked, stake)
+		row, inSet := snap.Validators[a.ValidatorID]
+		if !inSet || row == nil || row.StakeAmount == nil {
+			continue
 		}
+		staked.Add(staked, row.StakeAmount)
+		distinct++
 	}
 
-	return meetsStakeQuorum(staked, totalStake)
+	return quorumFromSnapshot(snap, staked, distinct)
 }
 
 // verifyAttestationSignature confirms that att.ValidatorID genuinely
@@ -209,8 +211,11 @@ func (c *Consensus) verifyAttestationSignature(att *types.Attestation, sigBlob [
 	}
 
 	synthetic := &Vote{
+		ChainID:   att.ChainID,
 		View:      att.View,
 		BlockHash: att.BlockHash,
+		Height:    att.Height,
+		Phase:     att.Phase,
 		VoterID:   att.ValidatorID,
 		Signature: sigBlob,
 	}
@@ -295,6 +300,10 @@ func (c *Consensus) HandleCommitCertificate(cert *CommitCertificate) error {
 				return fmt.Errorf("HandleCommitCertificate: attestation for %s claims block hash %s, mismatched with certificate's %s",
 					att.ValidatorID, att.BlockHash, cert.BlockHash)
 			}
+			if att.ChainID != c.chainID || att.Height != c.currentHeight+1 || att.Phase != VotePhaseCommit {
+				return fmt.Errorf("HandleCommitCertificate: attestation for %s has invalid chain, height, or phase",
+					att.ValidatorID)
+			}
 			if seen[att.ValidatorID] {
 				return fmt.Errorf("HandleCommitCertificate: duplicate attestation for validator %s in block %s", att.ValidatorID, cert.BlockHash)
 			}
@@ -309,7 +318,7 @@ func (c *Consensus) HandleCommitCertificate(cert *CommitCertificate) error {
 		logger.Warn("HandleCommitCertificate: no signing service configured, accepting certificate for %s on stake-quorum check only", shortHash)
 	}
 
-	if !c.attestationsMeetStakeQuorum(cert.Attestations) {
+	if !c.attestationsMeetStakeQuorum(cert.Attestations, c.snapshotForVoting()) {
 		return fmt.Errorf("HandleCommitCertificate: attestations for block %s do not carry 2/3 stake, rejecting", cert.BlockHash)
 	}
 
@@ -420,6 +429,10 @@ func (c *Consensus) HandlePrepareCertificate(cert *PrepareCertificate) error {
 				return fmt.Errorf("HandlePrepareCertificate: attestation for %s claims block hash %s, mismatched with certificate's %s",
 					att.ValidatorID, att.BlockHash, cert.BlockHash)
 			}
+			if att.ChainID != c.chainID || att.Height != c.currentHeight+1 || att.Phase != VotePhasePrepare {
+				return fmt.Errorf("HandlePrepareCertificate: attestation for %s has invalid chain, height, or phase",
+					att.ValidatorID)
+			}
 			if seen[att.ValidatorID] {
 				return fmt.Errorf("HandlePrepareCertificate: duplicate attestation for validator %s in block %s", att.ValidatorID, cert.BlockHash)
 			}
@@ -434,7 +447,7 @@ func (c *Consensus) HandlePrepareCertificate(cert *PrepareCertificate) error {
 		logger.Warn("HandlePrepareCertificate: no signing service configured, accepting certificate for %s on stake-quorum check only", cert.BlockHash)
 	}
 
-	if !c.attestationsMeetStakeQuorum(cert.Attestations) {
+	if !c.attestationsMeetStakeQuorum(cert.Attestations, c.snapshotForVoting()) {
 		return fmt.Errorf("HandlePrepareCertificate: attestations for block %s do not carry 2/3 stake, rejecting", cert.BlockHash)
 	}
 

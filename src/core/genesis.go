@@ -192,10 +192,11 @@ func GenesisStateFromChainParams(p *SphinxChainParameters) *GenesisState {
 //	    AddValidator("Node-127.0.0.1:32308", "0xdef...", 32, "")
 func (gs *GenesisState) AddValidator(nodeID, address string, stakeInSPX int64, pubKeyHex string) *GenesisState {
 	gs.InitialValidators = append(gs.InitialValidators, &GenesisValidator{
-		NodeID:    nodeID,
-		Address:   address,
-		StakeNSPX: NewGenesisValidatorStake(stakeInSPX),
-		PublicKey: pubKeyHex,
+		NodeID:       nodeID,
+		Address:      address,
+		OwnerAddress: address,
+		StakeNSPX:    NewGenesisValidatorStake(stakeInSPX),
+		PublicKey:    pubKeyHex,
 	})
 	return gs
 }
@@ -341,11 +342,11 @@ var GenesisVaultAddress = legacyGenesisVaultAddress
 
 // policyAutoLoadDisabled reports whether this process is a `go test` binary.
 //
-// ★ WHY: the `multisig` section of config/genesis_state.json and
-// config/escrow_multisig.json are auto-loaded at package init, because that is
-// what makes a live node derive its vault/escrow address from the operator's
-// policy data. A developer who has just run the live custody demo
-// (multisig devnet) therefore has that data on disk — and every test that
+// ★ WHY: the `multisig` section of config/genesis_state.json is auto-loaded at
+// package init, because that is what makes a live node derive its vault
+// address from the operator's policy data. Escrow policy is loaded explicitly
+// from that same document during startup. A developer who has just run the
+// live custody demo (multisig devnet) therefore has that data on disk — and every test that
 // assumes the default addresses would start failing for a reason that has
 // nothing to do with the code under test.
 // Tests that exercise the policy path load it explicitly
@@ -384,9 +385,52 @@ func (gs *GenesisState) BuildBlockWithCustody(auth GenesisDistributionAuthorizer
 	return gs.buildBlock(auth, chainID)
 }
 
+func genesisHeaderCommitments() (string, string, error) {
+	document, err := LoadGenesisFile(common.GetDataDir())
+	if err != nil {
+		return "", "", fmt.Errorf("load genesis document for block commitments: %w", err)
+	}
+	if document == nil {
+		// DIAGNOSTIC (temporary): a nil document used to fall through
+		// silently, so a node that simply had no genesis file on disk — or
+		// looked in the wrong directory — produced a block with EMPTY
+		// commitments and no explanation anywhere. Log the exact path that
+		// was tried plus an os.Stat verdict, so the next two-node run
+		// answers: is this "file absent" or "file read but rejected" or
+		// "wrong directory"?
+		path := GenesisStateFilePathForDataDir(common.GetDataDir())
+		statVerdict := "not attempted"
+		if fi, statErr := os.Stat(path); statErr != nil {
+			statVerdict = fmt.Sprintf("os.Stat failed: %v", statErr)
+		} else {
+			statVerdict = fmt.Sprintf("os.Stat OK: isDir=%v size=%d mode=%s",
+				fi.IsDir(), fi.Size(), fi.Mode())
+		}
+		logger.Error("genesisHeaderCommitments: NO genesis document; commitments will be EMPTY and the block hash will not match peers. "+
+			"datadir=%q path=%q %s", common.GetDataDir(), path, statVerdict)
+		return "", "", nil
+	}
+	digest, err := document.ConsensusDigest()
+	if err != nil {
+		return "", "", err
+	}
+	snapshotHash, err := document.validatorSnapshotHash()
+	if err != nil {
+		return "", "", err
+	}
+	return digest, snapshotHash, nil
+}
+
 func (gs *GenesisState) buildBlock(auth GenesisDistributionAuthorizer, chainID uint64) *types.Block {
 	// Build transaction list from allocations
 	txs := gs.allocationsToTxListAuthorized(auth, chainID)
+	genesisDigest, activeSnapshotHash, commitmentErr := genesisHeaderCommitments()
+	if commitmentErr != nil {
+		logger.Error("BuildBlock: cannot derive genesis commitments: %v", commitmentErr)
+	} else if genesisDigest != "" && activeSnapshotHash != "" {
+		logger.Info("Genesis block commitments: snapshot=%s document=%s",
+			activeSnapshotHash, genesisDigest)
+	}
 
 	// Create body with the allocation transactions
 	body := types.NewBlockBody(txs, []*types.BlockHeader{}, 0)
@@ -396,22 +440,24 @@ func (gs *GenesisState) buildBlock(auth GenesisDistributionAuthorizer, chainID u
 	txsRoot := tempBlock.CalculateTxsRoot()
 
 	header := &types.BlockHeader{
-		Version:    1,
-		Block:      0,
-		Height:     0,
-		Timestamp:  gs.Timestamp,
-		Difficulty: new(big.Int).Set(gs.InitialDifficulty),
-		Nonce:      gs.Nonce,
-		TxsRoot:    txsRoot,
-		StateRoot:  common.SpxHash([]byte("sphinx-genesis-state-root")),
-		GasLimit:   new(big.Int).Set(gs.InitialGasLimit),
-		GasUsed:    big.NewInt(0),
-		ExtraData:  append([]byte{}, gs.ExtraData...),
-		Miner:      make([]byte, 20),
-		ParentHash: make([]byte, 32),
-		UnclesHash: common.SpxHash([]byte("genesis-no-uncles")),
-		ProposerID: GenesisVaultAddress,
-		Hash:       []byte{},
+		Version:               1,
+		Block:                 0,
+		Height:                0,
+		Timestamp:             gs.Timestamp,
+		Difficulty:            new(big.Int).Set(gs.InitialDifficulty),
+		Nonce:                 gs.Nonce,
+		TxsRoot:               txsRoot,
+		StateRoot:             common.SpxHash([]byte("sphinx-genesis-state-root")),
+		GasLimit:              new(big.Int).Set(gs.InitialGasLimit),
+		GasUsed:               big.NewInt(0),
+		ExtraData:             append([]byte{}, gs.ExtraData...),
+		Miner:                 make([]byte, 20),
+		ParentHash:            make([]byte, 32),
+		UnclesHash:            common.SpxHash([]byte("genesis-no-uncles")),
+		ProposerID:            GenesisVaultAddress,
+		Hash:                  []byte{},
+		ActiveSnapshotHash:    activeSnapshotHash,
+		GenesisDocumentDigest: genesisDigest,
 	}
 
 	block := types.NewBlock(header, body)
@@ -673,7 +719,7 @@ func ApplyGenesisWithCachedBlock(bc *Blockchain, gs *GenesisState, cachedBlock *
 // It writes the complete per-account allocation list and per-validator list so
 // the document contains real data instead of blank arrays, and it MERGES rather
 // than replaces, so a node that already holds the sections written by
-// `genesis create` or by custody provisioning keeps them.
+// genesis authoring or custody provisioning keeps them.
 //
 // FIX: now writes the complete per-account allocation list and per-validator
 // list so genesis_state.json contains real data instead of blank arrays.
@@ -725,11 +771,12 @@ func (gs *GenesisState) writeGenesisStateFile(datadir string) error {
 			stakeNSPXStr = v.StakeNSPX.String()
 		}
 		valEntries[i] = genesisValidatorEntry{
-			NodeID:    v.NodeID,
-			Address:   v.Address,
-			StakeNSPX: stakeNSPXStr,
-			StakeSPX:  stakeSPX.String(),
-			PublicKey: v.PublicKey,
+			NodeID:       v.NodeID,
+			Address:      v.Address,
+			OwnerAddress: v.OwnerAddress,
+			StakeNSPX:    stakeNSPXStr,
+			StakeSPX:     stakeSPX.String(),
+			PublicKey:    v.PublicKey,
 		}
 	}
 
@@ -961,18 +1008,18 @@ func GenesisDistributionAuthorizerConfigured() bool {
 // The ONE genesis document — <datadir>/config/genesis_state.json
 //
 // R9: a node has exactly ONE genesis file. It is the only place initial
-// validator membership, chain parameters, the devnet genesis-vault custody
-// policy and the pre-signed block-0 witness set are recorded. There is no
+// validator membership, chain parameters, vault and escrow custody policies,
+// and the pre-signed block-0 witness set are recorded. There is no
 // separate genesis document, no separate multisig policy file and no separate
 // witness book, and there is deliberately NO compatibility fallback that reads
 // any of them.
 //
 // Four writers share this one file, in this order on a running node:
 //
-//  1. `genesis create` (the devnet helper — the ONLY place K is known) writes
-//     the chain, validators and funded_accounts sections;
-//  2. devnet custody provisioning merges in the multisig section (the genesis
-//     vault policy) and, on the bootstrap node, the witnesses section;
+//  1. the genesis authoring path writes the chain, validators and
+//     funded_accounts sections;
+//  2. devnet custody provisioning merges in the vault and escrow policy
+//     sections and, on the bootstrap node, the witnesses section;
 //  3. the block-0 witness sink merges in the witnesses section after signing;
 //  4. the block-0 audit writer merges in the top-level identity fields, the
 //     supply totals and the CGE allocations / initial_validators audit rows.
@@ -1001,7 +1048,7 @@ func GenesisDistributionAuthorizerConfigured() bool {
 
 // GenesisStateFileName is the single genesis document's file name, and
 // GenesisStateFileSubdir its per-node relative path under a datadir (the same
-// perNodePath convention the escrow policy and spend-proposal inbox use).
+// perNodePath convention the spend-proposal inbox uses).
 const (
 	GenesisStateFileName   = "genesis_state.json"
 	GenesisStateFileSubdir = "config/" + GenesisStateFileName
@@ -1038,6 +1085,7 @@ type GenesisStakedValidator struct {
 	NodeID        string `json:"node_id"`
 	PublicKey     string `json:"public_key"`
 	StakeNSPX     string `json:"stake_nspx"`
+	OwnerAddress  string `json:"owner_address,omitempty"`
 	RewardAddress string `json:"reward_address"`
 }
 
@@ -1108,6 +1156,11 @@ type GenesisStateFile struct {
 	// joiner must receive to rebuild an identical block 0.
 	Multisig *multisig.MultiPartyPolicy `json:"multisig,omitempty"`
 
+	// EscrowMultisig is the CGE escrow custody policy. Its derived address
+	// receives the locked genesis allocations, so it is also part of the
+	// genesis input and must travel in this document.
+	EscrowMultisig *multisig.MultiPartyPolicy `json:"escrow_multisig,omitempty"`
+
 	// Witnesses is the pre-signed block-0 witness book: one threshold witness per
 	// distribution slice plus the binding facts a replaying node must agree on.
 	// It lets a node rebuild block 0 identically while holding no custodian keys.
@@ -1120,10 +1173,9 @@ type GenesisStateFile struct {
 	// provenance record, not a safety mechanism, and it is the ONLY thing that
 	// relaxes the consensus.MinValidators floor below.
 	//
-	// ★ WHY THE FLOOR IS CONDITIONAL. A `genesis create` document names several
-	// validators up front, and an operator who names fewer than the BFT floor is
-	// provisioning a network that can never tolerate a fault — so that file is
-	// rejected. A self-authored document cannot: a node that has not started yet
+	// ★ WHY THE FLOOR IS CONDITIONAL. A non-bootstrap genesis document may name
+	// several validators up front; one below the BFT floor is rejected. A
+	// self-authored document cannot: a node that has not started yet
 	// cannot appear in a document written before it existed, so the first node to
 	// run can only ever name ITSELF. Refusing that document would make a
 	// one-command devnet impossible, and it is not unsafe — the set grows as
@@ -1137,11 +1189,104 @@ type GenesisStateFile struct {
 }
 
 // HasValidatorSet reports whether this document names an initial validator set at
-// all. A document with none is a block-0 audit record only: the network was not
-// provisioned with `genesis create`, so membership comes from on-chain Stake
-// transactions alone.
+// all. A document with none is a block-0 audit record only; validator
+// membership must then be established through chain-state admission.
 func (gf *GenesisStateFile) HasValidatorSet() bool {
 	return gf != nil && len(gf.Validators) > 0
+}
+
+// ConsensusDigest hashes the canonical chain-defining projection of the
+// genesis document. Human-readable audit totals and block-derived summaries
+// are deliberately excluded because they are rewritten from the executed
+// genesis block and do not alter consensus inputs.
+func (gf *GenesisStateFile) ConsensusDigest() (string, error) {
+	if gf == nil {
+		return "", fmt.Errorf("genesis document is nil")
+	}
+	document := struct {
+		Version        int                        `json:"version"`
+		ChainID        uint64                     `json:"chain_id"`
+		Chain          GenesisChainParams         `json:"chain,omitempty"`
+		Validators     []GenesisStakedValidator   `json:"validators,omitempty"`
+		FundedAccounts []GenesisFundedAccount     `json:"funded_accounts,omitempty"`
+		Multisig       *multisig.MultiPartyPolicy `json:"multisig,omitempty"`
+		EscrowMultisig *multisig.MultiPartyPolicy `json:"escrow_multisig,omitempty"`
+		Witnesses      *GenesisWitnessBook        `json:"witnesses,omitempty"`
+		Bootstrap      bool                       `json:"bootstrap,omitempty"`
+	}{
+		Version:        gf.Version,
+		ChainID:        gf.ChainID,
+		Chain:          gf.Chain,
+		Validators:     gf.Validators,
+		FundedAccounts: gf.FundedAccounts,
+		Multisig:       gf.Multisig,
+		EscrowMultisig: gf.EscrowMultisig,
+		Witnesses:      gf.Witnesses,
+		Bootstrap:      gf.Bootstrap,
+	}
+	canonical, err := json.Marshal(document)
+	if err != nil {
+		return "", fmt.Errorf("marshal canonical genesis document: %w", err)
+	}
+	return hex.EncodeToString(common.SpxHash(canonical)), nil
+}
+
+// epoch0SnapshotFromGenesis builds the epoch-0 validator snapshot from the
+// genesis DOCUMENT.
+//
+// ★ THE SINGLE BUILDER. The genesis block header commits to this exact set (see
+// headerCommitments / validatorSnapshotHash), and the node must also install
+// this exact set as the snapshot that governs heights 1..EpochBlocks-1. Two
+// separate constructions of "the epoch-0 validator set" is how those two
+// requirements silently drift apart, so both call this one function.
+//
+// It reads the DOCUMENT, never the live ValidatorSet. The live set is a
+// cross-check (see assertLiveSetMatchesEpoch0), not the source: seeding order
+// varies between a fresh bootstrap, a restart, and a late joiner, and a
+// snapshot built from whatever happened to be in memory at call time inherits
+// that call-order dependence.
+func epoch0SnapshotFromGenesis(gf *GenesisStateFile) (*consensus.ValidatorSnapshot, error) {
+	if gf == nil {
+		return nil, fmt.Errorf("genesis document is nil")
+	}
+	snapshot := &consensus.ValidatorSnapshot{
+		Epoch:      0,
+		Validators: make(map[string]*consensus.StakedValidator, len(gf.Validators)),
+		TotalStake: new(big.Int),
+	}
+	for _, validator := range gf.Validators {
+		stake, ok := new(big.Int).SetString(validator.StakeNSPX, 10)
+		if validator.NodeID == "" || !ok || stake.Sign() <= 0 {
+			return nil, fmt.Errorf("invalid genesis validator %q stake %q", validator.NodeID, validator.StakeNSPX)
+		}
+		if _, duplicate := snapshot.Validators[validator.NodeID]; duplicate {
+			return nil, fmt.Errorf("duplicate genesis validator %q", validator.NodeID)
+		}
+		// ActivationEpoch is left 0, meaning "active from epoch 0". TakeSnapshot
+		// uses exactly this value, so building here rather than via TakeSnapshot
+		// keeps the two paths byte-identical.
+		snapshot.Validators[validator.NodeID] = &consensus.StakedValidator{
+			ID:          validator.NodeID,
+			StakeAmount: stake,
+		}
+		snapshot.TotalStake.Add(snapshot.TotalStake, stake)
+	}
+	// ★ AN EMPTY SNAPSHOT IS WORSE THAN NONE. A zero-validator set has a zero
+	// total, and every quorum check divides against it. Refusing here is what
+	// keeps a "validator set attached but not yet seeded" state from producing a
+	// denominator of zero.
+	if len(snapshot.Validators) == 0 {
+		return nil, fmt.Errorf("genesis document names no validators; refusing to build a zero-validator epoch-0 snapshot")
+	}
+	return snapshot, nil
+}
+
+func (gf *GenesisStateFile) validatorSnapshotHash() (string, error) {
+	snapshot, err := epoch0SnapshotFromGenesis(gf)
+	if err != nil {
+		return "", err
+	}
+	return snapshot.Hash(), nil
 }
 
 // GenesisStateFilePathForDataDir returns the absolute path of the single genesis
@@ -1194,7 +1339,7 @@ func ValidateGenesisFileBytes(data []byte, gf *GenesisStateFile) error {
 //   - a document that names a validator set must list at least
 //     consensus.MinValidators of them (a GENESIS rule, not a runtime wait
 //     condition). A document with NO validator section is a valid block-0 audit
-//     record for a network that was not provisioned with `genesis create`;
+//     record that does not seed initial validator membership;
 //   - node IDs and reward addresses are well-formed, unique, and one reward
 //     address per node ID;
 //   - stakes and balances are positive decimal nSPX;
@@ -1211,8 +1356,8 @@ func (gf *GenesisStateFile) Validate() error {
 	}
 
 	// A validator set and its chain parameters travel together: chain params with
-	// no set (or a set with no params) is a half-written `genesis create`
-	// document, and accepting it would let a node run with membership but the
+	// no set (or a set with no params) is a half-written genesis document, and
+	// accepting it would let a node run with membership but the
 	// default EpochBlocks.
 	hasSet := len(gf.Validators) > 0
 	hasChain := gf.Chain.EpochBlocks != 0 || gf.Chain.ChainID != 0 || gf.Chain.Network != ""
@@ -1221,11 +1366,14 @@ func (gf *GenesisStateFile) Validate() error {
 	}
 
 	if hasSet {
+		if len(gf.Validators) > consensus.MaxValidatorSetSize {
+			return fmt.Errorf("genesis validator set exceeds the maximum of %d validators", consensus.MaxValidatorSetSize)
+		}
 		// ★ THE BFT FLOOR IS AN AUTHORING RULE FOR MULTI-NAME DOCUMENTS.
 		//
-		// A document that names SEVERAL validators was written by an operator
-		// (`genesis create`), so it is held to consensus.MinValidators: naming
-		// fewer than the floor provisions a network that can never tolerate a
+		// A document that names SEVERAL validators is held to
+		// consensus.MinValidators: naming fewer than the floor provisions a
+		// network that can never tolerate a
 		// fault, and refusing the file is correct.
 		//
 		// A `bootstrap: true` document is different in kind: it was authored by
@@ -1252,6 +1400,7 @@ func (gf *GenesisStateFile) Validate() error {
 
 		seenIDs := make(map[string]bool, len(gf.Validators))
 		seenReward := make(map[string]bool, len(gf.Validators))
+		seenOwner := make(map[string]bool, len(gf.Validators))
 		for i, v := range gf.Validators {
 			if strings.TrimSpace(v.NodeID) == "" {
 				return fmt.Errorf("validator[%d]: node_id is empty", i)
@@ -1266,7 +1415,7 @@ func (gf *GenesisStateFile) Validate() error {
 			}
 			if v.PublicKey != "" {
 				pk, err := hex.DecodeString(stripHexPrefix(v.PublicKey))
-				if err != nil || len(pk) != 32 {
+				if err != nil || len(pk) != OperatorPublicKeyLength {
 					return fmt.Errorf("validator[%d] (%s): public_key must be 32 bytes of hex", i, v.NodeID)
 				}
 			}
@@ -1279,6 +1428,37 @@ func (gf *GenesisStateFile) Validate() error {
 					return fmt.Errorf("validator[%d]: reward address %s is bound to more than one validator", i, addr)
 				}
 				seenReward[addr] = true
+			}
+
+			// ★ NORMALIZE THE OWNER, HERE, BEFORE ANYBODY HASHES.
+			//
+			// owner_address is optional in the document: an older or
+			// hand-written file may omit it, meaning "the reward address owns
+			// this stake". That equivalence used to be applied downstream, in
+			// the executor, which meant two documents describing the IDENTICAL
+			// chain — one with owner_address set to the reward address, one with
+			// it omitted — hashed to DIFFERENT genesis commitments, because
+			// ConsensusDigest hashes the raw struct field.
+			//
+			// Resolving the default here, at the single parse/validate
+			// chokepoint, makes the in-memory document canonical before
+			// ConsensusDigest, validatorSnapshotHash, or block-0 execution ever
+			// see it. Two spellings of one chain now produce one commitment, and
+			// the executor fallback in seedGenesisFileAllocations stops firing.
+			owner := v.OwnerAddress
+			if owner == "" {
+				owner = v.RewardAddress
+			}
+			if owner != "" {
+				canonicalOwner := common.CanonicalSPIFAddress(owner)
+				if !common.ValidateSPIFAddress(canonicalOwner) {
+					return fmt.Errorf("validator[%d] (%s): owner_address %q is not a valid address", i, v.NodeID, owner)
+				}
+				if seenOwner[canonicalOwner] {
+					return fmt.Errorf("validator[%d]: owner address %s is bound to more than one validator", i, canonicalOwner)
+				}
+				seenOwner[canonicalOwner] = true
+				gf.Validators[i].OwnerAddress = canonicalOwner
 			}
 		}
 	}
@@ -1296,6 +1476,11 @@ func (gf *GenesisStateFile) Validate() error {
 	if gf.Multisig != nil {
 		if err := gf.Multisig.Validate(); err != nil {
 			return fmt.Errorf("multisig section: %w", err)
+		}
+	}
+	if gf.EscrowMultisig != nil {
+		if err := gf.EscrowMultisig.Validate(); err != nil {
+			return fmt.Errorf("escrow_multisig section: %w", err)
 		}
 	}
 	if gf.Witnesses != nil {
@@ -1426,8 +1611,8 @@ func SelfGenesisStakeNSPX() string {
 //
 // ★ It can only ever name ONE validator — itself. A node that has not started
 // yet cannot appear in a document written before it existed, so the set grows as
-// nodes join by STAKING (see bind.stakeValidatorFromRewardAddress), not here.
-// `genesis create` therefore remains the only way to name several validators
+// nodes join through chain-state stake admission (see
+// bind.stakeValidatorFromRewardAddress), not here.
 // FaucetPayoutNSPX is what the bootstrap faucet pays one joining validator.
 //
 // ★ IT IS MIN STAKE + A FEE RESERVE, NOT MIN STAKE. A joining node must be
@@ -1515,7 +1700,59 @@ func FaucetPoolNSPX() *big.Int {
 //
 // faucetAddressHex, when non-empty, is recorded as the bootstrap faucet: a
 // devnet-only pooled account this node pays each joiner's reward address from.
-func CreateGenesisForSelf(datadir, nodeID, publicKeyHex, rewardAddressHex, faucetAddressHex string) error {
+func ValidatePinnedGenesisDocument(gf *GenesisStateFile, network, pinnedDigest string) error {
+	if gf == nil {
+		return fmt.Errorf("genesis document is missing")
+	}
+	network = strings.ToLower(strings.TrimSpace(network))
+	var expectedChainID uint64
+	switch network {
+	case "mainnet":
+		expectedChainID = GetSphinxChainParams().ChainID
+	case "testnet":
+		expectedChainID = GetTestnetChainParams().ChainID
+	default:
+		return fmt.Errorf("pinned genesis validation is only for mainnet or testnet, got %q", network)
+	}
+	if gf.Bootstrap {
+		return fmt.Errorf("%s genesis document must not be a self-authored bootstrap document", network)
+	}
+	if !gf.HasValidatorSet() {
+		return fmt.Errorf("%s genesis document has no pre-agreed founder validator set", network)
+	}
+	if gf.Chain.Network != network || gf.Chain.ChainID != expectedChainID || gf.ChainID != expectedChainID {
+		return fmt.Errorf("%s genesis network/chain ID mismatch: document network=%q chain.chain_id=%d chain_id=%d; expected chain ID %d",
+			network, gf.Chain.Network, gf.Chain.ChainID, gf.ChainID, expectedChainID)
+	}
+	for _, validator := range gf.Validators {
+		if strings.TrimSpace(validator.PublicKey) == "" {
+			return fmt.Errorf("%s founder validator %s has no committed operator public key", network, validator.NodeID)
+		}
+		stake, ok := new(big.Int).SetString(validator.StakeNSPX, 10)
+		if !ok || stake.Sign() <= 0 {
+			return fmt.Errorf("%s founder validator %s has invalid stake %q", network, validator.NodeID, validator.StakeNSPX)
+		}
+	}
+	if len(pinnedDigest) != 64 {
+		return fmt.Errorf("%s pinned genesis digest must be a 64-character hex digest configured out-of-band", network)
+	}
+	if _, err := hex.DecodeString(pinnedDigest); err != nil {
+		return fmt.Errorf("%s pinned genesis digest is not valid hex: %w", network, err)
+	}
+	actualDigest, err := gf.ConsensusDigest()
+	if err != nil {
+		return fmt.Errorf("calculate %s genesis digest: %w", network, err)
+	}
+	if !strings.EqualFold(actualDigest, pinnedDigest) {
+		return fmt.Errorf("%s genesis digest mismatch: pinned=%s actual=%s", network, pinnedDigest, actualDigest)
+	}
+	return nil
+}
+
+func CreateGenesisForSelf(datadir, network, nodeID, publicKeyHex, rewardAddressHex, faucetAddressHex string) error {
+	if strings.ToLower(strings.TrimSpace(network)) != string(PhaseDevnet) {
+		return fmt.Errorf("self-authored genesis is devnet-only; network %q must use a pre-agreed genesis document", network)
+	}
 	params := GenesisChainParams{
 		ChainID:     DevnetChainID,
 		Network:     string(PhaseDevnet),
@@ -1531,6 +1768,7 @@ func CreateGenesisForSelf(datadir, nodeID, publicKeyHex, rewardAddressHex, fauce
 			NodeID:        nodeID,
 			PublicKey:     publicKeyHex,
 			StakeNSPX:     params.MinStakeNSPX,
+			OwnerAddress:  rewardAddressHex,
 			RewardAddress: rewardAddressHex,
 		}}
 

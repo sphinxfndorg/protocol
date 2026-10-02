@@ -138,9 +138,7 @@ func ensureDevnetBundleFromSeeds(networkType, seeds, dataDir string) (time.Durat
 	for _, f := range core.DevnetPublicBundleFiles {
 		files = append(files, f.Name)
 	}
-	pending := map[string][]byte{} // nil value = optional file given up on
-	attempts := map[string]int{}
-	optionalGiveUp := 3 // rounds an optional file may stay missing before we stop asking
+	pending := make(map[string][]byte, len(files))
 	lastLog := time.Now().Add(-time.Hour)
 	// ★ 30 MINUTES, deliberately generous, and now explained in the log. The
 	// bootstrap node cannot serve the bundle until it has finished signing the
@@ -209,23 +207,6 @@ func ensureDevnetBundleFromSeeds(networkType, seeds, dataDir string) (time.Durat
 				return time.Since(start), fmt.Errorf("timed out after %s waiting for the devnet bundle: the seed answered but has not produced it yet. "+
 					"The bootstrap node is still signing its block-0 witness set (26 SPHINCS+ signatures); check its logs if this persists",
 					time.Since(start).Round(time.Second))
-			}
-		}
-		// Optional files may legitimately never exist on a network that was not
-		// provisioned with `genesis create`. Give up on them after a few rounds
-		// instead of blocking the joiner for the whole deadline — but only after
-		// actually asking, so a file that merely appears late is still fetched.
-		// (After the genesis consolidation nothing in the bundle is optional: the
-		// vault policy and witness book live as sections of genesis_state.json,
-		// which a joiner cannot rebuild block 0 without.)
-		for _, name := range files {
-			if _, ok := pending[name]; ok || !core.DevnetBundleOptional(name) {
-				continue
-			}
-			attempts[name]++
-			if attempts[name] >= optionalGiveUp {
-				pending[name] = nil
-				logger.Info("DEVNET BUNDLE: optional file %s not offered by the bootstrap — continuing without it (run `genesis create` on the network to enable it)", name)
 			}
 		}
 		if time.Since(lastLog) >= 15*time.Second {

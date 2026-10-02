@@ -48,6 +48,11 @@ type BlockHeader struct {
 	// to this block, starting from genesis. This is used for fork-choice:
 	// the chain with the highest cumulative weight is the canonical chain.
 	ChainWeight *big.Int `json:"chain_weight,omitempty"`
+
+	// ActiveSnapshotHash commits the validator snapshot governing this height.
+	// GenesisDocumentDigest identifies the canonical chain-defining genesis data.
+	ActiveSnapshotHash    string `json:"active_snapshot_hash,omitempty"`
+	GenesisDocumentDigest string `json:"genesis_document_digest,omitempty"`
 }
 
 // BlockBody represents the transactions and uncle blocks.
@@ -70,6 +75,9 @@ type Attestation struct {
 	ValidatorID string `json:"validator_id"`
 	Signature   []byte `json:"signature"`
 	BlockHash   string `json:"block_hash"`
+	ChainID     uint64 `json:"chain_id"`
+	Height      uint64 `json:"height"`
+	Phase       string `json:"phase"`
 	View        uint64 `json:"view"`
 	// Stake is the validator's stake at the time of attestation, cached here
 	// so that chain weight calculation does NOT require live validator set

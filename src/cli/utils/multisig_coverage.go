@@ -38,7 +38,7 @@ var defaultCoverageHorizon = time.Duration(policy.CGEMonthSeconds) * time.Second
 // runMultisigCoverage reports staged-witness coverage for every time-based CGE
 // recipient and fails loudly when any of them is uncovered.
 //
-//	multisig coverage --policy config/escrow_multisig.json \
+//	multisig coverage --policy config/genesis_state.json \
 //	    --dir config/cge_witnesses --rpc 127.0.0.1:8700 [--horizon <unix>]
 //
 // The reference timestamps are CHAIN-derived (the sealed tip header), never a
@@ -48,7 +48,7 @@ var defaultCoverageHorizon = time.Duration(policy.CGEMonthSeconds) * time.Second
 // normal path.
 func runMultisigCoverage(args []string) error {
 	fs := flag.NewFlagSet("multisig coverage", flag.ContinueOnError)
-	policyPath := fs.String("policy", custodyRoles["escrow"].OutPath, "escrow custody policy JSON the node auto-loads (required)")
+	policyPath := fs.String("policy", core.GenesisStateFileSubdir, "genesis document containing the escrow custody policy (required)")
 	dir := fs.String("dir", core.DefaultCGEWitnessDir, "directory of pre-signed CGE witness files to audit")
 	rpcAddr := fs.String("rpc", "127.0.0.1:8700", "node JSON-RPC host:port used to read the sealed tip timestamp")
 	nowFlag := fs.Uint64("now", 0, "chain timestamp to evaluate against (0 = read the sealed tip from --rpc)")
@@ -64,9 +64,13 @@ func runMultisigCoverage(args []string) error {
 	if *policyPath == "" {
 		return fmt.Errorf("--policy is required (the escrow policy the node auto-loads)")
 	}
-	addr, err := core.LoadEscrowPolicy(*policyPath)
+	policy, err := loadCustodyPolicy(*policyPath)
 	if err != nil {
 		return fmt.Errorf("escrow custody policy %s: %w", *policyPath, err)
+	}
+	addr, err := core.RegisterEscrowPolicy(policy)
+	if err != nil {
+		return fmt.Errorf("register escrow custody policy from %s: %w", *policyPath, err)
 	}
 
 	nowTS := *nowFlag

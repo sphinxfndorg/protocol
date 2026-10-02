@@ -11,6 +11,7 @@ import (
 	"math/big"
 	"sort"
 	"sync"
+	"sync/atomic"
 
 	logger "github.com/sphinxfndorg/protocol/src/console"
 	denom "github.com/sphinxfndorg/protocol/src/params/denom"
@@ -53,8 +54,20 @@ import (
 // processEpochAttestations processes attestations for finality.
 // This function determines which blocks become justified and finalized
 // based on attestations collected during an epoch.
+//
+// ★ CHECKPOINT 2 ITEM 1: it takes the SNAPSHOT that governed `epoch`, not the
+// live validator set. Two corrections:
+//
+//   - The denominator was the LIVE total, which by the time an epoch is
+//     processed may already describe the NEXT epoch — so a block could be
+//     justified against a set that did not govern it.
+//   - The threshold was `total*2/3` with `>=`. That is the OLD loose rule:
+//     truncating division plus a non-strict compare, so exactly 2/3 counted as
+//     enough. It is now meetsStakeQuorum — voted*3 > total*2 — which is the
+//     same rule every other path uses.
+//
 // MUST be called with c.mu already held (no internal locking).
-func (c *Consensus) processEpochAttestations(epoch uint64) {
+func (c *Consensus) processEpochAttestations(epoch uint64, snap *ValidatorSnapshot) {
 	// NOTE: c.mu is already held by the caller — do NOT lock here.
 
 	// Retrieve attestations for this epoch from the attestations map
@@ -62,35 +75,33 @@ func (c *Consensus) processEpochAttestations(epoch uint64) {
 
 	// If no attestations, nothing to process
 	if len(attestations) == 0 {
-		logger.Info("No attestations for epoch %d", epoch)
+		logger.Debug("No attestations for epoch %d", epoch)
+		return
+	}
+	// Fail closed: no snapshot for the epoch means no defensible denominator.
+	if snap == nil || snap.TotalStake == nil || snap.TotalStake.Sign() <= 0 {
+		logger.Warn("Not justifying epoch %d: no validator snapshot for it", epoch)
 		return
 	}
 
-	// Map to aggregate stake votes per block hash
+	// Map to aggregate stake votes per block hash. Stake comes from the
+	// SNAPSHOT, so a validator that was not a member of this epoch's set
+	// contributes nothing.
 	blockVotes := make(map[string]*big.Int)
-
-	// Aggregate stake for each block based on attestations
 	for _, att := range attestations {
-		// Get the stake of the validator who made this attestation
-		stake := c.getValidatorStake(att.ValidatorID)
-
-		// Initialize vote tally for this block if not already present
+		row, inSet := snap.Validators[att.ValidatorID]
+		if !inSet || row == nil || row.StakeAmount == nil {
+			continue
+		}
 		if blockVotes[att.BlockHash] == nil {
 			blockVotes[att.BlockHash] = big.NewInt(0)
 		}
-		// Add this validator's stake to the block's vote total
-		blockVotes[att.BlockHash].Add(blockVotes[att.BlockHash], stake)
+		blockVotes[att.BlockHash].Add(blockVotes[att.BlockHash], row.StakeAmount)
 	}
 
-	// Calculate required stake for justification (2/3 of total stake)
-	totalStake := c.validatorSet.GetTotalStake()
-	required := new(big.Int).Mul(totalStake, big.NewInt(2))
-	required.Div(required, big.NewInt(3))
-
-	// Check each block to see if it achieved 2/3 majority
+	// STRICT >2/3 of the snapshot's stake, the same rule as hasQuorum.
 	for blockHash, votedStake := range blockVotes {
-		// If block has sufficient stake votes, it becomes justified
-		if votedStake.Cmp(required) >= 0 {
+		if meetsStakeQuorum(votedStake, snap.TotalStake) {
 			// Convert to SPX for readable logging
 			votedSPX := new(big.Float).Quo(
 				new(big.Float).SetInt(votedStake),
@@ -426,6 +437,28 @@ func ResetSnapshots() {
 // installed while no epoch-0 snapshot exists.
 //
 // It is a test-only export, so it cannot be reached from production code.
+// StoreSnapshot installs `snap` as the snapshot for its epoch, and persists it.
+//
+// It is the production counterpart to StoreSnapshotForTest, which is test-only
+// and deliberately unreachable from production code. Callers that install an
+// epoch-0 snapshot derived from the genesis document use this so the node has
+// exactly one owner for that responsibility.
+//
+// Callers must have already verified the snapshot against the genesis
+// commitment; this function does not second-guess them, it only refuses to
+// install an empty set (a zero total would be a zero quorum denominator).
+func StoreSnapshot(snap ValidatorSnapshot) error {
+	clone := snap.Clone()
+	if len(clone.Validators) == 0 {
+		return fmt.Errorf("refusing to install an empty validator snapshot for epoch %d: a zero total stake is a zero quorum denominator", clone.Epoch)
+	}
+	snapshotMu.Lock()
+	snapshotByEpoch[clone.Epoch] = clone
+	snapshotMu.Unlock()
+	persistSnapshot(clone)
+	return nil
+}
+
 func StoreSnapshotForTest(snap ValidatorSnapshot) {
 	clone := snap.Clone()
 	snapshotMu.Lock()
@@ -504,6 +537,26 @@ func CurrentSnapshotStore() SnapshotStore {
 	defer snapshotStoreMu.RUnlock()
 	return snapshotStore
 }
+
+// ── Snapshot rebuild gate ────────────────────────────────────────────────────
+//
+// A node whose snapshot history is INCOMPLETE must not participate. If it did,
+// it would fail closed on every block in the missing epoch — and it could be the
+// node the rest of the network is waiting on, turning a recoverable local state
+// into a network stall.
+//
+// The flag is set TRUE at startup before any rebuild attempt, and cleared only
+// once every epoch up to the chain tip has a snapshot. It defaults to false so
+// a node with no attached store (tests, or one not yet started) is unaffected.
+var snapshotRebuildPending atomic.Bool
+
+// SetSnapshotRebuildPending marks whether a node must rebuild missing snapshots
+// before it may participate.
+func SetSnapshotRebuildPending(pending bool) { snapshotRebuildPending.Store(pending) }
+
+// SnapshotRebuildPending reports whether the node must finish rebuilding
+// snapshots before it may participate.
+func SnapshotRebuildPending() bool { return snapshotRebuildPending.Load() }
 
 // persistSnapshot writes snap through the attached store. A store failure is
 // logged and the in-memory snapshot is left in place, but the epoch is

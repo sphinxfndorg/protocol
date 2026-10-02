@@ -183,14 +183,9 @@ func ParseRoles(rolesStr string, count int) []network.NodeRole {
 // only from chain state. portOffset is a purely local addressing convenience:
 // it shifts default listen ports/datadir and nothing else.
 //
-// rewardAddress is this node's own SPIF wallet address. It is broadcast to
-// peers during key exchange (so THEY can verify OUR balance before staking
-// us) and is also used locally to self-stake from our own genesis/earned
-// balance. It is optional: an empty value just means this node starts with
-// no stake and relies on receiving some (e.g. a genesis allocation, or funds
-// sent to it) before it can be admitted as a validator by peers. It is never
-// a substitute for balance verification — see stakeValidatorFromRewardAddress
-// in helpers.go.
+// rewardAddress is payout metadata advertised during key exchange. It never
+// grants validator membership; membership is established by genesis or a
+// committed Stake transaction.
 // startNodeFn is the seam StartNode calls. It exists so a test can prove the
 // wrapper forwards exactly the zero NodeOptions — the CLI-identical gate —
 // without booting a node (see lifecycle_test.go).
@@ -320,6 +315,15 @@ func StartNodeWithOptions(
 	if custodyErr != nil {
 		return fmt.Errorf("devnet auto-custody: %w", custodyErr)
 	}
+	genesisPolicyFile, err := core.LoadGenesisFile(dataDir)
+	if err != nil {
+		return fmt.Errorf("load genesis document before block construction: %w", err)
+	}
+	if genesisPolicyFile != nil && genesisPolicyFile.EscrowMultisig != nil {
+		if _, err := core.RegisterEscrowPolicy(genesisPolicyFile.EscrowMultisig); err != nil {
+			return fmt.Errorf("register escrow policy from genesis document: %w", err)
+		}
+	}
 	// If something already computed genesis before we got here (a host that
 	// called core.GetGenesisHash() first), the block-0 vault address is frozen
 	// and provisioning can no longer affect it. Fail loudly here rather than let
@@ -382,7 +386,6 @@ func StartNodeWithOptions(
 			devnetCustody.VaultAddress, devnetCustody.EscrowAddress, devnetCustody.SigningNode, devnetCustody.ReplayNode)
 	}
 
-	networkType = "devnet"
 	logger.Info("Network type: %s (%s)", networkType, core.GetNetworkDisplayName(networkType))
 
 	// SECTION 2 — shared cryptographic parameters
@@ -437,11 +440,8 @@ func StartNodeWithOptions(
 	// node that finds a document already there (its own from a previous run, or
 	// one fetched over the devnet bundle from --seeds) reads it instead.
 	//
-	// The set then GROWS as nodes join by staking — not by re-authoring genesis,
-	// because a node that has not started yet cannot appear in a document
-	// written before it existed. `genesis create` remains available for anyone
-	// who wants several validators named before any of them exist; it is never
-	// required, and no node ever learns a count from it.
+	// The set then GROWS only through chain-state stake admission — not by
+	// re-authoring genesis or predeclaring a node count.
 	//
 	// It must be settled BEFORE core.NewBlockchain, because the document's chain
 	// parameters (EpochBlocks) are resolved into the chain params there.
@@ -456,8 +456,25 @@ func StartNodeWithOptions(
 			return fmt.Errorf("genesis file: %w", genesisFileErr)
 		}
 		core.SetGenesisEpochBlocks(genesisFile.Chain.EpochBlocks)
+		if networkType == "mainnet" || networkType == "testnet" {
+			envName := "SPHINX_MAINNET_GENESIS_DIGEST"
+			if networkType == "testnet" {
+				envName = "SPHINX_TESTNET_GENESIS_DIGEST"
+			}
+			pinnedDigest := strings.TrimSpace(os.Getenv(envName))
+			if err := core.ValidatePinnedGenesisDocument(genesisFile, networkType, pinnedDigest); err != nil {
+				return fmt.Errorf("pinned %s genesis validation failed (%s): %w", networkType, envName, err)
+			}
+		}
 		logger.Info("GENESIS FILE: %d initial validator(s), epoch_blocks=%d, network=%s",
 			len(genesisFile.Validators), genesisFile.Chain.EpochBlocks, genesisFile.Chain.Network)
+	} else if networkType != "devnet" {
+		envName := "SPHINX_MAINNET_GENESIS_DIGEST"
+		if networkType == "testnet" {
+			envName = "SPHINX_TESTNET_GENESIS_DIGEST"
+		}
+		return fmt.Errorf("--network=%s requires a pre-agreed genesis document and out-of-band pinned digest (%s); self-authoring is devnet-only",
+			networkType, envName)
 	}
 
 	// SECTION 4 — database initialization
@@ -580,7 +597,7 @@ func StartNodeWithOptions(
 			return fmt.Errorf("create devnet faucet key: %w", err)
 		}
 
-		genesisFileErr = core.CreateGenesisForSelf(dataDir, currentNodeID, selfPubKey, selfReward, faucetAddr)
+		genesisFileErr = core.CreateGenesisForSelf(dataDir, networkType, currentNodeID, selfPubKey, selfReward, faucetAddr)
 		if genesisFileErr != nil {
 			return fmt.Errorf("author genesis for this network: %w", genesisFileErr)
 		}
@@ -591,7 +608,7 @@ func StartNodeWithOptions(
 		core.SetGenesisEpochBlocks(genesisFile.Chain.EpochBlocks)
 		logger.Info("GENESIS AUTHORED: no document existed, so this node created it naming only itself (%s)", currentNodeID)
 		logger.Info("GENESIS: further validators join by staking from a funded reward address; the set grows as they do")
-		logger.Info("DEVNET FAUCET: %s holds %s nSPX, paying %s nSPX per joiner (min stake + fee reserve); any number of joiners, no fixed list",
+		logger.Info("DEVNET FAUCET ALLOCATION: %s holds %s nSPX; operators can manually fund joiners with up to %s nSPX (min stake + fee reserve); no node list",
 			faucetAddr, core.FaucetPoolNSPX().String(), core.FaucetPayoutNSPX().String())
 		logger.Info("GENESIS FILE: %d initial validator(s), epoch_blocks=%d, network=%s",
 			len(genesisFile.Validators), genesisFile.Chain.EpochBlocks, genesisFile.Chain.Network)
@@ -610,6 +627,21 @@ func StartNodeWithOptions(
 	bc, err := core.NewBlockchain(currentAddress, currentNodeID, validatorIDs, networkType, seeds != "", core.WithDeferredInit())
 	if err != nil {
 		return fmt.Errorf("failed to create blockchain: %w", err)
+	}
+
+	// ★ ATTACH THE GENESIS DOCUMENT BEFORE ANYTHING CAN EXECUTE GENESIS.
+	//
+	// The document is loaded above (and authored first on a fresh devnet), but
+	// it used to live only in this local variable. ExecuteGenesisBlock runs
+	// from FinishInit further down, and it needs the document to build the
+	// epoch-0 validator snapshot — the set that governs heights 1..EpochBlocks-1,
+	// without which no block can be produced at all.
+	//
+	// Retaining it here is what makes the snapshot builder order-independent: it
+	// reads the same validated bytes the loader checked, rather than depending
+	// on a live validator set that is not attached until much later.
+	if genesisFile != nil {
+		bc.SetGenesisDocument(genesisFile)
 	}
 	// ★ FIX: wire the STHINCS manager built in SECTION 4 onto the blockchain.
 	// Without this, bc.sphincsManager stays nil for the life of the process:
@@ -931,10 +963,26 @@ func StartNodeWithOptions(
 		signingService,
 		nil,
 		minStakeAmount,
+		// REQUIRED FastForward attestation verifier. It resolves operator keys
+		// from the replayed chain's StateDB and verifies each signature with the
+		// single shared consensus primitive, so catch-up blocks are verified
+		// cryptographically even though this node has never handshook with the
+		// peers it is replaying from. There is no nil-accept path: FastForward
+		// rejects when this is nil.
+		func(blk consensus.Block) error {
+			tb, ok := blk.(*types.Block)
+			if !ok {
+				return fmt.Errorf("FastForward verifier received a %T, not a *types.Block", blk)
+			}
+			return core.VerifyBlockAttestations(tb,
+				core.NewChainStateKeyResolver(bc),
+				core.NewConsensusAttestationVerifier())
+		},
 	)
 	if cons == nil {
 		return fmt.Errorf("failed to create consensus engine (VDF initialization likely failed)")
 	}
+	cons.SetParticipationGate(bc.IsValidatorPausedForHeight)
 
 	if p2pMgr != nil {
 		p2pMgr.SetConsensusEngine(cons)
@@ -961,37 +1009,8 @@ func StartNodeWithOptions(
 		return fmt.Errorf("consensus validator set is unavailable")
 	}
 
-	// ========== Self-stake from operator-supplied reward address ==========
-	// There is no hardcoded validator↔address table here anymore. On a real
-	// permissionless network we don't know who else is running a node or
-	// what address they'll claim — that only ever gets decided at runtime,
-	// per-peer, after a verified balance check (see registerDiscoveredPeer
-	// below and registerPeerStakeClaim in helpers.go).
-	//
-	// The only stake this function seeds directly is our OWN, from the
-	// reward address the operator passed in. If that address has a real,
-	// sufficient balance, we stake from it; otherwise we self-bootstrap at
-	// minimum stake so a brand-new solo node can produce its own genesis
-	// block. That minimum-stake fallback applies only to our own node ID —
-	// it is never extended to a remote peer.
-	//
-	// validatorAddressMap below feeds the Phase 2 re-verification pass that
-	// runs after Block 1 commits (watchAndUpdateStakes / initializePhase2Stakes
-	// in helpers.go). It only ever contains addresses we actually have — our
-	// own reward address — never a hardcoded table of other nodes' wallets.
-	// Same-box devnet peers simply have no entry, which is fine:
-	// initializePhase2Stakes already treats a missing mapping as "use
-	// minimum stake", which is the correct behavior for trusted local test
-	// peers and is documented there.
-	validatorAddressMap := map[string]string{}
-	if rewardAddress != "" {
-		validatorAddressMap[currentNodeID] = rewardAddress
-	}
-
-	// rewardClaims enforces "one funded reward address admits at most one
-	// node ID" on runtime peer-admission claims (helpers.go). Our own
-	// address is pre-bound so a remote peer can never claim it.
-	rewardClaims := newRewardClaimLedger()
+	// A reward address is payout metadata only. It never grants validator
+	// membership; only the genesis set or committed Stake transactions do.
 
 	// ── GENESIS FILE → consensus validator set ───────────────────────────
 	// Load the initial validator set from chain data. This is the ONLY place
@@ -999,33 +1018,28 @@ func StartNodeWithOptions(
 	// computes the same set, hence the same leaders and the same quorum.
 	// Public keys are registered up front so attestation signatures from
 	// genesis validators verify without waiting for a handshake.
+	// ★ MEMBERSHIP BOOTSTRAP — ONE OWNER, deferred to just after the engine is
+	// attached (see below).
+	//
+	// The genesis document is attached to the node, the consensus validator set
+	// is seeded from it, and the epoch-0 snapshot is built and cross-checked — in
+	// that order, in one call, so the sequence cannot drift.
+	//
+	// This previously happened in two places far apart: seeding ran here, while
+	// the epoch-0 snapshot was taken from inside ExecuteGenesisBlock, which runs
+	// ~300 lines EARLIER. A fresh devnet node therefore reached block production
+	// with no epoch-0 snapshot and logged "validator snapshot for height 1 is
+	// unavailable" forever.
 	genesisSeededSelf := false
-	if genesisFile != nil {
-		seeded, seedErr := seedGenesisValidators(cons, signingService, sthincsParams, genesisFile, currentNodeID, rewardClaims, bc)
-		if seedErr != nil {
-			return fmt.Errorf("seed validators from genesis file: %w", seedErr)
-		}
-		genesisSeededSelf = seeded
-		logger.Info("GENESIS FILE: seeded %d validators into the consensus set (%s nSPX total)",
-			len(genesisFile.Validators), cons.GetValidatorSet().GetTotalStake().String())
-		// ★ Seal the set to genesis seeding. From here the ONLY ways membership
-		// can change are QueueValidator (deferred to a boundary) and
-		// ProcessEpochTransition. Without this, any later caller of
-		// AddGenesisValidator — including a retry path — could add a live member
-		// with vote weight and no boundary, outside chain state.
-		cons.GetValidatorSet().SealGenesis()
-	}
 
-	logger.Info("=== SELF-STAKE FROM REWARD ADDRESS ===")
-	// The reward address (if any) is always bound to this node ID up front, so
-	// block rewards route correctly and no remote peer can ever claim it.
+	logger.Info("=== REWARD ADDRESS CONFIGURATION ===")
+	// The local reward address is payout metadata only.
 	if rewardAddress != "" {
 		selfRewardAddr := rewardAddress
 		if normalized, err := common.NormalizeSPIFAddress(rewardAddress); err == nil {
 			selfRewardAddr = normalized
 		}
 		bc.SetValidatorRewardAddress(currentNodeID, selfRewardAddr)
-		rewardClaims.bindSelf(selfRewardAddr, currentNodeID)
 		logger.Info("[%s] Block rewards / gas fees will route to %s", currentNodeID, selfRewardAddr)
 	}
 
@@ -1040,22 +1054,13 @@ func StartNodeWithOptions(
 	case genesisFile != nil:
 		// A genesis file defines this network's validator set and this node is
 		// not in it. It therefore participates as a PEER only: a Stake
-		// transaction applied by consensus (Phase 2) is the only way to join.
+		// transaction applied by consensus is the only way to join.
 		// Self-granting a seat here would put an unstaked node into quorum
 		// math and leader rotation purely because it happened to start.
 		logger.Info("[%s] Not listed in the genesis file — participating as a peer only until a Stake transaction admits this node", currentNodeID)
 
 	case rewardAddress != "":
-		// No genesis file: admit ourselves only from a VERIFIED on-chain
-		// balance. There is deliberately NO minimum-stake fallback here any
-		// more: granting a seat that nobody funded is exactly the "free
-		// validator" the goal forbids, and it would put this node into quorum
-		// math and leader rotation purely because it happened to start. A node
-		// with no genesis file and no funds stays a PEER until it is funded and
-		// stakes (Phase 2/3). Applied to our own node ID only, never a peer.
-		if !stakeValidatorFromRewardAddress(bc, cons, currentNodeID, currentNodeID, rewardAddress, rewardClaims) {
-			logger.Info("[%s] Reward address %s has no verifiable/sufficient balance yet — participating as a peer only (no self-granted seat)", currentNodeID, rewardAddress)
-		}
+		logger.Info("[%s] Reward address %s does not grant validator membership; a committed Stake transaction is required", currentNodeID, rewardAddress)
 
 	default:
 		// No reward address at all: nothing to verify, so no seat. Same rule as
@@ -1064,20 +1069,49 @@ func StartNodeWithOptions(
 		logger.Info("[%s] No reward address and no genesis entry — participating as a peer only (validator membership comes from the genesis document or a Stake transaction)", currentNodeID)
 	}
 
-	// Same-box devnet harness (usingRealAddress == false): the other
-	// synthetic validatorIDs in this process are our own test peers, not
-	// external actors, so seeding them at minimum stake is safe — it's
-	// exactly equivalent to running N trusted local validators by hand.
-	// ★ REMOVED (Phase 1, item 2): the legacy "same-box" block that called
-	// vs.AddValidator(vid, minSPX) for every synthesized peer ID without a
-	// balance check. There is no longer any localhost-only trust path: every
-	// non-genesis validator must enter through stakeValidatorFromRewardAddress
-	// (verified on-chain balance, one reward address per node ID), and
-	// genesis-listed validators come from the genesis file once it is loaded
-	// into consensus (Phase 2: ValidatorSetAt).
-
 	bc.SetConsensusEngine(cons)
 	bc.SetConsensus(cons)
+
+	// ★ MEMBERSHIP BOOTSTRAP — ONE OWNER, AND IT RUNS HERE.
+	//
+	// The genesis document is attached, the consensus validator set is seeded
+	// from it, and the epoch-0 snapshot is built and cross-checked — in that
+	// order, in one call, so the sequence cannot drift.
+	//
+	// It must run AFTER SetConsensus above, because the cross-check reads the
+	// validator set through the blockchain's live view of the engine. Seeding
+	// alone is not enough: a set that is populated but not attached is
+	// indistinguishable from an unseeded one, which is precisely the state that
+	// made the original failure invisible.
+	//
+	// It previously happened in two places far apart: seeding ran here, while
+	// the epoch-0 snapshot was taken from inside ExecuteGenesisBlock, ~300 lines
+	// EARLIER. A fresh devnet node therefore reached block production with no
+	// epoch-0 snapshot and logged "validator snapshot for height 1 is
+	// unavailable" every ten seconds forever.
+	if genesisFile != nil {
+		if err := bc.BootstrapGenesisValidatorSet(genesisFile, func(gf *core.GenesisStateFile) error {
+			seeded, seedErr := seedGenesisValidators(cons, signingService, sthincsParams, gf, currentNodeID, bc)
+			if seedErr != nil {
+				return seedErr
+			}
+			genesisSeededSelf = seeded
+			logger.Info("GENESIS FILE: seeded %d validators into the consensus set (%s nSPX total)",
+				len(gf.Validators), cons.GetValidatorSet().GetTotalStake().String())
+			return nil
+		}); err != nil {
+			return fmt.Errorf("bootstrap genesis validator set: %w", err)
+		}
+		// ★ Seal the set to genesis seeding. From here the ONLY ways membership
+		// can change are QueueValidator (deferred to a boundary) and
+		// ProcessEpochTransition. Without this, any later caller of
+		// AddGenesisValidator — including a retry path — could add a live member
+		// with vote weight and no boundary, outside chain state.
+		cons.GetValidatorSet().SealGenesis()
+	}
+	if err := bc.ReplayStakeTransactions(); err != nil {
+		return fmt.Errorf("replay committed stake transactions: %w", err)
+	}
 	cons.SetTimeout(10 * time.Second)
 
 	// StartLeaderLoop is intentionally NOT started here.
@@ -1145,7 +1179,7 @@ func StartNodeWithOptions(
 	// block did nothing but log 9 misleading WARNs per node startup.
 
 	// peerRegistry is the address book: nodeID -> address, used for
-	// effectivePeerCount()/getKnownPeers() bookkeeping and gossip. It may
+	// registered-peer bookkeeping and gossip. It may
 	// be pre-populated (see the static same-box registration below) before
 	// a peer's real key exchange completes, so it must NOT be used as the
 	// dedup guard for one-time side effects (AddNode/AddPeer/stake grant)
@@ -1188,20 +1222,13 @@ func StartNodeWithOptions(
 			currentNodeID, peerNodeID, peerAddr)
 	}
 
-	// registerPeerStakeClaim is invoked when a peer's key-exchange reply
-	// carries a reward address (see helpers.go). It is the ONLY function in
-	// this file allowed to grant validator status to a remote peer, and it
-	// only does so after stakeValidatorFromRewardAddress independently (a)
-	// checks the address's on-chain balance and (b) pins the funded address
-	// to this one node ID in rewardClaims — the claim itself, though covered
-	// by the peer's verified challenge signature, is never trusted alone.
-	// Transport admission (p2pMgr.AddPeer) is deliberately NOT done here; it
-	// is owned exclusively by ensureDialbackAdmitted below.
+	// A reward-address claim is metadata only. Consensus membership can only
+	// change when a committed Stake transaction is replayed from chain state.
 	registerPeerStakeClaim := func(peerNodeID, rewardAddress string) {
-		if peerNodeID == "" || rewardAddress == "" {
-			return
+		if peerNodeID != "" && rewardAddress != "" {
+			logger.Debug("[%s] Ignoring peer reward-address claim from %s for validator admission",
+				currentNodeID, peerNodeID)
 		}
-		stakeValidatorFromRewardAddress(bc, cons, currentNodeID, peerNodeID, rewardAddress, rewardClaims)
 	}
 
 	// ensureDialbackAdmitted is the ONLY path that adds peers to p2pMgr,
@@ -1211,11 +1238,8 @@ func StartNodeWithOptions(
 	//
 	//   - Address book (peerRegistry) may be fed by remote claims — it is
 	//     discovery data only.
-	//   - p2pMgr is the consensus broadcast list, and every p2pMgr member is
-	//     reported to consensus as an ACTIVE VALIDATOR
-	//     (network.p2pConsensusNode.GetRole), which directly inflates
-	//     getTotalNodes()/quorum floors and the leader-rotation roster.
-	//     Nothing unverified may enter it.
+	//   - p2pMgr is a transport broadcast list only. Its membership does not
+	//     affect validator snapshots, proposer selection, or quorum weight.
 	//   - The dial-back also proves address ↔ node_id binding: an attacker
 	//     who claims a victim's identity gets an address on the attacker's
 	//     own IP (only the port is claimed), and the victim's real node
@@ -1483,24 +1507,19 @@ func StartNodeWithOptions(
 		logger.Info("No --seeds configured; relying on statically-registered peers only")
 	}
 
-	knownPeerCount := func() int {
-		peerRegistryMu.Lock()
-		defer peerRegistryMu.Unlock()
-		return len(peerRegistry)
-	}
-
 	// discoveredPeerCount is the OLD meaning of "effective" peers: peers that
 	// completed discovery/key exchange at least once. It says nothing about
 	// whether the peer can receive a PBFT proposal yet, so it is only used
-	// for startup log lines. Consensus gating uses effectivePeerCount below.
+	// for startup log lines. Consensus gating uses the stake-weighted readiness
+	// calculation below, not a peer count.
 	discoveredPeerCount := func() int {
 		registeredMu.Lock()
 		defer registeredMu.Unlock()
 		return len(registeredPeers)
 	}
 
-	// ★ FIX (chain stuck at height 0 / first proposal lost): effectivePeerCount
-	// used to return len(registeredPeers) — "this peer has done a key exchange
+	// ★ FIX (chain stuck at height 0 / first proposal lost): readiness used to
+	// return len(registeredPeers) — "this peer has done a key exchange
 	// with me" — and runBlockProductionLoop treated that as "this validator can
 	// take part in PBFT". On a fresh 3-node devnet the followers need 60-75s
 	// after their first key exchange to finish startup (each SPHINCS+
@@ -1575,38 +1594,6 @@ func StartNodeWithOptions(
 			}
 		}
 	}()
-
-	// effectivePeerCount = registered peers that are also READY to receive
-	// consensus messages (see the FIX above). This is what
-	// runBlockProductionLoop's validator-count gate reads.
-	effectivePeerCount := func() int {
-		registeredMu.Lock()
-		ids := make([]string, 0, len(registeredPeers))
-		for id := range registeredPeers {
-			ids = append(ids, id)
-		}
-		registeredMu.Unlock()
-
-		peerRegistryMu.Lock()
-		addrs := make([]string, 0, len(ids))
-		for _, id := range ids {
-			if a, ok := peerRegistry[id]; ok && a != "" {
-				addrs = append(addrs, a)
-			}
-		}
-		peerRegistryMu.Unlock()
-
-		now := time.Now()
-		peerReadyMu.Lock()
-		defer peerReadyMu.Unlock()
-		ready := 0
-		for _, a := range addrs {
-			if since, ok := peerReadySince[a]; ok && now.Sub(since) >= peerReadySettle {
-				ready++
-			}
-		}
-		return ready
-	}
 
 	// stakedReadyValidatorCount counts validators that are BOTH in the ACTIVE
 	// STAKED set (from chain state) and READY to receive consensus messages
@@ -1730,74 +1717,65 @@ func StartNodeWithOptions(
 		return computeReadyStake(active, currentNodeID, isPeerReady)
 	}
 
-	if knownPeerCount() > 0 {
-		logger.Info("Waiting for other nodes to be ready (3 seconds)...")
-		time.Sleep(3 * time.Second)
-	}
+	logger.Info("=== EXCHANGING PUBLIC KEYS (SYNC) BEFORE CONSENSUS ===")
 
-	if knownPeerCount() > 0 {
-		logger.Info("=== EXCHANGING PUBLIC KEYS (SYNC) BEFORE CONSENSUS ===")
-
-		// ★ FIX (slow follower startup): every exchangeKeyWithPeerSync costs
-		// ~9s (a SPHINCS+ signature on each side). The two loops below used
-		// to exchange with the SAME peers again and again — once during seed
-		// discovery, once here in the same-box loop, once more in the
-		// discovered-peer loop (plus a background dial-back). Each follower
-		// spent ~40s of its 60-75s startup repeating handshakes that had
-		// already succeeded, which is exactly the window in which the
-		// bootstrap node was already proposing. Exchanging once per address
-		// is sufficient: the responder pins node_id<->key on the first
-		// verified handshake and a repeat is a no-op for it.
-		exchangedAddrs := make(map[string]bool)
-		addrAlreadyVerified := func(addr string) bool {
-			peerRegistryMu.Lock()
-			var ids []string
-			for id, a := range peerRegistry {
-				if a == addr {
-					ids = append(ids, id)
-				}
-			}
-			peerRegistryMu.Unlock()
-			dialbackMu.Lock()
-			defer dialbackMu.Unlock()
-			for _, id := range ids {
-				if dialbackVerified[id] {
-					return true
-				}
-			}
-			return false
-		}
-
-		// No static roster exists anymore: peers reach this point only via
-		// discovery (seeds/DNS/PEX) and are handled by the discovered-peer
-		// loop below.
+	// ★ FIX (slow follower startup): every exchangeKeyWithPeerSync costs
+	// ~9s (a SPHINCS+ signature on each side). The two loops below used
+	// to exchange with the SAME peers again and again — once during seed
+	// discovery, once here in the same-box loop, once more in the
+	// discovered-peer loop (plus a background dial-back). Each follower
+	// spent ~40s of its 60-75s startup repeating handshakes that had
+	// already succeeded, which is exactly the window in which the
+	// bootstrap node was already proposing. Exchanging once per address
+	// is sufficient: the responder pins node_id<->key on the first
+	// verified handshake and a repeat is a no-op for it.
+	exchangedAddrs := make(map[string]bool)
+	addrAlreadyVerified := func(addr string) bool {
 		peerRegistryMu.Lock()
-		var discoveredAddrs []string
-		for _, addr := range peerRegistry {
-			discoveredAddrs = append(discoveredAddrs, addr)
+		var ids []string
+		for id, a := range peerRegistry {
+			if a == addr {
+				ids = append(ids, id)
+			}
 		}
 		peerRegistryMu.Unlock()
-		for _, addr := range discoveredAddrs {
-			if exchangedAddrs[addr] || addrAlreadyVerified(addr) {
-				logger.Info("Key exchange with %s already completed — skipping repeat handshake", addr)
-				continue
-			}
-			logger.Info("Exchanging keys with discovered peer: %s", addr)
-			if kx, err := exchangeKeyWithPeerSync(addr, currentAddress, currentNodeID, rewardAddress, core.GetGenesisHash(), signingService, sthincsParams); err != nil {
-				logger.Warn("Failed to exchange keys with %s: %v", addr, err)
-			} else {
-				exchangedAddrs[addr] = true
-				admitVerifiedPeer(kx.NodeID, addr)
-				registerDiscoveredPeer(kx.NodeID, addr)
-				if kx.RewardAddress != "" {
-					registerPeerStakeClaim(kx.NodeID, kx.RewardAddress)
-				}
+		dialbackMu.Lock()
+		defer dialbackMu.Unlock()
+		for _, id := range ids {
+			if dialbackVerified[id] {
+				return true
 			}
 		}
-		logger.Info("Key exchange completed with all known peers")
-	} else {
-		logger.Info("[%s] No peers known yet — waiting for inbound connections / --seeds discovery; consensus starts from chain state, never from a count", currentNodeID)
+		return false
 	}
+
+	// No static roster exists anymore: peers reach this point only via
+	// discovery (seeds/DNS/PEX) and are handled by the discovered-peer
+	// loop below.
+	peerRegistryMu.Lock()
+	var discoveredAddrs []string
+	for _, addr := range peerRegistry {
+		discoveredAddrs = append(discoveredAddrs, addr)
+	}
+	peerRegistryMu.Unlock()
+	for _, addr := range discoveredAddrs {
+		if exchangedAddrs[addr] || addrAlreadyVerified(addr) {
+			logger.Info("Key exchange with %s already completed — skipping repeat handshake", addr)
+			continue
+		}
+		logger.Info("Exchanging keys with discovered peer: %s", addr)
+		if kx, err := exchangeKeyWithPeerSync(addr, currentAddress, currentNodeID, rewardAddress, core.GetGenesisHash(), signingService, sthincsParams); err != nil {
+			logger.Warn("Failed to exchange keys with %s: %v", addr, err)
+		} else {
+			exchangedAddrs[addr] = true
+			admitVerifiedPeer(kx.NodeID, addr)
+			registerDiscoveredPeer(kx.NodeID, addr)
+			if kx.RewardAddress != "" {
+				registerPeerStakeClaim(kx.NodeID, kx.RewardAddress)
+			}
+		}
+	}
+	logger.Info("Key exchange completed with all discovered peers")
 
 	logger.Info("=== VERIFYING KEY SERIALIZATION ROUND-TRIP ===")
 	pkBytes, err = signingService.GetPublicKey()
@@ -1811,11 +1789,6 @@ func StartNodeWithOptions(
 
 	logger.Info("Self-stake and key exchange complete; remaining validator admission happens per-peer as reward addresses are verified")
 
-	if knownPeerCount() > 0 {
-		logger.Info("Waiting for genesis transactions to propagate (2 seconds)...")
-		time.Sleep(2 * time.Second)
-	}
-
 	if err := cons.Start(); err != nil {
 		return fmt.Errorf("failed to start consensus: %w", err)
 	}
@@ -1828,26 +1801,6 @@ func StartNodeWithOptions(
 
 	// Node initialization is complete; mark startup as done
 	progress.CompleteNodeStartup()
-
-	phase2State := &phase2InitState{}
-	if genesisFile != nil {
-		// The genesis file already established the staked validator set. The
-		// legacy "Phase 2" pass re-derives stakes from balances at block 1 and
-		// only knows this node's own ID — running it would rewrite our stake
-		// (possibly below the genesis value) and leave each node with a
-		// different local set. Mark it done so every node keeps the
-		// genesis-defined set identically.
-		phase2State.finish(true)
-		logger.Info("Genesis file present — legacy Phase-2 stake re-derivation skipped (the staked set comes from the genesis file)")
-	}
-
-	if knownPeerCount() > 0 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			watchAndUpdateStakes(ctx, bc, cons, currentNodeID, validatorIDs, validatorAddressMap, phase2State)
-		}()
-	}
 
 	// SECTION 12 — HTTP server
 	httpPort := 8545 + portOffset
@@ -1945,7 +1898,7 @@ func StartNodeWithOptions(
 	// For nodes with peers (late joiners or multi-node networks), wait for
 	// the sync loop to fetch genesis. We wait indefinitely with periodic
 	// logging so the operator can see progress.
-	if !genesisVerified && knownPeerCount() > 0 {
+	if !genesisVerified {
 		logger.Info("Waiting for sync loop to fetch genesis from peers (will wait indefinitely)...")
 		checkTicker := time.NewTicker(1 * time.Second)
 		defer checkTicker.Stop()
@@ -1990,7 +1943,6 @@ func StartNodeWithOptions(
 	go func() {
 		defer wg.Done()
 		runBlockProductionLoop(ctx, bc, cons, currentNodeID, networkType,
-			validatorIDs, validatorAddressMap, phase2State, effectivePeerCount,
 			stakedReadyValidatorCount, stakedReadyStake, &syncState, &syncStateMu, progress)
 	}()
 

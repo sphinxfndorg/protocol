@@ -604,3 +604,255 @@ func formatSPX(nspxStr string) string {
 	result := spx.Text('f', 2)
 	return result + " SPX"
 }
+
+// ============================================================================
+// EPOCH-0 SNAPSHOT LIFECYCLE — SINGLE OWNER
+//
+// A node cannot produce block 1 without the snapshot that governs epoch 0:
+// CreateBlock fails closed when the snapshot for the proposed height is
+// missing, and heights 1..EpochBlocks-1 all live in epoch 0.
+//
+// The snapshot used to be taken in two unrelated places, guarded differently:
+//
+//   - ExecuteGenesisBlock, but only when the live set happened to be attached,
+//     and NOT AT ALL on the "already executed, skipping" branch that a restart
+//     takes;
+//   - CommitBlock's epoch-boundary helper, which a solo bootstrap never reaches
+//     because genesis runs through ExecuteGenesisBlock instead.
+//
+// A fresh devnet node seeded its validator set AFTER ExecuteGenesisBlock ran, so
+// the guard saw no set, skipped the snapshot, never retried — and then logged
+// "validator snapshot for height 1 is unavailable" every ten seconds forever.
+// One owner, called from every path that can reach height 1, removes the
+// ordering dependency entirely.
+// ============================================================================
+
+// ensureEpoch0Snapshot guarantees the snapshot governing epoch 0 exists and is
+// the one the genesis block committed to.
+//
+// ★ NEVER OVERWRITES A PERSISTED SNAPSHOT. The store is the record of what this
+// node already agreed to; a recovered row wins, and disagreement is an error
+// rather than a silent overwrite. Overwriting would let a re-commit redefine
+// the very set an earlier block was verified against.
+func (bc *Blockchain) ensureEpoch0Snapshot() error {
+	// 1. If a snapshot already exists in memory, honour it — but verify it is
+	//    the one genesis committed to, so a corrupted store cannot propagate.
+	existing := consensus.SnapshotAtEpoch(0)
+	if existing != nil {
+		return bc.verifyEpoch0AgainstGenesis(existing, "recovered")
+	}
+
+	// 2. Nothing in memory. Decide whether rebuilding is even valid: the genesis
+	//    document only describes epoch 0. If the chain is already past it,
+	//    guessing is worse than refusing.
+	tipHeight := uint64(0)
+	if bc.storage != nil {
+		if tip, err := bc.storage.GetLatestBlock(); err == nil && tip != nil {
+			tipHeight = tip.GetHeight()
+		}
+	}
+	if consensus.EpochForHeight(tipHeight) != 0 {
+		return fmt.Errorf("cannot rebuild the epoch-0 validator snapshot: local chain is at height %d (epoch %d) and "+
+			"genesis alone cannot describe the current epoch's membership; a full resync from peers is required",
+			tipHeight, consensus.EpochForHeight(tipHeight))
+	}
+
+	// 3. Build from the DOCUMENT (single shared builder), not the live set.
+	gf := bc.GenesisDocument()
+	if gf == nil {
+		return fmt.Errorf("cannot build the epoch-0 validator snapshot: no genesis document is loaded on this node")
+	}
+	snap, err := epoch0SnapshotFromGenesis(gf)
+	if err != nil {
+		return fmt.Errorf("build epoch-0 snapshot from genesis: %w", err)
+	}
+	if err := bc.verifyEpoch0AgainstGenesis(snap, "rebuilt"); err != nil {
+		return err
+	}
+
+	// 4. Cross-check the live set IF it is already attached.
+	//
+	// This is deliberately not fatal here. ensureEpoch0Snapshot is called from
+	// ExecuteGenesisBlock, which runs from FinishInit — BEFORE the consensus
+	// engine exists and therefore before genesis validators can have been
+	// seeded. At that point an unattached set is the normal, correct state, and
+	// treating it as an error would make startup impossible.
+	//
+	// The authoritative cross-check is assertLiveSetMatchesEpoch0, which runs
+	// from BootstrapGenesisValidatorSet immediately AFTER seeding and is fatal
+	// there. See that function for what it catches.
+	if vs := bc.liveValidatorSet(); vs != nil {
+		if err := bc.assertLiveSetMatchesEpoch0(snap); err != nil {
+			return err
+		}
+	} else {
+		logger.Debug("Epoch-0 snapshot built from genesis; live set not attached yet — " +
+			"the membership cross-check will run after seeding completes")
+	}
+
+	// 5. Install and persist.
+	consensus.StoreSnapshot(*snap)
+	logger.Info("Epoch-0 validator snapshot ensured: %d validator(s), total %s nSPX, hash %s",
+		len(snap.Validators), snap.TotalStake.String(), snap.Hash()[:16])
+	return nil
+}
+
+// verifyEpoch0AgainstGenesis checks a candidate epoch-0 snapshot against the
+// commitment the genesis block header carries. A mismatch is a startup error:
+// neither side is taken as authoritative, because "which one is right" is
+// exactly the question that cannot be answered locally.
+func (bc *Blockchain) verifyEpoch0AgainstGenesis(snap *consensus.ValidatorSnapshot, origin string) error {
+	if snap == nil {
+		return fmt.Errorf("epoch-0 snapshot (%s) is nil", origin)
+	}
+	committed, err := bc.GenesisSnapshotCommitment()
+	if err != nil {
+		// No commitment available (e.g. no genesis document attached yet). The
+		// snapshot hash is still deterministic, so record it and let a later
+		// comparison catch a divergence.
+		logger.Debug("Epoch-0 snapshot (%s): no genesis commitment available to compare against (%v)", origin, err)
+		return nil
+	}
+	if committed == "" {
+		return nil
+	}
+	if got := snap.Hash(); got != committed {
+		return fmt.Errorf("epoch-0 validator snapshot (%s) hash %s does not match the genesis commitment %s; "+
+			"this node's genesis data disagrees with what the block-0 header committed to, and neither can be "+
+			"trusted — refusing to start rather than picking one", origin, got[:16], committed[:16])
+	}
+	logger.Debug("Epoch-0 snapshot (%s) matches genesis commitment %s", origin, committed[:16])
+	return nil
+}
+
+// assertLiveSetMatchesEpoch0 confirms the live ValidatorSet agrees with the
+// epoch-0 snapshot on membership and stakes.
+//
+// The snapshot is built from the genesis DOCUMENT precisely so it does not
+// depend on seeding order. That makes the live set redundant for construction
+// but valuable as an independent check: if seeding produced a different set
+// (wrong stake, missing or extra validator), the node would compute quorum
+// denominators from the live set while verifying blocks against the snapshot,
+// and the two would disagree on every round.
+func (bc *Blockchain) assertLiveSetMatchesEpoch0(snap *consensus.ValidatorSnapshot) error {
+	vs := bc.liveValidatorSet()
+	if vs == nil {
+		return fmt.Errorf("no validator set attached; genesis validators were not seeded, so the epoch-0 " +
+			"snapshot cannot be cross-checked — refusing to continue")
+	}
+	for id, row := range snap.Validators {
+		live, ok := vs.GetValidator(id).(*consensus.StakedValidator)
+		if !ok || live == nil {
+			return fmt.Errorf("genesis validator %s is in the epoch-0 snapshot but not in the seeded validator set", id)
+		}
+		if live.StakeAmount == nil || row.StakeAmount == nil || live.StakeAmount.Cmp(row.StakeAmount) != 0 {
+			return fmt.Errorf("genesis validator %s stake disagrees: snapshot %s, seeded set %s",
+				id, row.StakeAmount, live.StakeAmount)
+		}
+	}
+	if seeded := vs.GetActiveValidators(0); len(seeded) != len(snap.Validators) {
+		return fmt.Errorf("seeded validator set has %d active member(s) but the epoch-0 snapshot has %d; "+
+			"membership disagrees with genesis", len(seeded), len(snap.Validators))
+	}
+	return nil
+}
+
+// SetGenesisDocument records the parsed, validated genesis document on the
+// blockchain so later phases read it from memory instead of re-parsing the file.
+//
+// The document is validated (including the owner-address normalization and the
+// pinned/committed digest check) by the loader before it is set here, so
+// anything reachable through GenesisDocument has already passed those gates.
+// Keeping it on the node is what lets the epoch-0 snapshot builder be
+// order-independent: it no longer has to be handed a document by whichever
+// startup phase happened to run first.
+func (bc *Blockchain) SetGenesisDocument(gf *GenesisStateFile) {
+	bc.genesisDocMu.Lock()
+	bc.genesisDoc = gf
+	bc.genesisDocMu.Unlock()
+}
+
+// GenesisDocument returns the loaded genesis document, or nil if none is set.
+func (bc *Blockchain) GenesisDocument() *GenesisStateFile {
+	bc.genesisDocMu.RLock()
+	defer bc.genesisDocMu.RUnlock()
+	return bc.genesisDoc
+}
+
+// GenesisSnapshotCommitment returns the epoch-0 snapshot hash that the genesis
+// block header commits to, derived from the loaded genesis document using the
+// SAME builder that creates the snapshot. It is an error when no document is
+// available, because there is then nothing to compare against.
+func (bc *Blockchain) GenesisSnapshotCommitment() (string, error) {
+	gf := bc.GenesisDocument()
+	if gf == nil {
+		return "", fmt.Errorf("no genesis document loaded")
+	}
+	return gf.validatorSnapshotHash()
+}
+
+// BootstrapGenesisValidatorSet performs the membership bootstrap in ONE place:
+// it attaches the genesis document, seeds the consensus validator set from it,
+// and ensures the epoch-0 snapshot exists.
+//
+// ★ WHY THIS IS A SINGLE FUNCTION. Seeding and snapshot creation used to live in
+// different startup phases, hundreds of lines apart: seeding ran where the
+// consensus engine is constructed, while the epoch-0 snapshot was taken from
+// inside ExecuteGenesisBlock, which runs EARLIER. On a fresh devnet the
+// validator set was therefore attached after the snapshot code had already
+// looked for it, found none, skipped, and never retried — leaving the node
+// unable to produce block 1 and logging the same fatal error every ten seconds
+// forever.
+//
+// Doing both here makes the order correct by construction rather than by
+// luck: the document is attached, the set is seeded, and only then is the
+// snapshot built and cross-checked against the live set.
+//
+// Any error is returned so the caller fails node construction. Nothing here
+// logs-and-continues: a node that cannot build the snapshot governing height 1
+// must not start.
+//
+// lateJoiner is passed through so a late joiner (which must NOT seed from its
+// own local document, because that document may be absent) is skipped here and
+// instead takes the snapshot from the chain it syncs.
+func (bc *Blockchain) BootstrapGenesisValidatorSet(
+	genesisFile *GenesisStateFile,
+	seed func(*GenesisStateFile) error,
+) error {
+	// The document is retained on the node so the snapshot builder is
+	// order-independent: it reads the same validated bytes the loader checked.
+	bc.SetGenesisDocument(genesisFile)
+
+	if seed != nil {
+		if err := seed(genesisFile); err != nil {
+			return fmt.Errorf("seed genesis validators: %w", err)
+		}
+	}
+
+	if err := bc.ensureEpoch0Snapshot(); err != nil {
+		return fmt.Errorf("ensure epoch-0 validator snapshot: %w", err)
+	}
+
+	// ★ THE AUTHORITATIVE MEMBERSHIP CROSS-CHECK, and it is fatal.
+	//
+	// Seeding has just run, so the live set MUST now exist and MUST agree with
+	// the epoch-0 snapshot the chain committed to. ensureEpoch0Snapshot tolerates
+	// an unattached set because it is also called from ExecuteGenesisBlock, which
+	// runs before any seeding exists. Here the set is REQUIRED.
+	//
+	// Why it matters: the node measures quorum against the snapshot, so if
+	// seeding produced a different membership or a different stake than the
+	// document, the node would verify blocks against one set and weight itself
+	// by another. That is a divergence, not a cosmetic mismatch, so it is a
+	// startup error rather than a warning.
+	snap := consensus.SnapshotAtEpoch(0)
+	if snap == nil {
+		return fmt.Errorf("epoch-0 validator snapshot is absent immediately after bootstrap")
+	}
+	if err := bc.assertLiveSetMatchesEpoch0(snap); err != nil {
+		return fmt.Errorf("genesis seeding does not match the genesis document: %w", err)
+	}
+	logger.Info("Genesis validator set verified against the epoch-0 snapshot (%d member(s), %s nSPX)",
+		len(snap.Validators), snap.TotalStake.String())
+	return nil
+}

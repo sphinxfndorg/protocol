@@ -25,9 +25,9 @@ import (
 // economics (policy.SlashDowntimeBPS / SlashDoubleSignBPS / SlashLivenessBPS)
 // so that consensus and the policy module share a single slashing schedule.
 const (
-	CommitWindowEnd = uint64(20)  // slots 0-20: submit commitHash+nonce (first phase of commit-reveal)
-	RevealWindowEnd = uint64(31)  // slots 21-31: reveal beta+proof+nonce (second phase of commit-reveal)
-	SubmitWindowEnd = uint64(31)  // slots 0-31: submit VDF output + proof (entire window for submission)
+	CommitWindowEnd = uint64(20) // slots 0-20: submit commitHash+nonce (first phase of commit-reveal)
+	RevealWindowEnd = uint64(31) // slots 21-31: reveal beta+proof+nonce (second phase of commit-reveal)
+	SubmitWindowEnd = uint64(31) // slots 0-31: submit VDF output + proof (entire window for submission)
 )
 
 // VDFCache caches VDF verification results to avoid redundant work

@@ -962,21 +962,22 @@ func TestMerkleRootFromLeaves_OddLeafCount(t *testing.T) {
 //
 // These tests pin the three properties the new admission path depends on:
 //
-//   1. A stake is PENDING: it grants no weight, and no vote.
-//   2. It activates only at a scheduled epoch, at an epoch BOUNDARY.
-//   3. totalStake is rebuilt from the set that can actually vote, so a pending
-//      validator can never sit in the quorum denominator.
+//  1. A stake is PENDING: it grants no weight, and no vote.
+//  2. It activates only at a scheduled epoch, at an epoch BOUNDARY.
+//  3. totalStake is rebuilt from the set that can actually vote, so a pending
+//     validator can never sit in the quorum denominator.
 //
 // The liveness scenarios at the bottom are the ones that matter most: they
 // encode the exact arithmetic of strict >2/3 stake, including the
 // counter-intuitive K=3 case where two of three is NOT enough.
-// TestBootstrapGenesis_AllowsOneValidatorButCreateDoesNot is the conditional
-// MinValidators floor: a `bootstrap: true` document may list one validator (the
-// node that authored it), while a `genesis create` document may not.
-func TestBootstrapGenesis_AllowsOneValidatorButCreateDoesNot(t *testing.T) {
+// TestBootstrapGenesis_AllowsOneValidatorButNonBootstrapDoesNot is the
+// conditional MinValidators floor: a `bootstrap: true` document may list one
+// validator (the node that authored it), while a non-bootstrap genesis document
+// may not.
+func TestBootstrapGenesis_AllowsOneValidatorButNonBootstrapDoesNot(t *testing.T) {
 	minStake := SelfGenesisStakeNSPX()
 
-	// A `genesis create`-style document (Bootstrap=false) with 1 validator is
+	// A non-bootstrap document with 1 validator is
 	// refused: an operator naming a multi-node set below the floor is
 	// provisioning something that can never tolerate a fault.
 	notBootstrap := &GenesisStateFile{

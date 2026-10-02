@@ -70,18 +70,6 @@ import (
 const DevnetChainID uint64 = 73310
 
 const (
-	// DefaultDevnetEscrowPolicyPath is the shared-root CGE escrow policy a real
-	// ceremony writes. Auto-custody therefore produces artifacts the rest of the
-	// node already understands. The ESCROW policy is NOT genesis-related: it
-	// decides where block 0 sends the locked remainder, not who the validators
-	// are, so it keeps its own file.
-	//
-	// ★ LEGACY SHARED-ROOT DEFAULT. When DevnetCustodyOptions.DataDir is set —
-	// which the CLI and bind.StartNode always do — withDefaults() IGNORES this
-	// and scopes every path under the node's own datadir instead. These survive
-	// only for tests and the same-process harness, which leave DataDir empty.
-	DefaultDevnetEscrowPolicyPath = defaultEscrowMultisigPath
-
 	// Per-node relative paths used when DataDir is set. Custody private keys
 	// live under <datadir>/custody/devnet-auto (NOT data/custody — that prefix
 	// is the ceremony/manual `multisig devnet` namespace, and reusing it would
@@ -108,7 +96,6 @@ const (
 	//
 	// TODO(ceremony-loader): attach the ticket that tracks building the loader;
 	// the pending test file carries the same unlinked placeholder.
-	escrowPolicySubdir     = "config/escrow_multisig.json"
 	custodyProposalsSubdir = "config/spend_proposals"
 	vaultKeysSubdir        = "custody/devnet-auto/vault"
 	escrowKeysSubdir       = "custody/devnet-auto/escrow"
@@ -137,34 +124,19 @@ const (
 // DevnetBundleFile describes one allowlisted PUBLIC devnet bundle file served
 // over the network to late joiners. Name is the allowlist key used on the
 // wire; Subdir is the per-node relative path under the node's own datadir
-// (see perNodePath / escrowPolicySubdir / GenesisStateFileSubdir). Only
+// (see perNodePath / GenesisStateFileSubdir). Only
 // allowlisted files are ever served or fetched — custody/ private keys are never
 // in this list, never served, and never fetched.
 type DevnetBundleFile struct {
 	Name   string
 	Subdir string
-	// Optional marks a file that a legitimate network may simply not have.
-	// The bundle fetch gives up on an optional file after a few rounds instead
-	// of blocking a joiner for the full deadline; a network that DOES have it
-	// still fetches it like any other file.
-	Optional bool
 }
 
-// DevnetPublicBundleFiles is the complete PUBLIC bundle a late joiner needs.
-//
-// After the genesis consolidation there are exactly TWO files: the single
-// genesis document (which carries the chain parameters, the initial validator
-// set, the pre-funded accounts, the genesis vault custody policy AND the
-// pre-signed block-0 witness book as sections) and the CGE escrow policy, which
-// is not genesis-related and keeps its own file.
-//
-// Both are REQUIRED: a joiner cannot rebuild block 0 without the policy and the
-// witnesses, so there is no legitimate devnet where the genesis document is
-// absent. The serve path answers Ready=false while the bootstrap node is still
-// signing, and the fetch retries.
+// DevnetPublicBundleFiles is the single public genesis document a late joiner
+// needs. It contains chain parameters, validators, funded accounts, both
+// custody policies and the pre-signed block-0 witness book.
 var DevnetPublicBundleFiles = []DevnetBundleFile{
 	{Name: GenesisStateFileName, Subdir: GenesisStateFileSubdir},
-	{Name: "escrow_multisig.json", Subdir: escrowPolicySubdir},
 }
 
 // devnetBundleByName resolves a wire name to its bundle entry. Unknown names
@@ -192,12 +164,9 @@ type DevnetCustodyOptions struct {
 	// terminals from each minting a competing policy.
 	BootstrapNode bool
 
-	// DataDir scopes every default custody/config path to one node. Fully
-	// per-node layout: dataDir/config/*.json and dataDir/custody/.... The
-	// node never reads the shared repo root, so distributing a devnet is an
-	// explicit copy of node1's PUBLIC bundle (the single genesis document and
-	// the escrow policy) into each peer's <datadir>/config — the same shape
-	// the real ceremony-artifact distribution will take.
+	// DataDir scopes the genesis document and private custody keys to one node.
+	// The public genesis bundle is one file; secret keys remain in the existing
+	// per-node custody directories.
 	// Empty means the legacy shared-root layout (used by tests and the
 	// same-process harness).
 	DataDir string
@@ -206,14 +175,9 @@ type DevnetCustodyOptions struct {
 	GenesisTimestamp int64
 
 	// GenesisStatePath is the single genesis document this node reads and writes.
-	// It carries the chain parameters, the initial validator set, the funded
-	// accounts, the genesis vault custody policy (Multisig section) and the
-	// pre-signed block-0 witness set (Witnesses section). There is deliberately
-	// no separate policy path and no separate witness path any more.
+	// It carries the chain parameters, the initial validator set, funded
+	// accounts, both custody policies and the pre-signed block-0 witness set.
 	GenesisStatePath string
-	// EscrowPolicyPath is the CGE escrow policy, which is NOT genesis-related
-	// and keeps its own file.
-	EscrowPolicyPath string
 	VaultKeysDir     string
 	EscrowKeysDir    string
 
@@ -248,9 +212,6 @@ func (o DevnetCustodyOptions) withDefaults() DevnetCustodyOptions {
 	if o.GenesisStatePath == "" {
 		o.GenesisStatePath = scope(GenesisStateFileSubdir)
 	}
-	if o.EscrowPolicyPath == "" {
-		o.EscrowPolicyPath = scope(escrowPolicySubdir)
-	}
 	if o.VaultKeysDir == "" {
 		o.VaultKeysDir = scope(vaultKeysSubdir)
 	}
@@ -275,16 +236,7 @@ func CustodyProposalsDirForDataDir(datadir string) string {
 	return perNodePath(datadir, custodyProposalsSubdir)
 }
 
-// EscrowPolicyPathForDataDir returns the escrow policy path for one node's
-// datadir (<datadir>/config/escrow_multisig.json); empty datadir keeps the
-// legacy shared-root layout.
-func EscrowPolicyPathForDataDir(datadir string) string {
-	return perNodePath(datadir, escrowPolicySubdir)
-}
-
-// GenesisStatePathForDataDir: same per-node scoping for the ONE genesis document
-// (<datadir>/config/genesis_state.json), which holds the genesis vault policy and
-// the pre-signed block-0 witness book as sections alongside the validator set.
+// GenesisStatePathForDataDir returns the one genesis document path for a node.
 func GenesisStatePathForDataDir(datadir string) string {
 	return perNodePath(datadir, GenesisStateFileSubdir)
 }
@@ -414,14 +366,10 @@ func GenesisCustodyOrderingViolation() error {
 		genesisCached.GetHash(), genesisCached.Body.TxsList[0].Sender)
 }
 
-// devnetCustodyBundlePresent reports whether this node's own datadir holds
-// custody material it could replay from. Either policy counts: a node with the
-// vault policy but not yet the escrow policy is a partial copy, and the
-// per-policy checks that follow produce a precise message naming whichever is
-// missing. This predicate exists to catch the ALL-ABSENT case, which is the one
-// that would otherwise silently diverge from the network.
+// devnetCustodyBundlePresent reports whether this node's datadir has the single
+// public genesis document needed to replay block 0.
 func devnetCustodyBundlePresent(opts DevnetCustodyOptions) bool {
-	return fileExists(opts.GenesisStatePath) || fileExists(opts.EscrowPolicyPath)
+	return fileExists(opts.GenesisStatePath)
 }
 
 // devnetLateJoinerMissingBundleError is the refusal for a devnet node started
@@ -430,10 +378,10 @@ func devnetCustodyBundlePresent(opts DevnetCustodyOptions) bool {
 // builds a different block 0, and is then rejected by every peer at key
 // exchange with no hint as to why.
 func devnetLateJoinerMissingBundleError(opts DevnetCustodyOptions) error {
-	return fmt.Errorf(`devnet late joiner has no custody bundle in its own datadir: neither %s nor %s exists.
+	return fmt.Errorf(`devnet late joiner has no genesis document in its own datadir: %s does not exist.
 
 A node started with --seeds cannot mint custody material — it must REPLAY the
-bootstrap node's block 0. Without the bundle it would build a different genesis
+bootstrap node's block 0. Without the document it would build a different genesis
 (legacy vault, unsigned, no witnesses), and every peer would reject it at key
 exchange because the genesis hashes differ. Refusing to start instead.
 
@@ -444,7 +392,7 @@ signing. If this error still fires, the network fetch itself failed
 (seeds unreachable or bootstrap not yet listening); check --seeds.
 
 Never fetch or copy the custody/ directory: a replaying node needs no keys.`,
-		opts.GenesisStatePath, opts.EscrowPolicyPath)
+		opts.GenesisStatePath)
 }
 
 // AutoProvisionDevnetCustody provisions (or loads) devnet custody and, when
@@ -513,22 +461,24 @@ func AutoProvisionDevnetCustody(opts DevnetCustodyOptions) (*DevnetCustodyResult
 // decides WHERE block 0 sends the locked remainder, and every node that loads
 // the same public policy derives the same address.
 func ensureDevnetEscrowPolicy(opts DevnetCustodyOptions, res *DevnetCustodyResult) error {
-	if !fileExists(opts.EscrowPolicyPath) {
+	gf, err := LoadGenesisFile(datadirOf(opts.GenesisStatePath))
+	if err != nil {
+		return fmt.Errorf("devnet auto-custody: read %s: %w", opts.GenesisStatePath, err)
+	}
+	if gf == nil || gf.EscrowMultisig == nil {
 		if !opts.BootstrapNode {
-			logger.Error("DEVNET AUTO-CUSTODY: %s is absent and this node is a late joiner (--seeds set) — refusing to generate a competing escrow policy. Start the first validator (no --seeds) once so it writes the shared policy, then restart this node.", opts.EscrowPolicyPath)
-			return nil
+			return fmt.Errorf("devnet auto-custody: %s has no escrow_multisig section; refusing to generate a competing escrow policy on a joiner", opts.GenesisStatePath)
 		}
 		if err := generateDevnetCustodySet(opts.EscrowKeysDir, "sphinx-escrow-v1", opts, saveEscrowPolicy(opts)); err != nil {
 			return err
 		}
 		res.GeneratedKeys = true
-		logger.Error("DEVNET AUTO-CUSTODY: CGE escrow policy + all %d custodian keys generated by this process (%s, policy %s). This is devnet convenience, NOT real M-of-N security. Never use auto-provisioned keys for testnet or mainnet.", opts.Custodians, opts.EscrowKeysDir, opts.EscrowPolicyPath)
-		logger.Error("DEVNET AUTO-CUSTODY: distribute the PUBLIC bundle to every peer datadir before they start (cp %s %s <peer-datadir>/config/) — never the keys.", opts.EscrowPolicyPath, filepath.Base(opts.EscrowPolicyPath))
+		logger.Error("DEVNET AUTO-CUSTODY: CGE escrow policy + all %d custodian keys generated by this process (%s, policy in %s). This is devnet convenience, NOT real M-of-N security. Never use auto-provisioned keys for testnet or mainnet.", opts.Custodians, opts.EscrowKeysDir, opts.GenesisStatePath)
 	}
 
-	addr, err := LoadEscrowPolicy(opts.EscrowPolicyPath)
+	addr, err := LoadEscrowPolicy(datadirOf(opts.GenesisStatePath))
 	if err != nil {
-		return fmt.Errorf("devnet auto-custody: load escrow policy %s: %w", opts.EscrowPolicyPath, err)
+		return fmt.Errorf("devnet auto-custody: load escrow policy from %s: %w", opts.GenesisStatePath, err)
 	}
 	res.EscrowAddress = addr
 	logger.Info("DEVNET AUTO-CUSTODY: escrow address %s (block 0 funds it; CGE releases stay UNGATED until enforcement is enabled)", addr)
@@ -563,7 +513,7 @@ func ensureDevnetVaultPolicy(opts DevnetCustodyOptions, res *DevnetCustodyResult
 		autoKeysPresent = true
 		res.GeneratedKeys = true
 		logger.Error("DEVNET AUTO-CUSTODY: genesis vault policy + all %d custodian keys generated by this process (%s, policy in %s). This is devnet convenience, NOT real M-of-N security. Never use auto-provisioned keys for testnet or mainnet.", opts.Custodians, opts.VaultKeysDir, opts.GenesisStatePath)
-		logger.Error("DEVNET AUTO-CUSTODY: distribute the PUBLIC bundle (%s, escrow_multisig.json) from %s to every peer <datadir>/config/ before they start — never the keys.", GenesisStateFileName, filepath.Dir(opts.GenesisStatePath))
+		logger.Error("DEVNET AUTO-CUSTODY: distribute the single PUBLIC genesis document (%s) from %s to every peer <datadir>/config/ before they start — never the keys.", GenesisStateFileName, filepath.Dir(opts.GenesisStatePath))
 		logger.Error("DEVNET AUTO-CUSTODY: this node signs block 0's distribution slices (%d-of-%d each, %d slices) with a bounded worker pool — expect on the order of a minute of STHINCS signing before genesis exists (more on a single core; the completed run logs the exact wall time). The resulting witnesses are merged into %s so other devnet nodes need no custodian keys.", opts.Threshold, opts.Custodians, len(devnetCustodySlicesForGenesis(opts.GenesisTimestamp)), opts.GenesisStatePath)
 	}
 
@@ -981,7 +931,8 @@ func (b *GenesisWitnessBook) authorizer(policy *multisig.MultiPartyPolicy, genes
 //   - the genesis vault policy is merged into the `multisig` SECTION of the one
 //     genesis document (MutateGenesisFile), so the vault authorization travels
 //     with the validator set and the witness book;
-//   - the CGE escrow policy keeps its own file (not genesis-related).
+//   - the CGE escrow policy is merged into the `escrow_multisig` section of the
+//     same genesis document.
 //
 // The key files are the same in both cases, in the exact on-disk shape
 // `multisig devnet` produces, so the rest of the node (and the CLI) treats
@@ -1041,19 +992,12 @@ func saveVaultPolicy(opts DevnetCustodyOptions) func(*multisig.MultiPartyPolicy)
 	}
 }
 
-// saveEscrowPolicy writes the CGE escrow policy to its own file. The escrow is
-// NOT genesis-related, so it deliberately does not live in the genesis document.
+// saveEscrowPolicy merges the CGE escrow policy into the single genesis document.
 func saveEscrowPolicy(opts DevnetCustodyOptions) func(*multisig.MultiPartyPolicy) error {
 	return func(p *multisig.MultiPartyPolicy) error {
-		if dir := filepath.Dir(opts.EscrowPolicyPath); dir != "" && dir != "." {
-			if err := os.MkdirAll(dir, 0o755); err != nil {
-				return fmt.Errorf("create policy dir: %w", err)
-			}
-		}
-		if err := p.Save(opts.EscrowPolicyPath); err != nil {
-			return fmt.Errorf("write devnet custody policy %s: %w", opts.EscrowPolicyPath, err)
-		}
-		return nil
+		return MutateGenesisFile(datadirOf(opts.GenesisStatePath), func(gf *GenesisStateFile) {
+			gf.EscrowMultisig = p
+		})
 	}
 }
 
@@ -1165,21 +1109,14 @@ type DevnetBundleResponse struct {
 	Data    []byte `json:"data,omitempty"`
 }
 
-// bundleCompleteForDataDir reports whether datadir holds the full REQUIRED
-// PUBLIC bundle. Both entries are required after the genesis consolidation: a
-// joiner needs the vault policy and the witness book (sections of the genesis
-// document) to rebuild block 0, and the escrow policy to derive the same escrow
-// address. A restarted node must not be blocked re-fetching files that are
-// already there, so a node with a complete datadir skips the network fetch and
+// bundleCompleteForDataDir reports whether datadir holds the required public
+// genesis document. A restarted node with the document skips network fetch and
 // never overwrites its bundle.
 func bundleCompleteForDataDir(datadir string) bool {
 	if datadir == "" {
 		return false
 	}
 	for _, f := range DevnetPublicBundleFiles {
-		if f.Optional {
-			continue
-		}
 		data, err := os.ReadFile(perNodePath(datadir, f.Subdir))
 		if err != nil || len(data) == 0 {
 			return false
@@ -1200,12 +1137,6 @@ func validateBundleBytes(name string, data []byte) error {
 			return fmt.Errorf("bundle %s failed validation: %w", name, err)
 		}
 		return nil
-	case "escrow_multisig.json":
-		var p multisig.MultiPartyPolicy
-		if err := json.Unmarshal(data, &p); err != nil {
-			return fmt.Errorf("bundle %s not a policy: %w", name, err)
-		}
-		return p.Validate()
 	default:
 		return fmt.Errorf("unknown bundle file %s", name)
 	}
@@ -1266,14 +1197,6 @@ func BundleSubdirFor(name string) (string, bool) {
 		return "", false
 	}
 	return entry.Subdir, true
-}
-
-// DevnetBundleOptional reports whether an allowlisted bundle file may be
-// legitimately absent on a network (see DevnetBundleFile.Optional). Unknown
-// names are not optional.
-func DevnetBundleOptional(name string) bool {
-	entry, ok := devnetBundleByName(name)
-	return ok && entry.Optional
 }
 
 // ServeDevnetBundle answers one bundle request from this node's OWN datadir.

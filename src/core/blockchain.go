@@ -84,7 +84,7 @@ func NewBlockchain(dataDir string, nodeID string, validators []string, networkTy
 
 	// Initialize state machine for Byzantine Fault Tolerance replication
 	// This handles consensus state and validator management
-	stateMachine := storage.NewStateMachine(store, nodeID, validators)
+	stateMachine := storage.NewStateMachine(store, nodeID)
 
 	// Create blockchain with mempool (will be configured after chain params are set)
 	// Initialize the blockchain structure with default values and empty caches
@@ -364,7 +364,6 @@ func SetGlobalStateDB(sdb StateDBInterface) {
 	defer stateDBMu.Unlock()
 	globalStateDB = sdb
 }
-
 
 // SetChainTip sets the chain tip to a specific height and hash.
 // This is used after restoring from a state snapshot to fast-forward past
@@ -2106,6 +2105,9 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 	// same input set and reaches the same totalStake. Nothing here reads a
 	// clock, a peer count, or a flag.
 	// ════════════════════════════════════════════════════════════════════
+	if err := bc.applyStakeTransactionsToValidatorSet(typeBlock); err != nil {
+		return fmt.Errorf("CommitBlock: apply committed stake transactions: %w", err)
+	}
 	bc.applyEpochTransitionIfBoundary(typeBlock.GetHeight())
 
 	if err := bc.validateBlockTransactionAuth(typeBlock, true); err != nil {
@@ -2172,25 +2174,41 @@ func (bc *Blockchain) CommitBlock(block consensus.Block) error {
 	return nil
 }
 
-// applyEpochTransitionIfBoundary runs the epoch transition when `height` starts
-// a new epoch, and snapshots the resulting set.
+// applyEpochTransitionIfBoundary runs the epoch transition for the epoch that
+// block `height+1` will OPEN, and snapshots the resulting set.
 //
-// Phase 2, step 8. Two things happen at a boundary, in this order:
+// ★★ CHECKPOINT 2 ITEM 0 — THIS IS THE EPOCH-OPENING SNAPSHOT FIX. ★★
 //
-//  1. ProcessEpochTransition promotes every validator whose ActivationEpoch has
-//     arrived and rebuilds totalStake from the set that can actually vote.
-//  2. SnapshotValidatorSet freezes that set under the NEW epoch, so a block at
-//     any later height resolves its governing set by height (ValidatorSetAt).
+// The previous version ran the transition at the commit of block `height` when
+// `height` itself was a boundary, i.e. it took the snapshot for epoch e AT THE
+// COMMIT OF THE BLOCK THAT OPENS EPOCH e. That makes the snapshot for epoch e
+// UNAVAILABLE while that block is being verified, because verification happens
+// BEFORE the commit. Two real paths hit this:
+//
+//   - a LIVE node runs a full consensus round for block e*EB before committing
+//     it, and that round's attestation verification needs epoch e's set;
+//   - a LATE node's replay verifies block e*EB before applying it.
+//
+// The result was that an epoch's first block could not verify, failing closed
+// (which is safe but permanently unusable on a live chain: the round could
+// never start).
+//
+// THE FIX: build epoch e's snapshot at the commit of the LAST block of epoch
+// e-1, i.e. at height e*EB - 1. By then the queued changes effective at epoch e
+// are fully known — a validator activated at epoch e has ActivationEpoch <= e,
+// and its stake has been queued since epoch e-2 — so the set computed at
+// e*EB-1 is exactly the set that governs epoch e.
+//
+// This moves the transition one block earlier than before, which is
+// behaviourally identical: no membership change can occur between e*EB-1 and
+// e*EB, because membership only changes AT boundaries. ProcessEpochTransition
+// is a pure function of the epoch number and the validator state, so calling it
+// at e*EB-1 yields the same set as calling it at e*EB.
 //
 // It is a no-op on a non-boundary height, so the cost on an ordinary block is
-// one modulo. Height 0 is skipped: genesis is not a transition, and the set at
-// genesis is the authored one with activation epoch 0.
+// one modulo. Height 0 is handled by genesis: genesis is authored, not
+// transitioned, and its snapshot is taken when the genesis document is applied.
 func (bc *Blockchain) applyEpochTransitionIfBoundary(height uint64) {
-	if height == 0 || !consensus.IsEpochBoundary(height) {
-		return
-	}
-	epoch := consensus.EpochForHeight(height)
-
 	// ★ THE SINGLE, LIVE VALIDATOR SET. This used to call
 	// bc.GetValidatorSet(), which allocated a fresh SHADOW copy of the consensus
 	// set on every call (and filtered it at a hardcoded epoch 0), so the
@@ -2198,21 +2216,52 @@ func (bc *Blockchain) applyEpochTransitionIfBoundary(height uint64) {
 	// reaches the one authoritative set directly.
 	vs := bc.liveValidatorSet()
 	if vs == nil {
-		// A node with no validator set has nothing to activate.
-		logger.Debug("Epoch %d boundary at height %d: no validator set attached", epoch, height)
+		logger.Debug("Epoch snapshot pending at height %d: no validator set attached", height)
+		return
+	}
+
+	// ── Height 0: GENESIS. Epoch 0's set is the AUTHORED set, so no transition
+	// runs — but the snapshot must still exist, or every block in the genesis
+	// epoch (heights 1..EB-1) fails closed because it has no snapshot to verify
+	// against. Genesis normally executes through ExecuteGenesisBlock rather
+	// than CommitBlock; this covers the import/replay path and is idempotent.
+	if height == 0 {
+		if consensus.SnapshotAtEpoch(0) == nil {
+			snap := vs.TakeSnapshot(0)
+			logger.Info("Genesis epoch-0 snapshot taken (%d validator(s), hash %s)",
+				len(snap.Validators), snap.Hash()[:16])
+		}
+		return
+	}
+
+	// The transition is for the epoch the NEXT block opens.
+	next := height + 1
+	if !consensus.IsEpochBoundary(next) {
+		return
+	}
+	epoch := consensus.EpochForHeight(next)
+
+	// Skip if already present: on replay a node may re-commit a block it has
+	// already applied, and a snapshot is IMMUTABLE once taken — overwriting it
+	// would let a re-committed block redefine the very set it was verified
+	// against.
+	if consensus.SnapshotAtEpoch(epoch) != nil {
 		return
 	}
 
 	activated, retired := vs.ProcessEpochTransition(epoch)
 	if len(activated) == 0 && len(retired) == 0 {
-		logger.Debug("Epoch %d boundary at height %d: no membership change (%d validators, %s nSPX)",
+		logger.Debug("Epoch %d snapshot at height %d: no membership change (%d validators, %s nSPX)",
 			epoch, height, len(vs.GetValidators()), vs.GetTotalStake().String())
 	}
 
-	// Freeze the set that governs this epoch. The snapshot's TotalStake is the
-	// post-transition total, which is exactly the denominator quorum is measured
-	// against for blocks in this epoch.
-	vs.TakeSnapshot(epoch)
+	// Freeze the set that governs epoch `epoch`, BEFORE its opening block is
+	// ever verified. TotalStake is the post-transition total, which is exactly
+	// the denominator quorum is measured against for blocks in this epoch.
+	snap := vs.TakeSnapshot(epoch)
+	logger.Info("Epoch %d snapshot prepared at height %d (%d validator(s), hash %s) — "+
+		"block %d will verify against it",
+		epoch, height, len(snap.Validators), snap.Hash()[:16], epoch*consensus.EpochBlocks())
 }
 
 // liveValidatorSet returns THE validator set this node is running, or nil.
@@ -3219,6 +3268,9 @@ func (bc *Blockchain) ValidateBlock(block consensus.Block) error {
 	if b == nil {
 		return fmt.Errorf("failed to extract underlying block")
 	}
+	if b.Header.ActiveSnapshotHash == "" || b.Header.GenesisDocumentDigest == "" {
+		return fmt.Errorf("block %d is missing validator-snapshot or genesis-document commitment", b.Header.Height)
+	}
 
 	// Take a single snapshot of the chain tip for this entire validation pass.
 	// Both parent-hash checks below must agree on the same tip — reading
@@ -3228,6 +3280,40 @@ func (bc *Blockchain) ValidateBlock(block consensus.Block) error {
 	// hash" (and historically caused a node to reject a valid proposal and
 	// commit a competing block of its own instead).
 	latestTip := bc.GetLatestBlock()
+	if b.Header.Height == 0 {
+		digest, snapshotHash, err := genesisHeaderCommitments()
+		if err != nil {
+			return fmt.Errorf("derive local genesis commitments: %w", err)
+		}
+		if b.Header.GenesisDocumentDigest != digest {
+			return fmt.Errorf("genesis-document commitment mismatch: expected %s, got %s",
+				digest, b.Header.GenesisDocumentDigest)
+		}
+		if b.Header.ActiveSnapshotHash != snapshotHash {
+			return fmt.Errorf("genesis validator-snapshot commitment mismatch: expected %s, got %s",
+				snapshotHash, b.Header.ActiveSnapshotHash)
+		}
+	} else {
+		snapshot := consensus.ValidatorSetAt(b.Header.Height)
+		if snapshot == nil {
+			return fmt.Errorf("validator snapshot for block height %d is unavailable", b.Header.Height)
+		}
+		if expected := snapshot.Hash(); b.Header.ActiveSnapshotHash != expected {
+			return fmt.Errorf("validator-snapshot commitment mismatch at height %d: expected %s, got %s",
+				b.Header.Height, expected, b.Header.ActiveSnapshotHash)
+		}
+		if latestTip == nil {
+			return fmt.Errorf("cannot validate block %d genesis-document commitment without its parent", b.Header.Height)
+		}
+		parent, ok := latestTip.GetUnderlyingBlock().(*types.Block)
+		if !ok || parent == nil || parent.Header == nil {
+			return fmt.Errorf("cannot extract parent header for block %d commitment validation", b.Header.Height)
+		}
+		if b.Header.GenesisDocumentDigest != parent.Header.GenesisDocumentDigest {
+			return fmt.Errorf("genesis-document commitment mismatch at height %d: parent=%s block=%s",
+				b.Header.Height, parent.Header.GenesisDocumentDigest, b.Header.GenesisDocumentDigest)
+		}
+	}
 
 	// Validate ParentHash chain linkage (except for genesis block)
 	if b.Header.Height > 0 {

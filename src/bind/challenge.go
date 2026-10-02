@@ -98,7 +98,6 @@ func sendAuthChallenge(conn net.Conn, nonce []byte) error {
 	return nil
 }
 
-
 // readAuthProof reads the auth_proof frame that must answer a challenge and
 // returns the carried signature.
 //

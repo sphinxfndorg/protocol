@@ -123,13 +123,9 @@ func requestPeerListSync(peerAddr string, selfNodeID string, selfAddr string, ow
 // from a small list of seed addresses.
 //
 // onPeerDiscovered registers a peer for gossip/relay purposes only — it
-// never grants validator status. onPeerStakeClaim is called separately,
-// only when a peer's key-exchange reply includes a non-empty reward
-// address; the caller is expected to verify that address's on-chain
-// balance before admitting the peer as a validator (see
-// stakeValidatorFromRewardAddress). Discovery and validator admission are
-// intentionally decoupled: showing up on the wire earns you a spot in the
-// gossip graph, never a vote.
+// never grants validator status. onPeerStakeClaim handles authenticated
+// reward-address metadata only; stake transactions and genesis chain state
+// are the sole sources of validator membership.
 //
 // progress: dashboard to update peer discovery progress.
 func discoverAndRegisterPeers(

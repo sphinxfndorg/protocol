@@ -161,6 +161,30 @@ func (s *StateDB) SetContractValue(key string, value []byte) {
 	s.contractPending[key] = append([]byte(nil), value...)
 }
 
+func (s *StateDB) GetContractKeysWithPrefix(prefix string) ([]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	keys, err := s.db.ListKeysWithPrefix(contractPrefix + prefix)
+	if err != nil {
+		return nil, fmt.Errorf("list contract keys with prefix %q: %w", prefix, err)
+	}
+	keySet := make(map[string]struct{}, len(keys)+len(s.contractPending))
+	for _, key := range keys {
+		keySet[strings.TrimPrefix(key, contractPrefix)] = struct{}{}
+	}
+	for key := range s.contractPending {
+		if strings.HasPrefix(key, prefix) {
+			keySet[key] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(keySet))
+	for key := range keySet {
+		out = append(out, key)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
 // ContractExists checks whether a contract address has been deployed.
 // It checks both pending writes (in the current block's state) and the
 // committed store. This is used by mempool validation to reject calls to

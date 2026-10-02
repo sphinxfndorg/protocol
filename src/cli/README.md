@@ -3,44 +3,49 @@
 How to build the CLI and run validator nodes as separate processes on one
 machine.
 
-**Every command and every log excerpt below was executed against this tree.**
-Raw output is quoted verbatim; nothing here is aspirational.
+The log excerpts below are from this tree. A fresh devnet starts with the
+validator set in chain state; additional nodes join as peers and only gain
+validator weight through chain-state admission.
 
-> ## ⚠️ State of automatic joining — read this first
+> ## Checkpoint 2 implementation status
 >
-> After Phase 1, **the three-command flow below works, and the three nodes end
-> up on the same chain at the same height and block hash — but only ONE of them
-> is a validator.** The other two are **peers**.
+> | Item | Status |
+> |---|---|
+> | 0 — epoch-opening snapshot created before the opening block verifies | **Done, proven through the real `CommitBlock`** |
+> | 0b — startup rebuilds a missing snapshot and gates participation | **Done, proven through the real `AttachSnapshotStore`** |
+> | 1 — snapshot-based quorum everywhere; `getTotalNodes` deleted; float paths fixed | **Done, proven** |
+> | 2 — proposed-height snapshot proposer selection; unstaked-peer neutrality; Debug logging | **Done** |
+> | 3 — chain-queued Stake/Unstake, delayed activation, identity proof, CLI | **Done** |
+> | 4 — evidence-only double-sign slashing from chain state | **Done** |
+> | 5 — unequal-stake quorum and timeout quorum reports | **Done** |
+> | 6 — block-hash commitments to active snapshot and canonical genesis data | **Done** |
+> | 7 — SMR membership and quorum sourced from chain snapshots | **Done** |
+> | 8 — README updated to match the implementation | **Done** |
 >
-> This is expected and temporary. Automatic joining is built in stages and only
-> the first has landed:
->
-> | Stage | Status | What it does |
-> |---|---|---|
-> | Auto-authored genesis | **Working** | The first node to start writes `genesis_state.json` naming only itself. |
-> | Genesis fetch over the network | **Working** | Later nodes fetch that exact document from `--seeds`. |
-> | Faucet payout | **Disabled** | Written, not yet enabled. Waits for the Phase 2 tests. |
-> | Node submits its own Stake tx | **Disabled** | Waits for the Phase 2 tests. |
-> | Activation at an epoch boundary | **Built, not yet wired to the live set** | Waits for the Phase 2 validator-set merge. |
->
-> Consequence, stated plainly: **a joining node stays a peer** and contributes
-> no vote weight. A one-validator devnet is a real, working chain — its single
-> validator holds 100% of the stake, so it commits its own blocks — but a
-> three-node devnet is a *one*-validator devnet with two spectators.
->
-> Nothing here describes a 3-validator network as working, because it is not
-> yet. §5 shows the log lines that prove the current state.
+> **`./sphinx node --pbft` by itself starts a one-validator devnet.** That
+> validator is the whole active set and may produce every block. More nodes can
+> join as peers without changing consensus behavior. They participate as
+> validators only when chain state admits their stake. There is no command-line
+> node-count or predeclared-roster setting. Stake takes effect at epoch `e+2`.
+> A full unstake exits at its delayed boundary, but escrowed funds remain
+> slashable for three more epochs before withdrawal; evidence is accepted for
+> at most two epochs.
+> Genesis validators with an on-chain stake owner have their genesis stake
+> moved into the staking escrow during block 0; a valid double-sign proof
+> reduces active stake and burns the matching escrowed penalty.
 
 ---
 
 ## 1. Prerequisites and build
 
-Requires Go (built and tested on darwin/arm64).
+Requires Go 1.25+ (this tree is developed on go1.27.1). Built and tested on
+darwin/arm64.
 
 ```bash
-cd /Users/kusuma/Desktop/protocol
-go build ./...          # exit 0
-go build -o sphinx ./src/cli
+git clone https://github.com/sphinxfndorg/protocol.git
+cd protocol
+go build ./...                 # compile everything
+go build -o sphinx ./src/cli   # build the CLI binary
 ```
 
 ```
@@ -48,31 +53,75 @@ $ go build -o sphinx ./src/cli
 35586240 sphinx
 ```
 
+Check it:
+
+```bash
+./sphinx help
+```
+
+If you would rather not build a binary, every command in this document also
+works as `go run src/cli/main.go <command>` — just slower on each invocation,
+because the CLI is recompiled.
+
 Run the tests the way the `Makefile` does (the SPHINCS+ suites in `src/core`
 take about 3 minutes, which is why the default 10m `go test` timeout is too
 tight on a loaded machine):
 
 ```bash
-make test        # test-policy test-musig test-cli test-core
+make test          # all suites, 40m timeout
+make test-cli      # just the CLI
+go test ./... -timeout 40m
 ```
+
+### Verification
+
+For this implementation, the selected package regression suite passed:
+
+```text
+go test ./src/consensus ./src/core ./src/core/transaction ./src/state ./src/cli/utils ./src/bind -count=1
+```
+
+After the final genesis-stake escrow change, the targeted stake/unstake and
+real-commit-path tests passed, along with `go build ./...`, `go vet ./...`, and
+`git diff --check`. These checks cover the chain-state membership logic, CLI
+dispatch, real SPHINCS+ evidence/quorum paths, and the changed consensus
+packages; they are not a claim that a separate-process multi-validator network
+has been tested.
+
+**Genesis commitment:** the block-0 header commits to the canonical
+chain-defining projection of the genesis document and the epoch-0 validator
+snapshot. On bootstrap, `Genesis block commitments: snapshot=... document=...`
+prints both digests; they are also part of the block hash and are checked during
+validation. There is intentionally no universal hard-coded digest: it is
+derived from each chain's genesis parameters and initial validators. Tests
+verify that changing chain-defining genesis data changes the commitment. The
+canonical projection includes the version, chain ID and parameters, initial
+validators, funded accounts, custody/witness policy, and bootstrap marker; it
+excludes mutable audit totals and derived metadata.
 
 ---
 
-## 2. The zero-setup flow
+## 2. Start a node and add peers
 
-Three terminals. Three commands. No `genesis create`, no `--datadir`, no
-`--tcp-addr`, no key material, no addresses to paste.
+A fresh devnet node authors its own genesis and starts with itself as the
+initial validator. Start another process with a distinct local port/datadir and
+the first node as its seed:
 
 ```bash
-# Terminal 1
+# Terminal 1 — authors devnet genesis and starts the first validator
 ./sphinx node --pbft
 
-# Terminal 2
+# Terminal 2 — joins as a peer and syncs from Terminal 1
 ./sphinx node --pbft --port-offset=1 --seeds=127.0.0.1:30303
 
-# Terminal 3
+# Terminal 3+ — same pattern, with a unique local port offset
 ./sphinx node --pbft --port-offset=2 --seeds=127.0.0.1:30303
 ```
+
+Joining as a peer does not change validator membership or consensus readiness.
+Active membership and proposer selection come from chain state; a peer only
+votes after its stake has been admitted there. A one-validator chain cannot
+rotate its proposer.
 
 | Terminal | Command | P2P TCP | HTTP | Wallet RPC | Datadir |
 |---|---|---|---|---|---|
@@ -104,48 +153,18 @@ SPHINCS+ keys and signing the 13 block-0 distribution witness sets (2-of-3 each,
 26 signatures) before it can serve anything. Let Terminal 1 reach
 `GENESIS AUTHORED` before launching the others, or they will wait (§4).
 
-
-Go 1.25+ (`go version` — this tree is developed on go1.27.1).
-
-```bash
-git clone https://github.com/sphinxfndorg/protocol.git
-cd protocol
-go build ./...                 # compile everything
-go build -o sphinx ./src/cli   # build the CLI binary
-```
-
-Check it:
-
-```bash
-./sphinx help
-```
-
-If you would rather not build a binary, every command in this document also
-works as `go run src/cli/main.go <command>` — just slower on each invocation,
-because the CLI is recompiled.
-
-Run the tests (the Makefile targets exist because `src/core`'s SPHINCS+ suites
-take ~12 min and exceed `go test`'s 10 min per-package default):
-
-```bash
-make test          # all suites, 40m timeout
-make test-cli      # just the CLI
-go test ./... -timeout 40m
-```
-
-
 ---
 
-## 3. What Terminal 1 does: authors the genesis
+## 3. Single-validator smoke test: what Terminal 1 does
 
-There is no "bootstrap terminal" and no node count anywhere. The **first node to
-start** writes the document, and it names only itself.
+In this smoke-test flow there is no pre-created validator roster. The **first
+node to start** writes a genesis document that names only itself.
 
 ```
 $ grep -E 'DEVNET REWARD KEY|GENESIS AUTHORED|DEVNET FAUCET|GENESIS FILE' T1.log
 DEVNET REWARD KEY: auto-generated DA852F4FFDE0B7B89A3B5327271D2CEC1614F0DC34A91209EAE00C523E5E8627 (datadir data/custody/devnet-auto/reward) — no --reward-address needed
 GENESIS AUTHORED: no document existed, so this node created it naming only itself (Node-127.0.0.1:30303)
-DEVNET FAUCET: 55F1239553FC2E7B0A5910806CB9C04E57E47E6050AB9FE551D1E3498E1A734A holds 3200016800000000000000000 nSPX, paying 32000168000000000000 nSPX per joiner (min stake + fee reserve); any number of joiners, no fixed list
+DEVNET FAUCET ALLOCATION: 55F1239553FC2E7B0A5910806CB9C04E57E47E6050AB9FE551D1E3498E1A734A holds 3200016800000000000000000 nSPX; operators can manually fund joiners with up to 32000168000000000000 nSPX (min stake + fee reserve); no node list
 GENESIS FILE: 1 initial validator(s), epoch_blocks=10, network=devnet
 GENESIS FILE: seeded 1 validators into the consensus set (32 SPX total)
 ```
@@ -157,7 +176,8 @@ Four things to notice:
 2. **The document is marked `bootstrap: true`** and lists exactly one
    validator: itself. That is legitimate, and it is what makes the
    one-command flow possible at all.
-3. **A faucet allocation is recorded** (§6) — *written*, but not yet paid out.
+3. **A faucet allocation is recorded** (§6) — the node does not distribute
+   payouts automatically; the operator must submit a transfer.
 4. **`epoch_blocks=10`** is a chain parameter read from the document, not a
    flag.
 
@@ -165,7 +185,7 @@ Then it produces blocks:
 
 ```
 $ grep -E 'SOLO MODE|Solo-mined and committed' T1.log | head -4
-[Node-127.0.0.1:30303] SOLO MODE — bootstrap node, no peers detected yet, mining blocks independently
+[Node-127.0.0.1:30303] SOLO MODE — this node is the sole active validator
 [Node-127.0.0.1:30303] Solo-mined and committed block height=1 txs=0
 [Node-127.0.0.1:30303] Solo-mined and committed block height=2 txs=0
 [Node-127.0.0.1:30303] Solo-mined and committed block height=3 txs=0
@@ -220,6 +240,15 @@ are launched at once.
 
 ```
 $ grep -c 'GENESIS AUTHORED' T2.log T3.log
+T2.log:0
+T3.log:0
+```
+
+A count of **zero** in both joiners is the proof that they never authored a
+genesis. Any non-zero number means a joiner forked the chain at block 1.
+
+If the seed is unreachable and no document ever arrives, the joiner **waits and
+then fails loudly**. It does not invent a genesis.
 
 ---
 
@@ -253,9 +282,16 @@ verify and follow the chain, they just do not vote. That is the intended
 behaviour for an unstaked node, and it is what the warning at the top of this
 document describes.
 
+**What this section does not show.** Three terminals agreeing on a block hash is
+**evidence of convergence, not of consensus**. The log line that would distinguish
+them is the "seeded 1 validators" line above: one of the three processes holds
+all 32 SPX. A single validator holding 100% of the stake commits its own blocks
+uncontested — no quorum race ever happens here, so this run cannot fail in the
+way a real multi-validator network would. §12 spells this out in full.
+
 ---
 
-## 6. The devnet faucet (written, not yet paying out)
+## 6. Devnet faucet and manual validator admission
 
 The bootstrap node's document carries a faucet account. The numbers are derived
 from the real policy fee floor, not chosen:
@@ -279,8 +315,26 @@ Nothing ever reads it as a network size; it is a treasury cap. If it were ever
 exhausted, a joining node would simply not be funded and would remain a peer — a
 liveness condition for that node, never a safety problem.
 
-**It is not active yet.** Automatic joining is disabled pending the Phase 2
-tests.
+The genesis document allocates this balance to the bootstrap faucet, but the
+node does not automatically send payouts. The bootstrap operator can fund a
+joiner's reward address with an ordinary signed transaction (the faucet key is
+stored in the bootstrap datadir); for the default devnet, that key file is
+`data/custody/devnet-auto/faucet/key.json`:
+
+```bash
+./sphinx send-tx \
+  --rpc=http://127.0.0.1:8545 \
+  --from="SPIF <faucet-address>" \
+  --to="SPIF <joiner-reward-address>" \
+  --amount=32.000168 \
+  --key=data/custody/devnet-auto/faucet/key.json
+```
+
+After funds arrive, the joiner submits the signed `stake` transaction in §8a.
+It includes proof-of-possession from the validator's consensus identity key;
+the stake owner and validator operator must both authorize admission. Stake is
+pending until the `e+2` epoch boundary, so connecting or receiving funds alone
+never adds voting weight.
 
 ---
 
@@ -297,6 +351,86 @@ stake that is `floor(2K/3) + 1` validators:
 | 3 | **3** (all three) | 0 |
 | 4 | 3 | **1** |
 | 5 | 4 | 1 |
+| 6 | 5 | 1 |
+| 7 | 5 | 2 |
+
+**`K = 3` tolerates nothing.** Two of three is exactly 2/3, and the rule is
+*strictly* more, so it does not commit. The smallest set that survives one
+offline validator is **4**.
+
+Offline validators do not change the set size — they simply stop voting.
+
+Readiness uses the same arithmetic: block production waits until validators
+holding more than 2/3 of the active snapshot's stake are ready. There is no
+node count in that condition.
+
+**Where these numbers come from (Checkpoint 2 item 1).** Every quorum path now
+reads a `ValidatorSnapshot` — an immutable, height-keyed record of the validator
+set and its stake — rather than the live in-memory `ValidatorSet`. One function,
+`quorumFromSnapshot`, applies the single rule everywhere:
+
+- stake: `voted × 3 > total × 2` (strict; exactly 2/3 is **not** enough)
+- distinct voters: `distinct >= StrictTwoThirdsCount(len(snapshot.Validators))`,
+  i.e. `floor(2N/3) + 1`, in **integer** arithmetic
+
+If the snapshot for the height is missing, every quorum path **fails closed**
+rather than guessing from the live set. The old `getTotalNodes()` (which read
+the live set) has been deleted, as has the old `int(N*0.67)` floor — which
+returned `2` for `N=3`, permitting exactly the 2-of-3 the safety rule exists to
+prevent.
+
+---
+
+## 7a. What the engine harness proves, and what it does not
+
+**Read this before citing "the harness" as evidence of correctness.**
+
+There are two harnesses. Both are real, and both are narrower than the word
+"engine" suggests.
+
+### `TestEngine_QuorumForN` (src/consensus/engine_harness_test.go)
+
+This drives the **real production `hasQuorum`** — the same function the live
+engine calls — for `N = 2, 3, 4`, stopping one validator in each case:
+
+| N | running | commits? |
+|---|---|---|
+| 2 | 1 | halts (strict >2/3) |
+| 3 | 2 | **halts** (2 of 3 is exactly 2/3 — not enough) |
+| 4 | 3 | continues (smallest set tolerating one offline validator) |
+
+It also asserts the vote-count floor and the stake rule always agree — which is
+what caught the old `int(N*0.67)` bug.
+
+**What it proves:** the production quorum *arithmetic and the vote-acceptance
+decision* are correct for those N, against real snapshots.
+
+**What it does NOT prove:** anything about the **full consensus engine**. It does
+not start goroutines, does not run the view-change **timer**, does not perform
+SPHINCS+ signing, does not exchange a single network message, and never calls
+`Consensus.Start()`. It is a direct call into a pure function. A bug in the
+engine's orchestration — timers, phase transitions, message plumbing, signing
+latency — would not be caught here.
+
+### `TestHarness_RealSPHINCS_QuorumForN` (src/bind/nvalidator_harness_test.go)
+
+This runs **N real, independently generated SPHINCS+ keypairs** over the
+production parameters, and asks whether a block signed by the required number of
+them verifies, and whether one signed fewer is refused. It checks no key is
+shared between validators, which would make the table meaningless.
+
+**What it proves:** the quorum threshold and the real signing/verification path
+agree — the arithmetic is not being satisfied by signatures the verifier would
+reject.
+
+**What it does NOT prove:** it is **in-process**, not three separate programs. No
+P2P, no real socket, no separate datadir, no crash-and-restart, no Byzantine
+node. It proves the signature arithmetic, not the network.
+
+**Summary:** these tests pin the **production quorum functions** — the
+arithmetic, the snapshot sourcing, and the signing threshold. They do **not**
+exercise the orchestrated engine (goroutines + timers + VDF + messaging). Treat
+them as "the maths is right", never as "the engine is right".
 
 ---
 
@@ -325,6 +459,66 @@ Run `./sphinx node --help` for the authoritative list. Defaults as of this tree:
 because indexing into it by `--port-offset` would turn it into a de-facto
 pre-agreed node roster — exactly the knowledge this design removes.
 
+`--role=validator` describes the process role; it does **not** grant validator
+membership or voting weight. Only the chain's active validator snapshot does.
+
+### 8a. Stake, unstake, and submit double-sign evidence
+
+Stake uses two separate signing authorities:
+
+- `--key` is the SPIF account key that pays the stake and transaction fee.
+- `--validator-key` is the validator's persistent node-identity key. Its
+  proof-of-possession is bound to the chain ID, validator ID, owner, amount,
+  and action and stored with the delayed on-chain admission.
+
+`--validator-key` accepts the node's `keys/` directory (containing
+`private.key` and `public.key`), the `private.key` path, or a JSON key file
+with `private_key` / `public_key` (or `sk` / `pk`) hex fields. Keep the private
+key secret; never use a peer-count or CLI node-count to establish membership.
+
+```bash
+# Lock 32 whole SPX. Use the exact Node-<tcp-address> identity for this node.
+./sphinx stake --action=stake \
+  --rpc=http://127.0.0.1:8545 \
+  --from="SPIF <wallet-address>" \
+  --validator-id="Node-127.0.0.1:30304" \
+  --amount=32 \
+  --key=wallet.json \
+  --validator-key="<datadir>/Node-127.0.0.1:30304/keys"
+
+# Request a full exit; withdrawal remains slashable for three more epochs
+# after the e+2 exit boundary.
+./sphinx stake --action=unstake \
+  --rpc=http://127.0.0.1:8545 \
+  --from="SPIF <wallet-address>" \
+  --validator-id="Node-127.0.0.1:30304" \
+  --key=wallet.json
+```
+
+An unstake is owner-only, has no partial amount, and cannot take effect
+immediately. The queued state is replayable from committed blocks.
+
+Double-sign slashing is accepted only for two valid, conflicting SPHINCS+
+votes from the same chain-committed validator key at the same height and view.
+Put the evidence in a JSON file with type `sphinx_double_sign` and submit it
+with:
+
+```bash
+./sphinx slash \
+  --rpc=http://127.0.0.1:8545 \
+  --from="SPIF <fee-payer-address>" \
+  --evidence=double-sign.json \
+  --key=fee-payer.json
+```
+
+The executor checks historical snapshot membership, both signatures, and
+evidence replay protection, then applies the policy's existing double-sign
+penalty to active and pending-withdrawal stake and burns the matching escrow.
+Evidence older than two epochs is rejected. Consensus vote signatures use the
+v2 chain-ID and phase domain; this is a consensus-breaking change, so all
+validators on a network must run compatible software before producing votes.
+Local VDF misses, peer observations, or unsigned claims never slash.
+
 ---
 
 ## 9. Non-devnet networks
@@ -341,10 +535,21 @@ guess the network's membership or chain parameters. Place the document at
 
 You must place `genesis_state.json` at `<datadir>/config/genesis_state.json` out
 of band, by copying it from a peer. The node will not create it for you.
+Startup also requires a separately published 64-character canonical genesis
+digest pin: set `SPHINX_MAINNET_GENESIS_DIGEST` or
+`SPHINX_TESTNET_GENESIS_DIGEST` to that pin. The selected genesis must include
+the agreed founder set and positive stakes. Do not calculate a pin from an
+untrusted document and then trust that same document.
+
+The protocol permits at most 100 active or pending validators. A new stake
+admission is rejected while the set is full; an exiting validator stops
+occupying a slot at its committed exit boundary.
 
 ---
 
-## 10. Removed flags
+## 10. Removed flags and membership-related commands
+
+### Removed flags
 
 These existed previously and are gone. They appear nowhere in this document
 except here:
@@ -356,42 +561,88 @@ except here:
 | `-legacy-cluster` | Hardcoded a 3-node cluster on fixed ports |
 | fixed `32307+` ports | Contradicted the real `30303` default; removed as dead code |
 
----
+### Membership commands
 
-## 11. Optional: `genesis create`
+`./sphinx help` includes these membership-related commands:
 
-**Not part of the main flow.** You do not need it to run a devnet, and nothing
-above uses it.
-
-`genesis create` authors a genesis document that names **several** validators
-before any of them have started. Use it when you want a specific,
-pre-declared set — for example to test fault tolerance with four validators.
-
-```bash
-./sphinx genesis create --validators=4
-./sphinx genesis create --validators=3 --funded-accounts=2
+```
+node  stake  slash  send-tx  get-balance  watch-tx  ipfs  wallet  multisig  help
 ```
 
-| Flag | Default | Meaning |
-|---|---|---|
-| `--validators` | `3` (the BFT floor) | How many validators to name |
-| `--funded-accounts` | `0` | Extra pre-funded reward addresses |
-| `--root` | `data` | Root holding `node<N>` datadirs |
-| `--host` | `127.0.0.1` | Host used to derive identities |
-| `--tcp-base` | `30303` | Base TCP port |
+`stake` queues an owner-authorized Stake or full Unstake action and requires
+validator-key proof for new admission. `slash` submits signed double-vote
+evidence for deterministic verification by the executor. Neither command
+predeclares membership: activation and exit remain chain-state transitions at
+the `e+2` epoch boundary, followed by the three-epoch unbonding delay before
+withdrawal. The `wallet` and `multisig` families do not set a
+validator count or roster.
 
-It refuses fewer than the BFT floor of 3, because a multi-node network
-provisioned below the floor can never tolerate a fault.
+### Removed from the engine (Checkpoint 2)
 
-**Limitation — important.** `genesis create` does **not** support per-validator
-reward addresses or public keys, and it cannot generate per-validator
-identities for machines you do not control. It is therefore appropriate for a
-single-machine devnet and for nothing else. Do not use it to author a
-multi-machine production network.
+| Removed | Why |
+|---|---|
+| `getTotalNodes()` | Read the live `ValidatorSet`; every quorum path now reads a height-keyed `ValidatorSnapshot` |
+| `Consensus.quorumFraction` field | Set to `0.67` and never read anywhere — a float named "quorum fraction" implied a 67% rule the engine never ran |
+| `int(N*0.67)` quorum floor | Floored to `2` for `N=3`, permitting the very 2-of-3 the safety rule forbids |
 
 ---
 
-## 12. Troubleshooting
+## 11. Validator membership
+
+There is no command-line option or helper that creates a validator roster or
+sets a target validator count. The first devnet node writes genesis for itself.
+Other nodes may connect and sync in any number; connectivity alone does not
+change the active validator set. Validator admission and proposer selection
+must follow chain state. A one-validator set has only one possible proposer;
+rotation requires additional validators to be admitted through the delayed
+Stake flow in §8a.
+
+---
+
+## 12. What the single-validator three-process smoke test proves, and what it does not
+
+The single-validator smoke-test flow in §2 starts three real `sphinx node
+--pbft` processes with separate datadirs and ports. That is a genuine
+end-to-end run. Here is its exact scope.
+
+### It DOES prove
+- The first node auto-authors `genesis_state.json` naming only itself, and
+  signs block 0.
+- Joiners fetch that exact genesis document over the network and refuse to
+  author their own.
+- Nodes discover each other over real TCP and UDP sockets, on real ports.
+- Blocks propagate, and the nodes converge on the same height and hash.
+- Datadirs are genuinely isolated; `--port-offset` shifts ports without changing
+  identity.
+- Genesis-hash mismatch is rejected before admission.
+
+### It does NOT prove
+- **Multi-validator consensus.** In this smoke-test run only **one** node is a
+  validator; the other two are peers with zero stake, so they vote nothing. The
+  3-process run is a **1-validator chain with two spectators**, not a
+  3-validator BFT network.
+- **Quorum under partial failure.** Nothing here shows the chain halting when a
+  validator is stopped, or surviving when one of four is. That is proven only by
+  the in-process harnesses (§7a), not by this run.
+- **The orchestrated engine under real conditions.** The run uses the real
+  timers and goroutines, but with a single validator there is no prepare/commit
+  quorum race to lose. It does not stress view change, leader rotation, or
+  message loss.
+- **Queued stake activation.** This run does not submit a Stake transaction; it
+  therefore does not demonstrate a peer becoming a validator. See §8a for the
+  manual chain-state admission flow.
+- **Anything about mainnet/testnet.** Auto-authoring is devnet-only (§9).
+
+**Bottom line:** the single-validator three-process run proves *plumbing* —
+identity, discovery, genesis distribution, block propagation, convergence. The
+quorum guarantees are proven by the in-process harnesses (§7a). This smoke test
+does not prove a multi-validator BFT network. Submit Stake transactions using
+§6 and §8a to admit additional validators; then test proposer rotation,
+view-change, and multi-process quorum behavior separately.
+
+---
+
+## 13. Troubleshooting
 
 | Symptom | Cause | Fix |
 |---|---|---|
@@ -399,7 +650,8 @@ multi-machine production network.
 | `no seed has answered yet ... ACTION: start the seed node` | Nothing listening on the seed | Start Terminal 1 |
 | `seed is reachable but still finishing block-0 witness signing` | Seed is working, just slow | Wait; ceiling is 30m |
 | `... is not devnet: auto-authoring genesis is devnet-only` | Non-devnet with no document | Copy `genesis_state.json` into `<datadir>/config/` |
-| A joiner never votes | Expected after Phase 1 | Automatic joining is disabled; see the warning at the top |
+| A joiner never votes | It has not been admitted through chain state yet | Fund its stake owner, submit `stake`, and wait for the `e+2` activation boundary |
+| `unknown subcommand "stake"` or `"slash"` | The executable is stale | Rebuild with `go build -o sphinx ./src/cli` |
 | `--config file holds N node entries` | Multi-entry config | Use one file per node, or explicit flags |
 
 On one machine, SPHINCS+ signing is slow: a PBFT round needs several signatures
@@ -414,23 +666,3 @@ is never used to dial anything — so it affects nothing functionally, but the
 P2P chain handshake and the HTTP explorer both advertise a port the node is not
 listening on. Left as-is deliberately: changing it would alter persisted chain
 parameters.
-
-| 7 | 5 | 2 |
-
-**`K = 3` tolerates nothing.** Two of three is exactly 2/3, and the rule is
-*strictly* more, so it does not commit. The smallest set that survives one
-offline validator is **4**.
-
-Offline validators do not change the set size — they simply stop voting.
-
-Readiness uses the same arithmetic: block production waits until validators
-holding more than 2/3 of the active snapshot's stake are ready. There is no
-node count in that condition.
-
-T2.log:0
-T3.log:0
-```
-
-If the seed is unreachable and no document ever arrives, the joiner **waits and
-then fails loudly**. It does not invent a genesis.
-

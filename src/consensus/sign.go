@@ -17,6 +17,7 @@ import (
 	logger "github.com/sphinxfndorg/protocol/src/console"
 	svm "github.com/sphinxfndorg/protocol/src/core/kernel/opcodes"
 	vmachine "github.com/sphinxfndorg/protocol/src/core/kernel/vm"
+	params "github.com/sphinxfndorg/protocol/src/core/sthincs/config"
 	key "github.com/sphinxfndorg/protocol/src/core/sthincs/key/backend"
 	sign "github.com/sphinxfndorg/protocol/src/core/sthincs/sign/backend"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
@@ -592,6 +593,105 @@ func (s *SigningService) VerifyVote(vote *Vote) (bool, error) {
 	return valid, nil
 }
 
+// VerifyAttestationSignature verifies one consensus vote/attestation signature
+// against a KNOWN public key, using the single shared vote preimage.
+//
+// ★ THIS IS THE SINGLE SOURCE OF TRUTH for "did this validator sign this
+// vote". consensusVoteMessage builds the preimage; the live certificate path,
+// double-sign evidence verification, and core.VerifyBlockAttestations all
+// reach it through this function. Two copies of the preimage would drift, and
+// that drift would be invisible until a late joiner rejected a valid chain —
+// so there is exactly one builder and this is the only exported verifier.
+//
+// ★ NO FRESHNESS CHECKS, DELIBERATELY. This verifies structure, preimage
+// binding and the signature, and nothing else. It does NOT expire on
+// timestamp, and it keeps no nonce-replay memory. Both would be wrong here:
+// sync replays old blocks long after they were signed, and the sync path may
+// re-verify a vote the live path already accepted. A freshness policy belongs
+// in the mempool, where a vote is fresh, not here, where it is history.
+//
+// signature is the FULL serialized SignedMessage blob. The extracted
+// signedMsg.Signature bytes alone are NOT sufficient: the timestamp and nonce
+// are part of what was signed.
+func VerifyAttestationSignature(publicKey []byte, chainID uint64, phase string, height, view uint64, blockHash, validatorID string, signature []byte) error {
+	if len(publicKey) == 0 {
+		return fmt.Errorf("attestation signature verification: no public key for %s", validatorID)
+	}
+	message, err := consensusVoteMessage(chainID, phase, height, view, blockHash, validatorID)
+	if err != nil {
+		return fmt.Errorf("attestation signature verification: %w", err)
+	}
+	return verifyStandaloneSignedMessage(publicKey, signature, message)
+}
+
+// VerifyStakeIdentityProof verifies a deterministic, chain-bound proof that
+// the operator controlling validatorID owns the public key committed by a
+// Stake transaction.
+func VerifyStakeIdentityProof(publicKey, signature, message []byte) error {
+	return verifyStandaloneSignedMessage(publicKey, signature, message)
+}
+
+// VerifyDoubleSignEvidence verifies two conflicting signatures using the
+// validator key stored in chain state.
+func VerifyDoubleSignEvidence(first, second *Vote, publicKey []byte) error {
+	if first == nil || second == nil || first.Height == 0 ||
+		first.ChainID == 0 || first.ChainID != second.ChainID ||
+		first.Height != second.Height || first.View != second.View ||
+		first.VoterID == "" || first.VoterID != second.VoterID ||
+		first.BlockHash == "" || second.BlockHash == "" || first.BlockHash == second.BlockHash ||
+		!validVotePhase(first.Phase) || !validVotePhase(second.Phase) {
+		return fmt.Errorf("votes do not prove a same-height, same-view double sign")
+	}
+	for _, vote := range []*Vote{first, second} {
+		// Routed through the shared verifier so evidence checking and
+		// attestation checking cannot drift apart on the preimage.
+		if err := VerifyAttestationSignature(publicKey, vote.ChainID, vote.Phase,
+			vote.Height, vote.View, vote.BlockHash, vote.VoterID, vote.Signature); err != nil {
+			return fmt.Errorf("verify vote for block %s: %w", vote.BlockHash, err)
+		}
+	}
+	return nil
+}
+
+func verifyStandaloneSignedMessage(publicKey, serialized, expectedData []byte) error {
+	if len(publicKey) == 0 || len(serialized) == 0 {
+		return fmt.Errorf("public key and signature are required")
+	}
+	signed, err := DeserializeSignedMessage(serialized)
+	if err != nil {
+		return fmt.Errorf("decode signed proof: %w", err)
+	}
+	if !bytes.Equal(signed.Data, expectedData) {
+		return fmt.Errorf("signed proof does not bind to the expected message")
+	}
+	if len(signed.Timestamp) != 8 || len(signed.Nonce) != 16 {
+		return fmt.Errorf("signed proof has invalid timestamp or nonce length")
+	}
+	if !bytes.Equal(signed.SignatureHash, common.SpxHash(signed.Signature)) {
+		return fmt.Errorf("signed proof signature hash mismatch")
+	}
+	parameters, err := params.NewSTHINCSParameters()
+	if err != nil {
+		return fmt.Errorf("initialize SPHINCS+ parameters: %w", err)
+	}
+	pk, err := sthincs.DeserializePK(parameters.Params, publicKey)
+	if err != nil {
+		return fmt.Errorf("decode validator public key: %w", err)
+	}
+	sig, err := sthincs.DeserializeSignature(parameters.Params, signed.Signature)
+	if err != nil {
+		return fmt.Errorf("decode SPHINCS+ proof signature: %w", err)
+	}
+	message := make([]byte, 0, len(signed.Timestamp)+len(signed.Nonce)+len(signed.Data))
+	message = append(message, signed.Timestamp...)
+	message = append(message, signed.Nonce...)
+	message = append(message, signed.Data...)
+	if !sthincs.Spx_verify(parameters.Params, message, sig, pk) {
+		return fmt.Errorf("SPHINCS+ proof signature is invalid")
+	}
+	return nil
+}
+
 // SignTimeout signs a timeout message.
 // Timeout messages are used in consensus to signal that a round has timed out.
 // SignTimeout signs a timeout using VM for hashing
@@ -748,23 +848,35 @@ func (s *SigningService) serializeProposalForSigning(proposal *Proposal) ([]byte
 // The vote binds to its view, the block hash of the block being voted for, and
 // the voter ID, all hashed into a full SphinxHash digest.
 func (s *SigningService) serializeVoteForSigning(vote *Vote) ([]byte, error) {
-	dataStr := fmt.Sprintf("VOTE:%d:%s:%s",
-		vote.View,
-		vote.BlockHash,
-		vote.VoterID)
-
-	return sphinxHashConsensusMessage("vote", []byte(dataStr))
+	if vote == nil || vote.ChainID == 0 || !validVotePhase(vote.Phase) ||
+		vote.Height == 0 || vote.VoterID == "" || vote.BlockHash == "" {
+		return nil, fmt.Errorf("vote signing requires chain ID, phase, height, block hash, and voter ID")
+	}
+	return consensusVoteMessage(vote.ChainID, vote.Phase, vote.Height, vote.View, vote.BlockHash, vote.VoterID)
 }
 
 // serializeTimeoutForSigning creates a deterministic byte string from a timeout.
-// The timeout binds to its view, the voter ID, and the timeout timestamp.
+// Timeout signatures share the v2 consensus-vote domain and bind chain, height,
+// view, hash, phase, and voter identity. Timestamp is deliberately excluded.
 func (s *SigningService) serializeTimeoutForSigning(timeout *TimeoutMsg) ([]byte, error) {
-	dataStr := fmt.Sprintf("TIMEOUT:%d:%s:%d",
-		timeout.View,
-		timeout.VoterID,
-		timeout.Timestamp)
+	if timeout == nil || timeout.ChainID == 0 || timeout.Height == 0 || timeout.VoterID == "" {
+		return nil, fmt.Errorf("timeout signing requires chain ID, height, and voter ID")
+	}
+	return consensusVoteMessage(timeout.ChainID, VotePhaseTimeout, timeout.Height,
+		timeout.View, timeout.BlockHash, timeout.VoterID)
+}
 
-	return sphinxHashConsensusMessage("timeout", []byte(dataStr))
+func validVotePhase(phase string) bool {
+	return phase == VotePhasePrepare || phase == VotePhaseCommit || phase == VotePhaseTimeout
+}
+
+func consensusVoteMessage(chainID uint64, phase string, height, view uint64, blockHash, voterID string) ([]byte, error) {
+	if chainID == 0 || !validVotePhase(phase) || height == 0 || voterID == "" {
+		return nil, fmt.Errorf("invalid consensus vote domain")
+	}
+	preimage := fmt.Sprintf("SPHINX_CONSENSUS_V2:%d:%s:%d:%d:%s:%s",
+		chainID, phase, height, view, blockHash, voterID)
+	return sphinxHashConsensusMessage("consensus-vote-v2", []byte(preimage))
 }
 
 // GetPublicKey returns the public key for this node as bytes.
@@ -912,27 +1024,68 @@ func (s *SigningService) VerifyBlockSignature(block Block) (bool, error) {
 
 // computeBlockSigDataHash computes the SigDataHash for a block WITHOUT modifying the header
 // This is a race-safe alternative to the old approach of temporarily setting ProposerSignature=nil
-func (s *SigningService) computeBlockSigDataHash(tb *types.Block) ([]byte, error) {
+// VerifyBlockProposerSignature verifies a block's proposer signature against an
+// EXPLICITLY SUPPLIED SPHINCS+ public key.
+//
+// ★ WHY THIS EXISTS ALONGSIDE SigningService.VerifyBlockSignature. That method
+// resolves the key from the signing service's in-memory peer registry, so it can
+// only check blocks from nodes this process has handshook with. A late joiner
+// replaying blocks from validators it has never met gets "no key registered"
+// and cannot verify anything. This function takes the key as a parameter, so the
+// caller resolves it from REPLAYED CHAIN STATE and the verification is
+// cryptographic rather than relational — the same reason
+// NewChainStateKeyResolver exists for attestations.
+//
+// It shares verifyStandaloneSignedMessage, the same primitive
+// VerifyAttestationSignature uses, so the block and vote signature paths cannot
+// drift apart in how they check a proof.
+func VerifyBlockProposerSignature(tb *types.Block, publicKey []byte) error {
+	if tb == nil || tb.Header == nil {
+		return fmt.Errorf("block or header is nil")
+	}
+	if len(publicKey) == 0 {
+		return fmt.Errorf("no proposer public key supplied")
+	}
+	if len(tb.Header.ProposerSignature) == 0 {
+		return fmt.Errorf("block %d has no proposer signature", tb.GetHeight())
+	}
+	if tb.Header.ProposerID == "" {
+		return fmt.Errorf("block %d has no proposer ID", tb.GetHeight())
+	}
+
+	rawHash, err := blockSigDataHash(tb)
+	if err != nil {
+		return fmt.Errorf("compute block sig data hash: %w", err)
+	}
+	if len(rawHash) == 0 {
+		return fmt.Errorf("block %d has no finalized sig data hash", tb.GetHeight())
+	}
+	if err := verifyStandaloneSignedMessage(publicKey, tb.Header.ProposerSignature, rawHash); err != nil {
+		return fmt.Errorf("block %d proposer signature from %s is invalid: %w",
+			tb.GetHeight(), tb.Header.ProposerID, err)
+	}
+	return nil
+}
+
+// blockSigDataHash is the signing preimage: the block header with every
+// signature field cleared, finalized. It is a package function rather than a
+// method so both the registry-backed and the chain-state-backed verifier compute
+// byte-identical preimages.
+func blockSigDataHash(tb *types.Block) ([]byte, error) {
 	if tb == nil || tb.Header == nil {
 		return nil, fmt.Errorf("block or header is nil")
 	}
-
-	// Create a temporary copy of the header to avoid modifying the original
 	headerCopy := *tb.Header
-
-	// Clear signature fields in the copy (not the original)
 	headerCopy.ProposerSignature = nil
 	headerCopy.SigValid = false
-
-	// Create a temporary block with the copied header
 	tempBlock := *tb
 	tempBlock.Header = &headerCopy
-
-	// Finalize the hash on the copy
 	tempBlock.FinalizeHash()
-
-	// Return the SigDataHash from the copy
 	return append([]byte(nil), tempBlock.Header.SigDataHash...), nil
+}
+
+func (s *SigningService) computeBlockSigDataHash(tb *types.Block) ([]byte, error) {
+	return blockSigDataHash(tb)
 }
 
 // GetSigningService returns the signing service instance from the Consensus object.

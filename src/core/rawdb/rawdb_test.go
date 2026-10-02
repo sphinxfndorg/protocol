@@ -295,7 +295,6 @@ func TestReadFailureIsNotReportedAsNotFound(t *testing.T) {
 		"ReadBody":          func() error { _, err := ReadBody(db, hashFor(1)); return err },
 		"ReadTxLookupEntry": func() error { _, err := ReadTxLookupEntry(db, "tx-1"); return err },
 		"ReadCanonicalHash": func() error { _, err := ReadCanonicalHash(db, 1); return err },
-	
 	}
 
 	for name, read := range readers {

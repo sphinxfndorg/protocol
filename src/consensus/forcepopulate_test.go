@@ -438,6 +438,8 @@ func TestMembershipEpoch_ChangesWithHeight(t *testing.T) {
 // height-derived, and this asserts that a difference in view alone changes
 // nothing about who is eligible.
 func TestProposerSelection_SameAtEqualHeightAcrossViews(t *testing.T) {
+	ResetSnapshots()
+	t.Cleanup(ResetSnapshots)
 	prev := epochBlocksOverride
 	SetEpochBlocks(verifyEpochBlocks)
 	defer func() { epochBlocksOverride = prev }()
@@ -449,6 +451,9 @@ func TestProposerSelection_SameAtEqualHeightAcrossViews(t *testing.T) {
 			t.Fatalf("AddGenesisValidator: %v", err)
 		}
 	}
+	vs.ProcessEpochTransition(0)
+	snap := vs.TakeSnapshot(EpochForHeight(6))
+	StoreSnapshotForTest(*snap)
 	sel := NewStakeWeightedSelector(vs)
 
 	// A fixed seed. The point is that ONLY the view differs between the two
@@ -466,8 +471,8 @@ func TestProposerSelection_SameAtEqualHeightAcrossViews(t *testing.T) {
 	a.currentView = 0
 	b.currentView = 7777
 
-	pa := sel.SelectProposer(a.membershipEpoch(), seed)
-	pb := sel.SelectProposer(b.membershipEpoch(), seed)
+	pa := sel.SelectProposer(height+1, seed)
+	pb := sel.SelectProposer(height+1, seed)
 	if pa == nil || pb == nil {
 		t.Fatalf("SelectProposer returned nil (a=%v b=%v)", pa, pb)
 	}

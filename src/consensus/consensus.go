@@ -48,12 +48,12 @@ import (
 //        tryEnterPreparedPhase (idempotent, runs from any of the 3 call sites):
 //            requires: hasPrepareQuorum() AND phase==PhasePrePrepared AND preparedBlock set
 //            hasPrepareQuorum/hasQuorum both require, in this order:
-//              (a) distinct voter count >= calculateQuorumSize(getTotalNodes()) — a floor derived
-//                  from actual connected peers, independent of this node's own stake bookkeeping
-//              (b) accumulated voter stake >= 2/3 of c.validatorSet.GetTotalStake()
-//            (a) exists so an incomplete/stale local validator-set registry — which shrinks this
-//            node's own view of "total stake" — can never let a single vote alone clear "2/3" of
-//            that too-small total.
+//              (a) distinct voter count reaches the strict two-thirds threshold
+//                  from the immutable snapshot for this height
+//              (b) accumulated voter stake exceeds two thirds of that snapshot's
+//                  total active stake
+//            Peer connectivity and local CLI configuration do not affect either
+//            quorum condition.
 //            ├─ if a peer already broadcast a PrepareCertificate for this block hash, adopt its
 //            │    signer list verbatim (lookupPrepareCertificate) instead of this node's own
 //            │    locally-gossiped subset; otherwise derive locally AND broadcast a
@@ -107,6 +107,17 @@ func NewConsensus(
 	signingService *SigningService,
 	onCommit func(Block) error,
 	minStakeAmount *big.Int,
+	// verifyBlockAttestations is the REQUIRED block-attestation verifier used by
+	// FastForward. It is a constructor parameter, not a setter: there is no
+	// window in which the node runs without it, so there is nothing to forget to
+	// wire. The implementation lives in core (which imports consensus, so the
+	// dependency cannot point the other way); the bind package, which imports
+	// both, supplies core's chain-state key resolver and the shared signature
+	// verifier.
+	//
+	// A nil verifier makes FastForward REJECT every block rather than accept an
+	// unverified one. Verification is never skipped.
+	verifyBlockAttestations func(Block) error,
 ) *Consensus {
 
 	// Create a cancellable context for graceful shutdown
@@ -178,7 +189,7 @@ func NewConsensus(
 		// from peers.
 		genesisTime = time.Now()
 	}
-		// ── MEMBERSHIP IS NOT DECIDED HERE ──────────────────────────────────────
+	// ── MEMBERSHIP IS NOT DECIDED HERE ──────────────────────────────────────
 	// This constructor used to grant the local node a seat in the validator
 	// set, twice:
 	//
@@ -216,38 +227,49 @@ func NewConsensus(
 	}
 
 	// Create consensus instance
+	chainID := uint64(0)
+	if provider, ok := blockchain.(interface{ GetChainID() uint64 }); ok {
+		chainID = provider.GetChainID()
+	}
 	cons := &Consensus{
-		nodeID:               nodeID,                            // Unique identifier for this node
-		nodeManager:          nodeManager,                       // Manages peer connections
-		blockChain:           blockchain,                        // Reference to blockchain storage
-		signingService:       signingService,                    // Handles cryptographic signatures
-		currentView:          1,                                 // First PBFT round is view 1
-		currentHeight:        0,                                 // Current blockchain height
-		phase:                PhaseIdle,                         // Current consensus phase
-		quorumFraction:       0.67,                              // 2/3 majority requirement
+		nodeID:         nodeID,         // Unique identifier for this node
+		nodeManager:    nodeManager,    // Manages peer connections
+		blockChain:     blockchain,     // Reference to blockchain storage
+		signingService: signingService, // Handles cryptographic signatures
+		chainID:        chainID,
+		currentView:    1,         // First PBFT round is view 1
+		currentHeight:  0,         // Current blockchain height
+		phase:          PhaseIdle, // Current consensus phase
+		// CHECKPOINT 2 ITEM 1: quorumFraction is DELETED. It was set here and never
+		// read anywhere - the field was dead. A float named quorum fraction on the
+		// Consensus struct invited the reading that the engine quorum was 67%. The
+		// real rule is meetsStakeQuorum (voted*3 > total*2) plus StrictTwoThirdsCount,
+		// both integer, both operating on a snapshot.
 		timeout:              10 * time.Second,                  // View change timeout
 		receivedVotes:        make(map[string]map[string]*Vote), // Commit votes by block hash
 		prepareVotes:         make(map[string]map[string]*Vote), // Prepare votes by block hash
 		sentVotes:            make(map[string]bool),             // Track sent commit votes
 		sentPrepareVotes:     make(map[string]bool),             // Track sent prepare votes
-		proposalCh:           make(chan *Proposal, 100),         // Proposal channel buffer
-		voteCh:               make(chan *Vote, 1000),            // Vote channel buffer
-		timeoutCh:            make(chan *TimeoutMsg, 100),       // Timeout channel buffer
-		prepareCh:            make(chan *Vote, 1000),            // Prepare vote channel buffer
-		onCommit:             onCommit,                          // Callback for block commit
-		ctx:                  ctx,                               // Context for cancellation
-		cancel:               cancel,                            // Cancel function
-		lastViewChange:       common.GetTimeService().Now(),     // Last view change timestamp
-		viewChangeMutex:      sync.Mutex{},                      // Mutex for view change
-		lastBlockTime:        common.GetTimeService().Now(),     // Last block commit timestamp
-		lastRoundActivity:    common.GetTimeService().Now(),     // Last proposal/vote progress timestamp
-		validatorSet:         validatorSet,                      // Set of active validators
-		randao:               randao,                            // VDF-based RANDAO instance
-		selector:             selector,                          // Leader selector
-				useStakeWeighted:     true,                              // Use stake-weighted leader election
-		weightedPrepareVotes: make(map[string]*big.Int),         // Weighted prepare votes by stake
-		weightedCommitVotes:  make(map[string]*big.Int),         // Weighted commit votes by stake
-		attestations:         make(map[uint64][]*Attestation),   // Attestations by epoch
+		timeoutVotes:         make(map[uint64]map[string]*TimeoutMsg),
+		proposalCh:           make(chan *Proposal, 100),       // Proposal channel buffer
+		voteCh:               make(chan *Vote, 1000),          // Vote channel buffer
+		timeoutCh:            make(chan *TimeoutMsg, 100),     // Timeout channel buffer
+		prepareCh:            make(chan *Vote, 1000),          // Prepare vote channel buffer
+		onCommit:             onCommit,                        // Callback for block commit
+		attestationVerifier:  verifyBlockAttestations,         // REQUIRED FastForward attestation verifier (nil => reject)
+		ctx:                  ctx,                             // Context for cancellation
+		cancel:               cancel,                          // Cancel function
+		lastViewChange:       common.GetTimeService().Now(),   // Last view change timestamp
+		viewChangeMutex:      sync.Mutex{},                    // Mutex for view change
+		lastBlockTime:        common.GetTimeService().Now(),   // Last block commit timestamp
+		lastRoundActivity:    common.GetTimeService().Now(),   // Last proposal/vote progress timestamp
+		validatorSet:         validatorSet,                    // Set of active validators
+		randao:               randao,                          // VDF-based RANDAO instance
+		selector:             selector,                        // Leader selector
+		useStakeWeighted:     true,                            // Use stake-weighted leader election
+		weightedPrepareVotes: make(map[string]*big.Int),       // Weighted prepare votes by stake
+		weightedCommitVotes:  make(map[string]*big.Int),       // Weighted commit votes by stake
+		attestations:         make(map[uint64][]*Attestation), // Attestations by epoch
 		pendingProposals:     make(map[string]Block),
 		electedLeaderID:      "", // Set by UpdateLeaderStatus
 		syncNeededCh:         make(chan uint64, 4),
@@ -277,6 +299,17 @@ func NewConsensus(
 
 // Start begins the consensus operation by launching all goroutines
 func (c *Consensus) Start() error {
+	// ★★ CHECKPOINT 2 ITEM 0b: refuse to participate until snapshots are rebuilt.
+	//
+	// A node that still has a gap in its snapshot history would fail closed on
+	// every block in the missing epoch. Letting it start anyway is worse than
+	// refusing: it can become the proposer the rest of the network is waiting
+	// on, so a recoverable local gap turns into a network stall. Startup clears
+	// the flag only once every epoch up to the chain tip has a snapshot.
+	if SnapshotRebuildPending() {
+		return fmt.Errorf("consensus: snapshot history incomplete — refusing to start until " +
+			"the validator-set snapshots for every epoch up to the chain tip have been rebuilt")
+	}
 	logger.Info("Consensus started for node %s", c.nodeID)
 
 	// Start goroutines for handling different message types
@@ -434,10 +467,12 @@ func (c *Consensus) updateLeaderStatusLocked() {
 		c.updateLeaderStatusRoundRobin()
 		return
 	}
-
 	// PIN: use currentView as the canonical slot for this round.
 	viewSlot := c.currentView
-	viewEpoch := c.membershipEpoch()
+	// ★ c.mu is HELD here (updateLeaderStatusLocked). Use the no-lock variant —
+	// membershipEpoch() would RLock the same mutex and deadlock forever.
+	proposedHeight := c.currentHeight + 1
+	viewEpoch := EpochForHeight(proposedHeight)
 
 	// Handle epoch transition if we've moved to a new epoch.
 	if viewEpoch > c.currentEpoch {
@@ -446,7 +481,7 @@ func (c *Consensus) updateLeaderStatusLocked() {
 
 	// Derive seed and run proposer selection.
 	seed := c.randao.GetSeed(viewSlot)
-	selected := c.selector.SelectProposer(viewEpoch, seed)
+	selected := c.selector.SelectProposer(proposedHeight, seed)
 
 	if selected == nil {
 		c.isLeader = false
@@ -461,11 +496,11 @@ func (c *Consensus) updateLeaderStatusLocked() {
 	c.isLeader = (selected.ID == c.nodeID)
 
 	if c.isLeader {
-		logger.Info("Node %s elected proposer for view %d (stake %.2f SPX)",
-			c.nodeID, viewSlot, selected.GetStakeInSPX())
+		logger.Debug("Node %s elected proposer for height %d, view %d (stake %.2f SPX)",
+			c.nodeID, proposedHeight, viewSlot, selected.GetStakeInSPX())
 	} else {
-		logger.Info("   Node %s NOT proposer for view %d (elected: %s, stake %.2f SPX)",
-			c.nodeID, viewSlot, selected.ID, selected.GetStakeInSPX())
+		logger.Debug("Node %s NOT proposer for height %d, view %d (elected: %s, stake %.2f SPX)",
+			c.nodeID, proposedHeight, viewSlot, selected.ID, selected.GetStakeInSPX())
 	}
 }
 
@@ -837,6 +872,9 @@ func (c *Consensus) ProposeBlock(block interface{}) error {
 	if !c.IsSyncReady() {
 		return fmt.Errorf("node %s cannot propose: not sync-ready yet (still catching up to canonical chain)", c.nodeID)
 	}
+	if !c.participationAllowed(c.nodeID, c.currentHeight+1) {
+		return fmt.Errorf("node %s is paused from consensus participation at height %d", c.nodeID, c.currentHeight+1)
+	}
 
 	c.updateLeaderStatusLocked()
 
@@ -1026,7 +1064,42 @@ func (c *Consensus) GetCurrentHeight() uint64 {
 // seed) — that is legitimate, because a seed only needs to be unpredictable,
 // not identical across nodes — but it no longer decides who is eligible.
 func (c *Consensus) membershipEpoch() uint64 {
-	return EpochForHeight(c.GetCurrentHeight())
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.membershipEpochLocked()
+}
+
+// ★ NOT-REENTRANT, HELD-LOCK-CALLER VARIANT.
+//
+// `sync.RWMutex` is NOT reentrant: a writer that tries to RLock the same mutex
+// it already holds blocks FOREVER (RLock cannot proceed while a writer holds
+// it, and the writer cannot release until the RLock returns).
+//
+// That is exactly what happened. `updateLeaderStatusLocked` is called with
+// c.mu held and calls `c.membershipEpoch()`, which took `c.mu.RLock()` via
+// GetCurrentHeight. The result was a hard self-deadlock on the FIRST call:
+//
+//	bind.runBlockSyncLoop        helpers.go:1279   cons.ResetRANDAO(...)
+//	  -> ResetRANDAO              random.go:867     c.UpdateLeaderStatus()
+//	    -> updateLeaderStatus     consensus.go:427  c.mu.Lock()
+//	      -> updateLeaderStatusLocked  consensus.go:443
+//	        -> membershipEpoch    consensus.go:455
+//	          -> GetCurrentHeight consensus.go:1043 c.mu.RLock()  <-- DEADLOCK
+//
+// A late joiner calls ResetRANDAO right after replacing genesis, so every
+// joining node hung at height 0 with c.mu permanently held — which starved
+// every reader (IsLeader, GetCurrentHeight, the checkpoint loop) and left the
+// block-sync loop unable to make progress. It reproduced only on nodes that
+// sync genesis, which is why genesis-authoring tests never caught it.
+//
+// ★ CHECKPOINT 2: membershipEpoch was introduced by the height-derived-membership
+// work, which derived the epoch from the height via GetCurrentHeight without
+// noticing that most of its callers already hold c.mu.
+//
+// Any caller that ALREADY holds c.mu must use this. It must stay in lockstep
+// with membershipEpoch; the two differ only in locking.
+func (c *Consensus) membershipEpochLocked() uint64 {
+	return EpochForHeight(c.currentHeight)
 }
 
 // ── Consensus timing constants ─────────────────────────────────────────────
@@ -1477,7 +1550,7 @@ func (c *Consensus) onEpochTransition(newEpoch uint64) {
 	logger.Info("Entering epoch %d", newEpoch)
 	// Process attestations from the previous epoch
 	if newEpoch > 0 {
-		c.processEpochAttestations(newEpoch - 1)
+		c.processEpochAttestations(newEpoch-1, SnapshotAtEpoch(newEpoch-1))
 	}
 	c.currentEpoch = newEpoch // Update current epoch
 }
@@ -1633,6 +1706,11 @@ func (c *Consensus) processProposal(proposal *Proposal) {
 		logger.Info("Deferring proposal for height %d (view %d) from %s until sync gate opens",
 			proposal.Block.GetHeight(), proposal.View, proposal.ProposerID)
 		c.deferProposalUntilSyncReady(proposal)
+		return
+	}
+	if !c.participationAllowed(proposal.ProposerID, proposal.Block.GetHeight()) {
+		logger.Warn("Rejecting proposal from paused validator %s at height %d",
+			proposal.ProposerID, proposal.Block.GetHeight())
 		return
 	}
 
@@ -1874,33 +1952,21 @@ func (c *Consensus) processProposal(proposal *Proposal) {
 		// (using proposal.SlotNumber == proposal.View) handles the election.
 	}
 
-	// Re-derive electedLeaderID from the proposal's SlotNumber.
-	// The leader sets SlotNumber = currentView (view-pinned slot), so every
-	// follower that applies the same seed to SelectProposer gets the same winner.
-	if proposal.SlotNumber > 0 {
-		slotEpoch := c.membershipEpoch()
-		seed := c.randao.GetSeed(proposal.SlotNumber)
-		selected := c.selector.SelectProposer(slotEpoch, seed)
-		if selected != nil {
-			c.electedLeaderID = selected.ID
-			logger.Info("Follower re-derived electedLeaderID=%s for view-slot %d",
-				c.electedLeaderID, proposal.SlotNumber)
-		} else {
-			logger.Warn("SelectProposer returned nil for slot %d, trusting signed proposal", proposal.SlotNumber)
-			c.electedLeaderID = proposal.ProposerID
-		}
-	} else if proposal.ElectedLeaderID != "" {
-		logger.Warn("Proposal has no SlotNumber, using embedded ElectedLeaderID=%s", proposal.ElectedLeaderID)
-		c.electedLeaderID = proposal.ElectedLeaderID
-	} else {
-		// SlotNumber and ElectedLeaderID both absent — fall back to view-pinned election.
-		viewSlot := c.currentView
-		viewEpoch := c.membershipEpoch()
-		seed := c.randao.GetSeed(viewSlot)
-		if sel := c.selector.SelectProposer(viewEpoch, seed); sel != nil {
-			c.electedLeaderID = sel.ID
-		}
+	// Re-derive the proposer from the immutable snapshot governing this exact
+	// proposed height. Proposal fields never supply membership or eligibility.
+	proposedHeight := proposal.Block.GetHeight()
+	viewSlot := proposal.SlotNumber
+	if viewSlot == 0 {
+		viewSlot = proposal.View
 	}
+	selected := c.selector.SelectProposer(proposedHeight, c.randao.GetSeed(viewSlot))
+	if selected == nil {
+		logger.Warn("No validator snapshot available for proposed height %d", proposedHeight)
+		return
+	}
+	c.electedLeaderID = selected.ID
+	logger.Debug("Follower elected proposer=%s for height=%d view-slot=%d",
+		selected.ID, proposedHeight, viewSlot)
 
 	// Validate that the proposer is the legitimate leader
 	if !c.isValidLeader(proposal.ProposerID, proposal.View) {
@@ -2010,7 +2076,7 @@ func (c *Consensus) processProposal(proposal *Proposal) {
 
 	// Send prepare vote for this block (skip for leader's own proposal if already sent)
 	if !isSelfProposal || !c.sentPrepareVotes[proposal.Block.GetHash()] {
-		c.sendPrepareVote(proposal.Block.GetHash(), proposal.View)
+		c.sendPrepareVote(proposal.Block.GetHash(), proposal.View, proposal.Block.GetHeight())
 		if isSelfProposal {
 			logger.Info("[%s] LEADER: Sending prepare vote for own block", c.nodeID)
 		} else {
@@ -2039,7 +2105,7 @@ func (c *Consensus) processProposal(proposal *Proposal) {
 	// does I/O and must run outside c.mu), so we release the lock then commit.
 	blockHash := proposal.Block.GetHash()
 	view := proposal.View
-	if c.phase != PhaseCommitted && c.hasQuorum(blockHash) {
+	if c.phase != PhaseCommitted && c.hasQuorum(blockHash, c.snapshotForVoting()) {
 		blockToCommit := proposal.Block
 		logger.Info("Commit quorum was already reached for %s before proposal arrived — committing now", blockHash[:16])
 		// ========== FIX: Attach attestations BEFORE commit ==========
@@ -2113,6 +2179,18 @@ func (c *Consensus) StatusFromMsgType(messageType string) string {
 func (c *Consensus) processPrepareVote(vote *Vote) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if vote == nil {
+		logger.Warn("Ignoring nil prepare vote")
+		return
+	}
+	if vote.Height != c.currentHeight+1 {
+		logger.Warn("Ignoring prepare vote at height %d; expected %d", vote.Height, c.currentHeight+1)
+		return
+	}
+	if vote.ChainID != c.chainID || vote.Phase != VotePhasePrepare {
+		logger.Warn("Ignoring prepare vote with invalid chain or phase from %s", vote.VoterID)
+		return
+	}
 
 	// Verify vote signature if signing service available
 	if c.signingService != nil && len(vote.Signature) > 0 {
@@ -2148,7 +2226,8 @@ func (c *Consensus) processPrepareVote(vote *Vote) {
 
 	// Calculate current vote count and quorum requirements
 	totalVotes := len(c.prepareVotes[vote.BlockHash])
-	quorumSize := c.calculateQuorumSize(c.getTotalNodes())
+	snap := c.snapshotForVoting()
+	quorumSize := StrictTwoThirdsCount(len(snap.Validators))
 
 	logger.Info("Prepare vote received: node=%s, from=%s, block=%s, votes=%d/%d, phase=%v, prepared=%v",
 		c.nodeID, vote.VoterID, vote.BlockHash, totalVotes, quorumSize, c.phase, c.preparedBlock != nil)
@@ -2157,7 +2236,7 @@ func (c *Consensus) processPrepareVote(vote *Vote) {
 	// PrePrepared -> Prepared transition and commit-vote broadcast are
 	// handled by tryEnterPreparedPhase (see its doc comment for why that
 	// logic needs to live in one place callable from two sites).
-	if c.hasPrepareQuorum(vote.BlockHash) {
+	if c.hasPrepareQuorum(vote.BlockHash, snap) {
 		logger.Info("PREPARE QUORUM ACHIEVED for block %s at view %d", vote.BlockHash, vote.View)
 	}
 	c.tryEnterPreparedPhase(vote.BlockHash, vote.View)
@@ -2193,7 +2272,7 @@ func (c *Consensus) processPrepareVote(vote *Vote) {
 // processPrepareVote closes that race: whichever of {the proposal, the
 // quorum-completing vote} arrives second is the one that completes it.
 func (c *Consensus) tryEnterPreparedPhase(blockHash string, view uint64) {
-	if !c.hasPrepareQuorum(blockHash) {
+	if !c.hasPrepareQuorum(blockHash, c.snapshotForVoting()) {
 		return // not yet — still waiting on prepare votes
 	}
 	if c.phase == PhasePrepared || c.phase == PhaseCommitted {
@@ -2266,6 +2345,9 @@ func (c *Consensus) tryEnterPreparedPhase(blockHash string, view uint64) {
 				attestations = append(attestations, &types.Attestation{
 					ValidatorID: voterID,
 					BlockHash:   blockHash,
+					ChainID:     v.ChainID,
+					Height:      v.Height,
+					Phase:       v.Phase,
 					View:        v.View,
 					Signature:   signedMsg.Signature,
 				})
@@ -2301,7 +2383,7 @@ func (c *Consensus) tryEnterPreparedPhase(blockHash string, view uint64) {
 		c.nodeID, blockHash, c.preparedBlock.GetHeight())
 
 	// Send our own commit vote for this block.
-	c.voteForBlock(blockHash, view)
+	c.voteForBlock(blockHash, view, c.preparedBlock.GetHeight())
 }
 
 // addConsensusSig adds a signature to the consensus signatures collection
@@ -2493,6 +2575,10 @@ func (c *Consensus) GetConsensusSignatures() interface{} {
 
 // processVote handles incoming commit votes.
 func (c *Consensus) processVote(vote *Vote) {
+	if vote == nil {
+		logger.Warn("Ignoring nil commit vote")
+		return
+	}
 	c.mu.Lock()
 	if c.sentVotes == nil {
 		c.sentVotes = make(map[string]bool)
@@ -2526,6 +2612,16 @@ func (c *Consensus) processVote(vote *Vote) {
 func (c *Consensus) processVoteLocked(vote *Vote) Block {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if vote == nil || vote.Height != c.currentHeight+1 {
+		if vote != nil {
+			logger.Warn("Ignoring commit vote at height %d; expected %d", vote.Height, c.currentHeight+1)
+		}
+		return nil
+	}
+	if vote.ChainID != c.chainID || vote.Phase != VotePhaseCommit {
+		logger.Warn("Ignoring commit vote with invalid chain or phase from %s", vote.VoterID)
+		return nil
+	}
 
 	// Verify vote signature if signing service available
 	if c.signingService != nil && len(vote.Signature) > 0 {
@@ -2579,12 +2675,13 @@ func (c *Consensus) processVoteLocked(vote *Vote) Block {
 
 	// Calculate current vote count and quorum requirements
 	totalVotes := len(c.receivedVotes[vote.BlockHash])
-	quorumSize := c.calculateQuorumSize(c.getTotalNodes())
+	snap := c.snapshotForVoting()
+	quorumSize := StrictTwoThirdsCount(len(snap.Validators))
 	logger.Info("Commit vote received: node=%s, from=%s, block=%s, votes=%d/%d, phase=%v",
 		c.nodeID, vote.VoterID, vote.BlockHash, totalVotes, quorumSize, c.phase)
 
 	// In processVote, when commit quorum is achieved
-	if c.hasQuorum(vote.BlockHash) {
+	if c.hasQuorum(vote.BlockHash, snap) {
 		logger.Info("COMMIT QUORUM ACHIEVED for block %s at view %d", vote.BlockHash, vote.View)
 
 		// Determine which block to commit
@@ -2750,6 +2847,9 @@ func (c *Consensus) attachAttestationsBeforeCommit(block Block, blockHash string
 		tb.Body.Attestations = append(tb.Body.Attestations, &types.Attestation{
 			ValidatorID: voterID,
 			BlockHash:   blockHash,
+			ChainID:     vote.ChainID,
+			Height:      vote.Height,
+			Phase:       vote.Phase,
 			View:        vote.View,
 			Signature:   signedMsg.Signature, // Extract raw SPHINCS+ signature bytes only
 		})
@@ -2825,6 +2925,29 @@ func (c *Consensus) processTimeout(timeout *TimeoutMsg) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	if timeout == nil {
+		logger.Warn("Ignoring nil view-change timeout")
+		return
+	}
+	if timeout.ChainID != c.chainID || timeout.Height != c.currentHeight+1 {
+		logger.Warn("Ignoring timeout with chain/height %d/%d; expected %d/%d",
+			timeout.ChainID, timeout.Height, c.chainID, c.currentHeight+1)
+		return
+	}
+	snapshot := ValidatorSetAt(timeout.Height)
+	if !timeoutVoterInSnapshot(snapshot, timeout.VoterID) {
+		logger.Warn("Ignoring view-change timeout from non-validator %s at height %d",
+			timeout.VoterID, c.currentHeight+1)
+		return
+	}
+	if !c.participationAllowed(timeout.VoterID, timeout.Height) {
+		logger.Warn("Ignoring timeout from paused validator %s at height %d", timeout.VoterID, timeout.Height)
+		return
+	}
+	if timeout.View <= c.currentView {
+		return
+	}
+
 	// Verify timeout signature if signing service available
 	if c.signingService != nil && len(timeout.Signature) > 0 {
 		valid, err := c.signingService.VerifyTimeout(timeout)
@@ -2832,10 +2955,30 @@ func (c *Consensus) processTimeout(timeout *TimeoutMsg) {
 			logger.Warn("Invalid timeout signature from %s: %v", timeout.VoterID, err)
 			return
 		}
+
 	} else {
 		// In production this must never happen: timeouts drive view-change.
 		// Reject unsigned timeouts deterministically.
 		logger.Error("CRITICAL: No signing service available — rejecting unsigned timeout from %s", timeout.VoterID)
+		return
+	}
+
+	if c.timeoutVotes == nil {
+		c.timeoutVotes = make(map[uint64]map[string]*TimeoutMsg)
+	}
+	votes := c.timeoutVotes[timeout.View]
+	if votes == nil {
+		votes = make(map[string]*TimeoutMsg)
+		c.timeoutVotes[timeout.View] = votes
+	}
+	if _, duplicate := votes[timeout.VoterID]; duplicate {
+		return
+	}
+	votes[timeout.VoterID] = timeout
+	votedStake, distinctVoters := timeoutVotesQuorum(snapshot, votes)
+	if !quorumFromSnapshot(snapshot, votedStake, distinctVoters) {
+		logger.Debug("View %d timeout stake %s/%s does not meet snapshot quorum",
+			timeout.View, votedStake, snapshot.TotalStake)
 		return
 	}
 
@@ -2862,26 +3005,58 @@ func (c *Consensus) processTimeout(timeout *TimeoutMsg) {
 		logger.Info("View change requested to view %d by %s", timeout.View, timeout.VoterID)
 		c.currentView = timeout.View
 		c.lastViewChange = common.GetTimeService().Now()
+		for view := range c.timeoutVotes {
+			if view <= c.currentView {
+				delete(c.timeoutVotes, view)
+			}
+		}
 		c.resetConsensusState()
 		// Use view-pinned RANDAO election so view-change leader matches proposal validation.
 		viewSlot := c.currentView
-		viewEpoch := c.membershipEpoch()
+		// ★ c.mu is HELD here (defer unlock at function top). Use the no-lock
+		// variant — membershipEpoch() would RLock the same mutex and deadlock.
+		proposedHeight := c.currentHeight + 1
 		seed := c.randao.GetSeed(viewSlot)
-		if sel := c.selector.SelectProposer(viewEpoch, seed); sel != nil {
+		if sel := c.selector.SelectProposer(proposedHeight, seed); sel != nil {
 			c.electedLeaderID = sel.ID
 			c.electedSlot = viewSlot
 			c.isLeader = (sel.ID == c.nodeID)
 		} else {
-			// Fallback to round-robin if no stake set yet.
-			c.updateLeaderStatusWithValidators(c.getValidators())
+			c.electedLeaderID = ""
+			c.electedSlot = 0
+			c.isLeader = false
+			logger.Warn("No validator snapshot available for proposed height %d", proposedHeight)
 		}
 		logger.Info("View change completed: node=%s, new_view=%d, leader=%v (elected=%s)",
 			c.nodeID, c.currentView, c.isLeader, c.electedLeaderID)
 	}
 }
 
+func timeoutVotesQuorum(snapshot *ValidatorSnapshot, votes map[string]*TimeoutMsg) (*big.Int, int) {
+	stake := new(big.Int)
+	if snapshot == nil {
+		return stake, 0
+	}
+	distinctVoters := 0
+	for voterID := range votes {
+		if validator := snapshot.Validators[voterID]; validator != nil && validator.StakeAmount != nil && validator.StakeAmount.Sign() > 0 {
+			stake.Add(stake, validator.StakeAmount)
+			distinctVoters++
+		}
+	}
+	return stake, distinctVoters
+}
+
+func timeoutVoterInSnapshot(snapshot *ValidatorSnapshot, voterID string) bool {
+	if snapshot == nil || voterID == "" {
+		return false
+	}
+	validator := snapshot.Validators[voterID]
+	return validator != nil && validator.StakeAmount != nil && validator.StakeAmount.Sign() > 0
+}
+
 // sendPrepareVote creates and broadcasts a prepare vote for a block
-func (c *Consensus) sendPrepareVote(blockHash string, view uint64) {
+func (c *Consensus) sendPrepareVote(blockHash string, view, height uint64) {
 	// SYNC GATE: never cast a vote until this node has been declared caught
 	// up by its sync orchestrator. Height/parent-hash checks in
 	// processProposal already stop most premature voting, but this is a
@@ -2893,6 +3068,10 @@ func (c *Consensus) sendPrepareVote(blockHash string, view uint64) {
 			c.nodeID, blockHash, view)
 		return
 	}
+	if !c.participationAllowed(c.nodeID, height) {
+		logger.Info("Node %s is paused — withholding prepare vote for height %d", c.nodeID, height)
+		return
+	}
 
 	// Check if already sent prepare vote for this block
 	if c.sentPrepareVotes[blockHash] {
@@ -2902,6 +3081,9 @@ func (c *Consensus) sendPrepareVote(blockHash string, view uint64) {
 	// Create prepare vote message
 	prepareVote := &Vote{
 		BlockHash: blockHash,
+		ChainID:   c.chainID,
+		Height:    height,
+		Phase:     VotePhasePrepare,
 		View:      view,
 		VoterID:   c.nodeID,
 		Signature: []byte{},
@@ -2943,12 +3125,16 @@ func (c *Consensus) sendPrepareVote(blockHash string, view uint64) {
 }
 
 // voteForBlock creates and broadcasts a commit vote for a block
-func (c *Consensus) voteForBlock(blockHash string, view uint64) {
+func (c *Consensus) voteForBlock(blockHash string, view, height uint64) {
 	// SYNC GATE: same reasoning as sendPrepareVote — never cast a commit
 	// vote until this node has been declared caught up.
 	if !c.IsSyncReady() {
 		logger.Info("⏳ Node %s not sync-ready — withholding commit vote for block %s (view %d)",
 			c.nodeID, blockHash, view)
+		return
+	}
+	if !c.participationAllowed(c.nodeID, height) {
+		logger.Info("Node %s is paused — withholding commit vote for height %d", c.nodeID, height)
 		return
 	}
 
@@ -2971,6 +3157,9 @@ func (c *Consensus) voteForBlock(blockHash string, view uint64) {
 	// Create commit vote message
 	vote := &Vote{
 		BlockHash: blockHash,
+		ChainID:   c.chainID,
+		Height:    height,
+		Phase:     VotePhaseCommit,
 		View:      view,
 		VoterID:   c.nodeID,
 		Signature: []byte{},
@@ -3055,102 +3244,136 @@ func StrictTwoThirdsCount(n int) int {
 	return (2*n)/3 + 1
 }
 
-// hasQuorum checks if a block has achieved commit quorum based on stake weight
-func (c *Consensus) hasQuorum(blockHash string) bool {
+// hasPrepareQuorum checks if a block has achieved prepare quorum based on stake weight
+// snapshotForVoting returns the validator snapshot governing the height this
+// engine is currently deciding — i.e. the set that a block at this height must
+// be certified against.
+//
+// ★ CHECKPOINT 2 ITEM 1. Every quorum path takes its denominator and its
+// eligible-voter count from THIS, rather than from the live validator set.
+//
+// The old code derived both from `c.getTotalNodes()`, which read
+// `len(validatorSet.ActiveValidatorIDs(0))` off the LIVE set. That has two
+// defects:
+//
+//   - it reads the LIVE set, so a block could be judged against a membership
+//     that had already moved on — the same class of bug as the verification
+//     path fixed in Checkpoint 1;
+//   - ActiveValidatorIDs(0) is filtered at a hardcoded epoch 0, which is wrong
+//     for every epoch after the first.
+//
+// A snapshot is immutable, height-keyed, and identical on every node that has
+// replayed the same blocks, which is exactly what a quorum denominator must be.
+func (c *Consensus) snapshotForVoting() *ValidatorSnapshot {
+	return ValidatorSetAt(c.GetCurrentHeight())
+}
+
+// quorumFromSnapshot runs the ONE quorum rule, against a snapshot.
+//
+// Both conditions must hold and they are the same condition stated two ways:
+//
+//	stake:     voted * 3 > total * 2
+//	distinct:  distinctVoters >= StrictTwoThirdsCount(len(snapshot.Validators))
+//
+// The distinct-voter floor is what stops a single whale from committing alone,
+// and it is derived from the SNAPSHOT's membership, so the two cannot drift.
+//
+// A nil snapshot is FAIL CLOSED: with no chain-state record of who governed
+// this height there is no defensible denominator, and guessing from the live set
+// is precisely the defect being removed.
+func quorumFromSnapshot(snap *ValidatorSnapshot, votedStake *big.Int, distinctVoters int) bool {
+	if snap == nil {
+		return false
+	}
+
+	total := snap.TotalStake
+	if total == nil || total.Sign() <= 0 {
+		return false
+	}
+	if distinctVoters < StrictTwoThirdsCount(len(snap.Validators)) {
+		return false
+	}
+	return meetsStakeQuorum(votedStake, total)
+}
+
+// MeetsSnapshotQuorum exposes the consensus quorum rule to ancillary
+// components that validate the same chain data. Membership and total stake
+// come only from the immutable snapshot for the block height.
+func MeetsSnapshotQuorum(snap *ValidatorSnapshot, votedStake *big.Int, distinctVoters int) bool {
+	return quorumFromSnapshot(snap, votedStake, distinctVoters)
+}
+
+func (c *Consensus) hasQuorum(blockHash string, snap *ValidatorSnapshot) bool {
 	// Get votes for this block
 	votes := c.receivedVotes[blockHash]
 	if votes == nil {
 		return false
 	}
-
-	// SAFETY FLOOR: quorum must never be satisfiable by fewer distinct
-	// voters than a real 2/3 majority of the network requires, regardless
-	// of what the stake tally below says. The stake check depends on this
-	// node's local c.validatorSet being fully populated with every other
-	// validator's stake; if that set is incomplete or stale on this node
-	// (e.g. a validator registration this node hasn't learned yet),
-	// totalStake computed below is smaller than the network's real total,
-	// and a single vote can wrongly clear 2/3 of that too-small total.
-	// getTotalNodes() is derived independently, from actual connected
-	// peers, so cross-checking against it catches exactly that case —
-	// this is what let a node commit (and record final_states) with only
-	// its own vote while peers required 2-of-3.
-	requiredVoters := c.calculateQuorumSize(c.getTotalNodes())
-	if len(votes) < requiredVoters {
+	if snap == nil {
+		logger.Warn("Refusing commit quorum for %s: no validator snapshot for the height under vote", blockHash)
 		return false
 	}
 
-	// Calculate total stake that has voted
-	totalStakeVoted := big.NewInt(0)
+	// Sum the stake of DISTINCT voters, using the SNAPSHOT's own stake for each
+	// validator — never the live set, which may already have moved on.
+	voted := big.NewInt(0)
+	distinct := 0
 	for voterID := range votes {
-		if stake := c.getValidatorStake(voterID); stake != nil {
-			totalStakeVoted.Add(totalStakeVoted, stake)
+		row, inSet := snap.Validators[voterID]
+		if !inSet || row == nil || row.StakeAmount == nil {
+			// A vote from outside the governing snapshot is worth nothing.
+			continue
 		}
+		voted.Add(voted, row.StakeAmount)
+		distinct++
 	}
 
-	// Store weighted vote total
-	c.weightedCommitVotes[blockHash] = totalStakeVoted
+	// Store weighted vote total (observability only).
+	c.weightedCommitVotes[blockHash] = voted
 
-	// Get total stake from validator set
-	totalStake := c.validatorSet.GetTotalStake()
-
-	// Cannot achieve quorum if total stake is zero
-	if totalStake == nil || totalStake.Cmp(big.NewInt(0)) == 0 {
-		logger.Warn("Total stake is zero, cannot achieve quorum")
-		return false
+	ok := quorumFromSnapshot(snap, voted, distinct)
+	if ok {
+		attestedSPX := new(big.Float).Quo(new(big.Float).SetInt(voted),
+			new(big.Float).SetFloat64(denom.SPX))
+		totalSPX := new(big.Float).Quo(new(big.Float).SetInt(snap.TotalStake),
+			new(big.Float).SetFloat64(denom.SPX))
+		logger.Debug("Commit quorum for %s: %.2f / %.2f SPX from %d of %d snapshot members",
+			blockHash, attestedSPX, totalSPX, distinct, len(snap.Validators))
 	}
-
-	// Check if quorum achieved — strictly more than 2/3 of total stake.
-	hasQuorum := meetsStakeQuorum(totalStakeVoted, totalStake)
-
-	// Log quorum details if achieved
-	if hasQuorum && totalStakeVoted.Cmp(big.NewInt(0)) > 0 {
-		votedSPX := new(big.Float).Quo(new(big.Float).SetInt(totalStakeVoted), new(big.Float).SetFloat64(denom.SPX))
-		totalSPX := new(big.Float).Quo(new(big.Float).SetInt(totalStake), new(big.Float).SetFloat64(denom.SPX))
-		if totalSPX.Cmp(big.NewFloat(0)) != 0 {
-			pct := new(big.Float).Quo(votedSPX, totalSPX)
-			pct.Mul(pct, big.NewFloat(100))
-			logger.Info("Quorum achieved: %.2f / %.2f SPX voted (%.1f%%)", votedSPX, totalSPX, pct)
-		}
-	}
-	return hasQuorum
+	return ok
 }
 
-// hasPrepareQuorum checks if a block has achieved prepare quorum based on stake weight
-func (c *Consensus) hasPrepareQuorum(blockHash string) bool {
+// hasPrepareQuorum is the prepare-phase twin of hasQuorum: identical rule,
+// identical source of truth, different vote map.
+//
+// See hasQuorum and quorumFromSnapshot for why the snapshot replaces the live
+// set as the denominator.
+func (c *Consensus) hasPrepareQuorum(blockHash string, snap *ValidatorSnapshot) bool {
 	// Get prepare votes for this block
 	votes := c.prepareVotes[blockHash]
 	if votes == nil {
 		return false
 	}
-
-	// SAFETY FLOOR: same cross-check as hasQuorum — see its comment.
-	requiredVoters := c.calculateQuorumSize(c.getTotalNodes())
-	if len(votes) < requiredVoters {
+	if snap == nil {
+		logger.Warn("Refusing prepare quorum for %s: no validator snapshot for the height under vote", blockHash)
 		return false
 	}
 
-	// Calculate total stake that has voted
-	totalStakeVoted := big.NewInt(0)
+	voted := big.NewInt(0)
+	distinct := 0
 	for voterID := range votes {
-		if stake := c.getValidatorStake(voterID); stake != nil {
-			totalStakeVoted.Add(totalStakeVoted, stake)
+		row, inSet := snap.Validators[voterID]
+		if !inSet || row == nil || row.StakeAmount == nil {
+			continue
 		}
+		voted.Add(voted, row.StakeAmount)
+		distinct++
 	}
 
-	// Store weighted vote total
-	c.weightedPrepareVotes[blockHash] = totalStakeVoted
+	c.weightedPrepareVotes[blockHash] = voted
 
-	// Get total stake from validator set
-	totalStake := c.validatorSet.GetTotalStake()
-
-	// Cannot achieve quorum if total stake is zero
-	if totalStake == nil || totalStake.Cmp(big.NewInt(0)) == 0 {
-		return false
-	}
-
-	// Strictly more than 2/3 of total stake must have voted to prepare.
-	return meetsStakeQuorum(totalStakeVoted, totalStake)
+	// Strictly more than 2/3 of the SNAPSHOT's stake must have prepared.
+	return quorumFromSnapshot(snap, voted, distinct)
 }
 
 // getValidatorStake returns the stake amount for a validator
@@ -3188,22 +3411,6 @@ func (c *Consensus) calculateQuorumSize(setSize int) int {
 	// N=3 gave 2, permitting 2-of-3 — the exact case the surrounding SAFETY
 	// FLOOR comment says this function exists to prevent.
 	return StrictTwoThirdsCount(setSize)
-}
-
-// getTotalNodes returns the size of the ACTIVE STAKED validator set — chain
-// state only. It never reads nodeManager/peer membership: connectivity is not
-// membership, and a disconnected (or absent) validator still counts toward N
-// exactly as a connected one does. It also never reads a CLI flag or any
-// configured node count — there is none any more.
-//
-// NOTE (Phase 1): this reads the live ValidatorSet directly. Phase 2 adds
-// ValidatorSetAt(height) with per-epoch snapshots persisted in rawdb, and the
-// quorum paths below then take an explicit snapshot parameter.
-func (c *Consensus) getTotalNodes() int {
-	if c.validatorSet == nil {
-		return 0
-	}
-	return len(c.validatorSet.ActiveValidatorIDs(0))
 }
 
 // commitBlock commits a block to the blockchain
@@ -3608,6 +3815,16 @@ func (c *Consensus) startViewChange() {
 	c.mu.Lock()
 
 	now := common.GetTimeService().Now()
+	if !c.participationAllowed(c.nodeID, c.currentHeight+1) {
+		logger.Debug("View change skipped - %s is paused at height %d", c.nodeID, c.currentHeight+1)
+		c.mu.Unlock()
+		return
+	}
+	if !timeoutVoterInSnapshot(ValidatorSetAt(c.currentHeight+1), c.nodeID) {
+		logger.Debug("View change skipped - %s is not a validator at height %d", c.nodeID, c.currentHeight+1)
+		c.mu.Unlock()
+		return
+	}
 
 	// A round that has made no progress for stalledRoundThreshold is dead
 	// (e.g. two competing blocks with votes for both). In that case a view
@@ -3642,53 +3859,27 @@ func (c *Consensus) startViewChange() {
 		return
 	}
 
-	// Get current validators
-	validators := c.getValidators()
-	if len(validators) == 0 {
-		logger.Warn("Skipping view change - no validators available")
-		c.mu.Unlock()
-		return
-	}
-
 	// Calculate new view number
 	newView := c.currentView + 1
-	logger.Info("Node %s initiating view change to view %d", c.nodeID, newView)
-
-	// Update consensus state
-	c.currentView = newView
-	c.lastViewChange = common.GetTimeService().Now()
-	c.resetConsensusState()
-
-	// Use view-pinned RANDAO election (stake-weighted, NOT round-robin).
-	// Round-robin fallback (updateLeaderStatusWithValidators) would produce a
-	// different leader than the RANDAO-based path used by processProposal,
-	// causing the new leader's own proposal to be rejected by every follower
-	// as "invalid leader".  Always use the same stake-weighted selector.
-	viewSlot := c.currentView
-	viewEpoch := c.membershipEpoch()
-	seed := c.randao.GetSeed(viewSlot)
-	if sel := c.selector.SelectProposer(viewEpoch, seed); sel != nil {
-		c.electedLeaderID = sel.ID
-		c.electedSlot = viewSlot
-		c.isLeader = (sel.ID == c.nodeID)
-		logger.Info("New leader for view %d: %s (stake-weighted, isLeader=%v)", newView, c.electedLeaderID, c.isLeader)
-	} else {
-		// Last-resort fallback: if SelectProposer returns nil (e.g. empty
-		// validator set), use round-robin as a safe deterministic default
-		// that at least lets the chain make progress.
-		logger.Warn("SelectProposer returned nil for view %d — falling back to round-robin", newView)
-		c.updateLeaderStatusWithValidators(validators)
-	}
+	logger.Info("Node %s initiating view-change vote for view %d", c.nodeID, newView)
+	c.lastViewChange = now
 
 	// Unlock before broadcasting to avoid deadlock
 	c.mu.Unlock()
 
 	// Create and broadcast timeout message
 	timeoutMsg := &TimeoutMsg{
+		ChainID:   c.chainID,
+		Height:    c.currentHeight + 1,
 		View:      newView,
 		VoterID:   c.nodeID,
 		Signature: []byte{},
 		Timestamp: common.GetCurrentTimestamp(),
+	}
+	if c.preparedBlock != nil {
+		timeoutMsg.BlockHash = c.preparedBlock.GetHash()
+	} else if c.lockedBlock != nil {
+		timeoutMsg.BlockHash = c.lockedBlock.GetHash()
 	}
 
 	// Sign timeout if signing service available
@@ -3698,6 +3889,8 @@ func (c *Consensus) startViewChange() {
 			return
 		}
 	}
+
+	c.processTimeout(timeoutMsg)
 
 	// Broadcast timeout
 	if err := c.broadcastTimeout(timeoutMsg); err != nil {
@@ -3724,35 +3917,6 @@ func (c *Consensus) tryViewChangeLock() bool {
 	}
 }
 
-// updateLeaderStatusWithValidators is used by view-change to elect leader by round-robin.
-// It also stores the result in electedLeaderID so isValidLeader stays consistent.
-func (c *Consensus) updateLeaderStatusWithValidators(validators []string) {
-	if len(validators) == 0 {
-		c.isLeader = false
-		c.electedLeaderID = ""
-		return
-	}
-
-	// Sort for deterministic selection
-	sort.Strings(validators)
-	// Select leader based on current view
-	leaderIndex := int(c.currentView) % len(validators)
-	expectedLeader := validators[leaderIndex]
-
-	// Store elected leader
-	c.electedLeaderID = expectedLeader
-	c.isLeader = (expectedLeader == c.nodeID)
-
-	// Log election result
-	if c.isLeader {
-		logger.Info("Node %s elected as leader for view %d (index %d/%d)",
-			c.nodeID, c.currentView, leaderIndex, len(validators))
-	} else {
-		logger.Debug("Node %s is NOT leader for view %d (leader: %s)",
-			c.nodeID, c.currentView, expectedLeader)
-	}
-}
-
 // resetConsensusState clears all consensus-related state for a new view
 // resetConsensusState clears all consensus-related state for a new view
 func (c *Consensus) resetConsensusState() {
@@ -3765,6 +3929,7 @@ func (c *Consensus) resetConsensusState() {
 	c.prepareVotes = make(map[string]map[string]*Vote)
 	c.sentVotes = make(map[string]bool)
 	c.sentPrepareVotes = make(map[string]bool)
+	c.timeoutVotes = make(map[uint64]map[string]*TimeoutMsg)
 	c.weightedPrepareVotes = make(map[string]*big.Int) // ← ADD THIS
 	c.weightedCommitVotes = make(map[string]*big.Int)  // ← ADD THIS
 	// Note: do NOT clear electedLeaderID or electedSlot here —
@@ -3773,12 +3938,17 @@ func (c *Consensus) resetConsensusState() {
 
 // isValidLeader checks whether a proposer is the legitimate leader.
 //
-// It uses c.electedLeaderID which is populated by:
-//   - UpdateLeaderStatus (RANDAO path, called from helper.go before proposal)
-//   - updateLeaderStatusWithValidators (round-robin, called on view change)
+// It uses c.electedLeaderID, which is written by the RANDAO/stake-weighted
+// selector — via UpdateLeaderStatus / updateLeaderStatusLocked, and by the
+// in-line re-derivation in processProposal and processTimeout. All of those
+// call the same selector.SelectProposer against the immutable snapshot for
+// the proposed height, so every node (leader and followers) independently
+// derives the same leader ID.
 //
-// Both paths store a single consistent leader ID, so every node (leader and
-// followers) agrees on who is allowed to propose.
+// The round-robin fallback below is a last resort for the case where
+// electedLeaderID has not been derived yet; it must not be reached in normal
+// operation, because its denominator is the live peer set rather than chain
+// state.
 func (c *Consensus) isValidLeader(nodeID string, view uint64) bool {
 	// Use elected leader if available
 	if c.electedLeaderID != "" {
@@ -3966,13 +4136,28 @@ func (c *Consensus) IsSyncReady() bool {
 	return atomic.LoadInt32(&c.syncReady) == 1
 }
 
-// SetAttestationVerifier installs the callback FastForward uses to verify
-// PBFT quorum before committing a block fetched reactively from a single
-// peer. See the attestationVerifier field doc for why this is required.
-func (c *Consensus) SetAttestationVerifier(fn func(block Block) error) {
+// SetParticipationGate installs the chain-state check that pauses validators
+// for the remainder of an epoch after repeated missed commit rounds. Install it
+// before consensus starts; a missing callback preserves use by isolated test
+// harnesses and non-chain consensus instances.
+func (c *Consensus) SetParticipationGate(gate func(validatorID string, height uint64) (bool, error)) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.attestationVerifier = fn
+	c.participationGate = gate
+}
+
+func (c *Consensus) participationAllowed(validatorID string, height uint64) bool {
+	gate := c.participationGate
+	if gate == nil {
+		return true
+	}
+	allowed, err := gate(validatorID, height)
+	if err != nil {
+		logger.Error("Consensus participation gate failed for %s at height %d: %v",
+			validatorID, height, err)
+		return false
+	}
+	return allowed
 }
 
 // FastForward commits a block that was fetched from a peer during a sync
@@ -3995,11 +4180,24 @@ func (c *Consensus) FastForward(block Block) error {
 	// check bind.runBlockSyncLoop's bulk path already performs (solo-mined
 	// pre-PBFT blocks with zero attestations are still accepted, since
 	// they were never subject to quorum in the first place).
-	if c.attestationVerifier != nil {
-		if err := c.attestationVerifier(block); err != nil {
-			return fmt.Errorf("FastForward: attestation quorum check failed for height %d: %w",
-				block.GetHeight(), err)
-		}
+	// ★ UNCONDITIONAL, AND NOT SKIPPABLE. This was an optional hook
+	// (attestationVerifier) behind a nil check, and it had ZERO callers — so in
+	// production FastForward performed no attestation check at all and committed
+	// whatever a single peer handed back. The hook is deleted: there is no state
+	// in which verification is configured off, because a caller that cannot
+	// verify must reject rather than accept. A nil or missing verifier rejects.
+	//
+	// The bulk sync path (bind.runBlockSyncLoop) and the sync manager verify the
+	// same way, resolving keys from REPLAYED CHAIN STATE rather than the
+	// handshake registry, so a node that has never met a peer still verifies
+	// cryptographically.
+	// A nil verifier REJECTS. It never falls through to an unverified commit.
+	if c.attestationVerifier == nil {
+		return fmt.Errorf("FastForward: no attestation verifier is configured; refusing to commit an unverified block at height %d", block.GetHeight())
+	}
+	if err := c.attestationVerifier(block); err != nil {
+		return fmt.Errorf("FastForward: attestation verification failed for height %d: %w",
+			block.GetHeight(), err)
 	}
 
 	tip := c.blockChain.GetLatestBlock()

@@ -168,6 +168,14 @@ type Blockchain struct {
 	// Node identifier
 	nodeID string
 
+	// genesisDoc holds the parsed, validated genesis document for this chain.
+	// It is set once at load (see SetGenesisDocument) and read by the epoch-0
+	// snapshot builder, so that snapshot does not depend on which startup phase
+	// ran first. Guarded by its own mutex: startup writes it, and block
+	// production reads it from a different goroutine.
+	genesisDocMu sync.RWMutex
+	genesisDoc   *GenesisStateFile
+
 	// lateJoiner indicates this node did NOT create genesis locally and
 	// must download the entire chain (including genesis) from peers.
 	// Set to true when --seeds is provided at startup.
@@ -282,6 +290,10 @@ type GenesisValidator struct {
 	// block rewards earned by this validator.
 	Address string `json:"address"`
 
+	// OwnerAddress controls stake and withdrawal authorization. It is distinct
+	// from the operator public key used for consensus signatures.
+	OwnerAddress string `json:"owner_address,omitempty"`
+
 	// StakeNSPX is the initial stake expressed in nSPX (the smallest unit).
 	// Use NewGenesisValidatorStake() to create this value from whole SPX.
 	StakeNSPX *big.Int `json:"stake_nspx"`
@@ -339,6 +351,8 @@ type genesisValidatorEntry struct {
 
 	// Address is the hex-encoded 20- or 32-byte reward address for this validator.
 	Address string `json:"address"`
+
+	OwnerAddress string `json:"owner_address,omitempty"`
 
 	// StakeNSPX is the initial stake expressed in nSPX.
 	StakeNSPX string `json:"stake_nspx"`
@@ -431,17 +445,19 @@ func (e *genesisAllocationEntry) UnmarshalJSON(data []byte) error {
 // SPIF representation instead of bare hex.
 func (e genesisValidatorEntry) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
-		NodeID    string `json:"node_id"`
-		Address   string `json:"address"`
-		StakeNSPX string `json:"stake_nspx"`
-		StakeSPX  string `json:"stake_spx"`
-		PublicKey string `json:"public_key,omitempty"`
+		NodeID       string `json:"node_id"`
+		Address      string `json:"address"`
+		OwnerAddress string `json:"owner_address,omitempty"`
+		StakeNSPX    string `json:"stake_nspx"`
+		StakeSPX     string `json:"stake_spx"`
+		PublicKey    string `json:"public_key,omitempty"`
 	}{
-		NodeID:    e.NodeID,
-		Address:   formatGenesisEntryAddress(e.Address),
-		StakeNSPX: e.StakeNSPX,
-		StakeSPX:  e.StakeSPX,
-		PublicKey: e.PublicKey,
+		NodeID:       e.NodeID,
+		Address:      formatGenesisEntryAddress(e.Address),
+		OwnerAddress: formatGenesisEntryAddress(e.OwnerAddress),
+		StakeNSPX:    e.StakeNSPX,
+		StakeSPX:     e.StakeSPX,
+		PublicKey:    e.PublicKey,
 	})
 }
 
@@ -450,17 +466,19 @@ func (e genesisValidatorEntry) MarshalJSON() ([]byte, error) {
 // field is stored as canonical raw uppercase hex.
 func (e *genesisValidatorEntry) UnmarshalJSON(data []byte) error {
 	var raw struct {
-		NodeID    string `json:"node_id"`
-		Address   string `json:"address"`
-		StakeNSPX string `json:"stake_nspx"`
-		StakeSPX  string `json:"stake_spx"`
-		PublicKey string `json:"public_key,omitempty"`
+		NodeID       string `json:"node_id"`
+		Address      string `json:"address"`
+		OwnerAddress string `json:"owner_address,omitempty"`
+		StakeNSPX    string `json:"stake_nspx"`
+		StakeSPX     string `json:"stake_spx"`
+		PublicKey    string `json:"public_key,omitempty"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
 	e.NodeID = raw.NodeID
 	e.Address = parseGenesisEntryAddress(raw.Address)
+	e.OwnerAddress = parseGenesisEntryAddress(raw.OwnerAddress)
 	e.StakeNSPX = raw.StakeNSPX
 	e.StakeSPX = raw.StakeSPX
 	e.PublicKey = raw.PublicKey

@@ -12,9 +12,8 @@
 // tell whether the node's admission path (pool.verifyTransactionSignature,
 // rpc.sendRawTransaction, core.validateTransactionAuth) accepted a witness or
 // silently fell back to single-key auth. These two commands close that loop:
-// the witness is produced with the SAME policy file the node auto-loads
-// (config/escrow_multisig.json, or the `multisig` section of the single
-// config/genesis_state.json for the vault), so a passing
+// the witness is produced with the SAME policy section the node loads from
+// config/genesis_state.json, so a passing
 // run proves signer and verifier agree byte-for-byte.
 package utils
 
@@ -60,11 +59,8 @@ const defaultCustodyWatchInterval = 10 * time.Second
 // bound into every CGE release message, and the vault domain separates the
 // genesis vault's spend namespace from the escrow's.
 //
-// InGenesisDoc marks the roles whose policy is a SECTION of the single genesis
-// document (<datadir>/config/genesis_state.json) rather than a file of its own.
-// Only the genesis vault is: R9 leaves exactly one genesis file, and the vault
-// policy is genesis data (it authorises block 0). The escrow is not genesis
-// related, so it keeps config/escrow_multisig.json.
+// InGenesisDoc marks roles whose policy is a section of the one genesis
+// document (<datadir>/config/genesis_state.json).
 var custodyRoles = map[string]struct {
 	Domain       string
 	OutPath      string
@@ -74,11 +70,12 @@ var custodyRoles = map[string]struct {
 	AutoLoad     string
 }{
 	"escrow": {
-		Domain:   "sphinx-escrow-v1",
-		OutPath:  "config/escrow_multisig.json",
-		KeysDir:  "data/custody/escrow",
-		Label:    "CGE escrow",
-		AutoLoad: "core.InitEscrowAddress",
+		Domain:       "sphinx-escrow-v1",
+		OutPath:      core.GenesisStateFileSubdir,
+		InGenesisDoc: true,
+		KeysDir:      "data/custody/escrow",
+		Label:        "CGE escrow",
+		AutoLoad:     "core.LoadEscrowPolicy(datadir)",
 	},
 	"vault": {
 		Domain:       "sphinx-vault-v1",
@@ -96,19 +93,13 @@ var custodyRoles = map[string]struct {
 //
 //	multisig devnet --role escrow --custodians 3 --threshold 2
 //
-// Writes:
-//
-//	config/escrow_multisig.json              policy (public keys only — shareable)
-//	data/custody/escrow/custodian-<i>.json   secret keys (chmod 0600)
-//
-// The policy file must exist BEFORE the nodes start: the address it derives
-// replaces policy.CGEEscrowAddress in block 0, so every node's genesis funding
-// must be built from the same policy.
+// Writes the policy into the escrow_multisig section of the node's
+// genesis_state.json. Secret custodian keys remain under --keys-dir.
 func runMultisigDevnet(args []string) error {
 	fs := flag.NewFlagSet("multisig devnet", flag.ContinueOnError)
 	role := fs.String("role", "escrow", "custody role: escrow | vault (selects the domain and the default paths)")
 	domain := fs.String("domain", "", "override the domain separation string")
-	out := fs.String("out", "", "policy output path (default: the role's auto-loaded config path)")
+	out := fs.String("out", "", "genesis document path to update (default: the role's config path)")
 	keysDir := fs.String("keys-dir", "", "custodian key output directory (default: the role's data dir)")
 	custodians := fs.Int("custodians", 3, "number of custodian keys to generate (N)")
 	threshold := fs.Int("threshold", 2, "signatures required to authorize a spend (M)")
@@ -179,14 +170,21 @@ func runMultisigDevnet(args []string) error {
 	if err != nil {
 		return err
 	}
-	// The vault policy is a SECTION of the single genesis document; the escrow
-	// policy keeps its own file. Both are public data (custodian SECRET keys go to
-	// keysDir only).
+	// Both policies are sections of the single genesis document. Custodian
+	// secret keys go to keysDir only.
 	if spec.InGenesisDoc {
-		if err := core.MutateGenesisFile(dirOfGenesisDoc(*out), func(gf *core.GenesisStateFile) {
-			gf.Multisig = p
+		datadir, err := dirOfGenesisDoc(*out)
+		if err != nil {
+			return err
+		}
+		if err := core.MutateGenesisFile(datadir, func(gf *core.GenesisStateFile) {
+			if strings.EqualFold(*role, "escrow") {
+				gf.EscrowMultisig = p
+			} else {
+				gf.Multisig = p
+			}
 		}); err != nil {
-			return fmt.Errorf("merge vault policy into %s: %w", *out, err)
+			return fmt.Errorf("merge %s policy into %s: %w", *role, *out, err)
 		}
 	} else {
 		if dir := filepath.Dir(*out); dir != "" && dir != "." {
@@ -201,24 +199,23 @@ func runMultisigDevnet(args []string) error {
 
 	fmt.Printf("role=%s label=%s\naddress=%s\nthreshold=%d-of-%d domain=%s\npolicy=%s\nkeys=%s\n",
 		strings.ToLower(*role), spec.Label, addr, *threshold, *custodians, *domain, *out, *keysDir)
-	if spec.InGenesisDoc {
-		fmt.Printf("The policy is the `multisig` SECTION of %s — there is no separate\n", *out)
-		fmt.Printf("genesis policy file. The node reads it via %s.\n", spec.AutoLoad)
-	} else {
-		fmt.Printf("The node auto-loads this policy via %s at process start;\n", spec.AutoLoad)
-	}
+	fmt.Printf("The policy is a section of %s; the node loads it via %s.\n", *out, spec.AutoLoad)
 	fmt.Printf("start (or restart) every node AFTER writing it so all nodes derive the same address.\n")
 	return nil
 }
 
-// dirOfGenesisDoc strips the "config/genesis_state.json" suffix from a path so it
-// can be handed to core.MutateGenesisFile, which scopes the document by datadir.
-func dirOfGenesisDoc(path string) string {
+// dirOfGenesisDoc strips the genesis document path so it can be handed to
+// core.MutateGenesisFile, which scopes the document by datadir.
+func dirOfGenesisDoc(path string) (string, error) {
 	suffix := core.GenesisStateFileSubdir
-	if len(path) > len(suffix) && strings.HasSuffix(path, suffix) {
-		return strings.TrimSuffix(path, suffix)
+	if strings.HasSuffix(path, suffix) {
+		datadir := strings.TrimSuffix(path, suffix)
+		if datadir != "" {
+			datadir = filepath.Clean(datadir)
+		}
+		return datadir, nil
 	}
-	return path
+	return "", fmt.Errorf("custody policies must be stored in %s, got %s", suffix, path)
 }
 
 // runMultisigSpend is the live path: it fetches the custodial account's nonce
@@ -237,12 +234,12 @@ func dirOfGenesisDoc(path string) string {
 // With --dry-run, --watch only prints the balance (monitor mode) and never
 // signs or broadcasts.
 //
-//	multisig spend --policy config/escrow_multisig.json \
+//	multisig spend --policy config/genesis_state.json \
 //	    --to <recipient> --amount-spx 1000 \
 //	    --keys-dir data/custody/escrow \
 //	    --rpc 127.0.0.1:8700 --verify-rpc 127.0.0.1:8701
 //
-//	multisig spend --policy config/escrow_multisig.json \
+//	multisig spend --policy config/genesis_state.json \
 //	    --to <recipient> --amount-spx 1000 \
 //	    --keys-dir data/custody/escrow \
 //	    --rpc 127.0.0.1:8700 --watch --interval 10s
@@ -250,7 +247,7 @@ func runMultisigSpend(args []string) error {
 	fs := flag.NewFlagSet("multisig spend", flag.ContinueOnError)
 	var keys stringSliceFlag
 	var verifyRPCs stringSliceFlag
-	policyPath := fs.String("policy", "", "policy JSON file the custodial address derives from (required)")
+	policyPath := fs.String("policy", "", "genesis document or policy JSON used to derive the custodial address (required)")
 	from := fs.String("from", "", "custodial source address (default: the policy's derived address)")
 	to := fs.String("to", "", "destination address (required)")
 	amountSPX := fs.String("amount-spx", "", "amount in whole SPX (decimal)")
@@ -317,7 +314,7 @@ func runMultisigSpend(args []string) error {
 		}
 	}
 
-	p, err := multisig.LoadPolicy(*policyPath)
+	p, err := loadCustodyPolicy(*policyPath)
 	if err != nil {
 		return err
 	}
@@ -608,7 +605,7 @@ func autoWatchArgs(policyPath, rpcAddr, proposalDir string) ([]string, error) {
 	if policyPath == "" {
 		return nil, fmt.Errorf("custody policy path is empty (run `multisig devnet --role escrow` BEFORE starting the nodes)")
 	}
-	if _, err := multisig.LoadPolicy(policyPath); err != nil {
+	if _, err := loadCustodyPolicy(policyPath); err != nil {
 		return nil, fmt.Errorf("custody policy %s: %w (run `multisig devnet --role escrow` BEFORE starting the nodes)", policyPath, err)
 	}
 	if proposalDir == "" {
@@ -621,6 +618,21 @@ func autoWatchArgs(policyPath, rpcAddr, proposalDir string) ([]string, error) {
 		"--watch",
 		"--interval", defaultCustodyWatchInterval.String(),
 	}, nil
+}
+
+func loadCustodyPolicy(path string) (*multisig.MultiPartyPolicy, error) {
+	if filepath.Base(path) == core.GenesisStateFileName {
+		datadir := filepath.Dir(filepath.Dir(path))
+		gf, err := core.LoadGenesisFile(datadir)
+		if err != nil {
+			return nil, err
+		}
+		if gf == nil || gf.EscrowMultisig == nil {
+			return nil, fmt.Errorf("genesis document %s has no escrow_multisig section", path)
+		}
+		return gf.EscrowMultisig, nil
+	}
+	return multisig.LoadPolicy(path)
 }
 
 // selfDirectedWatchState is everything one self-directed custody watcher needs.
@@ -785,7 +797,7 @@ func runSelfDirectedCustodyWatch(st selfDirectedWatchState) error {
 	if st.interval <= 0 {
 		return fmt.Errorf("--interval must be positive, got %s", st.interval)
 	}
-	p, err := multisig.LoadPolicy(st.policyPath)
+	p, err := loadCustodyPolicy(st.policyPath)
 	if err != nil {
 		return fmt.Errorf("custody policy %s: %w", st.policyPath, err)
 	}

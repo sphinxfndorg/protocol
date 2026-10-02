@@ -6,6 +6,7 @@ package core
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"math/big"
 	"strings"
@@ -235,6 +236,115 @@ func (bc *Blockchain) IsLateJoiner() bool {
 	return bc.lateJoiner
 }
 
+// VerifyPeerGenesis decides whether a genesis block served by a peer may
+// replace this node's own.
+//
+// ★ WHY THIS GUARD EXISTS. Without it, ReplaceGenesis accepts whatever a peer
+// sends. A hostile peer can hand a joiner ITS OWN genesis — naming ITS OWN
+// validator — and from that moment every block the joiner is offered verifies
+// perfectly against the attacker's chain, because the whole chain is coherent.
+// The genesis block is the root of trust, so an unguarded swap here silently
+// invalidates every block-level check above it.
+//
+// THE ANCHOR IS THE LOCAL GENESIS BLOCK'S OWN COMMITMENTS. The local block was
+// either authored by this node or derived from the bundle it already fetched
+// and verified (devnet), or it was validated against an operator-pinned digest
+// at startup (mainnet/testnet). Its GenesisDocumentDigest and
+// ActiveSnapshotHash therefore already encode the operator's intent, and
+// comparing against them needs no network-type plumbing into the sync loop.
+//
+// If the peer serves a genesis that does not match, the node REFUSES and stays
+// at height 0 rather than adopting a foreign chain.
+//
+// ★ TRUST MODEL, AND WHERE IT IS WEAKER. This guard is only as strong as the
+// local anchor it compares against, and that differs by network:
+//
+//   - mainnet / testnet: the local genesis was validated against an
+//     out-of-band pinned digest (SPHINX_MAINNET_GENESIS_DIGEST /
+//     SPHINX_TESTNET_GENESIS_DIGEST) at startup, so the anchor is
+//     trust-anchored. The pin is the real root of trust here.
+//   - devnet: the local genesis is built from a bundle FETCHED FROM THE
+//     BOOTSTRAP NODE. That is trust-on-first-use. A hostile bootstrap can hand
+//     a joiner a coherent chain the joiner will then accept, because the
+//     bundle and the anchor come from the same source. Acceptable for a
+//     throwaway devnet; it is NOT acceptable for a public network.
+//
+// The proper fix is the document extension: carry allocations and the header
+// template inside the document and inside its digest, so the digest covers all
+// chain-defining content. That work is a BLOCKER for any public testnet.
+func VerifyPeerGenesis(peer, local *types.Block) error {
+	if peer == nil {
+		return fmt.Errorf("peer genesis block is nil")
+	}
+	if peer.Header == nil {
+		return fmt.Errorf("peer genesis block has no header")
+	}
+	if peer.GetHeight() != 0 {
+		return fmt.Errorf("peer offered a block at height %d as genesis; genesis must be height 0", peer.GetHeight())
+	}
+
+	// The peer's commitments must match the identity this node already holds.
+	// An empty local commitment means this node has nothing to compare against,
+	// which is exactly the case where a swap must not be trusted.
+	if local == nil || local.Header == nil {
+		return fmt.Errorf("no local genesis block to verify the peer's against; refusing to adopt a peer's genesis unverified")
+	}
+	if local.Header.GenesisDocumentDigest == "" {
+		return fmt.Errorf("local genesis block carries no genesis document digest, so the peer's genesis cannot be verified against it; refusing the swap")
+	}
+	if peer.Header.GenesisDocumentDigest != local.Header.GenesisDocumentDigest {
+		return fmt.Errorf("peer genesis document digest mismatch: local=%s peer=%s — refusing to replace genesis (a peer may not choose this node's chain)",
+			local.Header.GenesisDocumentDigest, peer.Header.GenesisDocumentDigest)
+	}
+	// The active-snapshot hash is inside the block hash, so the block-hash
+	// check below subsumes this one. It is kept as a named, specific error
+	// message: a snapshot mismatch is a different operational problem from a
+	// digest mismatch and an operator reading the log should not have to
+	// diff two hashes to tell which it is.
+	//
+	// Verified by mutation: disabling this check alone does not fail
+	// RefusesSnapshotMismatch, because the block-hash check catches it. That
+	// is the intended relationship, not a coverage gap.
+	if peer.Header.ActiveSnapshotHash != local.Header.ActiveSnapshotHash {
+		return fmt.Errorf("peer genesis active-snapshot hash mismatch: local=%s peer=%s — refusing to replace genesis",
+			local.Header.ActiveSnapshotHash, peer.Header.ActiveSnapshotHash)
+	}
+
+	// ★ ALLOCATIONS. The two commitments above do NOT cover the allocation
+	// list, and allocations feed block 0's TxsRoot, so a peer can serve a
+	// genesis carrying the same document digest and the same active-snapshot
+	// hash but a DIFFERENT set of distribution transactions — funding itself.
+	// That block is internally consistent and hashes correctly to its own
+	// header, so the checks above and the self-hash check below all pass.
+	//
+	// The fix is the block hash itself: allocations are inside TxsRoot, which
+	// is inside the header hash, so requiring the peer's block hash to equal
+	// the local one closes the gap without extending the document. The proper
+	// fix is to carry allocations in the document and its digest; that is
+	// tracked as a blocker for any public testnet.
+	if string(peer.Header.Hash) != string(local.Header.Hash) {
+		return fmt.Errorf("peer genesis block hash differs from local (local=%s peer=%s) while its document digest and snapshot hash match: the allocation set differs, so the peer is serving a different distribution — refusing to replace genesis",
+			string(local.Header.Hash), string(peer.Header.Hash))
+	}
+
+	// Finally, the block must actually hash to what it claims. The header is
+	// finalized into the peer's own hash, so a body swapped under a matching
+	// commitment still has to reconcile with the stored hash.
+	//
+	// The copy matters: FinalizeHash MUTATES the header (it recomputes TxsRoot
+	// and UnclesHash in place), so finalizing the peer's block directly would
+	// rewrite the very block we are deciding about.
+	headerCopy := *peer.Header
+	blockCopy := *peer
+	blockCopy.Header = &headerCopy
+	blockCopy.FinalizeHash()
+	if string(blockCopy.Header.Hash) != string(peer.Header.Hash) {
+		return fmt.Errorf("peer genesis block does not hash to its own header: claimed=%s recomputed=%s",
+			string(peer.Header.Hash), string(blockCopy.Header.Hash))
+	}
+	return nil
+}
+
 // ReplaceGenesis replaces the local genesis block with one received from a peer.
 // This is used by late-joining nodes that created a local genesis (with their own
 // wall-clock timestamp) and need to adopt the network's canonical genesis block.
@@ -412,6 +522,13 @@ func (bc *Blockchain) SyncSTHINCSManager() {
 // GetChainParams returns the Sphinx blockchain parameters for external recognition
 func (bc *Blockchain) GetChainParams() *SphinxChainParameters {
 	return bc.chainParams
+}
+
+func (bc *Blockchain) GetChainID() uint64 {
+	if bc == nil || bc.chainParams == nil {
+		return 0
+	}
+	return bc.chainParams.ChainID
 }
 
 // SaveBasicChainState saves a basic chain state
@@ -633,6 +750,46 @@ func (bc *Blockchain) ValidateTransactionPolicyAt(tx *types.Transaction, height 
 	offeredFee := tx.GetGasFee()
 	if offeredFee.Cmp(requiredFee) < 0 {
 		return fmt.Errorf("transaction fee below policy minimum: offered %s, required %s", offeredFee.String(), requiredFee.String())
+	}
+
+	// ── Stake proof-of-possession, checked at ADMISSION ──────────────────────
+	// A Stake transaction is only structurally checked by ParseStakeAction
+	// (it must carry a non-empty proof). The proof itself is cryptographic and
+	// is verified during execution — but execution is too late.
+	//
+	// ExecuteBlock aborts the WHOLE block on the first bad transaction, and
+	// CommitBlock evicts the offending transactions from the mempool. So a
+	// junk-proof stake that got past admission would be picked up by the
+	// proposer, poison the block it was bundled into, force that eviction, and
+	// then be re-picked and re-poison on the next round — the proposer
+	// producing an invalid block over and over.
+	//
+	// Verifying here means the transaction never enters the mempool at all.
+	// The check is duplicated deliberately: the executor MUST re-verify,
+	// because a block arriving from a peer has not passed this path and its
+	// proof is untrusted regardless of what any local mempool believes.
+	//
+	// The public key is self-declared in the payload, so this proves
+	// possession of THAT key, not membership: it stops a submitter from
+	// registering someone else's key (validator keys are visible via
+	// handshake and in genesis_state.json) and squatting it permanently in
+	// the operator-key index.
+	if action, isStake, err := types.ParseStakeAction(tx.ReturnData); err != nil {
+		return fmt.Errorf("stake action is malformed: %w", err)
+	} else if isStake && action.Action == "stake" {
+		publicKey, err := hex.DecodeString(action.ValidatorPublicKey)
+		if err != nil || len(publicKey) != OperatorPublicKeyLength {
+			return fmt.Errorf("stake validator public key must be %d bytes of hex", OperatorPublicKeyLength)
+		}
+		proofMessage, err := types.StakeIdentityProofMessage(
+			tx.ChainID, action.Action, action.ValidatorID, tx.Sender, tx.Amount,
+		)
+		if err != nil {
+			return fmt.Errorf("create stake identity proof message: %w", err)
+		}
+		if err := consensus.VerifyStakeIdentityProof(publicKey, action.ValidatorProof, proofMessage); err != nil {
+			return fmt.Errorf("stake validator identity proof failed: %w", err)
+		}
 	}
 
 	// ── Node-side mint-anchor verification ────────────────────────────────

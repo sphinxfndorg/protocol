@@ -64,11 +64,20 @@ type Proposal struct {
 // Vote represents a vote from a validator
 type Vote struct {
 	BlockHash     string `json:"block_hash"`
+	ChainID       uint64 `json:"chain_id"`
+	Height        uint64 `json:"height"`
+	Phase         string `json:"phase"`
 	View          uint64 `json:"view"`
 	VoterID       string `json:"voter_id"`
 	Signature     []byte `json:"signature"`
 	SignatureHash []byte `json:"signature_hash,omitempty"` // Optional: for debugging
 }
+
+const (
+	VotePhasePrepare = "prepare"
+	VotePhaseCommit  = "commit"
+	VotePhaseTimeout = "timeout"
+)
 
 // Attestation represents a validator's vote with epoch information
 type Attestation struct {
@@ -169,8 +178,8 @@ type ConsensusPhase int
 // StakedValidator represents a validator with SPX stake
 type StakedValidator struct {
 	ID              string   `json:"id"`
-	PublicKey       []byte   `json:"public_key,omitempty"`
-	StakeAmount     *big.Int `json:"stake_amount"` // In nSPX (base units)
+	PublicKey       []byte   `json:"public_key,omitempty"` // Operator signing key; stake ownership is a separate chain-state address.
+	StakeAmount     *big.Int `json:"stake_amount"`         // In nSPX (base units)
 	ActivationEpoch uint64   `json:"activation_epoch"`
 	ExitEpoch       uint64   `json:"exit_epoch"`
 	IsSlashed       bool     `json:"is_slashed"`
@@ -266,6 +275,7 @@ type Consensus struct {
 	nodeManager    NodeManager
 	blockChain     BlockChain
 	signingService *SigningService
+	chainID        uint64
 	currentView    uint64
 	currentHeight  uint64
 	phase          ConsensusPhase
@@ -277,8 +287,16 @@ type Consensus struct {
 	isLeader       bool
 
 	// electedLeaderID stores the node ID selected by the most recent
-	// UpdateLeaderStatus (RANDAO) or updateLeaderStatusWithValidators
-	// (round-robin view-change) call.
+	// leader election. There is exactly ONE path that writes it:
+	// updateLeaderStatusLocked (the RANDAO/stake-weighted selector), plus the
+	// two in-line re-derivations in processProposal and processTimeout that
+	// deliberately duplicate that same SelectProposer call because they run
+	// with c.mu already held and cannot call the locking wrapper.
+	//
+	// An earlier revision also had a round-robin variant taking an explicit
+	// validator slice. It had no callers left and was deleted: two election
+	// algorithms writing the same field is exactly the divergence that lets
+	// two nodes disagree about who may propose.
 	electedLeaderID string
 
 	// Vote tracking
@@ -286,6 +304,7 @@ type Consensus struct {
 	prepareVotes     map[string]map[string]*Vote
 	sentVotes        map[string]bool
 	sentPrepareVotes map[string]bool
+	timeoutVotes     map[uint64]map[string]*TimeoutMsg
 
 	// Channels
 	proposalCh chan *Proposal
@@ -294,7 +313,8 @@ type Consensus struct {
 	prepareCh  chan *Vote
 
 	// Callbacks
-	onCommit func(Block) error
+	onCommit          func(Block) error
+	participationGate func(validatorID string, height uint64) (bool, error)
 
 	// Context
 	ctx               context.Context
@@ -314,7 +334,7 @@ type Consensus struct {
 	validatorSet     *ValidatorSet
 	randao           *RANDAO
 	selector         *StakeWeightedSelector
-		useStakeWeighted bool
+	useStakeWeighted bool
 	currentEpoch     uint64
 	justifiedEpoch   uint64
 	finalizedEpoch   uint64
@@ -356,17 +376,20 @@ type Consensus struct {
 	// it has adopted the canonical chain. See SetSyncReady / IsSyncReady.
 	syncReady int32 // atomic bool: 0 = not ready, 1 = ready
 
-	// attestationVerifier, when set, is invoked by FastForward before it
-	// commits a block fetched reactively from a single peer during
-	// catch-up. FastForward otherwise has no PBFT quorum check at all
-	// (unlike the normal proposal pipeline in processProposal, and unlike
-	// bind.runBlockSyncLoop's bulk sync path, both of which verify
-	// attestation quorum). Without this hook a single misbehaving or
-	// forked peer could plant a block on this node that the rest of the
-	// network never actually reached quorum on, permanently diverging this
-	// node's tip hash from the canonical chain. Wired from the bind
-	// package (which can see both core.VerifyBlockAttestations and this
-	// Consensus instance) via SetAttestationVerifier.
+	// attestationVerifier is invoked by FastForward before it commits a block
+	// fetched reactively from a single peer during catch-up.
+	//
+	// ★ REQUIRED, NOT OPTIONAL. This was previously an optional hook behind a
+	// nil check with ZERO callers, which meant production FastForward performed
+	// no attestation check at all and committed whatever a single peer returned.
+	// It is now a NewConsensus parameter, so it is present from construction, and
+	// a nil verifier makes FastForward REJECT rather than skip — there is no
+	// reachable state in which verification is off.
+	//
+	// The implementation lives in core.VerifyBlockAttestations, which resolves
+	// operator keys from REPLAYED CHAIN STATE rather than the handshake
+	// registry, so a node that has never met a peer still verifies
+	// cryptographically. bind supplies it, since bind imports both packages.
 	attestationVerifier func(block Block) error
 
 	// syncNeededCh receives the next height this node needs to sync from
@@ -453,6 +476,9 @@ type BlockSizeMetrics struct {
 
 // TimeoutMsg represents a view change timeout message
 type TimeoutMsg struct {
+	ChainID   uint64 `json:"chain_id"`
+	Height    uint64 `json:"height"`
+	BlockHash string `json:"block_hash,omitempty"`
 	View      uint64 `json:"view"`
 	VoterID   string `json:"voter_id"`
 	Signature []byte `json:"signature"`

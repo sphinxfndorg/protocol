@@ -293,16 +293,21 @@ func (bc *Blockchain) CallContractReadOnly(address, caller string, callData []by
 
 // executeContractTransaction runs deploy/call transactions as part of block
 // execution. It must only be called after normal sender/nonce validation.
-func (bc *Blockchain) executeContractTransaction(tx *types.Transaction, state *StateDB, heights ...uint64) error {
+func (bc *Blockchain) executeContractTransaction(tx *types.Transaction, state *StateDB, actualGasUsed *big.Int, heights ...uint64) error {
+	if actualGasUsed == nil {
+		return errors.New("actual gas usage output is nil")
+	}
+	activePolicy := bc.ActivePolicy()
+	baseGas := activePolicy.QuoteTransactionGas(uint64(len(tx.ReturnData))).GasLimit
 	var blockHeight uint64
 	if len(heights) > 0 {
 		blockHeight = heights[0]
 	}
 	if len(tx.Code) == 0 && tx.ToContract == "" {
+		actualGasUsed.Set(baseGas)
 		return nil
 	}
 	store := newContractStore(state)
-	policy := bc.ActivePolicy()
 	var operations, reads, writes, eventBytes, transfers uint64
 	wasmExecution := false
 
@@ -335,7 +340,7 @@ func (bc *Blockchain) executeContractTransaction(tx *types.Transaction, state *S
 			if !tx.Amount.IsUint64() {
 				return errors.New("WASM transferred value exceeds u64 ABI range")
 			}
-			if err := contracts.ValidateWASM(tx.Code, policy.WASMMaxCodeBytes, policy.WASMMemoryPages); err != nil {
+			if err := contracts.ValidateWASM(tx.Code, activePolicy.WASMMaxCodeBytes, activePolicy.WASMMemoryPages); err != nil {
 				return fmt.Errorf("invalid WASM contract: %w", err)
 			}
 			address := contracts.ContractAddress(tx.Sender, tx.Nonce, tx.Code)
@@ -353,7 +358,7 @@ func (bc *Blockchain) executeContractTransaction(tx *types.Transaction, state *S
 				return fmt.Errorf("analyze WASM: %w", err)
 			}
 			operations, reads, writes, eventBytes, transfers = analysis.Operations, analysis.StorageReads, analysis.StorageWrites, analysis.EventBytes, analysis.Transfers
-			result, err := contracts.ExecuteWASMWithContext(store, address, tx.Code, tx.CallData, policy.WASMMaxCodeBytes, policy.WASMMemoryPages, contracts.WASMContext{Caller: tx.Sender, Value: tx.Amount.Uint64(), BlockHeight: blockHeight, MaxEvents: policy.WASMMaxEvents, Transfer: bc.contractTransfer(state, address)})
+			result, err := contracts.ExecuteWASMWithContext(store, address, tx.Code, tx.CallData, activePolicy.WASMMaxCodeBytes, activePolicy.WASMMemoryPages, contracts.WASMContext{Caller: tx.Sender, Value: tx.Amount.Uint64(), BlockHeight: blockHeight, MaxEvents: activePolicy.WASMMaxEvents, Transfer: bc.contractTransfer(state, address)})
 			if err != nil {
 				return fmt.Errorf("WASM deployment: %w", err)
 			}
@@ -405,7 +410,7 @@ func (bc *Blockchain) executeContractTransaction(tx *types.Transaction, state *S
 				return fmt.Errorf("analyze stored WASM: %w", err)
 			}
 			operations, reads, writes, eventBytes, transfers = analysis.Operations, analysis.StorageReads, analysis.StorageWrites, analysis.EventBytes, analysis.Transfers
-			result, err := contracts.ExecuteWASMWithContext(store, tx.ToContract, code, tx.CallData, policy.WASMMaxCodeBytes, policy.WASMMemoryPages, contracts.WASMContext{Caller: tx.Sender, Value: tx.Amount.Uint64(), BlockHeight: blockHeight, MaxEvents: policy.WASMMaxEvents, Transfer: bc.contractTransfer(state, tx.ToContract)})
+			result, err := contracts.ExecuteWASMWithContext(store, tx.ToContract, code, tx.CallData, activePolicy.WASMMaxCodeBytes, activePolicy.WASMMemoryPages, contracts.WASMContext{Caller: tx.Sender, Value: tx.Amount.Uint64(), BlockHeight: blockHeight, MaxEvents: activePolicy.WASMMaxEvents, Transfer: bc.contractTransfer(state, tx.ToContract)})
 			if err != nil {
 				return fmt.Errorf("WASM execution: %w", err)
 			}
@@ -420,22 +425,23 @@ func (bc *Blockchain) executeContractTransaction(tx *types.Transaction, state *S
 			// zero. Payouts are buffered in StateDB like every other write, so
 			// a later failure rolls them back atomically.
 			Value:      tx.Amount,
-			PriceFloor: policy.MinTokenSaleValue,
+			PriceFloor: activePolicy.MinTokenSaleValue,
 			Transfer:   bc.contractTransferNSPX(state, tx.ToContract),
 		}); err != nil {
 			return fmt.Errorf("native contract call: %w", err)
 		}
 	}
 
-	quote := policy.QuoteTransactionGas(uint64(len(tx.ReturnData)))
-	contractQuote := policy.QuoteContractGas(len(tx.Code) > 0, uint64(len(tx.Code)), uint64(len(tx.CallData)), operations)
+	quote := activePolicy.QuoteTransactionGas(uint64(len(tx.ReturnData)))
+	contractQuote := activePolicy.QuoteContractGas(len(tx.Code) > 0, uint64(len(tx.Code)), uint64(len(tx.CallData)), operations)
 	if wasmExecution {
-		contractQuote = policy.QuoteWASMContractGas(len(tx.Code) > 0, uint64(len(tx.Code)), uint64(len(tx.CallData)), operations, reads, writes, eventBytes, transfers)
+		contractQuote = activePolicy.QuoteWASMContractGas(len(tx.Code) > 0, uint64(len(tx.Code)), uint64(len(tx.CallData)), operations, reads, writes, eventBytes, transfers)
 	}
 	quote.GasLimit.Add(quote.GasLimit, contractQuote.GasLimit)
 	if tx.GasLimit == nil || tx.GasLimit.Cmp(quote.GasLimit) < 0 {
 		return errors.New("contract gas limit below policy requirement")
 	}
+	actualGasUsed.Set(quote.GasLimit)
 	store.commit()
 	return nil
 }

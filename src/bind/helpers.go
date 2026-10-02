@@ -36,35 +36,8 @@ import (
 
 	logger "github.com/sphinxfndorg/protocol/src/console"
 	security "github.com/sphinxfndorg/protocol/src/handshake"
-	denom "github.com/sphinxfndorg/protocol/src/params/denom"
-	"github.com/sphinxfndorg/protocol/src/pool"
 	"github.com/sphinxfndorg/protocol/src/rpc"
 )
-
-func (s *phase2InitState) begin() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.initialized || s.running {
-		return false
-	}
-	s.running = true
-	return true
-}
-
-func (s *phase2InitState) finish(success bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.running = false
-	if success {
-		s.initialized = true
-	}
-}
-
-func (s *phase2InitState) isInitialized() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.initialized
-}
 
 // writeFramedMessage writes a length-prefixed message to the connection.
 func writeFramedMessage(conn net.Conn, data []byte) error {
@@ -212,14 +185,11 @@ func runCheckpointSyncLoop(
 			return false
 		}
 		peers := peerAddrsFunc()
-		if len(peers) == 0 {
-			return false
-		}
-		logger.Info("[%s] Syncing checkpoint with peers...", nodeID)
 		for _, p2pAddr := range peers {
 			if p2pAddr == selfAddr {
 				continue
 			}
+			logger.Info("[%s] Syncing checkpoint from %s...", nodeID, p2pAddr)
 			peerRPCAddr := walletRPCAddressForNode(p2pAddr)
 			if peerRPCAddr == "" {
 				logger.Debug("[%s] No derivable wallet-RPC port for peer %s — skipping", nodeID, p2pAddr)
@@ -270,274 +240,11 @@ func runCheckpointSyncLoop(
 	}
 }
 
-// ============================================================================
-// Stake watching
-// ============================================================================
-
-// watchAndUpdateStakes watches for Block 1 and updates validator stakes.
-func watchAndUpdateStakes(
-	ctx context.Context,
-	bc *core.Blockchain,
-	cons *consensus.Consensus,
-	nodeID string,
-	validatorIDs []string,
-	validatorAddressMap map[string]string,
-	phase2State *phase2InitState,
-) {
-	logger.Info("[%s] Stake watcher started - waiting for Block 1", nodeID)
-
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			latestBlock := bc.GetLatestBlock()
-			if latestBlock == nil {
-				continue
-			}
-
-			height := latestBlock.GetHeight()
-
-			if height >= 1 {
-				logger.Info("[%s] Block %d detected - updating validator stakes from state DB", nodeID, height)
-
-				time.Sleep(300 * time.Millisecond)
-
-				tryInitPhase2WithRetry(bc, cons, nodeID, validatorIDs, validatorAddressMap, phase2State)
-				logger.Info("[%s] Stake watcher done", nodeID)
-				return
-			}
-		}
-	}
-}
-
-// ============================================================================
-// Validator admission — the ONLY path allowed to grant stake
-// ============================================================================
-
-// stakeIfSufficientBalance checks rewardAddress's balance against an
-// already-open stateDB and, only if it meets the minimum stake, admits
-// validatorID with that stake via SetStakeFromBalance. It never falls back
-// to a minimum-stake grant on lookup failure — insufficient or unverifiable
-// balance means the candidate is simply not added as a validator.
-//
-// The balance check itself lives in verifyRewardBalance — the single source
-// of truth for "is this reward address funded enough to stake", used both by
-// genesis Phase 2 bulk initialization and by runtime peer admission after
-// key exchange. There must be exactly one such check; having two copies of
-// this logic is how the two paths drifted apart before (one checked balance,
-// the other blindly granted minimum stake to anyone who dialed in).
-func stakeIfSufficientBalance(vs *consensus.ValidatorSet, stateDB pool.StateDB, selfNodeID, validatorID, rewardAddress string, activationEpoch uint64) bool {
-	balanceNSPX, address, ok := verifyRewardBalance(vs, stateDB, selfNodeID, validatorID, rewardAddress)
-	if !ok {
-		return false
-	}
-
-	// ★ AtEpoch, not the bare call: a runtime-admitted node is still syncing, so
-	// it must not hold vote weight — or a share of the quorum denominator —
-	// until it has caught up. See consensus.SetStakeFromBalanceAtEpoch.
-	if err := vs.SetStakeFromBalanceAtEpoch(validatorID, balanceNSPX, activationEpoch); err != nil {
-		logger.Warn("[%s] Failed to stake %s from verified balance: %v", selfNodeID, validatorID, err)
-		return false
-	}
-	logger.Info("[%s] Validator %s admitted with verified stake from %s, active from epoch %d",
-		selfNodeID, validatorID, address, activationEpoch)
-	return true
-}
-
-// verifyRewardBalance reads rewardAddress's on-chain balance against an
-// already-open stateDB and reports whether it meets the minimum stake. It
-// returns the normalized address alongside the balance so callers can use
-// the exact same key for bookkeeping (e.g. the reward-claim ledger).
-// Insufficient or unverifiable balance means the candidate is simply not
-// admitted — there is deliberately no minimum-stake fallback here.
-func verifyRewardBalance(vs *consensus.ValidatorSet, stateDB pool.StateDB, selfNodeID, validatorID, rewardAddress string) (*big.Int, string, bool) {
-	if vs == nil || stateDB == nil || validatorID == "" || rewardAddress == "" {
-		return nil, "", false
-	}
-
-	address := rewardAddress
-	if normalized, err := common.NormalizeSPIFAddress(rewardAddress); err == nil {
-		address = normalized
-	}
-
-	balanceNSPX, err := stateDB.GetBalance(address)
-	if err != nil {
-		logger.Info("[%s] Cannot verify balance for %s (%s): %v — not admitted as validator", selfNodeID, validatorID, address, err)
-		return nil, address, false
-	}
-	if balanceNSPX == nil || !vs.IsValidStakeAmount(balanceNSPX) {
-		logger.Info("[%s] %s (%s) balance below minimum stake — not admitted as validator", selfNodeID, validatorID, address)
-		return nil, address, false
-	}
-	return balanceNSPX, address, true
-}
-
-// rewardClaimLedger enforces "one funded reward address admits at most one
-// node ID" on the runtime peer-admission path. Ownership of an address is
-// proven to the extent the admission challenge provides: the claimed address
-// is covered by the peer's challenge-response signature (the same proof that
-// authenticates its node identity), and the address must hold a real
-// on-chain balance. The ledger then pins address → node ID so a second,
-// different node ID can never be staked against the same funded address.
-//
-// The local operator's own address is pre-bound with bindSelf so a remote
-// peer can never claim it.
-type rewardClaimLedger struct {
-	mu     sync.Mutex
-	owners map[string]string // normalized reward address -> node ID
-}
-
-func newRewardClaimLedger() *rewardClaimLedger {
-	return &rewardClaimLedger{owners: make(map[string]string)}
-}
-
-// normalizeRewardAddress canonicalizes a reward address for ledger keys.
-func normalizeRewardAddress(addr string) string {
-	if normalized, err := common.NormalizeSPIFAddress(addr); err == nil {
-		return normalized
-	}
-	return addr
-}
-
-// reserve records addr -> nodeID. It returns allowed=false when a DIFFERENT
-// node ID already owns the address (the caller must reject the claim), and
-// fresh=true when this call created the reservation (so the caller can
-// release it if the subsequent stake update fails).
-func (l *rewardClaimLedger) reserve(addr, nodeID string) (allowed, fresh bool) {
-	if l == nil || addr == "" || nodeID == "" {
-		return false, false
-	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	key := normalizeRewardAddress(addr)
-	if owner, exists := l.owners[key]; exists {
-		if owner != nodeID {
-			return false, false
-		}
-		return true, false // already bound to this same node ID
-	}
-	l.owners[key] = nodeID
-	return true, true
-}
-
-// release undoes a fresh reservation (only while this node still owns it).
-func (l *rewardClaimLedger) release(addr, nodeID string) {
-	if l == nil || addr == "" {
-		return
-	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	key := normalizeRewardAddress(addr)
-	if owner, exists := l.owners[key]; exists && owner == nodeID {
-		delete(l.owners, key)
-	}
-}
-
-// bindSelf pre-assigns the local operator's reward address to this node so a
-// remote peer can never claim it.
-func (l *rewardClaimLedger) bindSelf(addr, nodeID string) {
-	l.reserve(addr, nodeID)
-}
-
-// stakeValidatorFromRewardAddress is the runtime entry point used after a
-// peer's key-exchange reply carries a reward address (see helpers.go
-// discoverAndRegisterPeers / handleIncomingConn). It opens its own StateDB
-// handle for a single check — appropriate for the "one peer just showed up"
-// case, unlike the bulk genesis path in initializePhase2Stakes which reuses
-// one already-open handle across every validator.
-//
-// The claim itself is never trusted: it must have been covered by the
-// peer's verified challenge signature upstream (see challenge.go), the
-// address must hold a real on-chain balance (verifyRewardBalance), and —
-// via claims — one funded reward address can admit at most one node ID.
-func stakeValidatorFromRewardAddress(bc *core.Blockchain, cons *consensus.Consensus, selfNodeID, validatorID, rewardAddress string, claims *rewardClaimLedger) bool {
-	if bc == nil || cons == nil {
-		return false
-	}
-	vs := cons.GetValidatorSet()
-	if vs == nil {
-		return false
-	}
-
-	// ★★ CHECKPOINT 1b ITEM 5 GUARD — READ THIS BEFORE TOUCHING THE BODY. ★★
-	//
-	// This function is a TEMPORARY SHIM, removed in Phase 3. It decides
-	// validator admission from a node's LOCAL view: a key-exchange handshake
-	// plus a local balance read. Neither is chain state. Two consequences, both
-	// disqualifying on their own:
-	//
-	//   1. DIFFERENT NODES CAN DISAGREE. This node reads its own replicated
-	//      balance for the peer's address. A node that has not yet replayed
-	//      that state sees a different (or zero) balance and reaches a different
-	//      admission decision. Membership is therefore not a function of the
-	//      chain, which is the property the whole epoch/snapshot design exists
-	//      to provide.
-	//   2. THE ACTIVATION EPOCH IS LOCAL. It comes from this node's own
-	//      currentHeight, not from a committed block.
-	//
-	// On a node running with a GENESIS FILE, membership is already fully
-	// determined by that document, and the set is SEALED (SealGenesis is called
-	// immediately after seeding). Admitting anyone here would both contradict
-	// the document and produce a set no other node could derive. So this is
-	// refused outright rather than merely discouraged.
-	//
-	// With the faucet and auto-join disabled, no funded joiner exists in the
-	// T1/T2/T3 devnet flow, so this guard removes the only runtime admission
-	// path without changing observable behaviour.
-	if vs.Sealed() {
-		logger.Warn("[%s] REFUSING local admission of %s: the validator set is sealed by a "+
-			"genesis document, so membership is chain state and cannot be granted from a "+
-			"local handshake/balance view (stakeValidatorFromRewardAddress is a Phase-2 shim)",
-			selfNodeID, validatorID)
-		return false
-	}
-
-	stateDB, err := bc.NewStateDB()
-	if err != nil {
-		logger.Warn("[%s] Cannot verify stake for %s: StateDB unavailable: %v", selfNodeID, validatorID, err)
-		return false
-	}
-	defer stateDB.Close()
-
-	balanceNSPX, address, ok := verifyRewardBalance(vs, stateDB, selfNodeID, validatorID, rewardAddress)
-	if !ok {
-		return false
-	}
-
-	// One funded reward address → at most one node ID.
-	allowed, fresh := claims.reserve(address, validatorID)
-	if !allowed {
-		logger.Info("[%s] Reward address %s is already bound to another node ID — rejecting stake claim from %s", selfNodeID, address, validatorID)
-		return false
-	}
-
-	// ★ Scheduled, not immediate: this node is by definition still syncing when
-	// it is admitted, so it gets no vote weight until it has had a full epoch to
-	// catch up. ActivationEpochForStake(height) = height/EpochBlocks + 2.
-	activationEpoch := consensus.ActivationEpochForStake(cons.GetCurrentHeight())
-	if err := vs.SetStakeFromBalanceAtEpoch(validatorID, balanceNSPX, activationEpoch); err != nil {
-		if fresh {
-			claims.release(address, validatorID)
-		}
-		logger.Warn("[%s] Failed to stake %s from verified balance: %v", selfNodeID, validatorID, err)
-		return false
-	}
-	logger.Info("[%s] Validator %s admitted with verified stake from %s, active from epoch %d",
-		selfNodeID, validatorID, address, activationEpoch)
-	return true
-}
-
 // seedGenesisValidators loads the initial validator set from the genesis file
 // into consensus. This is the ONLY place initial membership is established:
 // every node that reads the same file computes the same set, hence the same
-// leader rotation and the same quorum denominators. It also pins each
-// validator's reward address to its node ID (so a remote peer can never claim
-// a genesis-bound address) and registers the peer public keys up front, so
-// attestation signatures from genesis validators verify without waiting for a
+// leader rotation and quorum denominators. It registers the peer public keys
+// up front so genesis-validator signatures verify without waiting for a
 // key-exchange handshake.
 //
 // It never invents a validator that the file does not list, and it never
@@ -548,7 +255,6 @@ func seedGenesisValidators(
 	params *parameters.Parameters,
 	gf *core.GenesisStateFile,
 	selfNodeID string,
-	claims *rewardClaimLedger,
 	bc *core.Blockchain,
 ) (bool, error) {
 	vs := cons.GetValidatorSet()
@@ -568,9 +274,6 @@ func seedGenesisValidators(
 		if v.RewardAddress != "" && bc != nil {
 			addr := common.CanonicalSPIFAddress(v.RewardAddress)
 			bc.SetValidatorRewardAddress(v.NodeID, addr)
-			// One reward address ↔ one node ID, enforced for every later
-			// (remote) claim as well.
-			claims.reserve(addr, v.NodeID)
 		}
 		if v.NodeID == selfNodeID {
 			selfSeeded = true
@@ -596,237 +299,6 @@ func seedGenesisValidators(
 		signingService.RegisterPublicKey(v.NodeID, pk)
 	}
 	return selfSeeded, nil
-}
-
-// ============================================================================
-// Phase 2 initialization
-// ============================================================================
-
-// initializePhase2Stakes reads actual balances from state DB and sets
-// validator stakes for the pre-configured (genesis) validator set.
-//
-// Unlike peer-discovery admission (stakeValidatorFromRewardAddress),
-// validatorIDs here comes from trusted node configuration, not from an
-// unauthenticated remote claim — so a missing/zero balance still falls back
-// to minimum stake rather than exclusion, to avoid a fresh genesis network
-// deadlocking just because distribution transactions haven't landed yet.
-// The actual balance check + stake assignment goes through the same
-// stakeIfSufficientBalance core used everywhere else, so there is only one
-// place that reads a balance and decides whether it's enough.
-func initializePhase2Stakes(
-	bc *core.Blockchain,
-	cons *consensus.Consensus,
-	nodeID string,
-	validatorIDs []string,
-	validatorAddressMap map[string]string,
-) bool {
-	logger.Info("[%s] PHASE 2 INITIALIZATION - Reading stakes from genesis allocations", nodeID)
-
-	vs := cons.GetValidatorSet()
-	if vs == nil {
-		logger.Error("[%s] ValidatorSet is nil!", nodeID)
-		return false
-	}
-	if len(validatorIDs) == 0 {
-		logger.Error("[%s] No validators found! Cannot initialize Phase 2 stakes.", nodeID)
-		return false
-	}
-
-	const maxRetries = 5
-	var stateDB pool.StateDB
-	var err error
-	for attempt := 0; attempt < maxRetries; attempt++ {
-		logger.Info("[%s] Phase 2: StateDB open attempt %d/%d", nodeID, attempt+1, maxRetries)
-		stateDB, err = bc.NewStateDB()
-		if err == nil {
-			break
-		}
-		logger.Warn("[%s] Failed to open StateDB (attempt %d/%d): %v", nodeID, attempt+1, maxRetries, err)
-		time.Sleep(time.Duration(100*(1<<attempt)) * time.Millisecond)
-	}
-	if stateDB == nil {
-		logger.Error("[%s] Failed to open StateDB after %d attempts", nodeID, maxRetries)
-		return false
-	}
-	defer stateDB.Close()
-
-	// ★ 1b: the minimum is carried as nSPX *big.Int, not a whole-SPX uint64,
-	// so no stake is truncated on its way into the comparison.
-	minStakeNSPX := vs.GetMinStakeAmount()
-	successCount := 0
-
-	for _, vid := range validatorIDs {
-		address := validatorAddressMap[vid]
-		if address == "" {
-			// A peer ID is not an account address. Until this validator presents
-			// a verified reward-address claim, it deliberately receives only the
-			// configured bootstrap stake; do not attempt an acct:<node-id> lookup.
-			logger.Info("[%s] Validator %s has no verified reward address yet — using configured minimum stake", nodeID, vid)
-			if err := vs.AddGenesisValidator(vid, minStakeNSPX); err == nil {
-				successCount++
-			} else {
-				logger.Warn("[%s] Failed to set minimum stake for %s: %v", nodeID, vid, err)
-			}
-			continue
-		}
-
-		// ★ activationEpoch is 0 HERE, and that is correct: this is the GENESIS
-		// bulk path, running before any block exists. Every genesis validator is
-		// active from epoch 0 by definition. Only the runtime path in
-		// stakeValidatorFromRewardAddress schedules a future epoch, because only
-		// there is the node still syncing.
-		if stakeIfSufficientBalance(vs, stateDB, nodeID, vid, address, 0) {
-			successCount++
-			continue
-		}
-
-		// Genesis-mapped validator with no readable/sufficient balance
-		// yet — bootstrap at minimum stake rather than excluding them;
-		// this is a trusted, operator-configured ID, not a remote claim.
-		logger.Info("[%s] Validator %s (%s) balance not yet available — using minimum stake", nodeID, vid, address)
-		if err := vs.AddGenesisValidator(vid, minStakeNSPX); err != nil {
-			logger.Warn("[%s] Failed to set fallback stake for %s: %v", nodeID, vid, err)
-			continue
-		}
-		successCount++
-	}
-
-	logger.Info("[%s] Phase 2: %d/%d validators staked", nodeID, successCount, len(validatorIDs))
-
-	totalStake := vs.GetTotalStake()
-	if totalStake.Sign() == 0 {
-		logger.Error("[%s] CRITICAL: Total stake is 0 after Phase 2 init!", nodeID)
-		return false
-	}
-
-	totalSPX := new(big.Int).Div(totalStake, big.NewInt(denom.SPX))
-	logger.Info("[%s] Phase 2 stakes initialized with %s SPX total", nodeID, totalSPX.String())
-	return true
-}
-
-// tryInitPhase2 runs the Phase 2 initialization and advances the consensus view.
-func tryInitPhase2(
-	bc *core.Blockchain,
-	cons *consensus.Consensus,
-	nodeID string,
-	validatorIDs []string,
-	validatorAddressMap map[string]string,
-	phase2State *phase2InitState,
-) bool {
-	if phase2State.isInitialized() {
-		return true
-	}
-	if !phase2State.begin() {
-		logger.Info("[%s] Phase 2 initialization already running on another path", nodeID)
-		return false
-	}
-
-	succeeded := false
-	defer func() {
-		phase2State.finish(succeeded)
-		logger.Info("[%s] Phase 2 initialization attempt finished (success=%v)", nodeID, succeeded)
-	}()
-
-	logger.Info("[%s] BLOCK 1 COMMITTED — Initializing Phase 2 stakes", nodeID)
-
-	time.Sleep(500 * time.Millisecond)
-
-	if !initializePhase2Stakes(bc, cons, nodeID, validatorIDs, validatorAddressMap) {
-		logger.Error("[%s] Phase 2 initialization failed!", nodeID)
-		return false
-	}
-
-	// ★ Seal the set here too. This is the no-genesis-file startup path, where
-	// Phase 2 is what establishes membership; after it, nothing may add a live
-	// member outside an epoch boundary.
-	if vs := cons.GetValidatorSet(); vs != nil {
-		vs.SealGenesis()
-	}
-
-	logger.Info("[%s] Phase 2: refreshing leader status", nodeID)
-	cons.UpdateLeaderStatus()
-
-	if err := bc.WriteChainCheckpoint(); err != nil {
-		logger.Warn("[%s] Failed to write checkpoint after Phase 2: %v", nodeID, err)
-	} else {
-		logger.Info("[%s] Checkpoint updated after Phase 2 initialization", nodeID)
-	}
-
-	newLeader := cons.GetElectedLeaderID()
-	if newLeader != "" {
-		logger.Info("[%s] Phase 2 leader elected: %s (isLeader=%v)",
-			nodeID, newLeader, cons.IsLeader())
-	} else {
-		logger.Warn("[%s] No leader after Phase 2 init — will retry next loop", nodeID)
-	}
-	succeeded = true
-	return succeeded
-}
-
-// tryInitPhase2WithRetry attempts to initialize Phase 2 with retries.
-func tryInitPhase2WithRetry(
-	bc *core.Blockchain,
-	cons *consensus.Consensus,
-	nodeID string,
-	validatorIDs []string,
-	validatorAddressMap map[string]string,
-	phase2State *phase2InitState,
-) bool {
-	logger.Info("[%s] Initializing Phase 2 with retry...", nodeID)
-
-	maxAttempts := 15
-	baseBackoff := 200 * time.Millisecond
-	maxBackoff := 10 * time.Second
-
-	for attempt := 0; attempt < maxAttempts; attempt++ {
-		backoff := baseBackoff
-		for i := 0; i < attempt && backoff < maxBackoff; i++ {
-			backoff *= 2
-		}
-		if backoff > maxBackoff {
-			backoff = maxBackoff
-		}
-
-		jitterFactor := 0.7 + 0.6*float64(attempt%10)/10.0
-		jitter := time.Duration(float64(backoff) * jitterFactor)
-		if jitter < 100*time.Millisecond {
-			jitter = 100 * time.Millisecond
-		}
-
-		if tryInitPhase2(bc, cons, nodeID, validatorIDs, validatorAddressMap, phase2State) {
-			logger.Info("[%s] Phase 2 initialized on attempt %d", nodeID, attempt+1)
-			return true
-		}
-
-		if attempt < maxAttempts-1 {
-			logger.Warn("[%s] Phase 2 init attempt %d/%d failed, retrying in %v...",
-				nodeID, attempt+1, maxAttempts, jitter)
-			time.Sleep(jitter)
-		}
-	}
-
-	logger.Error("[%s] Phase 2 initialization failed after %d attempts - applying fallback stakes",
-		nodeID, maxAttempts)
-
-	vs := cons.GetValidatorSet()
-	if vs != nil {
-		minStakeNSPX := vs.GetMinStakeAmount()
-		for _, vid := range validatorIDs {
-			if err := vs.AddGenesisValidator(vid, minStakeNSPX); err != nil {
-				logger.Warn("[%s] Failed to set fallback stake for %s: %v", nodeID, vid, err)
-			} else {
-				logger.Info("[%s] Set fallback stake %s nSPX for %s", nodeID, minStakeNSPX.String(), vid)
-			}
-		}
-
-		cons.UpdateLeaderStatus()
-		cons.StartViewChange()
-		phase2State.finish(true)
-		logger.Info("[%s] Fallback stakes applied, view change triggered", nodeID)
-		return true
-	}
-
-	return false
 }
 
 // ============================================================================
@@ -1023,22 +495,9 @@ func runBlockSyncLoop(
 		default:
 		}
 
-		// ★ FIX: Re-read the peer list on every iteration instead of using a
-		// snapshot captured once at goroutine launch. The caller passes a
-		// closure backed by the live, mutex-protected peer registry (the same
-		// one runBlockProductionLoop's peerCountFunc reads from). Previously
-		// this loop was handed a plain []string snapshot taken at startup —
-		// for the bootstrap node (no --seeds) that snapshot is always empty,
-		// since peers only get registered later via inbound key exchange. The
-		// snapshot never changed for the lifetime of the goroutine, so the
-		// bootstrap node's "len(peerAddrs) == 0" branch below was taken
-		// forever: it correctly reached CAUGHT_UP once (so solo mining could
-		// start), but its ongoing catch-up mechanism — the whole point of a
-		// persistent sync loop — never actually ran for that node, even after
-		// it had live peers and had joined PBFT. Any block it then missed via
-		// direct gossip (dropped message, timing gap during the solo→PBFT
-		// handoff, etc.) could never be recovered, permanently stalling its
-		// height while peers with a working sync loop kept advancing.
+		// Read the live peer list on every iteration so newly discovered
+		// addresses are included in subsequent sync requests. The list is
+		// transport input only; local readiness is not inferred from its size.
 		peerAddrs := peerAddrsFunc()
 
 		localTip := bc.GetLatestBlock()
@@ -1048,33 +507,20 @@ func runBlockSyncLoop(
 			localHeight = localTip.GetHeight()
 			hasGenesis = true
 		}
-
-		// ★ FIX: If no peer addresses are configured (solo mode / first node), there is
-		// nothing to sync — immediately transition to CAUGHT_UP so the block production
-		// loop can start mining blocks. Without this, the first node gets stuck at genesis
-		// because the sync loop can never reach a peer, so it never transitions state, and
-		// the block production loop waits for CAUGHT_UP before it starts mining.
-		if len(peerAddrs) == 0 {
+		if hasGenesis {
 			syncStateMu.Lock()
 			if *syncState == SyncStateSyncing {
 				*syncState = SyncStateCaughtUp
-				logger.Info("[%s] No peer addresses configured — skipping sync, transitioning to CAUGHT_UP", nodeID)
+				logger.Info("[%s] Local chain is initialized — sync readiness is based on chain state", nodeID)
 				if syncStarted {
 					syncStarted = false
 				}
 			}
 			syncStateMu.Unlock()
-			observeSync(0, 0) // [observational] no peers known → target unknown
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(10 * time.Second):
-			}
-			continue
 		}
 
-		logger.Debug("[%s] Sync loop: localHeight=%d, hasGenesis=%v, peerCount=%d, retryInterval=%v",
-			nodeID, localHeight, hasGenesis, len(peerAddrs), currentRetryInterval)
+		logger.Debug("[%s] Sync loop: localHeight=%d, hasGenesis=%v, retryInterval=%v",
+			nodeID, localHeight, hasGenesis, currentRetryInterval)
 
 		if time.Since(lastPeerRefresh) > peerRefreshInterval {
 			logger.Debug("[%s] Refreshing peer list (last refresh %v ago)", nodeID, time.Since(lastPeerRefresh))
@@ -1086,6 +532,7 @@ func runBlockSyncLoop(
 		networkTip := uint64(0)
 		bestPeerAddr := ""
 		reachablePeers := 0
+		peerResponded := false
 		for _, addr := range peerAddrs {
 			if addr == "" {
 				continue
@@ -1095,6 +542,7 @@ func runBlockSyncLoop(
 				logger.Debug("[%s] Peer %s failed tip query: %v", nodeID, addr, err)
 				continue
 			}
+			peerResponded = true
 			reachablePeers++
 			// ★ FIX 1: keep the first reachable peer as fallback even if tip=0
 			if bestPeerAddr == "" {
@@ -1110,7 +558,7 @@ func runBlockSyncLoop(
 		// consults this; getsyncstatus reads it.
 		observeSync(networkTip, reachablePeers)
 
-		if reachablePeers == 0 {
+		if !peerResponded {
 			// ★ FIX: this is the one actionable line when a node is waiting
 			// for peers that are not up yet (e.g. node 2/3 of a same-box
 			// devnet still booting, or a crashed peer), so name the addresses
@@ -1123,10 +571,10 @@ func runBlockSyncLoop(
 			// unthrottled WARN flooded the first minute of a healthy startup
 			// race. The limiter appends "(+N suppressed)", so the operator
 			// can still see how many attempts happened inside the window.
-			noPeerSyncLog.Warn("[%s] No peers reachable — tried %d (%s); backing off before retry (is the other node running?)",
-				nodeID, len(peerAddrs), strings.Join(peerAddrs, ", "))
-			logger.Debug("[%s] No peers reachable — tried %d (%s)",
-				nodeID, len(peerAddrs), strings.Join(peerAddrs, ", "))
+			noPeerSyncLog.Warn("[%s] No peers reachable — tried addresses (%s); backing off before retry (is the other node running?)",
+				nodeID, strings.Join(peerAddrs, ", "))
+			logger.Debug("[%s] No peers reachable — tried addresses (%s)",
+				nodeID, strings.Join(peerAddrs, ", "))
 			consecutiveFailures++
 			currentRetryInterval = time.Duration(float64(currentRetryInterval) * backoffMultiplier)
 			if currentRetryInterval > maxRetryInterval {
@@ -1171,6 +619,41 @@ func runBlockSyncLoop(
 					return
 				case <-time.After(currentRetryInterval):
 				}
+				continue
+			}
+			// ★ GUARD: never adopt a peer's genesis unverified. A hostile peer
+			// can serve its OWN genesis naming ITS OWN validator, and from
+			// then on every block it offers verifies perfectly against that
+			// chain. The local genesis was authored here or derived from the
+			// verified bundle (devnet), or pinned out-of-band (mainnet), so its
+			// commitments are the anchor. A mismatch is a hard refusal and the
+			// peer is scored, because there is no honest explanation for
+			// serving a different chain.
+			if err := core.VerifyPeerGenesis(genesisBlock, bc.GetBlockByNumber(0)); err != nil {
+				logger.Error("[%s] REFUSED peer genesis from %s: %v — staying at height 0",
+					nodeID, bestPeerAddr, err)
+				peerFailureCount[bestPeerAddr]++
+				consecutiveFailures++
+				currentRetryInterval = time.Duration(float64(currentRetryInterval) * backoffMultiplier)
+				if currentRetryInterval > maxRetryInterval {
+					currentRetryInterval = maxRetryInterval
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(currentRetryInterval):
+				}
+				continue
+			}
+			if existing := bc.GetBlockByNumber(0); existing != nil &&
+				existing.GetHash() == genesisBlock.GetHash() {
+				// Identical genesis: replacing would be a no-op that still
+				// rewrites storage and re-executes block 0. Skip it.
+				logger.Info("[%s] Peer genesis matches local genesis (%s) — no replacement needed",
+					nodeID, genesisBlock.GetHash())
+				hasGenesis = true
+				localHeight = 0
+				consecutiveFailures = 0
 				continue
 			}
 			if err := bc.ReplaceGenesis(genesisBlock); err != nil {
@@ -1300,31 +783,44 @@ func runBlockSyncLoop(
 				peerGenesis := peerGenesisResp.Blocks[0]
 				localGenesis := bc.GetBlockByNumber(0)
 				if localGenesis != nil && peerGenesis != nil && localGenesis.GetHash() != peerGenesis.GetHash() {
-					logger.Info("[%s] Local genesis hash differs from peer %s — replacing genesis and clearing chain", nodeID, bestPeerAddr)
-					if err := bc.ReplaceGenesis(peerGenesis); err != nil {
-						logger.Warn("[%s] Failed to replace genesis: %v", nodeID, err)
+					// ★ GUARD (second call site): the "local differs from
+					// peer" branch is where a hostile peer most obviously
+					// wants to win. The local genesis is the anchor; a peer
+					// that does not match it is refused and scored, and this
+					// node keeps its own chain instead of clearing it.
+					if guardErr := core.VerifyPeerGenesis(peerGenesis, localGenesis); guardErr != nil {
+						logger.Error("[%s] REFUSED divergent genesis from peer %s: %v — keeping local genesis, local=%s peer=%s",
+							nodeID, bestPeerAddr, guardErr,
+							localGenesis.GetHash(), peerGenesis.GetHash())
+						peerFailureCount[bestPeerAddr]++
+						consecutiveFailures++
 					} else {
-						bc.ClearChainAfter(0)
-						logger.Info("[%s] Genesis replaced with peer's version — re-downloading chain from scratch", nodeID)
-						// Same fix as the initial-install site above: a
-						// replaced genesis is unexecuted genesis. Fund the
-						// vault and apply the embedded distribution txs now,
-						// or every allocation stays at zero balance again.
-						if err := bc.ExecuteGenesisBlock(); err != nil {
-							logger.Error("[%s] Failed to execute replaced genesis block: %v", nodeID, err)
+						logger.Info("[%s] Local genesis hash differs from peer %s — replacing genesis and clearing chain", nodeID, bestPeerAddr)
+						if err := bc.ReplaceGenesis(peerGenesis); err != nil {
+							logger.Warn("[%s] Failed to replace genesis: %v", nodeID, err)
 						} else {
-							logger.Info("[%s] Replaced genesis block executed — vault funded and allocations distributed", nodeID)
-							if tps := bc.GetTPSMonitor(); tps != nil {
-								txCount := uint64(len(peerGenesis.Body.TxsList))
-								for i := uint64(0); i < txCount; i++ {
-									tps.RecordTransaction()
+							bc.ClearChainAfter(0)
+							logger.Info("[%s] Genesis replaced with peer's version — re-downloading chain from scratch", nodeID)
+							// Same fix as the initial-install site above: a
+							// replaced genesis is unexecuted genesis. Fund the
+							// vault and apply the embedded distribution txs now,
+							// or every allocation stays at zero balance again.
+							if err := bc.ExecuteGenesisBlock(); err != nil {
+								logger.Error("[%s] Failed to execute replaced genesis block: %v", nodeID, err)
+							} else {
+								logger.Info("[%s] Replaced genesis block executed — vault funded and allocations distributed", nodeID)
+								if tps := bc.GetTPSMonitor(); tps != nil {
+									txCount := uint64(len(peerGenesis.Body.TxsList))
+									for i := uint64(0); i < txCount; i++ {
+										tps.RecordTransaction()
+									}
+									tps.RecordBlock(txCount, 5*time.Second)
 								}
-								tps.RecordBlock(txCount, 5*time.Second)
 							}
+							// Reset local height so we re-download from block 1
+							localHeight = 0
+							hasGenesis = true
 						}
-						// Reset local height so we re-download from block 1
-						localHeight = 0
-						hasGenesis = true
 					}
 				}
 			}
@@ -1332,22 +828,17 @@ func runBlockSyncLoop(
 
 		if networkTip == 0 {
 			syncStateMu.Lock()
-			if *syncState == SyncStateSyncing {
+			if hasGenesis && *syncState == SyncStateSyncing {
 				*syncState = SyncStateCaughtUp
-				logger.Info("[%s] At genesis (height 0) — transitioning to CAUGHT_UP (fresh network)", nodeID)
+				logger.Info("[%s] Local genesis is available and no peer tip is ahead — transitioning to CAUGHT_UP", nodeID)
 				if syncStarted {
 					syncStarted = false
 				}
 			}
 			syncStateMu.Unlock()
 			observeSync(networkTip, reachablePeers) // [observational] post-transition state
-			// ★ FIX: Don't return — enter periodic sync check mode. The network
-			// may produce blocks later. We keep checking every 10 seconds so a
-			// node that joined early (before any blocks were mined) automatically
-			// catches up when blocks arrive, without needing a restart.
-			// This implements "synchronization shouldn't happen only during startup"
-			// — the node continuously monitors the network tip and catches up
-			// whenever it falls behind.
+			// Keep retrying even if genesis has not arrived yet. A missing genesis
+			// document is not evidence that this node is synchronized.
 			logger.Info("[%s] Entering periodic sync check mode — will re-check every 10s", nodeID)
 			select {
 			case <-ctx.Done():
@@ -1455,20 +946,26 @@ func runBlockSyncLoop(
 				break
 			}
 			if cons != nil && blk.GetHeight() > 0 {
-				// ── Attestation quorum check ──
-				if len(blk.Body.Attestations) > 0 {
-					// ★ NO live validator set and NO epoch argument: the
-					// verification resolves consensus.ValidatorSetAt(height)
-					// itself and fails closed if that snapshot is missing.
-					if err := core.VerifyBlockAttestations(blk); err != nil {
-						logger.Error("[%s] Block %d failed attestation quorum check: %v — rejecting batch from peer %s",
-							nodeID, blk.GetHeight(), err, bestPeerAddr)
-						applied = 0
-						break
-					}
-				} else {
-					logger.Info("[%s] Block %d has no attestations (solo-mined before PBFT) — skipping quorum check, verified by chain continuity",
-						nodeID, blk.GetHeight())
+				// ── Authority check ──────────────────────────────────────────
+				// ★ NO "solo-mined" SKIP ANYMORE. The old code read an empty
+				// attestation list as permission to skip verification, which
+				// let a peer hand this node an arbitrary chain of unattested
+				// blocks whose only property was that parent hashes linked.
+				// VerifyBlockAuthority decides from the snapshot that governs
+				// the height: a quorum certificate when the block has one, and
+				// otherwise a verified proposer signature, and only while the
+				// governing snapshot has a single member. The key comes from
+				// replayed chain state and the verifier is the shared
+				// consensus primitive, so this is cryptographic even with no
+				// handshake history.
+				if err := core.VerifyBlockAuthority(blk,
+					core.NewChainStateKeyResolver(bc),
+					core.NewConsensusAttestationVerifier(),
+					core.NewConsensusBlockProposerSignatureVerifier()); err != nil {
+					logger.Error("[%s] Block %d failed authority verification: %v — rejecting batch from peer %s",
+						nodeID, blk.GetHeight(), err, bestPeerAddr)
+					applied = 0
+					break
 				}
 			}
 			wrapped := core.NewBlockHelper(blk)
@@ -1560,10 +1057,6 @@ func runBlockProductionLoop(
 	cons *consensus.Consensus,
 	nodeID string,
 	networkType string,
-	validatorIDs []string,
-	validatorAddressMap map[string]string,
-	phase2State *phase2InitState,
-	peerCountFunc func() int,
 	validatorReadyCountFunc func() int,
 	// readyStakeFunc returns the stake of validators that are both in the
 	// ACTIVE staked set and READY, plus the total active stake. The readiness
@@ -1577,21 +1070,6 @@ func runBlockProductionLoop(
 	// Set initial consensus status: PAUSED while syncing
 	progress.SetConsensusStatus("PAUSED — synchronizing")
 
-	// ★ FIX: SOLO_MODE must be exclusive to the bootstrap node — the one
-	// that created genesis locally, i.e. bc.IsLateJoiner() == false (set at
-	// startup from `seeds != ""`, see bind/nodes.go's core.NewBlockchain
-	// call: `seeds != ""` is passed as the lateJoiner argument). Previously
-	// *any* node that currently saw 0 peers would enter SOLO_MODE, including
-	// late joiners. If peer discovery took a couple of minutes, every node
-	// independently mined 15-16 blocks with divergent content from height 1
-	// onward — a fork the reorg path couldn't heal (see
-	// FindCommonAncestor/handleReorg fixes in sync.go).
-	//
-	// NOTE: this deliberately does NOT key off any node index or count — there
-	// is no longer a node-count flag, and IsLateJoiner (driven by whether
-	// --seeds was given at startup) is the only signal that distinguishes "the
-	// bootstrap node" from "any other node" in every deployment.
-	isBootstrapNode := !bc.IsLateJoiner()
 	const (
 		singleNodeInterval  = 10 * time.Second
 		multiNodeRoundDelay = 3 * time.Second
@@ -1622,6 +1100,17 @@ func runBlockProductionLoop(
 			return 0
 		}
 		return len(vs.ActiveValidatorIDs(0))
+	}
+	isSoleLocalValidator := func() bool {
+		if cons == nil {
+			return false
+		}
+		vs := cons.GetValidatorSet()
+		if vs == nil {
+			return false
+		}
+		active := vs.ActiveValidatorIDs(0)
+		return len(active) == 1 && active[0] == nodeID
 	}
 
 	// readyStakeHoldsQuorum is the readiness gate: STRICTLY more than 2/3 of the
@@ -1709,27 +1198,38 @@ func runBlockProductionLoop(
 		break
 	}
 
-	// ── SOLO MODE (genuine single-validator network only) ──
-	// Entered ONLY when the ACTIVE STAKED set has exactly one member and no
-	// peers are known at all. In any multi-validator network the bootstrap
-	// node must wait for its peers and then produce PBFT-attested blocks:
-	// mining solo first produced an unattested chain that late joiners
-	// accepted via the "solo-mined before PBFT — skipping quorum check" path,
-	// letting it become canonical ahead of the real consensus chain.
-	//
-	// OPEN QUESTION (Phase 1, reported not decided): with membership now
-	// chain-driven, whether solo mining should exist at all is an operator
-	// decision. This gate is the minimal, strictly narrower replacement for
-	// the old single-node check.
-	noPeersKnown := peerCountFunc == nil || peerCountFunc() == 0
-	if isBootstrapNode && stakedSetSize() == 1 && noPeersKnown {
-		logger.Info("[%s] SOLO MODE — bootstrap node, no peers detected yet, mining blocks independently", nodeID)
+	// ── SOLO MODE (policy decision remains open) ──
+	// This mode is now selected from active chain membership only. Connectivity
+	// and startup flags do not determine whether this node produces solo blocks.
+	// Phase 1 preserves the existing single-validator path pending an operator
+	// decision on whether standalone solo production should exist at all.
+	if isSoleLocalValidator() {
+		logger.Info("[%s] SOLO MODE — this node is the sole active validator", nodeID)
 		progress.SetConsensusStatus("ACTIVE — solo mining")
 
 		blockTicker := time.NewTicker(singleNodeInterval)
 		defer blockTicker.Stop()
 		peerCheckTicker := time.NewTicker(5 * time.Second)
 		defer peerCheckTicker.Stop()
+
+		// ★ FATAL AFTER REPEATED INVARIANT FAILURES.
+		//
+		// A node whose epoch-0 snapshot is missing cannot ever produce block 1,
+		// because CreateBlock fails closed on it. That used to log one ERROR
+		// every 10 seconds forever: the process looked alive, the dashboard
+		// showed no progress, and an operator had no signal that it would never
+		// recover. Retrying cannot help — the precondition is structural, not
+		// transient.
+		//
+		// Scoped deliberately to a NARROW error class. A node legitimately
+		// waiting for peers, a leader, or a sync catch-up must keep retrying, so
+		// ordinary CreateBlock errors are NOT fatal. Only a missing/inconsistent
+		// validator snapshot is treated as an invariant violation, because
+		// nothing this loop can do will ever change that answer.
+		var (
+			lastInvariantErr string
+			invariantRepeats int
+		)
 
 		for {
 			select {
@@ -1739,9 +1239,44 @@ func runBlockProductionLoop(
 			case <-blockTicker.C:
 				blk, err := bc.CreateBlock()
 				if err != nil {
-					logger.Error("[%s] solo mine error: %v", nodeID, err)
-					continue
+					// Is this the structural class (never recoverable), or an
+					// ordinary transient/expected error (keep retrying)?
+					msg := err.Error()
+					switch {
+					case strings.Contains(msg, "validator snapshot for height") &&
+						strings.Contains(msg, "is unavailable"):
+						if msg == lastInvariantErr {
+							invariantRepeats++
+						} else {
+							lastInvariantErr = msg
+							invariantRepeats = 1
+						}
+						if invariantRepeats >= 3 {
+							logger.Error("[%s] FATAL: block production failed %d consecutive times with an unrecoverable invariant violation: %v",
+								nodeID, invariantRepeats, err)
+							logger.Error("[%s] The epoch-0 validator snapshot is missing or does not match genesis. "+
+								"This node CANNOT produce block %d and never will without intervention. Stopping instead of logging the same error forever.",
+								nodeID, 1)
+							if progress != nil {
+								progress.SetConsensusStatus("FATAL — missing validator snapshot")
+							}
+							os.Exit(1)
+						}
+						logger.Error("[%s] solo mine error (invariant violation %d/3): %v",
+							nodeID, invariantRepeats, err)
+						continue
+					default:
+						// Transient or expected (waiting on peers, a leader, a
+						// sync, a full mempool): reset the invariant counter and
+						// keep retrying, exactly as before.
+						lastInvariantErr = ""
+						invariantRepeats = 0
+						logger.Error("[%s] solo mine error: %v", nodeID, err)
+						continue
+					}
 				}
+				lastInvariantErr = ""
+				invariantRepeats = 0
 				wrapped := core.NewBlockHelper(blk)
 				if err := bc.CommitBlock(wrapped); err != nil {
 					logger.Error("[%s] solo commit error: %v", nodeID, err)
@@ -1943,10 +1478,6 @@ startPBFT:
 	// the stale pre-handoff height until the next block changed it.
 	progress.UpdateBlockSync(int64(currentHeight), int64(currentHeight))
 
-	phase2Initialized := false
-
-	go watchAndUpdateStakes(ctx, bc, cons, nodeID, validatorIDs, validatorAddressMap, phase2State)
-
 	// The dashboard denominator is the active staked set (chain state), never
 	// a configured network size — "ready" is the staked+ready count.
 	progress.UpdateValidatorStatus(effectiveValidatorCount(), stakedSetSize())
@@ -1982,11 +1513,6 @@ startPBFT:
 				progress.UpdateBlockSync(int64(currentHeight), int64(currentHeight))
 			}
 
-			if currentHeight >= 1 && !phase2Initialized {
-				if tryInitPhase2WithRetry(bc, cons, nodeID, validatorIDs, validatorAddressMap, phase2State) {
-					phase2Initialized = true
-				}
-			}
 		}
 
 		// Update mempool and validator counts periodically
@@ -2214,12 +1740,6 @@ startPBFT:
 					// still showed 6/6).
 					progress.UpdateBlockSync(int64(currentHeight), int64(currentHeight))
 
-					if currentHeight >= 1 && !phase2Initialized {
-						if tryInitPhase2WithRetry(bc, cons, nodeID, validatorIDs, validatorAddressMap, phase2State) {
-							phase2Initialized = true
-						}
-					}
-
 					committed = true
 				}
 			}
@@ -2355,8 +1875,8 @@ func loadOrCreateDevnetKey(dir string) (string, []byte, []byte, error) {
 
 // devnetAddressForPublicKey renders a SPHINCS public key as the canonical
 // raw-hex SPIF address that state keys and balance lookups use — the same
-// derivation `genesis create` uses for devnet staking keys, so a faucet-funded
-// address and a `genesis create` address are indistinguishable to the state DB.
+// derivation used for devnet reward keys, so a faucet-funded address and any
+// other valid reward address are indistinguishable to the state DB.
 func devnetAddressForPublicKey(pkBytes []byte) (string, error) {
 	formatted := usiKey.GetPublicKeyFingerprintFromBytes(pkBytes, usiKey.OrgSPIF)
 	canonical := common.CanonicalSPIFAddress(formatted)

@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sphinxfndorg/protocol/src/consensus"
 	logger "github.com/sphinxfndorg/protocol/src/console"
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
 	denom "github.com/sphinxfndorg/protocol/src/params/denom"
@@ -31,6 +32,8 @@ var (
 // getCachedGenesisBlock. This is separate from genesisSignerMu (genesis.go),
 // which only guards the registered signer pointer itself.
 var genesisSignAttemptMu sync.Mutex
+
+var genesisCommitmentMu sync.Mutex
 
 // GetGenesisTime returns the genesis block timestamp
 func (bc *Blockchain) GetGenesisTime() time.Time {
@@ -62,35 +65,32 @@ func (bc *Blockchain) GetGenesisTime() time.Time {
 	return time.Unix(genesis.GetTimestamp(), 0)
 }
 
-// GetValidatorStake returns the stake amount for a validator in nSPX
+// GetValidatorStake returns the validator's recorded stake in nSPX.
 func (bc *Blockchain) GetValidatorStake(validatorID string) *big.Int {
-	bc.lock.RLock()
-	defer bc.lock.RUnlock()
-
-	// This is a placeholder - you need to implement actual stake storage
-	// For now, return a default stake for testing
-	if bc.chainParams != nil && bc.chainParams.ConsensusConfig != nil {
-		// Return minimum stake as default for testing
-		return bc.chainParams.ConsensusConfig.MinStakeAmount
+	if bc == nil || validatorID == "" {
+		return nil
 	}
-
-	// Default fallback: minimum validator stake in nSPX (32 SPX) — shared
-	// constant from the denom package.
-	return denom.MinValidatorStakeNSPX()
+	vs := bc.LiveValidatorSet()
+	if vs == nil {
+		return nil
+	}
+	validator, ok := vs.GetValidator(validatorID).(*consensus.StakedValidator)
+	if !ok || validator == nil || validator.StakeAmount == nil {
+		return nil
+	}
+	return new(big.Int).Set(validator.StakeAmount)
 }
 
-// GetTotalStaked returns the total amount staked across all validators
+// GetTotalStaked returns active validator stake from the live chain state.
 func (bc *Blockchain) GetTotalStaked() *big.Int {
-	bc.lock.RLock()
-	defer bc.lock.RUnlock()
-
-	// Placeholder - you need to implement actual total stake calculation
-	// For testing, return a reasonable value
-	totalStake := new(big.Int).Mul(
-		big.NewInt(1000), // Assume 1000 SPX total staked
-		big.NewInt(denom.SPX),
-	)
-	return totalStake
+	if bc == nil {
+		return big.NewInt(0)
+	}
+	vs := bc.LiveValidatorSet()
+	if vs == nil {
+		return big.NewInt(0)
+	}
+	return vs.GetTotalStake()
 }
 
 // UpdateValidatorStake updates a validator's stake (for rewards/slashing)
@@ -207,8 +207,34 @@ func getCachedGenesisBlock() *types.Block {
 			}
 		}
 	})
+	ensureCachedGenesisCommitments(genesisCached)
 	signGenesisIfPossible(genesisCached)
 	return genesisCached
+}
+
+func ensureCachedGenesisCommitments(block *types.Block) {
+	genesisCommitmentMu.Lock()
+	defer genesisCommitmentMu.Unlock()
+	if block == nil || block.Header == nil ||
+		(block.Header.ActiveSnapshotHash != "" && block.Header.GenesisDocumentDigest != "") {
+		return
+	}
+	digest, snapshotHash, err := genesisHeaderCommitments()
+	if err != nil {
+		logger.Error("genesis commitment refresh failed: %v", err)
+		return
+	}
+	if digest == "" || snapshotHash == "" {
+		return
+	}
+	block.Header.ActiveSnapshotHash = snapshotHash
+	block.Header.GenesisDocumentDigest = digest
+	block.Header.ProposerSignature = nil
+	block.Header.SigValid = false
+	block.FinalizeHash()
+	genesisHashValue = block.GetHash()
+	logger.Info("Genesis commitments attached: snapshot=%s document=%s",
+		snapshotHash, digest)
 }
 
 // signGenesisIfPossible attaches a producer signature to the cached genesis

@@ -25,19 +25,10 @@ const (
 )
 
 // NewStateMachine creates a new state machine replication instance
-func NewStateMachine(storage *Storage, nodeID string, validators []string) *StateMachine {
-	quorumSize := calculateQuorumSize(len(validators))
-
-	validatorMap := make(map[string]bool)
-	for _, v := range validators {
-		validatorMap[v] = true
-	}
-
+func NewStateMachine(storage *Storage, nodeID string) *StateMachine {
 	sm := &StateMachine{
 		storage:      storage,
 		nodeID:       nodeID,
-		validators:   validatorMap,
-		quorumSize:   quorumSize,
 		stateHistory: make(map[uint64]*StateSnapshot),
 		opCh:         make(chan *Operation, 1000),
 		stateCh:      make(chan *StateSnapshot, 100),
@@ -133,7 +124,10 @@ func (sm *StateMachine) ProposeBlock(block *types.Block) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	if !sm.isValidator() {
+	if block == nil {
+		return fmt.Errorf("block is nil")
+	}
+	if !sm.isValidatorAt(block.GetHeight(), sm.nodeID) {
 		return fmt.Errorf("node %s is not a validator", sm.nodeID)
 	}
 
@@ -840,7 +834,7 @@ func (sm *StateMachine) ProposeStateTransition(transition *StateTransition) erro
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	if !sm.isValidator() {
+	if !sm.isValidatorAt(sm.currentState.Height+1, sm.nodeID) {
 		return fmt.Errorf("node %s is not a validator", sm.nodeID)
 	}
 
@@ -888,7 +882,7 @@ func (sm *StateMachine) validateStateTransition(transition *StateTransition) err
 		if transition.ValidatorID == "" {
 			return fmt.Errorf("validator ID required for remove")
 		}
-		if !sm.validators[transition.ValidatorID] {
+		if !sm.isValidatorAt(sm.currentState.Height+1, transition.ValidatorID) {
 			return fmt.Errorf("validator %s does not exist", transition.ValidatorID)
 		}
 	case "stake_update":
@@ -1198,19 +1192,12 @@ func (sm *StateMachine) applyStateTransitionOperation(op *Operation) error {
 		// genesis document (AddGenesisValidator) or by being QUEUED
 		// (QueueValidator) and gaining weight at a boundary, where every node
 		// derives the same answer from the same blocks. This state-machine hint
-		// is recorded locally but grants nothing.
-		sm.mu.Lock()
-		sm.validators[op.StateTransition.ValidatorID] = true
-		sm.mu.Unlock()
-		log.Printf("validator_add for %s recorded as a local hint only; "+
-			"membership changes are decided by the epoch transition, not by a peer operation",
+		log.Printf("validator_add for %s ignored by SMR; membership is read from the chain snapshot",
 			op.StateTransition.ValidatorID)
 
 	case "validator_remove":
-		// Remove an existing validator
-		validatorID := op.StateTransition.ValidatorID
-		log.Printf("Removing validator %s", validatorID)
-		delete(sm.validators, validatorID)
+		log.Printf("validator_remove for %s ignored by SMR; membership is read from the chain snapshot",
+			op.StateTransition.ValidatorID)
 
 	case "stake_update":
 		// Update validator stake
@@ -1278,12 +1265,20 @@ func (sm *StateMachine) createStateSnapshot(block *types.Block) (*StateSnapshot,
 	// Calculate state root (simplified - in practice this would be a Merkle root)
 	stateRoot := sm.calculateStateRoot(block)
 
+	validatorSnapshot := consensus.ValidatorSetAt(block.GetHeight())
+	if validatorSnapshot == nil {
+		return nil, fmt.Errorf("validator snapshot missing for block height %d", block.GetHeight())
+	}
+	validators := make(map[string]bool, len(validatorSnapshot.Validators))
+	for id := range validatorSnapshot.Validators {
+		validators[id] = true
+	}
 	snapshot := &StateSnapshot{
 		Height:     block.GetHeight(),
 		BlockHash:  block.GetHash(),
 		StateRoot:  stateRoot,
 		Timestamp:  time.Now(),
-		Validators: sm.validators,
+		Validators: validators,
 		UTXOSet:    make(map[string]*types.UTXO),   // Would be populated from block
 		Accounts:   make(map[string]*AccountState), // Would be populated from block
 		Committed:  false,
@@ -1301,8 +1296,14 @@ func (sm *StateMachine) calculateStateRoot(block *types.Block) string {
 
 // validateOperation validates operation using final states
 func (sm *StateMachine) validateOperation(op *Operation) error {
-	// Check proposer is a validator
-	if !sm.validators[op.Proposer] {
+	if op == nil {
+		return fmt.Errorf("operation is nil")
+	}
+	height := op.Sequence
+	if op.Block != nil {
+		height = op.Block.GetHeight()
+	}
+	if !sm.isValidatorAt(height, op.Proposer) {
 		return fmt.Errorf("proposer %s is not a validator", op.Proposer)
 	}
 
@@ -1348,21 +1349,34 @@ func (sm *StateMachine) validateOperationWithFinalStates(op *Operation) error {
 		return fmt.Errorf("no final states provided")
 	}
 
-	// Count valid signatures from different validators
+	height := op.Sequence
+	if op.Block != nil {
+		height = op.Block.GetHeight()
+	}
+	snapshot := consensus.ValidatorSetAt(height)
+	if snapshot == nil {
+		return fmt.Errorf("validator snapshot missing for height %d", height)
+	}
 	validatorsSigned := make(map[string]bool)
 	validCount := 0
+	votedStake := new(big.Int)
 
 	for _, state := range op.FinalStates {
-		if state.Valid && sm.validators[state.SignerNodeID] {
-			validatorsSigned[state.SignerNodeID] = true
-			validCount++
+		if !state.Valid || validatorsSigned[state.SignerNodeID] {
+			continue
 		}
+		validator := snapshot.Validators[state.SignerNodeID]
+		if validator == nil || validator.StakeAmount == nil {
+			continue
+		}
+		validatorsSigned[state.SignerNodeID] = true
+		votedStake.Add(votedStake, validator.StakeAmount)
+		validCount++
 	}
 
-	// Check if we have quorum of valid signatures
-	if len(validatorsSigned) < sm.quorumSize {
-		return fmt.Errorf("insufficient final states: %d < %d (quorum)",
-			len(validatorsSigned), sm.quorumSize)
+	if !consensus.MeetsSnapshotQuorum(snapshot, votedStake, len(validatorsSigned)) {
+		return fmt.Errorf("insufficient final-state quorum: voters=%d stake=%s total=%s",
+			len(validatorsSigned), votedStake, snapshot.TotalStake)
 	}
 
 	log.Printf("Operation validated with %d final states from %d validators",
@@ -1371,32 +1385,54 @@ func (sm *StateMachine) validateOperationWithFinalStates(op *Operation) error {
 }
 
 func (sm *StateMachine) validateCommitProof(proof *CommitProof) error {
-	// Check if we have enough signatures for quorum
-	if len(proof.Signatures) < sm.quorumSize {
-		return fmt.Errorf("insufficient signatures: %d < %d",
-			len(proof.Signatures), sm.quorumSize)
+	if proof == nil {
+		return fmt.Errorf("commit proof is nil")
+	}
+	snapshot := consensus.ValidatorSetAt(proof.Height)
+	if snapshot == nil {
+		return fmt.Errorf("validator snapshot missing for height %d", proof.Height)
 	}
 
-	// Verify signatures come from validators
+	votedStake := new(big.Int)
 	for nodeID := range proof.Signatures {
-		if !sm.validators[nodeID] {
+		validator := snapshot.Validators[nodeID]
+		if validator == nil || validator.StakeAmount == nil {
 			return fmt.Errorf("signature from non-validator: %s", nodeID)
 		}
+		votedStake.Add(votedStake, validator.StakeAmount)
+	}
+	if !consensus.MeetsSnapshotQuorum(snapshot, votedStake, len(proof.Signatures)) {
+		return fmt.Errorf("insufficient commit-proof quorum: voters=%d stake=%s total=%s",
+			len(proof.Signatures), votedStake, snapshot.TotalStake)
 	}
 
 	return nil
 }
 
 func (sm *StateMachine) hasOperationQuorum(sequence uint64) bool {
-	// Count unique proposers for this sequence
-	proposers := make(map[string]bool)
+	snapshot := consensus.ValidatorSetAt(sequence)
+	if snapshot == nil {
+		return false
+	}
+	voters := make(map[string]bool)
+	votedStake := new(big.Int)
 	for _, op := range sm.pendingOps {
-		if op.Sequence == sequence {
-			proposers[op.Proposer] = true
+		if op.Sequence != sequence {
+			continue
+		}
+		for _, state := range op.FinalStates {
+			if !state.Valid || voters[state.SignerNodeID] {
+				continue
+			}
+			validator := snapshot.Validators[state.SignerNodeID]
+			if validator == nil || validator.StakeAmount == nil {
+				continue
+			}
+			voters[state.SignerNodeID] = true
+			votedStake.Add(votedStake, validator.StakeAmount)
 		}
 	}
-
-	return len(proposers) >= sm.quorumSize
+	return consensus.MeetsSnapshotQuorum(snapshot, votedStake, len(voters))
 }
 
 func (sm *StateMachine) filterPendingOps(sequence uint64) []*Operation {
@@ -1409,8 +1445,9 @@ func (sm *StateMachine) filterPendingOps(sequence uint64) []*Operation {
 	return filtered
 }
 
-func (sm *StateMachine) isValidator() bool {
-	return sm.validators[sm.nodeID]
+func (sm *StateMachine) isValidatorAt(height uint64, id string) bool {
+	snapshot := consensus.ValidatorSetAt(height)
+	return snapshot != nil && snapshot.Validators[id] != nil
 }
 
 func (sm *StateMachine) checkProgress() {
@@ -1459,7 +1496,7 @@ func (sm *StateMachine) createInitialState() {
 		BlockHash:  "genesis",
 		StateRoot:  "genesis",
 		Timestamp:  time.Now(),
-		Validators: sm.validators,
+		Validators: make(map[string]bool),
 		UTXOSet:    make(map[string]*types.UTXO),
 		Accounts:   make(map[string]*AccountState),
 		Committed:  true,

@@ -99,7 +99,7 @@ const (
 const (
 	accountPrefix    = "acct:"
 	contractPrefix   = "contract:"
-	validatorPrefix = "validator:"
+	validatorPrefix  = "validator:"
 	totalSupplyKey   = "supply:total"
 	genesisSupplyKey = "supply:genesis"
 	rewardsMintedKey = "supply:rewards"

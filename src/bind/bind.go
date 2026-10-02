@@ -175,11 +175,8 @@ func handleIncomingConn(
 			onPeerDiscovered(kx.NodeID, peerAddr)
 		}
 
-		// A reward address only ever results in a *verified* stake check
-		// downstream (see stakeValidatorFromRewardAddress) — and here it is
-		// additionally covered by the challenge signature just verified, so
-		// the claim is bound to the authenticated node identity. Receiving
-		// one never grants validator status by itself.
+		// A reward address is authenticated payout metadata. Validator
+		// membership is established only by chain state, never by key exchange.
 		if onPeerStakeClaim != nil && kx.RewardAddress != "" && deriveErr == nil {
 			onPeerStakeClaim(kx.NodeID, kx.RewardAddress)
 		}

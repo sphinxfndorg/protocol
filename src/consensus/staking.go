@@ -18,6 +18,8 @@ import (
 
 // sips0013 https://github.com/sphinxorg/SIPS/blob/main/.github/workflows/sips0013/sips0013.md
 
+const MaxValidatorSetSize = 100
+
 // NewValidatorSet creates a validator set with minimum stake configuration.
 func NewValidatorSet(minStakeAmount *big.Int) *ValidatorSet {
 	if minStakeAmount == nil {
@@ -89,10 +91,16 @@ func (vs *ValidatorSet) AddGenesisValidator(id string, stakeNSPX *big.Int) error
 	}
 
 	if val, exists := vs.validators[id]; exists {
+		if !vs.validatorCountsLocked(val) && vs.validatorCountLocked() >= MaxValidatorSetSize {
+			return fmt.Errorf("genesis validator set is full (%d validators maximum)", MaxValidatorSetSize)
+		}
 		val.StakeAmount = new(big.Int).Set(stakeNSPX)
 		val.ActivationEpoch = 0 // a genesis member is active from epoch 0
 		logger.Info("Genesis validator %s stake set to %s", id, stakeNSPX.String())
 		return nil
+	}
+	if vs.validatorCountLocked() >= MaxValidatorSetSize {
+		return fmt.Errorf("genesis validator set is full (%d validators maximum)", MaxValidatorSetSize)
 	}
 	vs.validators[id] = &StakedValidator{
 		ID:          id,
@@ -132,6 +140,12 @@ func (vs *ValidatorSet) Sealed() bool {
 // admitted here is by definition still syncing, so granting it weight at
 // admission would put an unvalidated node into the quorum denominator.
 func (vs *ValidatorSet) QueueValidator(id string, stakeNSPX *big.Int, activationEpoch uint64) error {
+	return vs.QueueValidatorWithRewardAddress(id, stakeNSPX, activationEpoch, "")
+}
+
+// QueueValidatorWithRewardAddress is QueueValidator plus the chain-state
+// reward destination associated with the committed stake transaction.
+func (vs *ValidatorSet) QueueValidatorWithRewardAddress(id string, stakeNSPX *big.Int, activationEpoch uint64, rewardAddress string) error {
 	if id == "" {
 		return fmt.Errorf("queued validator: empty node ID")
 	}
@@ -151,16 +165,62 @@ func (vs *ValidatorSet) QueueValidator(id string, stakeNSPX *big.Int, activation
 	defer vs.mu.Unlock()
 
 	v, exists := vs.validators[id]
+	if (!exists || !vs.validatorCountsLocked(v)) && vs.validatorCountLocked() >= MaxValidatorSetSize {
+		return fmt.Errorf("validator set is full (%d validators maximum); stake admission rejected", MaxValidatorSetSize)
+	}
 	if !exists {
 		v = &StakedValidator{ID: id}
 		vs.validators[id] = v
 	}
 	v.StakeAmount = new(big.Int).Set(stakeNSPX)
 	v.ActivationEpoch = activationEpoch
+	if rewardAddress != "" {
+		v.RewardAddress = rewardAddress
+	}
 	// The total is deliberately NOT touched: this member is pending, and the
 	// next ProcessEpochTransition rebuild will include it exactly when it
 	// becomes active.
 	logger.Info("Validator %s queued with %s nSPX, active from epoch %d", id, stakeNSPX.String(), activationEpoch)
+	return nil
+}
+
+func (vs *ValidatorSet) validatorCountLocked() int {
+	count := 0
+	for _, validator := range vs.validators {
+		if vs.validatorCountsLocked(validator) {
+			count++
+		}
+	}
+	return count
+}
+
+func (vs *ValidatorSet) validatorCountsLocked(validator *StakedValidator) bool {
+	return validator != nil && !validator.IsSlashed && validator.StakeAmount != nil &&
+		validator.StakeAmount.Sign() > 0 &&
+		(validator.ExitEpoch == 0 || validator.ExitEpoch > vs.currentEpoch)
+}
+
+// QueueUnstake schedules a full validator exit at an epoch boundary.
+func (vs *ValidatorSet) QueueUnstake(id string, exitEpoch uint64) error {
+	if id == "" {
+		return fmt.Errorf("queued unstake: empty validator ID")
+	}
+	vs.mu.Lock()
+	defer vs.mu.Unlock()
+	v := vs.validators[id]
+	if v == nil || v.IsSlashed {
+		return fmt.Errorf("queued unstake: validator %s is not active chain state", id)
+	}
+	if v.ActivationEpoch > vs.currentEpoch {
+		return fmt.Errorf("queued unstake: validator %s is not active yet", id)
+	}
+	if exitEpoch <= vs.currentEpoch {
+		return fmt.Errorf("queued unstake: exit epoch %d is not in the future", exitEpoch)
+	}
+	if v.ExitEpoch != 0 && v.ExitEpoch <= exitEpoch {
+		return fmt.Errorf("queued unstake: validator %s already exits at epoch %d", id, v.ExitEpoch)
+	}
+	v.ExitEpoch = exitEpoch
 	return nil
 }
 

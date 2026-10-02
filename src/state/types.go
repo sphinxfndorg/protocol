@@ -58,8 +58,6 @@ type StateMachine struct {
 	pendingOps   []*Operation
 
 	// Validation
-	validators  map[string]bool // nodeID -> isValidator
-	quorumSize  int
 	currentView uint64
 	lastApplied uint64
 

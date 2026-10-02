@@ -6,6 +6,7 @@ package utils
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -13,11 +14,13 @@ import (
 	"math/big"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/sphinxfndorg/protocol/src/bind/abi"
+	"github.com/sphinxfndorg/protocol/src/consensus"
 	logger "github.com/sphinxfndorg/protocol/src/console"
 	key "github.com/sphinxfndorg/protocol/src/core/sthincs/key/backend"
 	sign "github.com/sphinxfndorg/protocol/src/core/sthincs/sign/backend"
@@ -61,6 +64,7 @@ func SendTransaction(opts SendTxOptions) error {
 	if !ok {
 		return fmt.Errorf("invalid amount: %s", opts.Amount)
 	}
+
 	weiAmount := new(big.Int).Mul(amountBig, big.NewInt(1e18))
 
 	// A caller-supplied --nonce wins. Otherwise leave it nil so abi.Transact
@@ -105,6 +109,232 @@ func SendTransaction(opts SendTxOptions) error {
 	}
 
 	return nil
+}
+
+type StakeTxOptions struct {
+	RPCURL           string
+	Action           string
+	From             string
+	ValidatorID      string
+	ValidatorKeyFile string
+	Amount           string
+	GasLimit         string
+	GasPrice         string
+	Nonce            uint64
+	KeyFile          string
+	Wait             bool
+}
+
+func SendStakeTransaction(opts StakeTxOptions) error {
+	if opts.Action != "stake" && opts.Action != "unstake" {
+		return fmt.Errorf("action must be stake or unstake")
+	}
+	if opts.From == "" || opts.ValidatorID == "" || opts.KeyFile == "" {
+		return fmt.Errorf("--from, --validator-id, and --key are required")
+	}
+	amount := big.NewInt(0)
+	if opts.Action == "stake" {
+		spx, ok := new(big.Int).SetString(opts.Amount, 10)
+		if !ok || spx.Sign() <= 0 {
+			return fmt.Errorf("stake amount must be a positive whole-SPX integer")
+		}
+		amount.Mul(spx, big.NewInt(1e18))
+	} else if opts.Amount != "" {
+		return fmt.Errorf("--amount is only valid for --action=stake; unstake exits the full position")
+	}
+	receiver := opts.From
+	if opts.Action == "stake" {
+		receiver = types.StakingEscrowAddress
+	}
+	tx, err := buildTransaction(SendTxOptions{
+		RPCURL:   opts.RPCURL,
+		From:     opts.From,
+		To:       receiver,
+		GasLimit: opts.GasLimit,
+		GasPrice: opts.GasPrice,
+		KeyFile:  opts.KeyFile,
+	}, amount, 0)
+	if err != nil {
+		return err
+	}
+	publicKey := ""
+	var proof []byte
+	if opts.Action == "stake" {
+		if opts.ValidatorKeyFile == "" {
+			return fmt.Errorf("--validator-key is required for stake")
+		}
+		proofMessage, err := types.StakeIdentityProofMessage(
+			tx.ChainID, opts.Action, opts.ValidatorID, opts.From, tx.Amount,
+		)
+		if err != nil {
+			return err
+		}
+		publicKey, proof, err = signStakeIdentityProof(opts.ValidatorID, opts.ValidatorKeyFile, proofMessage)
+		if err != nil {
+			return fmt.Errorf("sign validator identity proof: %w", err)
+		}
+	}
+	data, err := types.BuildStakeActionData(opts.Action, opts.ValidatorID, publicKey, proof)
+	if err != nil {
+		return err
+	}
+	tx.ReturnData = data
+	txID, err := abi.Transact(&abi.TransactOpts{
+		Client:   abiRPC{},
+		Signer:   abiSigner{keyFile: opts.KeyFile},
+		NodeAddr: opts.RPCURL,
+		ChainID:  tx.ChainID,
+		Nonce:    optionalNonce(opts.Nonce),
+	}, tx)
+	if err != nil {
+		return fmt.Errorf("broadcast signed %s transaction: %w", opts.Action, err)
+	}
+	logger.Info("%s transaction sent! TX ID: %s", opts.Action, txID)
+	if opts.Wait {
+		return WatchTransaction(WatchTxOptions{RPCURL: opts.RPCURL, TxID: txID, TimeoutSecs: 120})
+	}
+	return nil
+}
+
+func signStakeIdentityProof(validatorID, keyFile string, message []byte) (string, []byte, error) {
+	skBytes, pkBytes, err := loadValidatorIdentityKeyFile(keyFile)
+	if err != nil {
+		return "", nil, err
+	}
+	keyManager, err := key.NewKeyManager()
+	if err != nil {
+		return "", nil, fmt.Errorf("initialize identity key manager: %w", err)
+	}
+	if _, _, err := keyManager.DeserializeKeyPair(skBytes, pkBytes); err != nil {
+		return "", nil, fmt.Errorf("deserialize validator identity key: %w", err)
+	}
+	manager := sign.NewSTHINCSManager(nil, keyManager, keyManager.GetSPHINCSParameters())
+	service, err := consensus.NewSigningService(manager, keyManager, validatorID, skBytes, pkBytes)
+	if err != nil {
+		return "", nil, fmt.Errorf("initialize validator identity signer: %w", err)
+	}
+	proof, err := service.SignMessage(message)
+	if err != nil {
+		return "", nil, fmt.Errorf("sign validator identity proof: %w", err)
+	}
+	return hex.EncodeToString(pkBytes), proof, nil
+}
+
+func loadValidatorIdentityKeyFile(path string) ([]byte, []byte, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("stat validator identity key path: %w", err)
+	}
+	if info.IsDir() || filepath.Base(path) == "private.key" {
+		privatePath, publicPath := path, filepath.Join(path, "public.key")
+		if !info.IsDir() {
+			privatePath = path
+			publicPath = filepath.Join(filepath.Dir(path), "public.key")
+		} else {
+			privatePath = filepath.Join(path, "private.key")
+		}
+		privateKey, err := readIdentityKeyFile(privatePath, 64)
+		if err != nil {
+			return nil, nil, fmt.Errorf("read validator private key: %w", err)
+		}
+		publicKey, err := readIdentityKeyFile(publicPath, 32)
+		if err != nil {
+			return nil, nil, fmt.Errorf("read validator public key: %w", err)
+		}
+		if len(privateKey) != 2*len(publicKey) {
+			return nil, nil, fmt.Errorf("validator identity key lengths do not match")
+		}
+		return privateKey, publicKey, nil
+	}
+	return loadSigningKeyFile(path)
+}
+
+func readIdentityKeyFile(path string, expectedLength int) ([]byte, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == expectedLength {
+		return data, nil
+	}
+	encoded := strings.TrimSpace(string(data))
+	if len(encoded) == expectedLength*2 {
+		decoded, err := hex.DecodeString(encoded)
+		if err == nil && len(decoded) == expectedLength {
+			return decoded, nil
+		}
+	}
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err == nil && len(decoded) == expectedLength {
+		return decoded, nil
+	}
+	return nil, fmt.Errorf("key file %s has invalid encoding or length", path)
+}
+
+type SlashTxOptions struct {
+	RPCURL       string
+	From         string
+	EvidenceFile string
+	GasLimit     string
+	GasPrice     string
+	Nonce        uint64
+	KeyFile      string
+	Wait         bool
+}
+
+func SendDoubleSignEvidenceTransaction(opts SlashTxOptions) error {
+	if opts.From == "" || opts.EvidenceFile == "" || opts.KeyFile == "" {
+		return fmt.Errorf("--from, --evidence, and --key are required")
+	}
+	evidenceJSON, err := os.ReadFile(opts.EvidenceFile)
+	if err != nil {
+		return fmt.Errorf("read slashing evidence file: %w", err)
+	}
+	evidence, recognized, err := types.ParseDoubleSignEvidence(evidenceJSON)
+	if err != nil {
+		return fmt.Errorf("parse slashing evidence: %w", err)
+	}
+	if !recognized {
+		return fmt.Errorf("evidence file does not contain %q", types.SlashEvidenceType)
+	}
+	data, err := types.BuildDoubleSignEvidenceData(evidence.First, evidence.Second)
+	if err != nil {
+		return fmt.Errorf("validate slashing evidence: %w", err)
+	}
+	tx, err := buildTransaction(SendTxOptions{
+		RPCURL:   opts.RPCURL,
+		From:     opts.From,
+		To:       opts.From,
+		GasLimit: opts.GasLimit,
+		GasPrice: opts.GasPrice,
+		KeyFile:  opts.KeyFile,
+	}, big.NewInt(0), 0)
+	if err != nil {
+		return err
+	}
+	tx.ReturnData = data
+	txID, err := abi.Transact(&abi.TransactOpts{
+		Client:   abiRPC{},
+		Signer:   abiSigner{keyFile: opts.KeyFile},
+		NodeAddr: opts.RPCURL,
+		ChainID:  tx.ChainID,
+		Nonce:    optionalNonce(opts.Nonce),
+	}, tx)
+	if err != nil {
+		return fmt.Errorf("broadcast double-sign evidence: %w", err)
+	}
+	logger.Info("Double-sign evidence submitted! TX ID: %s", txID)
+	if opts.Wait {
+		return WatchTransaction(WatchTxOptions{RPCURL: opts.RPCURL, TxID: txID, TimeoutSecs: 120})
+	}
+	return nil
+}
+
+func optionalNonce(nonce uint64) *uint64 {
+	if nonce == 0 {
+		return nil
+	}
+	return &nonce
 }
 
 // buildTransaction assembles the unsigned transfer; abi.Transact applies the

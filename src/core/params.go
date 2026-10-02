@@ -348,7 +348,7 @@ func GetDevnetChainParams() *SphinxChainParameters {
 
 	// Devnet uses a SMALL epoch length in blocks so tests observe epoch
 	// boundaries quickly. A genesis file's epoch_blocks value still wins
-	// (effectiveEpochBlocks), so `genesis create` can override this.
+	// (effectiveEpochBlocks), so the genesis document can override this.
 	params.EpochBlocks = effectiveEpochBlocks(DevnetEpochBlocks)
 
 	devnetMinStake := new(big.Int).Mul(big.NewInt(1), big.NewInt(1e18))
@@ -618,15 +618,112 @@ func (bc *Blockchain) AttachSnapshotStore() error {
 	if err != nil {
 		return fmt.Errorf("core: attaching snapshot store: %w", err)
 	}
+	// ★★ CHECKPOINT 2 ITEM 0b — PARTICIPATION GATE FIRST.
+	//
+	// Set the flag BEFORE any rebuild attempt so that a failure to rebuild
+	// leaves the node refusing to participate, rather than starting and
+	// becoming the proposer the rest of the network is waiting on. It is
+	// cleared only at the end, after every epoch up to the tip is proven to
+	// have a snapshot.
+	consensus.SetSnapshotRebuildPending(true)
+
 	consensus.SetSnapshotStore(&rawdbSnapshotStore{db: db})
-	n, err := consensus.ReplaySnapshotsFromStore()
-	if err != nil {
-		// Not fatal: the node may still hold in-memory snapshots taken this
-		// process. Log loudly, because a first-ever start legitimately has
-		// none while a restart that lost them does not.
+
+	// 1. Replay whatever reached disk. Missing entries are handled below.
+	if n, err := consensus.ReplaySnapshotsFromStore(); err != nil {
 		logger.Warn("Validator snapshot replay found nothing to restore: %v", err)
+	} else {
+		logger.Info("Validator snapshot store attached: %d snapshot(s) restored from disk", n)
+	}
+
+	// 2. Rebuild any epoch the chain says should exist but the store does not
+	// have — the crash window between StoreBlock and the snapshot write.
+	if err := bc.rebuildMissingSnapshots(); err != nil {
+		// Leave the gate SET: a node that cannot rebuild its history must not
+		// participate.
+		logger.Error("FATAL snapshot rebuild failed: %v — this node will REFUSE to "+
+			"participate in consensus until it is repaired", err)
+		return err
+	}
+
+	consensus.SetSnapshotRebuildPending(false)
+	return nil
+}
+
+// rebuildMissingSnapshots walks the epochs the chain has actually reached and
+// rebuilds every snapshot the store is missing.
+//
+// ★ THE CRASH WINDOW THIS CLOSES. CommitBlock writes the BLOCK (line 2051)
+// and the SNAPSHOT (now a few lines later) as two separate rawdb puts. A crash
+// between them leaves a committed block at height h with no snapshot for the
+// epoch that block opens. On restart the replay finds the gap and fails closed
+// on that epoch's blocks forever — correct, but unusable.
+//
+// ★ WHY REPLAYING THE TRANSITION IS EXACT, NOT AN APPROXIMATION.
+// ProcessEpochTransition(e) reads only per-validator ActivationEpoch, ExitEpoch
+// and IsSlashed — all of which are set at admission/queue time and never
+// mutated afterwards — and derives the total for epoch e from those. So
+// replaying epochs in ascending order reproduces exactly the set that was in
+// effect at epoch e, even though this node is now past it. The snapshots
+// written this way are byte-for-byte what the original commit would have
+// written.
+//
+// Note it runs ProcessEpochTransition for EVERY epoch up to the tip, not only
+// the missing ones: the live set's currentEpoch must end at the tip, or
+// GetTotalStake() would evaluate membership one epoch behind the chain.
+func (bc *Blockchain) rebuildMissingSnapshots() error {
+	vs := bc.liveValidatorSet()
+	if vs == nil {
+		// No validator set attached (e.g. a node that has not finished
+		// seeding). There is nothing to rebuild and nothing to verify yet, so
+		// this is not a failure.
+		logger.Warn("No validator set attached; skipping snapshot rebuild")
 		return nil
 	}
-	logger.Info("Validator snapshot store attached: %d snapshot(s) restored from disk", n)
+
+	// The highest height this node has on disk is the chain it must be able to
+	// verify. Genesis-only storage yields 0, so the loop still establishes the
+	// epoch-0 snapshot.
+	var tipHeight uint64
+	if tip, err := bc.storage.GetLatestBlock(); err == nil && tip != nil {
+		tipHeight = tip.GetHeight()
+	}
+	tipEpoch := consensus.EpochForHeight(tipHeight)
+
+	rebuilt := 0
+	for e := uint64(0); e <= tipEpoch; e++ {
+		missing := consensus.SnapshotAtEpoch(e) == nil
+		if e == 0 {
+			// Genesis is authored: no transition, only the freeze. Taken
+			// without mutation so a rebuild cannot alter the genesis set.
+			if missing {
+				vs.TakeSnapshot(0)
+				rebuilt++
+			}
+			continue
+		}
+		vs.ProcessEpochTransition(e)
+		if missing {
+			vs.TakeSnapshot(e)
+			rebuilt++
+			logger.Info("Rebuilt missing snapshot for epoch %d from chain state", e)
+		}
+	}
+
+	// Prove it: a gap that could not be repaired must not be papered over.
+	for e := uint64(0); e <= tipEpoch; e++ {
+		if consensus.SnapshotAtEpoch(e) == nil {
+			return fmt.Errorf("epoch %d still has no snapshot after rebuild (tip height %d, tip epoch %d)",
+				e, tipHeight, tipEpoch)
+		}
+	}
+
+	if rebuilt > 0 {
+		logger.Info("Snapshot rebuild complete: %d epoch(s) rebuilt, %d epoch(s) verified present "+
+			"(tip height %d)", rebuilt, tipEpoch+1, tipHeight)
+	} else {
+		logger.Info("Snapshot history complete: %d epoch(s) present, nothing to rebuild (tip height %d)",
+			tipEpoch+1, tipHeight)
+	}
 	return nil
 }

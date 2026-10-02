@@ -270,6 +270,20 @@ func CalculateMerkleRootFromHashes(hashes [][]byte) []byte {
 	return nodes[0].Hash
 }
 
+func appendConsensusCommitments(data []byte, header *BlockHeader) []byte {
+	if header == nil || (header.ActiveSnapshotHash == "" && header.GenesisDocumentDigest == "") {
+		return data
+	}
+	data = append(data, []byte("SPHINX-CONSENSUS-COMMITMENTS-v1")...)
+	for _, commitment := range []string{header.ActiveSnapshotHash, header.GenesisDocumentDigest} {
+		var length [8]byte
+		binary.BigEndian.PutUint64(length[:], uint64(len(commitment)))
+		data = append(data, length[:]...)
+		data = append(data, commitment...)
+	}
+	return data
+}
+
 // GenerateBlockHash generates the block hash with proper parent-uncle relationships
 // Returns: Block hash as byte slice
 func (b *Block) GenerateBlockHash() []byte {
@@ -335,6 +349,7 @@ func (b *Block) GenerateBlockHash() []byte {
 	headerData = append(headerData, b.Header.UnclesHash...)         // Uncles hash (32 bytes)
 	headerData = append(headerData, b.Header.ExtraData...)          // Extra data (variable)
 	headerData = append(headerData, b.Header.Miner...)              // Miner address (20 bytes)
+	headerData = appendConsensusCommitments(headerData, b.Header)
 
 	// Use common.SpxHash to hash the concatenated data
 	// Create the final hash using the SpxHash algorithm
@@ -437,6 +452,7 @@ func (b *Block) FinalizeHash() {
 	headerData = append(headerData, b.Header.UnclesHash...)
 	headerData = append(headerData, b.Header.ExtraData...)
 	headerData = append(headerData, b.Header.Miner...)
+	headerData = appendConsensusCommitments(headerData, b.Header)
 
 	// Calculate RAW hash (32 bytes) - THIS IS WHAT GETS SIGNED
 	rawHash := common.SpxHash(headerData)

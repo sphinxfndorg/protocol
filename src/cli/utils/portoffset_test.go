@@ -10,24 +10,10 @@ import (
 	"github.com/sphinxfndorg/protocol/src/network"
 )
 
-// TestApplyPortOffset_MatchesGenesisCreateNodeIDs is the guard for the
-// SAME-MACHINE / DEV QUICK START in printHelp().
-//
-// `genesis create --validators=3 --root=data --tcp-base=30303` writes
-//   data/node0/config/genesis_state.json  validator "Node-127.0.0.1:30303"
-//   data/node1/config/genesis_state.json  validator "Node-127.0.0.1:30304"
-//   data/node2/config/genesis_state.json  validator "Node-127.0.0.1:30305"
-//
-// and creates each node's identity keydir under data/node<i>/Node-<tcp-addr>.
-// The quick start must therefore make Terminal 1 resolve to
-// (127.0.0.1:30303, data/node0) and Terminals 2/3 to
-// (127.0.0.1:30304, data/node1) and (127.0.0.1:30305, data/node2) — otherwise a
-// node derives a Node-<tcp-addr> ID that is NOT in the validator set and boots as
-// a peer only.
-//
-// This test pins the arithmetic; TestQuickStartExamples_LineUpWithGenesisCreate
-// pins it against the helper's real output.
-func TestApplyPortOffset_MatchesGenesisCreateNodeIDs(t *testing.T) {
+// TestApplyPortOffset_MatchesNodeIdentity pins the local addressing arithmetic
+// used by the quick start. Offsets select unique listen ports/datadirs without
+// changing the node ID derivation rule.
+func TestApplyPortOffset_MatchesNodeIdentity(t *testing.T) {
 	// nodeID is how bind derives a validator identity from the TCP address.
 	nodeID := func(tcp string) string { return "Node-" + tcp }
 
@@ -83,6 +69,7 @@ func TestApplyPortOffset_RespectsExplicitValues(t *testing.T) {
 		t.Errorf("explicit --datadir was shifted: %q", dir)
 	}
 }
+
 // TestConfigFileEntry_NeverIndexesByPortOffset pins decision 2: --port-offset is
 // file this process uses. A multi-entry file is a de-facto pre-agreed node
 // roster, which is exactly the knowledge this design deletes, so it is refused
@@ -127,4 +114,3 @@ func TestConfigFileEntry_NeverIndexesByPortOffset(t *testing.T) {
 		t.Error("an empty --config file must be refused")
 	}
 }
-

@@ -6,7 +6,6 @@ package consensus
 
 import (
 	"fmt"
-	"math"
 	"time"
 
 	logger "github.com/sphinxfndorg/protocol/src/console"
@@ -25,20 +24,28 @@ func NewQuorumVerifier(setSize, faultyNodes int, quorumFraction float64) *Quorum
 	}
 }
 
-// VerifySafety checks if the system can guarantee safety with current parameters
-// Safety ensures that two different blocks cannot be committed at the same height
-// For Byzantine Fault Tolerance (BFT), requires:
-// - Quorum fraction >= 2/3
-// - Faulty nodes < total nodes / 3
-// Returns true if safety can be guaranteed with current configuration
+// VerifySafety checks if the system can guarantee safety with current parameters.
+//
+// Safety means no two different blocks commit at the same height. For BFT that
+// needs the quorum to be strictly larger than any set of Byzantine nodes can
+// forge, which requires:
+//
+//	N >= 3f + 1      (equivalently f < N/3, in INTEGER arithmetic)
+//
+// ★ CHECKPOINT 2 ITEM 1 — the fault-tolerance check was
+// `faultyNodes < setSize/3`. With Go integer division `setSize/3` floors, so for
+// N=3 that is `faultyNodes < 1`, i.e. f=0; for N=4, `f < 1`, i.e. f=0. Those
+// happen to be right, but the expression is accidental: for N=7, `setSize/3` is
+// 2, so it allows f=1 where 7 >= 3*1+1 = 4 permits f=2. The correct bound is
+// 3f+1 <= N, written in integer math so it cannot depend on a rounding
+// coincidence.
 func (qv *QuorumVerifier) VerifySafety() bool {
-	// Check if quorum fraction meets BFT requirement (at least 2/3)
+	// Quorum fraction must be at least 2/3.
 	meetsQuorumRequirement := qv.quorumFraction >= 2.0/3.0
 
-	// Check if faulty nodes are within BFT tolerance limit (less than 1/3)
-	meetsFaultTolerance := qv.faultyNodes < qv.setSize/3
+	// ★ INTEGER FAULT TOLERANCE: N >= 3f + 1, not f < N/3.
+	meetsFaultTolerance := qv.setSize >= 3*qv.faultyNodes+1
 
-	// Both conditions must be true for safety guarantee
 	return meetsQuorumRequirement && meetsFaultTolerance
 }
 
@@ -58,16 +65,24 @@ func (qv *QuorumVerifier) VerifyQuorumIntersection() bool {
 
 // CalculateMinQuorumSize calculates minimum quorum size needed
 // Quorum size is the minimum number of nodes required to reach consensus
-// Calculated as: ceil(setSize * quorumFraction)
-// Returns the minimum quorum size (at least 1)
+//
+// ★ CHECKPOINT 2 ITEM 1 — NO FLOAT. It used to be
+// ceil(setSize * quorumFraction), i.e. with quorumFraction = 0.67:
+//
+//	N=3 -> ceil(2.01) = 3   N=4 -> ceil(2.68) = 3
+//	N=6 -> ceil(4.02) = 5   N=7 -> ceil(4.69) = 5
+//
+// Those happen to match StrictTwoThirdsCount for 0.67, because 0.67 is close
+// enough to 2/3 that the ceiling rounds the same way. But the answer is a
+// function of the CONFIGURED FRACTION: set quorumFraction to 0.5 and this
+// returns ceil(N/2), a different rule from the protocol's, with nothing tying
+// the two together. The integer form is invariant, because there is no
+// fraction to configure.
+//
+// It now returns exactly StrictTwoThirdsCount(setSize): integer, exact, and
+// the same function the engine enforces.
 func (qv *QuorumVerifier) CalculateMinQuorumSize() int {
-	// Calculate minimum quorum size using ceiling to ensure we have enough nodes
-	minSize := int(math.Ceil(float64(qv.setSize) * qv.quorumFraction))
-	// Ensure we have at least 1 node in quorum (edge case for very small networks)
-	if minSize < 1 {
-		return 1
-	}
-	return minSize
+	return StrictTwoThirdsCount(qv.setSize)
 }
 
 // CalculateOptimalQuorumFraction calculates the optimal Q for given fault tolerance

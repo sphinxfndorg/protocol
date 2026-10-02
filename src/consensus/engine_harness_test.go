@@ -37,6 +37,54 @@ type engineNode struct {
 	vot *Vote
 }
 
+func TestEngine_FourValidatorLeaderLossAndPartitionHeal(t *testing.T) {
+	prev := epochBlocksOverride
+	SetEpochBlocks(4)
+	defer func() { epochBlocksOverride = prev }()
+	ResetSnapshots()
+	defer ResetSnapshots()
+
+	unit := engineUnit()
+	ids := []string{"Node-a", "Node-b", "Node-c", "Node-d"}
+	nodes := make([]*engineNode, 0, len(ids))
+	snapshot := &ValidatorSnapshot{
+		Epoch:      0,
+		TotalStake: new(big.Int).Mul(unit, big.NewInt(4)),
+		Validators: make(map[string]*StakedValidator, 4),
+	}
+	for _, id := range ids {
+		node := newEngineNode(t, id, ids, unit)
+		nodes = append(nodes, node)
+		snapshot.Validators[id] = &StakedValidator{ID: id, StakeAmount: new(big.Int).Set(unit)}
+	}
+	StoreSnapshotForTest(*snapshot)
+
+	const hash = "four-validator-block"
+	receiver := nodes[1]
+	for _, node := range nodes[1:] {
+		receiver.fileVote(hash, node)
+	}
+	if !receiver.c.hasQuorum(hash, snapshot) {
+		t.Fatal("three surviving validators did not reach quorum after leader loss")
+	}
+
+	left, right := nodes[0], nodes[2]
+	for _, node := range nodes[:2] {
+		left.fileVote(hash, node)
+	}
+	for _, node := range nodes[2:] {
+		right.fileVote(hash, node)
+	}
+	if left.c.hasQuorum(hash, snapshot) || right.c.hasQuorum(hash, snapshot) {
+		t.Fatal("a 2/2 partition reached quorum")
+	}
+	left.fileVote(hash, nodes[2])
+	right.fileVote(hash, nodes[1])
+	if !left.c.hasQuorum(hash, snapshot) || !right.c.hasQuorum(hash, snapshot) {
+		t.Fatal("healed partition did not reach quorum after exchanging a third vote")
+	}
+}
+
 func harnessParamsConsensus(t *testing.T) *parameters.Parameters {
 	t.Helper()
 	cfg, err := config.NewSTHINCSParameters()
@@ -100,7 +148,7 @@ func newEngineNode(t *testing.T, id string, allIDs []string, unit *big.Int) *eng
 		id:  id,
 		vs:  vs,
 		att: &Attestation{ValidatorID: id, Signature: sig},
-		vot: &Vote{VoterID: id, Signature: sig},
+		vot: &Vote{ChainID: 73310, Phase: VotePhaseCommit, VoterID: id, Signature: sig},
 		c: &Consensus{
 
 			nodeID:              id,
@@ -161,6 +209,7 @@ func TestEngine_QuorumForN(t *testing.T) {
 			for i := 0; i < n; i++ {
 				ids = append(ids, "Node-"+string(rune('a'+i)))
 			}
+
 			nodes := make([]*engineNode, 0, n)
 			snap := &ValidatorSnapshot{
 				Epoch:      0,
@@ -181,7 +230,7 @@ func TestEngine_QuorumForN(t *testing.T) {
 			for _, nd := range nodes {
 				lead.fileVote(blockHash, nd)
 			}
-			if !lead.c.hasQuorum(blockHash) {
+			if !lead.c.hasQuorum(blockHash, snap) {
 				t.Fatalf("N=%d: with all %d validators voting the chain did NOT commit", n, n)
 			}
 
@@ -191,7 +240,7 @@ func TestEngine_QuorumForN(t *testing.T) {
 			lead.c.mu.Unlock()
 
 			running := n - 1
-			committed := lead.c.hasQuorum(blockHash)
+			committed := lead.c.hasQuorum(blockHash, snap)
 			need := StrictTwoThirdsCount(n)
 			floor := lead.c.calculateQuorumSize(n)
 			voted := new(big.Int).Mul(unit, big.NewInt(int64(running)))

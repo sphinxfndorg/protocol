@@ -5,8 +5,6 @@
 package bind
 
 import (
-	"sync"
-
 	"github.com/sphinxfndorg/protocol/src/consensus"
 	"github.com/sphinxfndorg/protocol/src/core"
 	config "github.com/sphinxfndorg/protocol/src/core/sthincs/config" // Add this import
@@ -124,16 +122,9 @@ type knownPeerInfo struct {
 // dial to an arbitrary host, and the ephemeral source port of the inbound
 // connection is never recorded as the peer's address.
 //
-// RewardAddress is the SPIF wallet address the peer claims stake against.
-// It is covered by the challenge signature above — the same proof that
-// authenticates the node identity also commits to this claim — and the
-// recipient additionally looks up the address's real on-chain balance via
-// SetStakeFromBalance before granting any validator weight. One funded
-// reward address admits at most one node ID (rewardClaimLedger). Sending a
-// bogus or empty address just means the peer registers as a known network
-// peer with zero stake; it does not grant validator status. This is what
-// makes peer admission permissionless-safe: showing up on the wire is enough
-// to be gossiped to, but never enough to vote.
+// RewardAddress is the peer's authenticated payout metadata. It does not
+// grant validator status; stake owner and operator key are committed by a
+// Stake transaction, while initial membership comes from genesis.
 //
 // GenesisHash is the peer's claimed genesis block hash. It is verified
 // against the local genesis hash during key exchange. If the hashes differ,
@@ -178,11 +169,4 @@ type authChallengeMsg struct {
 // authProofMsg carries the sender's response to an auth_challenge.
 type authProofMsg struct {
 	Signature []byte `json:"signature"`
-}
-
-// phase2InitState tracks Phase 2 initialization state.
-type phase2InitState struct {
-	mu          sync.Mutex
-	running     bool
-	initialized bool
 }

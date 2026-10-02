@@ -14,8 +14,8 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/sphinxfndorg/protocol/src/common"
 	keyutils "github.com/sphinxfndorg/protocol/src/accounts/key/utils"
+	"github.com/sphinxfndorg/protocol/src/common"
 	sphincs "github.com/sphinxfndorg/protocol/src/core/sthincs/key/backend"
 	keys "github.com/sphinxfndorg/protocol/src/usi/core/key"
 )
@@ -148,4 +148,3 @@ func wipeString(s *string) {
 	}
 	*s = ""
 }
-

@@ -35,14 +35,16 @@ func Execute() error {
 			return runGetBalanceCmd(os.Args[2:])
 		case "watch-tx":
 			return runWatchTxCmd(os.Args[2:])
+		case "stake":
+			return runStakeCmd(os.Args[2:])
+		case "slash":
+			return runSlashCmd(os.Args[2:])
 		case "ipfs":
 			return runIPFSCmd(os.Args[2:])
 		case "wallet":
 			return runWalletCmd(os.Args[2:])
 		case "multisig":
 			return runMultisigCmd(os.Args[2:])
-		case "genesis":
-			return runGenesisCmd(os.Args[2:])
 		case "help", "--help", "-h":
 			printHelp()
 			return nil
@@ -101,6 +103,8 @@ SUBCOMMANDS
   send-tx       Send a transaction from one address to another
   get-balance   Query the balance of an address
   watch-tx      Poll until a transaction is confirmed
+  stake         Submit a delayed Stake or Unstake transaction
+  slash         Submit chain-verifiable double-sign evidence
   ipfs          IPFS + on-chain NFT mint, verify and repin
                 (note: a local IPFS daemon is NOT durable storage — it stops
                  serving content when it goes offline. Set
@@ -147,7 +151,7 @@ SUBCOMMANDS
                   sign    --policy policy.json --tx msg.msg --key <keyfile> --out sig.json
                   combine --policy policy.json --sig sig1.json --sig sig2.json \\
                           --expiry <unix> --release-time <unix> --out witness.json
-                  coverage --policy config/escrow_multisig.json \\
+                  coverage --policy config/genesis_state.json \\
                            [--dir config/cge_witnesses] [--rpc 127.0.0.1:8700] \\
                            [--now <unix>] [--horizon <unix>] [--json]
                           (PRE-FLIGHT for enforcing CGE releases: audits the
@@ -157,20 +161,6 @@ SUBCOMMANDS
                            uncovered. Run this before enabling enforcement:
                            an uncovered recipient is not protected, it is
                            silently skipped.)
-  genesis       Devnet genesis-file authoring (the ONLY place the validator
-                count K exists)
-                  create  --validators=K [--funded-accounts=M]
-                          [--root=data] [--tcp-base=30303] [--host=127.0.0.1]
-                          [--stake-spx 32] [--epoch-blocks 10]
-                          [--chain-id 73310] [--network devnet]
-                          Writes the SAME genesis document to every
-                          <root>/node<i>/config/genesis_state.json, generates each
-                          validator's Node-<addr> identity keypair under its
-                          own node dir, and generates K + M devnet staking keys
-                          under <root>/custody/devnet-rewards/ so a validator
-                          added later can send a Stake tx from a funded reward
-                          address. Rejects K < 3. Run BEFORE starting nodes.
-
 TOKENOMICS OVERVIEW
   Genesis Supply: 1,170,000,000 SPX (23.4% of 5B max supply) — 1,040,000,000 SPX remainder + 130,000,000 SPX sold (Angel Round + Public ICO), both funded in block 0
   Funding Rounds:
@@ -179,17 +169,15 @@ TOKENOMICS OVERVIEW
     Public ICO: 100,000,000 SPX @ $0.36 = $36.0M
     Total Raised: $54.6M (200,000,000 SPX sold, 16.1% of genesis)
 
-GENESIS DOCUMENT — the single source of validator membership
-  Every node reads <datadir>/config/genesis_state.json. It is the ONLY place the
-  initial validator set, the chain parameters, the genesis vault policy and the
-  block-0 witnesses are recorded. There is no other genesis file and no flag
-  that carries a node count.
+GENESIS DOCUMENT — initial chain state
+Every node reads <datadir>/config/genesis_state.json. The first devnet node
+authors its own genesis; later nodes fetch that document from seeds. There is
+no genesis-create command and no configured node-count flag.
 
-  How it reaches a node:
-    * devnet — the "genesis create" subcommand (--validators=K) writes one per
-                datadir, and a node started with --seeds fetches the missing
-                public sections over the network from its seeds (retrying while
-                the bootstrap node is still signing).
+How it reaches a node:
+  * devnet — the first node authors its own document, and a node started with
+              --seeds fetches it from the network (retrying while the
+              bootstrap node is still signing).
     * any other network — there is NO automatic fetch. The file must be placed at
                 <datadir>/config/genesis_state.json out of band (copy/scp it)
                 BEFORE the node starts. A node started without it still runs, but
@@ -200,12 +188,11 @@ GENESIS DOCUMENT — the single source of validator membership
   node_id recorded in genesis_state.json must match that exact string.
 
 CONSENSUS
-  One rule at every height, including block 1: a block commits only when
-  validators holding STRICTLY more than 2/3 of the staked validator set's total
-  stake have voted. The validator set comes from chain state — the genesis
-  document's validators plus on-chain Stake transactions — never from a CLI flag
-  or a connected-peer count. There is no "blocks 0-1 need no stake" phase.
-  VDF-derived leader selection runs on top of that same staked set.
+Validator membership comes from chain state. Connected peers do not become
+validators merely by joining, and peer count does not affect consensus,
+genesis, sync, or readiness. A block commits only when validators holding
+STRICTLY more than 2/3 of active stake have voted. VDF-derived proposer
+selection runs over that same active validator set.
 
 REAL-DEVICE QUICK START (ETH/BTC style — no pre-agreed node count)
   Each machine runs independently; peer discovery is via --seeds.
@@ -213,9 +200,7 @@ REAL-DEVICE QUICK START (ETH/BTC style — no pre-agreed node count)
   sync the full blockchain from peers before participating in consensus.
 
   # Node 1 (bootnode / first validator) — holds the genesis document.
-  # genesis_state.json must already exist at <datadir>/config/genesis_state.json
-  # (see "GENESIS DOCUMENT" above). Author it once with "genesis create" and
-  # copy that one file into every node's datadir.
+  # On devnet, the first node authors genesis on startup.
   go run main.go node --role=validator \
       --tcp-addr=<PUBLIC_IP_1>:30303 \
       --http-port=<PUBLIC_IP_1>:8545 \
@@ -235,10 +220,9 @@ REAL-DEVICE QUICK START (ETH/BTC style — no pre-agreed node count)
       --seeds=<PUBLIC_IP_1>:30303,<PUBLIC_IP_2>:30303 \
       --datadir=data --pbft
 
-  PBFT starts once validators holding > 2/3 of the staked stake of the
-  genesis snapshot are connected and ready. Validator membership comes from
-  the genesis file and on-chain Stake transactions — never from a CLI flag
-  or a connected-peer count. There is no configured node-count flag at all.
+  Peer connectivity is transport only. Readiness and proposer/consensus
+  membership are derived from active chain state, never a connected-peer count.
+  A peer must be admitted by chain state before it contributes stake or votes.
 
 EIP-1459 DNS DISCOVERY (cryptographically authenticated bootstrap)
   Instead of plain IP seeds, you can use enrtree:// URLs. The node list
@@ -258,36 +242,22 @@ EIP-1459 DNS DISCOVERY (cryptographically authenticated bootstrap)
       --seeds=enrtree://<PUBKEY_HEX>@nodes.sphinx.network,1.2.3.4:30303 \
       --datadir=data --pbft
 
-SAME-MACHINE / DEV QUICK START (all nodes on one machine)
-  For local development and testing. Step 1 writes the one genesis document that
-  defines the validator set — run it once, before any node starts. Steps 2..4
-  start three separate processes, each with its own --datadir and ports. Nodes
-  can be started in any order; late joiners sync from peers. --port-offset only
-  shifts default ports/datadir — it never changes a node's identity or its place
-  in the validator set.
+SAME-MACHINE / DEV QUICK START (one node or any number of peers)
+  Start a fresh devnet node; it authors its own genesis. Additional processes
+  use unique local ports/datadirs and the first node as a seed. Joining changes
+  peer connectivity only. Validator membership comes from chain state; no
+  command predeclares a node count or generates a validator roster.
 
-  # Step 1 (ONCE) — author the genesis document for 3 validators.
-  # Writes data/node{0,1,2}/config/genesis_state.json, the three Node-<addr>
-  # identity keypairs, and 3 devnet staking keys.
-  go run main.go genesis create --validators=3
+  # Terminal 1 — first node
+  go run main.go node --role=validator --pbft
 
-  # Step 2 (Terminal 1) — first validator: 127.0.0.1:30303, datadir data/node0
-  go run main.go node --role=validator --tcp-addr=127.0.0.1:30303 \
-      --http-port=127.0.0.1:8545 --datadir=data/node0 --pbft
-
-  # Step 3 (Terminal 2) — --port-offset=1 gives 127.0.0.1:30304, datadir
-  # data/node1, wallet RPC 127.0.0.1:8701; it derives the SAME Node-<addr> ID
-  # that Step 1 wrote. Can be started anytime, even after Terminal 1 is running.
+  # Terminal 2 — peer; can join later and sync from Terminal 1
   go run main.go node --role=validator --port-offset=1 \
       --seeds=127.0.0.1:30303 --pbft
 
-  # Step 4 (Terminal 3) — --port-offset=2 gives 127.0.0.1:30305, datadir
-  # data/node2. Can also be delayed; will sync automatically.
+  # Terminal 3+ — same pattern; each process uses a distinct port offset
   go run main.go node --role=validator --port-offset=2 \
       --seeds=127.0.0.1:30303 --pbft
-
-  TIP: To test late-joiner sync, start Terminal 1, wait for it to produce a few
-  blocks, then start Terminal 2 and/or 3 — they will automatically catch up.
 
   WALLET RPC = 8700 + --port-offset; UDP discovery port = TCP + 1000.
 `)
@@ -344,58 +314,20 @@ func runNodeCmd(args []string) error {
 	// this watcher does not touch either.
 	var autoSpendArgs []string
 	// ★ DEVNET BUNDLE FETCH — must run BEFORE anything touches genesis and
-	// before the policy stat below: a joiner (seeds != "") with an incomplete
+	// before custody setup: a joiner (seeds != "") with an incomplete
 	// local bundle fetches the PUBLIC bundle over the network from its seeds,
-	// verifying every file before it touches disk, retrying while the
+	// verifying the document before it touches disk, retrying while the
 	// bootstrap is still signing. Network transport only; custody/ never.
 	if wait, ferr := bind.EnsureDevnetBundleFromSeeds(*networkFlag, *seeds, *dataDir); ferr != nil {
 		return fmt.Errorf("devnet bundle fetch: %w", ferr)
 	} else if wait > 0 {
 		logger.Info("DEVNET BUNDLE: joiner waited %s for the bootstrap bundle", wait.Round(time.Second))
 	}
-	// Per-node FIRST: the escrow policy lives under this node's own datadir in
-	// the fully per-node layout (<datadir>/config/escrow_multisig.json). The
-	// shared-root path is the legacy fallback for nodes provisioned before the
-	// per-node layout landed. NEVER the reverse: a node must not silently pick
-	// up another node's keys.
-	escrowPolicyPath := core.EscrowPolicyPathForDataDir(*dataDir)
 	proposalsDir := core.CustodyProposalsDirForDataDir(*dataDir)
-	if _, statErr := os.Stat(escrowPolicyPath); statErr != nil && *dataDir != "" {
-		if _, legacyErr := os.Stat(custodyRoles["escrow"].OutPath); legacyErr == nil {
-			escrowPolicyPath = custodyRoles["escrow"].OutPath
-			// ERROR, not Warn: default level is INFO so both display, but ERROR
-			// marks this as a migration condition the operator must close out
-			// (copy the bundle into <datadir>/config), not a routine notice.
-			// A silently-misconfigured node must never pass via this fallback
-			// without a loud, greppable line.
-			logger.Error("MIGRATION: escrow policy found ONLY at legacy shared path %s — copy it to %s for the fully per-node layout (this fallback will be removed)", escrowPolicyPath, core.EscrowPolicyPathForDataDir(*dataDir))
-		}
-	}
-	proposalsPathForMsg := proposalsDir
 	if _, statErr := os.Stat(proposalsDir); statErr != nil && *dataDir != "" {
 		if _, legacyErr := os.Stat(custodyProposalsDir); legacyErr == nil {
-			proposalsPathForMsg = custodyProposalsDir
+			proposalsDir = custodyProposalsDir
 		}
-	}
-	if _, statErr := os.Stat(escrowPolicyPath); statErr == nil {
-		// A multisig policy has been provisioned (via "multisig devnet" or
-		// equivalent) — the watcher is expected to work, so an unreadable or
-		// invalid policy is a hard startup error, not a silent no-op. No
-		// custodian keys are required: this node only broadcasts what the
-		// quorum already signed (broadcaster ≠ custodian).
-		const unsetWSPortDefault = "127.0.0.1:8600"
-		walletRPC := *wsPort
-		if walletRPC == "" || walletRPC == unsetWSPortDefault {
-			walletRPC = fmt.Sprintf("127.0.0.1:%d", 8700+*portOffset)
-		}
-		spendArgs, err := autoWatchArgs(
-			escrowPolicyPath, walletRPC, proposalsDir)
-		if err != nil {
-			return err
-		}
-		autoSpendArgs = spendArgs
-	} else {
-		logger.Info("no multisig policy at %s — auto multisig spend watcher disabled (run \"multisig devnet\" to enable treasury spends); legacy shared path %s also checked (%s)", escrowPolicyPath, custodyRoles["escrow"].OutPath, proposalsPathForMsg)
 	}
 
 	// Build the NodePortConfig for THIS process. A node no longer describes a
@@ -501,6 +433,30 @@ func runNodeCmd(args []string) error {
 		}
 		logger.Warn("DEVNET AUTO-CUSTODY armed before genesis: vault=%s escrow=%s signer=%v replay=%v",
 			custody.VaultAddress, custody.EscrowAddress, custody.SigningNode, custody.ReplayNode)
+	}
+	genesisDoc, genesisErr := core.LoadGenesisFile(*dataDir)
+	if genesisErr != nil {
+		if !os.IsNotExist(genesisErr) {
+			return fmt.Errorf("load genesis document for custody watcher: %w", genesisErr)
+		}
+	} else if genesisDoc != nil && genesisDoc.EscrowMultisig != nil {
+		if _, err := core.LoadEscrowPolicy(*dataDir); err != nil {
+			return fmt.Errorf("load escrow policy from genesis document: %w", err)
+		}
+		const unsetWSPortDefault = "127.0.0.1:8600"
+		walletRPC := *wsPort
+		if walletRPC == "" || walletRPC == unsetWSPortDefault {
+			walletRPC = fmt.Sprintf("127.0.0.1:%d", 8700+*portOffset)
+		}
+		spendArgs, err := autoWatchArgs(
+			core.GenesisStateFilePathForDataDir(*dataDir), walletRPC, proposalsDir)
+		if err != nil {
+			return err
+		}
+		autoSpendArgs = spendArgs
+	} else {
+		logger.Info("no escrow_multisig section in %s — auto multisig spend watcher disabled (run \"multisig devnet --role escrow\" to enable treasury spends)",
+			core.GenesisStateFilePathForDataDir(*dataDir))
 	}
 
 	if *pbftMode {
@@ -620,6 +576,7 @@ func runWatchTxCmd(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+
 	if *txID == "" {
 		return fmt.Errorf("--txid is required")
 	}
@@ -628,6 +585,80 @@ func runWatchTxCmd(args []string) error {
 		RPCURL:      *rpcURL,
 		TxID:        *txID,
 		TimeoutSecs: *timeoutSecs,
+	})
+}
+
+func runStakeCmd(args []string) error {
+	fs := flag.NewFlagSet("stake", flag.ContinueOnError)
+	rpcURL := fs.String("rpc", "http://127.0.0.1:8545", "JSON-RPC endpoint")
+	action := fs.String("action", "", "stake or unstake")
+	from := fs.String("from", "", "SPIF address funding the stake (required)")
+	validatorID := fs.String("validator-id", "", "Node identity to admit or exit (required)")
+	validatorKeyFile := fs.String("validator-key", "", "Node identity keys directory or private.key file (required for stake)")
+	amount := fs.String("amount", "", "Stake amount in whole SPX (required for stake)")
+	gasLimit := fs.String("gas-limit", "21000", "Gas limit")
+	gasPrice := fs.String("gas-price", "1", "Gas price in gSPX")
+	nonce := fs.Uint64("nonce", 0, "Sender nonce (omit to auto-fetch)")
+	keyFile := fs.String("key", "", "Path to private key file (required)")
+	wait := fs.Bool("wait", true, "Wait for transaction confirmation")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *action != "stake" && *action != "unstake" {
+		return fmt.Errorf("--action must be stake or unstake")
+	}
+	if *from == "" || *validatorID == "" || *keyFile == "" {
+		return fmt.Errorf("--from, --validator-id, and --key are required")
+	}
+	if *action == "stake" && *validatorKeyFile == "" {
+		return fmt.Errorf("--validator-key is required for stake")
+	}
+	if !common.ValidateSPIFAddress(*from) {
+		return fmt.Errorf("invalid SPIF address %q", *from)
+	}
+	return SendStakeTransaction(StakeTxOptions{
+		RPCURL:           *rpcURL,
+		Action:           *action,
+		From:             *from,
+		ValidatorID:      *validatorID,
+		ValidatorKeyFile: *validatorKeyFile,
+		Amount:           *amount,
+		GasLimit:         *gasLimit,
+		GasPrice:         *gasPrice,
+		Nonce:            *nonce,
+		KeyFile:          *keyFile,
+		Wait:             *wait,
+	})
+}
+
+func runSlashCmd(args []string) error {
+	fs := flag.NewFlagSet("slash", flag.ContinueOnError)
+	rpcURL := fs.String("rpc", "http://127.0.0.1:8545", "JSON-RPC endpoint")
+	from := fs.String("from", "", "SPIF address paying the transaction fee (required)")
+	evidenceFile := fs.String("evidence", "", "JSON file containing signed conflicting votes (required)")
+	gasLimit := fs.String("gas-limit", "21000", "Gas limit")
+	gasPrice := fs.String("gas-price", "1", "Gas price in gSPX")
+	nonce := fs.Uint64("nonce", 0, "Sender nonce (omit to auto-fetch)")
+	keyFile := fs.String("key", "", "Path to transaction signing key file (required)")
+	wait := fs.Bool("wait", true, "Wait for transaction confirmation")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *from == "" || *evidenceFile == "" || *keyFile == "" {
+		return fmt.Errorf("--from, --evidence, and --key are required")
+	}
+	if !common.ValidateSPIFAddress(*from) {
+		return fmt.Errorf("invalid SPIF address %q", *from)
+	}
+	return SendDoubleSignEvidenceTransaction(SlashTxOptions{
+		RPCURL:       *rpcURL,
+		From:         *from,
+		EvidenceFile: *evidenceFile,
+		GasLimit:     *gasLimit,
+		GasPrice:     *gasPrice,
+		Nonce:        *nonce,
+		KeyFile:      *keyFile,
+		Wait:         *wait,
 	})
 }
 

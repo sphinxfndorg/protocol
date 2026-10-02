@@ -73,6 +73,24 @@ func ReadValidatorSnapshot(db *database.DB, epoch uint64) (*ValidatorSnapshotRow
 	return &row, nil
 }
 
+// DeleteValidatorSnapshot removes the stored snapshot for `epoch`, if any.
+//
+// This exists for the crash-window path and for tests: the production code
+// never deletes a snapshot, because losing one fails CLOSED and the startup
+// rebuild is the only sanctioned way to restore one. Deleting a single epoch
+// reproduces exactly that state — a chain whose tip is inside an epoch whose
+// snapshot never reached disk — which is otherwise impossible to construct
+// without editing raw storage by hand.
+func DeleteValidatorSnapshot(db *database.DB, epoch uint64) error {
+	if db == nil {
+		return fmt.Errorf("rawdb: nil db for validator snapshot epoch %d", epoch)
+	}
+	if err := db.Delete(validatorSnapshotKey(epoch)); err != nil {
+		return fmt.Errorf("rawdb: deleting validator snapshot epoch %d: %w", epoch, err)
+	}
+	return nil
+}
+
 // ReadAllValidatorSnapshots returns every stored snapshot, in ascending epoch
 // order. This is what a node replays on startup to rebuild its in-memory
 // snapshot store.

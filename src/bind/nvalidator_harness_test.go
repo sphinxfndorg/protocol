@@ -23,6 +23,7 @@
 package bind
 
 import (
+	"fmt"
 	"math/big"
 	"testing"
 
@@ -95,9 +96,17 @@ func newHarnessValidator(t *testing.T, id string) *harnessValidator {
 // harnessParams returns the production SPHINCS+ parameters.
 func harnessParams(t *testing.T) *parameters.Parameters {
 	t.Helper()
+	return harnessParamsT()
+}
+
+// harnessParamsT is harnessParams without the testing.T dependency, so a
+// production-shaped callback (core.AttestationSignatureVerifier) can reach it.
+// SPHINCS+ parameter construction is pure and deterministic, so there is
+// nothing here to assert.
+func harnessParamsT() *parameters.Parameters {
 	cfg, err := config.NewSTHINCSParameters()
 	if err != nil {
-		t.Fatalf("NewSTHINCSParameters: %v", err)
+		panic("harnessParamsT: NewSTHINCSParameters: " + err.Error())
 	}
 	return cfg.Params
 }
@@ -126,7 +135,7 @@ func (h *harnessValidator) signBlockAttestation(t *testing.T, height uint64) *ty
 	if err != nil {
 		t.Fatalf("[%s] SerializeSignature: %v", h.id, err)
 	}
-	return &types.Attestation{ValidatorID: h.id, Signature: sigBytes, View: height}
+	return &types.Attestation{ValidatorID: h.id, Signature: sigBytes, Height: height, View: height}
 }
 
 // verifyAttestation checks a real signature under h's own public key. The
@@ -134,15 +143,21 @@ func (h *harnessValidator) signBlockAttestation(t *testing.T, height uint64) *ty
 // never be an artefact of accepting unsigned or malformed attestations.
 func (h *harnessValidator) verifyAttestation(t *testing.T, height uint64, att *types.Attestation) bool {
 	t.Helper()
+	return h.verifyAttestationNoT(height, att)
+}
+
+// verifyAttestationNoT is verifyAttestation without a *testing.T, so production
+// code paths (the AttestationSignatureVerifier) can call it.
+func (h *harnessValidator) verifyAttestationNoT(height uint64, att *types.Attestation) bool {
 	if h.pk == nil {
 		return false
 	}
-	sig, err := sthincs.DeserializeSignature(harnessParams(t), att.Signature)
+	sig, err := sthincs.DeserializeSignature(harnessParamsT(), att.Signature)
 	if err != nil {
 		return false
 	}
 	// Spx_verify takes (params, message, sig, pk) and returns only a bool.
-	return sthincs.Spx_verify(harnessParams(t), attestationMessage(height, h.id), sig, h.pk)
+	return sthincs.Spx_verify(harnessParamsT(), attestationMessage(height, h.id), sig, h.pk)
 }
 
 // buildSnapshotFor builds a snapshot giving every validator in `vals` an equal
@@ -166,10 +181,64 @@ func buildSnapshotFor(vals []*harnessValidator) (*consensus.ValidatorSnapshot, *
 // genesis exemption keys on height 0. A header carrying only Height would read
 // as genesis and skip verification entirely — which would make this harness
 // assert nothing at all.
+// harnessKeyResolver returns each harness validator's REAL serialized public
+// key, so the snapshot-member key invariant is exercised against genuine
+// 32-byte SPHINCS+ keys rather than a stub.
+func harnessKeyResolver(vals []*harnessValidator) core.OperatorKeyResolver {
+	keys := make(map[string][]byte, len(vals))
+	for _, v := range vals {
+		serialized, err := v.pk.SerializePK()
+		if err != nil {
+			continue
+		}
+		keys[v.id] = serialized
+	}
+	return func(validatorID string) ([]byte, error) {
+		if key, ok := keys[validatorID]; ok {
+			return key, nil
+		}
+		return nil, fmt.Errorf("harness has no public key for %s", validatorID)
+	}
+}
+
+// harnessVerifyFn returns a core.AttestationSignatureVerifier that checks a
 func harnessBlock(height uint64, atts []*types.Attestation) *types.Block {
 	return &types.Block{
 		Header: &types.BlockHeader{Block: height, Height: height},
 		Body:   types.BlockBody{Attestations: atts},
+	}
+}
+
+// harnessVerifyFn returns a core.AttestationSignatureVerifier that checks a
+// harness signature the same way verifyAttestation does.
+//
+// ★ WHY IT IS NOT THE PRODUCTION VERIFIER. This harness deliberately signs
+// attestationMessage(height, id) — a bespoke preimage — rather than the
+// consensus vote preimage, because it is testing the QUORUM THRESHOLD against
+// real SPHINCS+ signatures, not the vote encoding. The production verifier
+// (consensus.VerifyAttestationSignature) is exercised for real, end to end, by
+// TestLiveSignedVoteVerifiesThroughSyncPath, which signs with the live signer and
+// verifies through core.VerifyBlockAttestations.
+//
+// Using the production verifier here would force this harness to adopt the
+// consensus preimage, which is a different test from the one it documents.
+func harnessVerifyFn(vals []*harnessValidator) core.AttestationSignatureVerifier {
+	byID := make(map[string]*harnessValidator, len(vals))
+	for _, v := range vals {
+		byID[v.id] = v
+	}
+	return func(att *types.Attestation, publicKey []byte) error {
+		if att == nil {
+			return fmt.Errorf("nil attestation")
+		}
+		v := byID[att.ValidatorID]
+		if v == nil {
+			return fmt.Errorf("no harness validator %s", att.ValidatorID)
+		}
+		if !v.verifyAttestationNoT(att.Height, att) {
+			return fmt.Errorf("signature does not verify under %s", att.ValidatorID)
+		}
+		return nil
 	}
 }
 
@@ -231,7 +300,7 @@ func TestHarness_RealSPHINCS_QuorumForN(t *testing.T) {
 			for i := 0; i < need; i++ {
 				okAtts = append(okAtts, sigs[vals[i].id])
 			}
-			if err := core.VerifyBlockAttestations(harnessBlock(1, okAtts)); err != nil {
+			if err := core.VerifyBlockAttestations(harnessBlock(1, okAtts), harnessKeyResolver(vals), harnessVerifyFn(vals)); err != nil {
 				t.Errorf("N=%d: a block signed by %d of %d (32 SPX each) must verify, got: %v",
 					n, need, n, err)
 			}
@@ -242,7 +311,7 @@ func TestHarness_RealSPHINCS_QuorumForN(t *testing.T) {
 				for i := 0; i < short; i++ {
 					shortAtts = append(shortAtts, sigs[vals[i].id])
 				}
-				if err := core.VerifyBlockAttestations(harnessBlock(1, shortAtts)); err == nil {
+				if err := core.VerifyBlockAttestations(harnessBlock(1, shortAtts), harnessKeyResolver(vals), harnessVerifyFn(vals)); err == nil {
 					t.Errorf("N=%d: a block signed by only %d of %d must be REFUSED "+
 						"(not strictly more than two thirds)", n, short, n)
 				}

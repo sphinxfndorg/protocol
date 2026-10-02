@@ -57,7 +57,19 @@ type ConnPool struct {
 	mu          sync.Mutex
 }
 
-const sameBoxDHTUDPPortOffset = 1000
+// DHTUDPPortOffset is the fixed offset added to a node's TCP port to derive the
+// UDP port its Kademlia discovery instance binds (TCP 30303 -> UDP 31303).
+//
+// It is exported because the CLI startup line reports the EFFECTIVE discovery
+// port. --udp-port defaults to empty on purpose so bind can apply this
+// derivation to the node's real listen address; logging the empty flag printed
+// "udp=" with no value and read as "discovery is off" in the one line an
+// operator checks when peers fail to connect.
+const DHTUDPPortOffset = 1000
+
+// sameBoxDHTUDPPortOffset is the package-local alias kept so the existing
+// bind-internal call sites read unchanged.
+const sameBoxDHTUDPPortOffset = DHTUDPPortOffset
 
 // sameBoxDHTUDPPort returns the deterministic UDP port used by a same-box
 // node's Kademlia instance. The public seed syntax is a TCP address, so using
@@ -1337,23 +1349,64 @@ func StartNodeWithOptions(
 		return out
 	}
 
+	// plainSeedAddrs are the operator's configured plain gossip seeds — the
+	// addresses the sync loops are allowed to DIAL. This is NOT a peer list and
+	// NOT a roster: peerRegistry below stays populated only by real discovery
+	// and verified key exchanges, so nothing here can be mistaken for a
+	// pre-agreed node set or for validator membership. A node that starts alone
+	// still has an empty peerRegistry and still holds no stake; these addresses
+	// are transport input only, and every response is still verified (genesis
+	// hash, attestations, chain continuity).
+	plainSeedAddrs := make([]string, 0, 2)
+	if seeds != "" {
+		for _, seed := range strings.Split(seeds, ",") {
+			seed = strings.TrimSpace(seed)
+			// enrtree:// is a DNS tree, not a dialable gossip address.
+			if seed == "" || strings.HasPrefix(seed, "enrtree://") {
+				continue
+			}
+			plainSeedAddrs = append(plainSeedAddrs, seed)
+		}
+		if len(plainSeedAddrs) > 0 {
+			logger.Info("Block sync will retry these configured seed address(es) while the address book is still empty: %s",
+				strings.Join(plainSeedAddrs, ", "))
+		}
+	}
+
 	// peerAddrsFunc is the live peer address book (discovery only, never a
-	// synthesized roster). Both the block-sync loop and the checkpoint-sync
-	// loop read it, so a node with zero peers simply has an empty list.
+	// synthesized roster), UNION the operator's configured plain --seeds.
+	//
+	// The union matters for diagnosability and for making progress. The
+	// address book is only populated by a peer that has already completed a
+	// verified key exchange, so a joiner whose seed rejects it (wrong genesis,
+	// seed still booting, seed down) had an EMPTY list and could only log
+	// "No peers reachable — tried addresses ()" — naming nothing, in the very
+	// line the troubleshooting table tells operators to read. Worse, the block
+	// sync loop then had no address to retry, so it could not recover even
+	// once the seed came up.
+	//
+	// Self is excluded so a node never tries to dial itself.
 	peerAddrsFunc := func() []string {
 		peerRegistryMu.Lock()
 		defer peerRegistryMu.Unlock()
-		addrs := make([]string, 0, len(peerRegistry))
+		addrs := make([]string, 0, len(peerRegistry)+len(plainSeedAddrs))
+		seen := make(map[string]bool, len(peerRegistry)+len(plainSeedAddrs))
 		for _, addr := range peerRegistry {
+			if addr == "" || seen[addr] {
+				continue
+			}
+			seen[addr] = true
+			addrs = append(addrs, addr)
+		}
+		for _, addr := range plainSeedAddrs {
+			if addr == "" || addr == currentAddress || seen[addr] {
+				continue
+			}
+			seen[addr] = true
 			addrs = append(addrs, addr)
 		}
 		return addrs
 	}
-
-	// Peers are not pre-registered from any static roster. The address book is
-	// populated only by real discovery (--seeds/PEX/DNS) and by verified key
-	// exchanges, so a node that starts alone simply has an empty address book
-	// until a peer actually connects.
 
 	// SECTION 11 — TCP listener
 	ctx, cancelCtx := context.WithCancel(context.Background())

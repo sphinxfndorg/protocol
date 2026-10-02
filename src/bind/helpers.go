@@ -629,7 +629,22 @@ func runBlockSyncLoop(
 			// commitments are the anchor. A mismatch is a hard refusal and the
 			// peer is scored, because there is no honest explanation for
 			// serving a different chain.
-			if err := core.VerifyPeerGenesis(genesisBlock, bc.GetBlockByNumber(0)); err != nil {
+			// ★ THE ANCHOR MUST NOT BE "whatever happens to be stored at height
+			// 0". A late joiner never stores one — it skips genesis execution
+			// and syncs block 0 from a peer — so bc.GetBlockByNumber(0) is nil
+			// there, and this guard then refused EVERY genesis with "no local
+			// genesis block to verify the peer's against", leaving the joiner at
+			// height 0 forever despite having reachable peers. Fall back to the
+			// in-memory genesis block this node derived INDEPENDENTLY from its
+			// own genesis document (authored here, or fetched and verified from
+			// the bootstrap before startup). Every check inside
+			// VerifyPeerGenesis still applies — document digest, active-snapshot
+			// hash and full block hash — so nothing is weakened.
+			localGenesis := bc.GetBlockByNumber(0)
+			if localGenesis == nil {
+				localGenesis = core.LocalGenesisAnchor()
+			}
+			if err := core.VerifyPeerGenesis(genesisBlock, localGenesis); err != nil {
 				logger.Error("[%s] REFUSED peer genesis from %s: %v — staying at height 0",
 					nodeID, bestPeerAddr, err)
 				peerFailureCount[bestPeerAddr]++

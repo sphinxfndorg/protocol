@@ -787,8 +787,37 @@ func (gs *GenesisState) writeGenesisStateFile(datadir string) error {
 	//
 	// Every *big.Int is rendered as a decimal string first, so the file is
 	// readable by tools with no Go runtime.
+	// chainIDConflict records a genuine disagreement between the ChainID this
+	// audit view would stamp and the one the document already carries. Silently
+	// overwriting it would change ConsensusDigest — which the genesis block
+	// header already committed to — and fork this node away from every peer.
+	// The mutator callback cannot return an error, so the conflict is captured
+	// here and turned into a hard failure below instead of a silent fork.
+	var chainIDConflict bool
+	// existingChainID is the document's ChainID as loaded before the audit ran,
+	// captured so the conflict message can name the value it refused to
+	// overwrite (the mutator runs against an in-memory copy).
+	var existingChainID uint64
 	audit := func(gf *GenesisStateFile) {
-		gf.ChainID = gs.ChainID
+		// ★ DEFENCE IN DEPTH: this audit view is NOT supposed to establish
+		// chain identity. ConsensusDigest hashes the top-level ChainID, and the
+		// genesis block header already committed to that digest, so stamping a
+		// DIFFERENT ChainID here would silently fork the chain away from every
+		// peer (each node would compute a different genesis hash and refuse the
+		// others at key exchange).
+		//
+		// CreateGenesisForSelf now writes gf.ChainID when the document is
+		// authored, so this assignment is normally idempotent. Keeping it makes
+		// the audit view correct for a document that legitimately arrives with
+		// no top-level ChainID yet (the historical shape), while the guard
+		// below turns any genuine disagreement into a loud, named error instead
+		// of a silent fork.
+		if gf.ChainID != 0 && gs.ChainID != 0 && gf.ChainID != gs.ChainID {
+			chainIDConflict = true
+			existingChainID = gf.ChainID
+		} else {
+			gf.ChainID = gs.ChainID
+		}
 		gf.ChainName = gs.ChainName
 		gf.Symbol = gs.Symbol
 		gf.Timestamp = time.Unix(gs.Timestamp, 0).UTC().Format(time.RFC3339)
@@ -812,6 +841,17 @@ func (gs *GenesisState) writeGenesisStateFile(datadir string) error {
 	}
 	if err := MutateGenesisFile(datadir, audit); err != nil {
 		return err
+	}
+	if chainIDConflict {
+		// Refuse rather than publish a document whose ConsensusDigest no longer
+		// matches the genesis block hash this node already committed to. The
+		// operator must decide which chain identity is authoritative; guessing
+		// here is what produced a silent three-way fork.
+		return fmt.Errorf(
+			"genesis audit refused to overwrite an existing chain identity: this node runs chain_id=%d but %s already declares chain_id=%d. "+
+				"Rewriting it would change the genesis document digest the block-0 header already committed to, so every peer would compute a different genesis hash and refuse this node. "+
+				"Point --network/--datadir at the matching chain, or delete this node's genesis document to re-author it",
+			gs.ChainID, GenesisStateFilePathForDataDir(datadir), existingChainID)
 	}
 
 	logger.Info("Genesis state written to %s (%d allocations, genesis supply %s SPX = %s sold + %s remainder)",
@@ -1764,6 +1804,27 @@ func CreateGenesisForSelf(datadir, network, nodeID, publicKeyHex, rewardAddressH
 		gf.Version = genesisStateFileVersion
 		gf.Bootstrap = true
 		gf.Chain = params
+		// ★ THE TOP-LEVEL ChainID MUST BE SET HERE, AT AUTHORING TIME.
+		//
+		// ConsensusDigest includes BOTH gf.ChainID and gf.Chain, and the genesis
+		// block header commits to that digest. Only gf.Chain used to be written
+		// here; gf.ChainID was left 0 until ApplyGenesis's audit mutation stamped
+		// it from the chain params (genesis.go writeGenesisStateFile). That made
+		// the digest change AFTER block 0 was already built and hashed:
+		//
+		//   author : builds block 0 while gf.ChainID==0 -> digest 729ae21e...
+		//   ApplyGenesis then writes chain_id=73310      -> digest 4527e2aa...
+		//   joiner : reads the final file               -> digest 4527e2aa...
+		//
+		// The author and every joiner therefore disagreed on the genesis hash, so
+		// each joiner was refused at key exchange with "genesis hash mismatch" and
+		// never discovered a single peer. Setting both fields here makes the digest
+		// stable from the moment the document exists, so the later audit write is
+		// idempotent instead of chain-forking.
+		//
+		// ValidatePinnedGenesisDocument also requires gf.ChainID == gf.Chain.ChainID
+		// on testnet/mainnet, so leaving it 0 here was latent breakage there too.
+		gf.ChainID = params.ChainID
 		gf.Validators = []GenesisStakedValidator{{
 			NodeID:        nodeID,
 			PublicKey:     publicKeyHex,

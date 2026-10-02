@@ -140,13 +140,18 @@ Verified from the run:
 
 ```
 $ grep 'Starting node role=' T1.log T2.log T3.log
-T1.log: Starting node role=validator tcp=127.0.0.1:30303 udp= rpc=127.0.0.1:8545 seeds=""               data=data      pbft=true mode=development network=devnet
-T2.log: Starting node role=validator tcp=127.0.0.1:30304 udp= rpc=127.0.0.1:8546 seeds="127.0.0.1:30303" data=data/node1 pbft=true mode=development network=devnet
-T3.log: Starting node role=validator tcp=127.0.0.1:30305 udp= rpc=127.0.0.1:8547 seeds="127.0.0.1:30303" data=data/node2 pbft=true mode=development network=devnet
+T1.log: Starting node role=validator tcp=127.0.0.1:30303 udp=31303 rpc=127.0.0.1:8545 seeds=""               data=data      pbft=true mode=development network=devnet
+T2.log: Starting node role=validator tcp=127.0.0.1:30304 udp=31304 rpc=127.0.0.1:8546 seeds="127.0.0.1:30303" data=data/node1 pbft=true mode=development network=devnet
+T3.log: Starting node role=validator tcp=127.0.0.1:30305 udp=31305 rpc=127.0.0.1:8547 seeds="127.0.0.1:30303" data=data/node2 pbft=true mode=development network=devnet
 
 $ grep 'Wallet/JSON-RPC listener bound' T2.log
 Wallet/JSON-RPC listener bound on 127.0.0.1:8701
 ```
+
+The startup line reports the **effective** discovery port (`udp=`), i.e. the
+TCP+1000 value the node actually binds. `--udp-port` still defaults to empty so
+the node derives it from its own listen address, but the log shows the resolved
+number rather than the empty flag.
 
 **First startup is slow.** Terminal 1 spends roughly 1–2 minutes generating
 SPHINCS+ keys and signing the 13 block-0 distribution witness sets (2-of-3 each,
@@ -257,15 +262,25 @@ then fails loudly**. It does not invent a genesis.
 Same height, same block hash, on all three terminals:
 
 ```
-$ for f in T1 T2 T3; do printf "%s: " $f; grep -oE 'height=30, hash=[0-9a-f]{16}' $f.log | tail -1; done
-T1: height=30, hash=e536f53f8db465ee
-T2: height=30, hash=e536f53f8db465ee
-T3: height=30, hash=e536f53f8db465ee
+$ for f in T1 T2 T3; do printf "%s: " $f; grep -oE 'Updated best block: height=[0-9]+, hash=[0-9a-f]{16}' $f.log | tail -1 | grep -oE 'height=[0-9]+, hash=[0-9a-f]{16}'; done
+T1: height=75, hash=1ec95d81c1227724
+T2: height=75, hash=1ec95d81c1227724
+T3: height=75, hash=1ec95d81c1227724
 
 $ grep -c 'attestation quorum not met' T1.log T2.log T3.log
 T1.log:0
 T2.log:0
 T3.log:0
+```
+
+All three also agree on the genesis hash — the chain identity that §4's bundle
+fetch is supposed to establish:
+
+```
+$ for f in T1 T2 T3; do printf "%s: " $f; grep -oE 'genesis hash: GENESIS_[0-9a-f]{16}' $f.log | tail -1; done
+T1: genesis hash: GENESIS_94f47677da1b4c5a
+T2: genesis hash: GENESIS_94f47677da1b4c5a
+T3: genesis hash: GENESIS_94f47677da1b4c5a
 ```
 
 The validator set is identical in every terminal — **one** validator, 32 SPX:
@@ -277,7 +292,7 @@ $ for f in T1 T2 T3; do echo "-- $f:"; grep 'seeded .* validators into the conse
 -- T3: GENESIS FILE: seeded 1 validators into the consensus set (32 SPX total)
 ```
 
-So T2 and T3 reach consensus about block 30 without holding any weight: they
+So T2 and T3 reach consensus about block 75 without holding any weight: they
 verify and follow the chain, they just do not vote. That is the intended
 behaviour for an unstaked node, and it is what the warning at the top of this
 document describes.
@@ -653,6 +668,9 @@ view-change, and multi-process quorum behavior separately.
 | A joiner never votes | It has not been admitted through chain state yet | Fund its stake owner, submit `stake`, and wait for the `e+2` activation boundary |
 | `unknown subcommand "stake"` or `"slash"` | The executable is stale | Rebuild with `go build -o sphinx ./src/cli` |
 | `--config file holds N node entries` | Multi-entry config | Use one file per node, or explicit flags |
+| `Rejecting key exchange from <node>: genesis hash mismatch` | The two sides computed different genesis hashes, so neither will peer with the other | Compare `Genesis block commitments: snapshot=… document=…` in both logs — they must match. Delete the joiner's datadir (or `genesis_state.json`) and restart it so it refetches the bundle |
+| `REFUSED peer genesis from <peer>: … digest/snapshot/hash mismatch` | The joiner holds a different genesis document than the peer | Same as above: refetch the bundle from the seed with a clean datadir |
+| `REFUSED peer genesis … no local genesis block to verify` | The node has no genesis anchor at all | Check that `<datadir>/config/genesis_state.json` exists and names a validator; a joiner with no document must not adopt a peer's genesis |
 
 On one machine, SPHINCS+ signing is slow: a PBFT round needs several signatures
 and each costs seconds of CPU. The generous timeouts are deliberate.

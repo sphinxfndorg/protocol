@@ -9,8 +9,10 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -369,8 +371,30 @@ func runNodeCmd(args []string) error {
 		nodeConfig.WSPort = *wsPort
 	}
 
+	// ★ REPORT THE EFFECTIVE UDP PORT, NOT THE EMPTY FLAG.
+	//
+	// --udp-port deliberately defaults to "" so that bind can derive the DHT
+	// port from the node's own TCP address as TCP+1000 (see sameBoxDHTUDPPort
+	// and the bind SECTION 7 wiring). Logging nodeConfig.UDPPort verbatim
+	// therefore printed "udp=" with nothing after it on every single node, even
+	// though a real discovery port was in use — which reads as "discovery is
+	// off" in exactly the log line an operator checks when peers fail to
+	// connect. Resolve the same TCP+1000 value here so the startup line
+	// reports what the node will actually bind, and keeps matching the README.
+	effectiveUDPPort := nodeConfig.UDPPort
+	if effectiveUDPPort == "" {
+		if _, portStr, splitErr := net.SplitHostPort(nodeConfig.TCPAddr); splitErr == nil && portStr != "" {
+			if tcpPortNum, convErr := strconv.Atoi(portStr); convErr == nil {
+				effectiveUDPPort = strconv.Itoa(tcpPortNum + bind.DHTUDPPortOffset)
+			}
+		}
+	}
+	if effectiveUDPPort == "" {
+		effectiveUDPPort = "(derived at bind)"
+	}
+
 	logger.Info("Starting node role=%s tcp=%s udp=%s rpc=%s seeds=%q data=%s pbft=%v mode=%s network=%s",
-		*role, nodeConfig.TCPAddr, nodeConfig.UDPPort, nodeConfig.HTTPPort, *seeds, *dataDir, *pbftMode, *mode, *networkFlag)
+		*role, nodeConfig.TCPAddr, effectiveUDPPort, nodeConfig.HTTPPort, *seeds, *dataDir, *pbftMode, *mode, *networkFlag)
 
 	// ── Peer discovery is decided by flags/config, never by a node count ──
 	//

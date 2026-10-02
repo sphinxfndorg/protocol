@@ -285,6 +285,36 @@ func GetGenesisTimestamp() int64 {
 	return genesisTimestampValue
 }
 
+// LocalGenesisAnchor returns the genesis block THIS NODE has independently
+// derived, for use as the trust anchor when a peer offers a genesis block.
+//
+// ★ WHY A LATE JOINER NEEDS THIS. A late joiner deliberately does not execute
+// genesis: it skips ExecuteGenesisBlock and waits to sync block 0 from a peer
+// (see the "Late-joiner mode" log line in bind.StartNodeWithOptions). That
+// leaves bc.GetBlockByNumber(0) == nil, so the sync loop's guard
+//
+//	VerifyPeerGenesis(peerGenesis, bc.GetBlockByNumber(0))
+//
+// was handed a nil anchor and refused EVERY genesis with "no local genesis
+// block to verify the peer's against" — the joiner could never adopt genesis,
+// so it sat at height 0 forever even though it had peers.
+//
+// The anchor does not have to be a STORED block: a joiner has already built
+// the identical block 0 in memory from its own genesis document — one it either
+// authored itself or fetched and verified from the bootstrap node before
+// startup (EnsureDevnetBundleFromSeeds). That derivation is independent of the
+// peer now offering a genesis, which is exactly what the guard needs. Returning
+// it restores the comparison without weakening any check: VerifyPeerGenesis
+// still requires the document digest, the active-snapshot hash AND the full
+// block hash to match, and the block hash covers the allocation list, so a peer
+// cannot substitute its own distribution.
+//
+// Returns nil only if the genesis block could not be derived at all, in which
+// case the caller must keep failing closed.
+func LocalGenesisAnchor() *types.Block {
+	return getCachedGenesisBlock()
+}
+
 // GenerateGenesisHash is deprecated - use GetGenesisHash instead for consistency
 func GenerateGenesisHash() string {
 	logger.Warn("GenerateGenesisHash is deprecated, using GetGenesisHash for consistency")

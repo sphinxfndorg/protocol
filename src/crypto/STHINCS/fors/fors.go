@@ -6,6 +6,7 @@ package fors
 
 import (
 	"fmt"
+	"sync"
 
 	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/address"
 	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/parameters"
@@ -107,9 +108,20 @@ func Fors_treehash(params *parameters.Parameters, SKseed []byte, startIndex int,
 			adrs.SetTreeIndex((adrs.GetTreeIndex() - 1) / 2)
 
 			// Parent = H(left_child || right_child)
-			// Order matters: left child first (popped from stack), then current node
-			// append(stack.Pop().Node, node...) concatenates left + right
-			node = params.Tweak.H(PKseed, adrs, append(stack.Pop().Node, node...))
+			// Order matters: left child first (popped from stack), then current
+			// node.
+			//
+			// Build the concatenation in a fresh buffer. append(left, node...)
+			// writes into left's spare capacity whenever cap > len, and hash
+			// outputs are often sliced from larger arrays — so it can clobber
+			// bytes of a value another node still references. That was safe by
+			// accident while everything ran on one goroutine; with the parallel
+			// tree build it would be a genuine data race.
+			leftNode := stack.Pop().Node
+			combined := make([]byte, 0, len(leftNode)+len(node))
+			combined = append(combined, leftNode...)
+			combined = append(combined, node...)
+			node = params.Tweak.H(PKseed, adrs, combined)
 
 			// Parent is one level higher in the tree
 			adrs.SetTreeHeight(adrs.GetTreeHeight() + 1)
@@ -271,63 +283,97 @@ func Fors_sign(params *parameters.Parameters, M []byte, SKseed []byte, PKseed []
 		return nil, fmt.Errorf("message_to_indices failed: %w", err)
 	}
 
-	// Initialize signature structure with capacity for k trees
-	SIG_FORS := &FORSSignature{
-		Forspkauth: make([]*TreePKAUTH, 0, params.K),
+	// Process each FORS tree independently. The K trees are mutually
+	// independent: tree i is addressed by (layer 0, tree address, keypair
+	// address, FORS_TREE) and depends only on SKseed, PKseed and indices[i],
+	// never on another tree. So they are built concurrently.
+	//
+	// The results are written to pre-allocated slots indexed by i, never
+	// appended, so the output order does not depend on scheduling — the
+	// signature is byte-identical to the sequential version regardless of how
+	// the goroutines interleave.
+	entries := make([]*TreePKAUTH, params.K)
+	if params.K >= parallelThreshold {
+		var wg sync.WaitGroup
+		errs := make(chan error, params.K)
+		for i := 0; i < params.K; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				defer func() {
+					if r := recover(); r != nil {
+						errs <- fmt.Errorf("panic signing FORS tree %d: %v", i, r)
+					}
+				}()
+				// Private address copy: Fors_treehash and PRF both mutate the
+				// ADRS, so sharing one across goroutines would be a data race.
+				a := adrs.Copy()
+				entry, err := forsSignOneTree(params, indices[i], i, SKseed, PKseed, a)
+				if err != nil {
+					errs <- err
+					return
+				}
+				entries[i] = entry
+			}(i)
+		}
+		wg.Wait()
+		close(errs)
+		for e := range errs {
+			return nil, e
+		}
+	} else {
+		for i := 0; i < params.K; i++ {
+			a := adrs.Copy()
+			entry, err := forsSignOneTree(params, indices[i], i, SKseed, PKseed, a)
+			if err != nil {
+				return nil, err
+			}
+			entries[i] = entry
+		}
 	}
 
-	// Process each FORS tree independently
-	for i := 0; i < params.K; i++ {
-		// STEP 1: Select leaf at position indices[i] within tree i
-		// Leaf index = base_index + offset
-		// base_index = i * params.T (start of tree i)
-		// offset = indices[i] (0 to 2^a - 1)
-		adrs.SetTreeHeight(0)
-		adrs.SetTreeIndex(i*params.T + indices[i])
-
-		// STEP 2a: Compute leaf value (the actual signature element)
-		// Leaf = PRF(SKseed, adrs) - deterministic given the seed
-		PKElement := params.Tweak.PRF(SKseed, adrs)
-
-		// STEP 2b: Compute authentication path of length a
-		// AUTH will contain a nodes, each N bytes
-		AUTH := make([]byte, params.A*params.N)
-
-		// For each level j from 0 to a-1
-		for j := 0; j < params.A; j++ {
-			// Calculate sibling index at level j
-			// (indices[i] >> j) ^ 1:
-			//   - Shift right by j to get the ancestor index at this level
-			//   - XOR with 1 flips the last bit, giving the sibling ancestor
-			// Then multiply by 2^j to get starting leaf index of sibling subtree
-			// Using bit shift: s * (1 << j) = s << j
-			//
-			// Example: leaf index = 5 (binary 101), j=1
-			//   (5 >> 1) = 2 (binary 10)
-			//   2 ^ 1 = 3 (binary 11)
-			//   sibling start = 3 << 1 = 6
-			s := (indices[i] >> j) ^ 1
-
-			// Compute root of sibling subtree of height j
-			// This node is exactly what we need for the authentication path
-			// i*params.T = start of current tree
-			// s << j = starting leaf index of sibling subtree
-			// j = height of subtree (we want the root at this level)
-			test, err := Fors_treehash(params, SKseed, i*params.T+(s<<j), j, PKseed, adrs)
-			if err != nil {
-				return nil, fmt.Errorf("Fors_treehash failed for tree %d, level %d: %w", i, j, err)
-			}
-			// Store auth node at position j * N
-			copy(AUTH[j*params.N:], test)
+	SIG_FORS := &FORSSignature{Forspkauth: entries}
+	for i := range entries {
+		if entries[i] == nil {
+			return nil, fmt.Errorf("FORS tree %d produced no signature", i)
 		}
-
-		// Store leaf and auth path for this tree
-		SIG_FORS.Forspkauth = append(SIG_FORS.Forspkauth, &TreePKAUTH{
-			PrivateKeyValue: PKElement,
-			AUTH:            AUTH,
-		})
 	}
 	return SIG_FORS, nil
+}
+
+// parallelThreshold is the smallest number of independent units for which
+// fanning out across goroutines pays for the scheduling and copy overhead.
+// It is a speed knob only; it can never change the output.
+const parallelThreshold = 4
+
+// forsSignOneTree produces the (revealed leaf, auth path) pair for one FORS
+// tree. It is the sequential body of Fors_sign for a single i, factored out
+// so the parallel and sequential paths cannot drift apart.
+func forsSignOneTree(params *parameters.Parameters, index, i int,
+	SKseed, PKseed []byte, adrs *address.ADRS) (*TreePKAUTH, error) {
+
+	// STEP 1: Select leaf at position index within tree i.
+	// Leaf index = base_index + offset = i*T + index.
+	adrs.SetTreeHeight(0)
+	adrs.SetTreeIndex(i*params.T + index)
+
+	// STEP 2a: Leaf value = PRF(SKseed, adrs) — deterministic given the seed.
+	PKElement := params.Tweak.PRF(SKseed, adrs)
+
+	// STEP 2b: Authentication path of length a.
+	AUTH := make([]byte, params.A*params.N)
+	for j := 0; j < params.A; j++ {
+		// s = sibling ancestor at level j: (index >> j) ^ 1, scaled to a
+		// leaf index by << j.
+		s := (index >> j) ^ 1
+		test, err := Fors_treehash(params, SKseed, i*params.T+(s<<j), j, PKseed, adrs)
+		if err != nil {
+			return nil, fmt.Errorf("Fors_treehash failed for tree %d, level %d: %w", i, j, err)
+		}
+		copy(AUTH[j*params.N:], test)
+	}
+
+	return &TreePKAUTH{PrivateKeyValue: PKElement, AUTH: AUTH}, nil
 }
 
 // Fors_pkFromSig recovers the FORS public key from a signature

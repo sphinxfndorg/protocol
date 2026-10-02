@@ -4,14 +4,17 @@
 // go/src/spxhash/hash/types.go
 package spxhash
 
-import "sync"
+import (
+	"hash/maphash"
+	"sync"
+)
 
 // SIPS-0001 https://github.com/sphinx-core/sips/wiki/SIPS-0001
 
-// CacheKey indexes entries in LRUCache. It is the full 32-byte output of a
-// keyed hash (see cacheKey in spxhash.go), giving a ~2^128 birthday bound
-// against cache-key collisions.
-type CacheKey [32]byte
+// CacheKey is a seeded non-cryptographic hash of the input. It only selects
+// a bucket; hits are confirmed by comparing the stored input, so a collision
+// can never return a wrong digest.
+type CacheKey uint64
 
 // LRUCache is a thread-safe LRU cache backed by a doubly-linked list and a map.
 type LRUCache struct {
@@ -25,6 +28,7 @@ type LRUCache struct {
 // Node is a doubly-linked list node used internally by LRUCache.
 type Node struct {
 	key   CacheKey // Cache key
+	input []byte   // Copy of the hashed input, compared on every hit
 	value []byte   // Cached hash value
 	prev  *Node    // Previous (more-recently-used) node
 	next  *Node    // Next (less-recently-used) node
@@ -42,5 +46,6 @@ type SphinxHash struct {
 	data    []byte // Accumulated input data (written via Write)
 	key     []byte // Per-instance key: either the caller's fixed value
 	// (NewSphinxHash) or freshly random (NewSphinxHashKeyed)
-	cache *LRUCache // LRU cache of previously computed hashes
+	cache *LRUCache    // LRU cache of previously computed hashes
+	seed  maphash.Seed // Per-instance seed for cache-key hashing
 }

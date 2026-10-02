@@ -6,12 +6,145 @@ package xmss
 
 import (
 	"fmt"
+	"runtime"
+	"sync"
 
 	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/address"
 	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/parameters"
 	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/util"
 	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/wots"
 )
+
+// parallelThreshold is the smallest number of leaf computations for which
+// fanning out across goroutines is worth the scheduling and ADRS-copy cost.
+// Below it the plain sequential loop is faster, so small subtrees stay
+// sequential. This only affects speed, never the output.
+const parallelThreshold = 4
+
+// buildTree computes the root of a full XMSS tree of height Hprime AND the
+// authentication path for one leaf, in a single pass.
+//
+// WHY THIS EXISTS. The original Xmss_sign called treehash once per level
+// (2^Hprime - 1 leaves in total, all WOTS+ keygens) and then called
+// Xmss_pkFromSig in Ht_sign to recover the root it had just computed. So each
+// layer built every leaf twice over. This builds each leaf exactly once and
+// returns both the root and the auth path from it.
+//
+// The root is mathematically identical to treehash's: the same WOTS+ leaves in
+// the same order, folded left-to-right by the same H() calls at the same
+// absolute TreeHeight/TreeIndex addresses. The ADRS usage is identical to
+// treehash's, which is what keeps the bytes identical — see
+// TestGoldenSignatures.
+//
+// Concurrency: the leaves are independent, so they are computed in parallel.
+// Every goroutine gets its own ADRS copy (the tree walk mutates the address),
+// writes only to its own slot in the level slice, and the fold that follows is
+// sequential and single-threaded, so there is no shared mutable state. A
+// panic inside a leaf — e.g. the nil-hasher panic in the SPHINXHASH backend —
+// is converted to an error, so a fault cannot take down the process from a
+// worker goroutine.
+func buildTree(params *parameters.Parameters, SKseed []byte, PKseed []byte,
+	base *address.ADRS, leafIdx int) (root, auth []byte, err error) {
+
+	n := 1 << params.Hprime
+	level := make([][]byte, n)
+
+	// Fan out over leaves. Each goroutine owns level[i] and its own ADRS.
+	if n >= parallelThreshold {
+		workers := runtime.GOMAXPROCS(0)
+		if workers > n {
+			workers = n
+		}
+		var wg sync.WaitGroup
+		// Buffer n so a failing worker never blocks on send; only the first
+		// error is reported but every error is drained.
+		errs := make(chan error, n)
+		sem := make(chan struct{}, workers)
+		for i := 0; i < n; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				// A panic in a worker would otherwise crash the process; the
+				// sequential path below had the same risk, so convert it to an
+				// error and keep signing reportable.
+				defer func() {
+					if r := recover(); r != nil {
+						errs <- fmt.Errorf("panic computing leaf %d: %v", i, r)
+					}
+				}()
+				v, lerr := leafNode(params, SKseed, PKseed, base, i)
+				if lerr != nil {
+					errs <- lerr
+					return
+				}
+				level[i] = v
+			}(i)
+		}
+		wg.Wait()
+		close(errs)
+		for e := range errs {
+			if err == nil {
+				err = e
+			}
+		}
+		if err != nil {
+			return nil, nil, err
+		}
+	} else {
+		for i := 0; i < n; i++ {
+			v, lerr := leafNode(params, SKseed, PKseed, base, i)
+			if lerr != nil {
+				return nil, nil, lerr
+			}
+			level[i] = v
+		}
+	}
+
+	// Fold level by level, recording the sibling on the leaf's path.
+	// Sequential on purpose: this is O(2^Hprime) H() calls, and parallelizing
+	// it would need a second fan-out for very little gain.
+	auth = make([]byte, params.Hprime*params.N)
+	for h := 1; h <= params.Hprime; h++ {
+		// The sibling on the leaf's path at this height.
+		sib := (leafIdx >> (h - 1)) ^ 1
+		copy(auth[(h-1)*params.N:], level[sib])
+
+		next := make([][]byte, len(level)/2)
+		for j := range next {
+			a := base.Copy()
+			a.SetType(address.TREE)
+			a.SetTreeHeight(h)
+			a.SetTreeIndex(j)
+			// Fresh buffer per node: append(level[2j], ...) would write into
+			// a hash output's spare capacity and can alias memory another
+			// node still references.
+			combined := make([]byte, 0, 2*params.N)
+			combined = append(combined, level[2*j]...)
+			combined = append(combined, level[2*j+1]...)
+			next[j] = params.Tweak.H(PKseed, a, combined)
+		}
+		level = next
+	}
+
+	return level[0], auth, nil
+}
+
+// leafNode computes one WOTS+ public key (a tree leaf) at absolute index i.
+// It uses a private copy of base so the caller's address is untouched, which is
+// what makes the parallel fan-out above safe.
+func leafNode(params *parameters.Parameters, SKseed, PKseed []byte,
+	base *address.ADRS, i int) ([]byte, error) {
+	a := base.Copy()
+	a.SetType(address.WOTS_HASH)
+	a.SetKeyPairAddress(i)
+	v, err := wots.Wots_PKgen(params, SKseed, PKseed, a)
+	if err != nil {
+		return nil, fmt.Errorf("WOTS_PKgen failed for leaf %d: %w", i, err)
+	}
+	return v, nil
+}
 
 // GetWOTSSig returns the WOTS+ signature component
 func (s *XMSSSignature) GetWOTSSig() []byte {
@@ -206,38 +339,194 @@ func Xmss_sign(params *parameters.Parameters, M []byte, SKseed []byte, idx int, 
 		return nil, fmt.Errorf("idx %d out of range [0, %d)", idx, maxLeaves)
 	}
 
-	// Step 1: Generate authentication path
-	// AUTH will contain Hprime nodes, each N bytes
-	AUTH := make([]byte, params.Hprime*params.N)
-
-	for i := 0; i < params.Hprime; i++ {
-		// Compute sibling index at level i
-		// Formula: k = floor(idx / 2^i) XOR 1
-		// Using bit shift: (idx >> i) gives floor(idx / 2^i)
-		// XOR with 1 flips the least significant bit (0↔1)
-		// This gives the sibling's ancestor index at level i
-		k := (idx >> i) ^ 1
-
-		// Compute root of sibling subtree of height i
-		// Starting leaf index = k * 2^i = k << i
-		// Height i subtree contains leaves [k<<i, (k<<i) + 2^i - 1]
-		subtreeRoot, err := treehash(params, SKseed, k<<i, i, PKseed, adrs)
-		if err != nil {
-			return nil, fmt.Errorf("treehash failed for level %d: %w", i, err)
-		}
-		// Store at position i * N in the AUTH buffer
-		copy(AUTH[i*params.N:], subtreeRoot)
+	// One pass: build every leaf once, fold to the root, and keep the sibling
+	// on idx's path as the auth path.
+	root, AUTH, err := Xmss_treeWithAuth(params, SKseed, PKseed, adrs, idx)
+	if err != nil {
+		return nil, fmt.Errorf("tree build failed: %w", err)
 	}
+	_ = root
 
-	// Step 2: Sign message with WOTS+ at leaf idx
-	adrs.SetType(address.WOTS_HASH)
-	adrs.SetKeyPairAddress(idx)
+	// Sign the message with WOTS+ at leaf idx.
+	a := adrs.Copy()
+	a.SetType(address.WOTS_HASH)
+	a.SetKeyPairAddress(idx)
 
-	sig, err := wots.Wots_sign(params, M, SKseed, PKseed, adrs)
+	sig, err := wots.Wots_sign(params, M, SKseed, PKseed, a)
 	if err != nil {
 		return nil, fmt.Errorf("WOTS_sign failed: %w", err)
 	}
 
+	return &XMSSSignature{WotsSignature: sig, AUTH: AUTH}, nil
+}
+
+// Xmss_treeCache is a precomputed XMSS layer: all leaves plus the root.
+type Xmss_treeCache struct {
+	// Leaves holds 2^Hprime WOTS+ public keys, N bytes each. It is
+	// unexported-by-convention inside this package: callers get a copy.
+	leaves [][]byte
+	root   []byte
+}
+
+// Root returns a copy of the layer's root.
+func (c *Xmss_treeCache) Root() []byte {
+	out := make([]byte, len(c.root))
+	copy(out, c.root)
+	return out
+}
+
+// Xmss_cacheLeaves builds the whole tree once and returns its leaves and root,
+// so a caller that signs many messages under one key does not rebuild a tree
+// whose contents never change.
+//
+// This is only valid for a tree that does not depend on the message — in
+// practice the top hypertree layer, whose tree address is always 0. For a
+// per-signature tree use Xmss_treeWithAuth instead.
+func Xmss_cacheLeaves(params *parameters.Parameters, SKseed []byte, PKseed []byte,
+	adrs *address.ADRS) (*Xmss_treeCache, error) {
+
+	n := 1 << params.Hprime
+	leaves := make([][]byte, n)
+
+	if n >= parallelThreshold {
+		var wg sync.WaitGroup
+		errs := make(chan error, n)
+		sem := make(chan struct{}, runtime.GOMAXPROCS(0))
+		for i := 0; i < n; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				defer func() {
+					if r := recover(); r != nil {
+						errs <- fmt.Errorf("panic computing leaf %d: %v", i, r)
+					}
+				}()
+				v, err := leafNode(params, SKseed, PKseed, adrs, i)
+				if err != nil {
+					errs <- err
+					return
+				}
+				leaves[i] = v
+			}(i)
+		}
+		wg.Wait()
+		close(errs)
+		for e := range errs {
+			return nil, e
+		}
+	} else {
+		for i := 0; i < n; i++ {
+			v, err := leafNode(params, SKseed, PKseed, adrs, i)
+			if err != nil {
+				return nil, err
+			}
+			leaves[i] = v
+		}
+	}
+
+	// Fold to the root, then drop the intermediate levels: only the leaves and
+	// the root are kept, which is what the caller needs (an auth path can be
+	// derived from the leaves without re-folding).
+	level := leaves
+	for h := 1; h <= params.Hprime; h++ {
+		next := make([][]byte, len(level)/2)
+		for j := range next {
+			a := adrs.Copy()
+			a.SetType(address.TREE)
+			a.SetTreeHeight(h)
+			a.SetTreeIndex(j)
+			combined := make([]byte, 0, 2*params.N)
+			combined = append(combined, level[2*j]...)
+			combined = append(combined, level[2*j+1]...)
+			next[j] = params.Tweak.H(PKseed, a, combined)
+		}
+		level = next
+	}
+
+	return &Xmss_treeCache{leaves: leaves, root: level[0]}, nil
+}
+
+// AuthPathFromLeaves folds the cached leaves into the authentication path for
+// leafIdx. It is the same walk buildTree performs, so the AUTH bytes are
+// identical to the ones a full build would have produced.
+func (c *Xmss_treeCache) AuthPathFromLeaves(params *parameters.Parameters,
+	PKseed []byte, adrs *address.ADRS, leafIdx int) []byte {
+
+	level := make([][]byte, len(c.leaves))
+	copy(level, c.leaves)
+	auth := make([]byte, params.Hprime*params.N)
+	for h := 1; h <= params.Hprime; h++ {
+		sib := (leafIdx >> (h - 1)) ^ 1
+		copy(auth[(h-1)*params.N:], level[sib])
+		next := make([][]byte, len(level)/2)
+		for j := range next {
+			a := adrs.Copy()
+			a.SetType(address.TREE)
+			a.SetTreeHeight(h)
+			a.SetTreeIndex(j)
+			combined := make([]byte, 0, 2*params.N)
+			combined = append(combined, level[2*j]...)
+			combined = append(combined, level[2*j+1]...)
+			next[j] = params.Tweak.H(PKseed, a, combined)
+		}
+		level = next
+	}
+	return auth
+}
+
+// Xmss_treeWithAuth builds the full XMSS tree rooted at the given address and
+// returns BOTH the root and the authentication path for leaf leafIdx.
+//
+// The root used to be recovered afterwards by the caller with
+// Xmss_pkFromSig, which re-ran the entire WOTS+ chain reconstruction
+// (Len chains x W-1 F calls) plus the full auth-path fold — duplicating work
+// the tree build had already done. Returning the root the build produced
+// removes that second pass entirely.
+//
+// Neither output changes: this is the same tree, built by the same H() calls
+// at the same absolute TreeHeight/TreeIndex addresses as treehash. The
+// caller's adrs is not modified (buildTree works from copies), which matters
+// because Ht_sign reuses one address struct across layers.
+//
+// This is the primitive Ht_sign fans out over: a tree depends only on
+// (SKseed, PKseed, the ADRS) and the leaf index, never on the message.
+func Xmss_treeWithAuth(params *parameters.Parameters, SKseed []byte, PKseed []byte,
+	adrs *address.ADRS, leafIdx int) (root, auth []byte, err error) {
+
+	maxLeaves := 1 << params.Hprime
+	if leafIdx < 0 || leafIdx >= maxLeaves {
+		return nil, nil, fmt.Errorf("leafIdx %d out of range [0, %d)", leafIdx, maxLeaves)
+	}
+	return buildTree(params, SKseed, PKseed, adrs, leafIdx)
+}
+
+// Xmss_signWithAuthPath signs M at leaf idx reusing an auth path that was
+// already produced by Xmss_treeWithAuth.
+//
+// Splitting the tree build from the WOTS+ signing is what lets Ht_sign build
+// all D layer trees concurrently and then sign them in order, without
+// rebuilding any tree.
+func Xmss_signWithAuthPath(params *parameters.Parameters, M []byte, SKseed []byte, idx int,
+	PKseed []byte, adrs *address.ADRS, AUTH []byte) (*XMSSSignature, error) {
+
+	maxLeaves := 1 << params.Hprime
+	if idx < 0 || idx >= maxLeaves {
+		return nil, fmt.Errorf("idx %d out of range [0, %d)", idx, maxLeaves)
+	}
+	if len(AUTH) != params.Hprime*params.N {
+		return nil, fmt.Errorf("invalid AUTH length: expected %d, got %d", params.Hprime*params.N, len(AUTH))
+	}
+
+	a := adrs.Copy()
+	a.SetType(address.WOTS_HASH)
+	a.SetKeyPairAddress(idx)
+
+	sig, err := wots.Wots_sign(params, M, SKseed, PKseed, a)
+	if err != nil {
+		return nil, fmt.Errorf("WOTS_sign failed: %w", err)
+	}
 	return &XMSSSignature{WotsSignature: sig, AUTH: AUTH}, nil
 }
 

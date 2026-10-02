@@ -7,9 +7,11 @@ package tweakable
 import (
 	"crypto/subtle"
 	"encoding/binary"
+	"runtime"
 
 	"github.com/sphinxfndorg/protocol/src/common"
 	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/address"
+	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/util"
 	"golang.org/x/crypto/sha3"
 )
 
@@ -82,19 +84,69 @@ const (
 	domainMask   byte = 0x07
 )
 
+// seedStackBound is the stack-allocated size of the hash-input scratch buffer.
+//
+// CHOSEN FROM MEASUREMENT, not guesswork. `seeder_max_total_test.go`
+// (TestReportSeedTotals) computes the exact `total` that spxHashExpand derives
+// for every call type across all 36 parameter sets:
+//
+//	PRF(SEED=N, adrs=32)          57 .. 73
+//	F(PKseed, adrs, tmp=N)        77 .. 109
+//	H(PKseed, adrs, tmp=2N)       93 .. 141     <- largest hot case
+//	T_l(PKseed, adrs, Len*N)    621 .. 2221     <- WOTS+ pk compression
+//	T_l(PKseed, adrs, K*N)      285 .. 1197     <- FORS roots
+//	Hmsg(R, PKseed, PKroot, M)  129 .. 177     (M is the caller's, unbounded)
+//
+// So 256 covers every HOT call type (PRF/F/H) on the stack across all 36 sets,
+// while T_l — whose input is genuinely Len*N or K*N bytes — falls back to the
+// heap. That is the right split: T_l runs O(K + D) times per signature, while
+// F/H/PRF run on the order of 10^6 times, so the hot paths are exactly the
+// ones worth keeping allocation-free.
+//
+// 256 bytes is also cheap to zero relative to what it saves: the fallback it
+// replaces is a heap allocation of the same size, and the hash it feeds is
+// ~1500 ns, so a 256-byte stack clear is noise next to it.
+const seedStackBound = 256
+
+// digestStackBound is the stack-allocated size of the intermediate digest
+// buffer in spxHashExpand.
+//
+// 64 covers every digest this hasher can produce at its supported sizes
+// (256/384/512-bit -> 32/48/64 bytes). Anything larger falls back to the heap,
+// so a future size cannot silently overflow the stack buffer.
+const digestStackBound = 64
+
 // spxHashExpand hashes domain||length-prefixed(parts) with
 // common.SpxHashUncached (v2-backed: SHA-256 double-hash + SHAKE256, see
 // spxhash/hash/spxhash.go), then expands that 32-byte result via SHAKE256 to
 // exactly outLen bytes. Length-prefixing every field makes the encoding
 // unambiguous — without it, spxHashExpand(d, n, "ab", "c") and
 // spxHashExpand(d, n, "a", "bc") would collide.
+//
+// THE ENCODING IS UNCHANGED. Two buffers live here rather than three:
+// `seed` (the input, stack-resident when small) and `base` (the digest, stack
+// -resident). `out` is heap-allocated because it is returned and becomes a tree
+// node, an auth path or signature bytes — it is allocated with its exact length
+// and returned as out[:outLen:outLen] so no caller can append into spare
+// capacity.
 func spxHashExpand(domain byte, outLen int, parts ...[]byte) []byte {
 	// Exact capacity: one append chain, no regrowth in the hot loop.
 	total := 1
 	for _, p := range parts {
 		total += 4 + len(p)
 	}
-	seed := make([]byte, 0, total)
+
+	// Hot path (PRF/F/H): the compiler proves `stack` never escapes, so this
+	// is a stack write, not a heap allocation. Escape analysis
+	// (`go build -gcflags=-m=1`) reports the makes as non-escaping.
+	var stack [seedStackBound]byte
+	var seed []byte
+	if total <= seedStackBound {
+		seed = stack[:0]
+	} else {
+		seed = make([]byte, 0, total)
+	}
+
 	seed = append(seed, domain)
 	for _, p := range parts {
 		var l [4]byte
@@ -103,7 +155,18 @@ func spxHashExpand(domain byte, outLen int, parts ...[]byte) []byte {
 		seed = append(seed, p...)
 	}
 
-	base := common.SpxHashUncached(seed) // 32 bytes, v2-backed, deterministic (ProtocolSalt) — no cache lookup, see GetHashUncached
+	// The digest buffer: written by HashIntoUncached, read below, never
+	// retained. common.SpxHashUncachedInto is a direct concrete call (not an
+	// interface method), so these arrays provably stay on the stack.
+	var dstack [digestStackBound]byte
+	var dbuf []byte
+	if digest := common.SpxHashDigestSize(); digest > 0 && digest <= digestStackBound {
+		dbuf = dstack[:digest]
+	} else if digest > 0 {
+		dbuf = make([]byte, digest)
+	}
+
+	base := common.SpxHashUncachedInto(dbuf, seed)
 	if base == nil {
 		// common.SpxHashUncached only returns nil on internal hasher
 		// construction failure (see getSpxHasher); that's an unrecoverable
@@ -111,6 +174,40 @@ func spxHashExpand(domain byte, outLen int, parts ...[]byte) []byte {
 		// than silently degrade signature security.
 		panic("tweakable: common.SpxHashUncached returned nil — SphinxHash instance unavailable")
 	}
+	// The seed holds WOTS+ chain values and PRF output — derived secret
+	// material. On the heap path the allocator may retain those bytes; on the
+	// stack path the frame is reused and overwritten. Wiping here is what
+	// makes the heap fallback safe; measured cost is under 1% (see the README).
+	util.Wipe(seed)
+
+	// Wipe the whole backing array as well, not just len(seed) bytes.
+	//
+	// On the stack path seed aliases stack, and len(seed) is only the bytes
+	// this call appended. stack[total:seedStackBound] was not written here,
+	// but a reused frame can still hold a previous call's seed there: an
+	// earlier invocation with a larger total would have written further into
+	// the same array. util.Wipe(seed) cannot reach those bytes, so without
+	// this the function leaves part of an older seed in the frame.
+	//
+	// On the heap path seed does not alias stack and this wipes an array that
+	// was never written; it is cheap (seedStackBound bytes) and keeps the
+	// handling uniform across both branches.
+	util.Wipe(stack[:])
+
+	// KeepAlive is a compiler barrier, not a memory operation: it costs nothing
+	// at runtime. It is required because nothing reads seed or stack again on
+	// any path out of this function, which makes the writes in the Wipe calls
+	// look like dead stores that the optimizer is free to delete. KeepAlive
+	// marks both as reachable at this point, so the stores must actually
+	// happen.
+	//
+	// Do not remove this on the grounds that seed is stack-resident. On the
+	// stack path a reused frame can still hold the previous call's seed bytes,
+	// and on the heap path the allocator may retain them; the wipe is what
+	// clears both, and it only counts if the compiler is forced to emit it.
+	runtime.KeepAlive(seed)
+	runtime.KeepAlive(&stack)
+
 	if outLen <= len(base) {
 		out := make([]byte, outLen)
 		copy(out, base)

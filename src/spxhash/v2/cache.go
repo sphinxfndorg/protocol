@@ -4,6 +4,8 @@
 // go/src/spxhash/hash/cache.go
 package spxhash
 
+import "bytes"
+
 // SIPS-0001 https://github.com/sphinx-core/sips/wiki/SIPS-0001
 
 // NewLRUCache initializes a new LRU cache with the given capacity.
@@ -18,37 +20,39 @@ func NewLRUCache(capacity int) *LRUCache {
 	}
 }
 
-// Get retrieves the cached value for key.
-// Returns a defensive copy of the value and true on a hit, nil and false on a miss.
-func (l *LRUCache) Get(key CacheKey) ([]byte, bool) {
+// Get returns a copy of the cached value for key if the stored input equals input.
+func (l *LRUCache) Get(key CacheKey, input []byte) ([]byte, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	if node, found := l.cache[key]; found {
-		l.moveToFront(node)
-		result := make([]byte, len(node.value))
-		copy(result, node.value)
-		return result, true
+	node, found := l.cache[key]
+	if !found || !bytes.Equal(node.input, input) {
+		return nil, false
 	}
-	return nil, false
+	l.moveToFront(node)
+	result := make([]byte, len(node.value))
+	copy(result, node.value)
+	return result, true
 }
 
-// Put inserts or updates a key-value pair in the cache.
-// A defensive copy of value is stored so the caller retains ownership of its slice.
-func (l *LRUCache) Put(key CacheKey, value []byte) {
+// Put stores copies of input and value under key, replacing any entry with the same key.
+func (l *LRUCache) Put(key CacheKey, input, value []byte) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	stored := make([]byte, len(value))
-	copy(stored, value)
+	buf := make([]byte, len(input)+len(value))
+	copy(buf, input)
+	copy(buf[len(input):], value)
+	in, val := buf[:len(input):len(input)], buf[len(input):]
 
 	if node, found := l.cache[key]; found {
-		node.value = stored
+		node.input = in
+		node.value = val
 		l.moveToFront(node)
 		return
 	}
 
-	node := &Node{key: key, value: stored}
+	node := &Node{key: key, input: in, value: val}
 	l.cache[key] = node
 
 	if l.head == nil {

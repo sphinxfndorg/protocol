@@ -435,6 +435,70 @@ func BenchmarkSpxHashCached(b *testing.B) {
 	fileMu.Unlock()
 }
 
+// BenchmarkSpxHashUncached measures GetHashUncached on a REPEATED input.
+//
+// This is the path STHINCS signing uses (src/crypto/STHINCS/tweakable/
+// spxhash.go): every tweakable call carries a distinct ADRS, so the LRU can
+// essentially never hit, and paying GetHash's cache-key derivation plus the
+// lookup and the insert is pure overhead on every call.
+//
+// It is measured on a repeated input precisely to make that point visible:
+// the same input that BenchmarkSpxHashCached serves in ~50-590 ns/op costs a
+// full recomputation here. The gap between the two is what GetHashUncached
+// avoids, and it is why the uncached path is the right choice for a
+// zero-hit-rate workload even though it is slower than a cache hit.
+//
+// A cold-path comparison is already available via BenchmarkSpxHash, which
+// additionally constructs a fresh instance (and its LRU map) on every op;
+// this one holds a single instance so the difference against
+// BenchmarkSpxHashCached is the cache itself, not per-op construction.
+func BenchmarkSpxHashUncached(b *testing.B) {
+	filename := filepath.Join(".", "vectorsoutput.txt")
+	f, err := os.OpenFile(filename, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		b.Fatalf("Failed to open vectorsoutput.txt: %v", err)
+	}
+	defer f.Close()
+
+	header := "=== RUN   BenchmarkSpxHashUncached"
+	fmt.Println(header)
+	fileMu.Lock()
+	fmt.Fprintln(f, header)
+	fileMu.Unlock()
+
+	for _, vec := range vectors {
+		b.Run(fmt.Sprintf("inputLen=%d", vec.inputLen), func(b *testing.B) {
+			input := generateInput(vec.inputLen)
+			s, err := hash.NewSphinxHash(256, fixedSalt)
+			if err != nil {
+				b.Fatalf("NewSphinxHash: %v", err)
+			}
+			s.GetHashUncached(input) // warm any lazily-initialized state
+			b.ReportAllocs()
+			b.ResetTimer()
+
+			for i := 0; i < b.N; i++ {
+				s.GetHashUncached(input)
+			}
+
+			result := fmt.Sprintf(
+				"BenchmarkSpxHashUncached/inputLen=%d-%d %d %f ns/op",
+				vec.inputLen, runtime.NumCPU(), b.N, float64(b.Elapsed().Nanoseconds())/float64(b.N),
+			)
+			fmt.Println(result)
+			fileMu.Lock()
+			fmt.Fprintln(f, result)
+			fileMu.Unlock()
+		})
+	}
+
+	footer := "--- PASS: BenchmarkSpxHashUncached"
+	fmt.Println(footer)
+	fileMu.Lock()
+	fmt.Fprintln(f, footer)
+	fileMu.Unlock()
+}
+
 // BenchmarkSHA512_256 benchmarks SHA-512/256 for comparison
 func BenchmarkSHA512_256(b *testing.B) {
 	filename := filepath.Join(".", "vectorsoutput.txt")

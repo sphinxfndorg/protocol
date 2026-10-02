@@ -8,6 +8,8 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
+	"fmt"
+	"sync"
 
 	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/address"
 	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/util"
@@ -54,8 +56,13 @@ func (h *Sha256Tweak) PRFmsg(SKprf []byte, OptRand []byte, M []byte) []byte {
 // Robust masks tmp with an MGF1 bitmask before hashing. Any other Variant
 // value is treated as Simple (tmp is hashed as-is) — never as "no input", so
 // tmp always reaches the hash.
+//
+// Hot path: called Len x (W-1) times per leaf, 2^Hprime leaves per tree, D
+// trees per signature. compressADRS writes into a stack array and the zero
+// pad is a constant-size slice, so neither allocates per call.
 func (h *Sha256Tweak) F(PKseed []byte, adrs *address.ADRS, tmp []byte) []byte {
-	compressedADRS := compressADRS(adrs)
+	var adrsBuf [22]byte
+	compressADRSInto(adrs, adrsBuf[:])
 
 	M1 := tmp
 	if h.Variant == Robust {
@@ -63,22 +70,39 @@ func (h *Sha256Tweak) F(PKseed []byte, adrs *address.ADRS, tmp []byte) []byte {
 		// the ADRS bytes into PKseed's spare capacity whenever cap > len,
 		// mutating the caller's backing array (and racing across goroutines
 		// that share one PKseed).
-		seed := make([]byte, 0, len(PKseed)+len(compressedADRS))
+		seed := make([]byte, 0, len(PKseed)+len(adrsBuf))
 		seed = append(seed, PKseed...)
-		seed = append(seed, compressedADRS...)
+		seed = append(seed, adrsBuf[:]...)
 		bitmask := mgf1sha256(seed, len(tmp))
 		M1 = make([]byte, len(tmp))
 		_ = subtle.XORBytes(M1, tmp, bitmask)
 	}
 
-	pad := make([]byte, 64-h.N)
+	// pad is all zeros; it depends only on N, so it is a package-level
+	// constant slice rather than a fresh allocation per call. It is never
+	// written to, and F never retains it, so sharing is safe.
+	pad := zeroPad(h.N)
 
 	hash := sha256.New()
 	hash.Write(PKseed)
 	hash.Write(pad)
-	hash.Write(compressedADRS)
+	hash.Write(adrsBuf[:])
 	hash.Write(M1)
 	return hash.Sum(nil)[:h.N]
+}
+
+// zeroPad returns a read-only, N-byte zero pad for the given N. Cached per N
+// so the hot path does not allocate. The returned slice must never be
+// modified; nothing in this package writes to it.
+var zeroPadCache sync.Map // int -> []byte
+
+func zeroPad(n int) []byte {
+	if v, ok := zeroPadCache.Load(n); ok {
+		return v.([]byte)
+	}
+	p := make([]byte, 64-n)
+	zeroPadCache.Store(n, p)
+	return p
 }
 
 // Tweakable hash function H
@@ -94,6 +118,23 @@ func (h *Sha256Tweak) T_l(PKseed []byte, adrs *address.ADRS, tmp []byte) []byte 
 // Compresses ADRS into 22 bytes
 func compressADRS(adrs *address.ADRS) []byte {
 	ADRSc := make([]byte, 22)
+	compressADRSInto(adrs, ADRSc)
+	return ADRSc
+}
+
+// compressADRSInto writes the 22-byte compressed ADRS into dst (which must be
+// at least 22 bytes), using the same encoding as compressADRS.
+//
+// Split out so the hot path (F, called millions of times per signature) can
+// encode into a stack array and avoid an allocation per call.
+func compressADRSInto(adrs *address.ADRS, dst []byte) {
+	if len(dst) < 22 {
+		panic(fmt.Sprintf("compressADRS destination too small: have %d bytes, need 22", len(dst)))
+	}
+	ADRSc := dst
+	// Zero first: only some of the 22 bytes are written for a given type, and
+	// a reused buffer must not leak a previous address's tail into the hash.
+	clear(ADRSc)
 
 	copy(ADRSc[0:1], adrs.LayerAddress[3:4])
 	copy(ADRSc[1:9], adrs.TreeAddress[4:12])
@@ -116,8 +157,6 @@ func compressADRS(adrs *address.ADRS) []byte {
 	case address.FORS_ROOTS:
 		copy(ADRSc[10:14], adrs.KeyPairAddress[:])
 	}
-
-	return ADRSc
 }
 
 // Based on RFC 2437

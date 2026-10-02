@@ -113,22 +113,42 @@ func (adrs *ADRS) Copy() *ADRS {
 // This prevents cross-context attacks where outputs from one part of the scheme
 // could be misused in another context.
 func (adrs *ADRS) GetBytes() []byte {
+	ADRSc := make([]byte, 32)
+	adrs.WriteTo(ADRSc)
+	return ADRSc
+}
+
+// WriteTo serializes the ADRS into dst, which must be at least 32 bytes,
+// using exactly the same encoding as GetBytes.
+//
+// WHY THIS EXISTS. GetBytes allocates a fresh 32-byte slice on every call, and
+// the tweakable hash functions call it once per F/H/T_l/PRF — millions of times
+// per signature. Streaming the encode lets a caller reuse one buffer across
+// calls instead, which is the difference between an allocation per hash and
+// none. The encoding itself is unchanged, so every digest is identical.
+func (adrs *ADRS) WriteTo(dst []byte) {
 	typ := adrs.GetType()
 	if typ < 0 || typ > 4 {
-		// Return a default or panic
+		// Same contract as GetBytes: a malformed type is a programming error,
+		// not attacker-controlled input.
 		panic(fmt.Sprintf("invalid ADRS type: %d", typ))
 	}
-	ADRSc := make([]byte, 32)
+	if len(dst) < 32 {
+		panic(fmt.Sprintf("ADRS destination too small: have %d bytes, need 32", len(dst)))
+	}
 
 	// Copy the fixed header (always present regardless of type)
-	copy(ADRSc[0:4], adrs.LayerAddress[:]) // Layer in hypertree
-	copy(ADRSc[4:16], adrs.TreeAddress[:]) // Tree identifier
-	copy(ADRSc[16:20], adrs.Type[:])       // Context discriminator
+	copy(dst[0:4], adrs.LayerAddress[:]) // Layer in hypertree
+	copy(dst[4:16], adrs.TreeAddress[:]) // Tree identifier
+	copy(dst[16:20], adrs.Type[:])       // Context discriminator
+	// Bytes 20-31 are a union: zero them first so a type that only fills part
+	// of the range cannot leak a previous address's bytes into the hash.
+	clear(dst[20:32])
 
 	// Based on Type, encode different payloads in bytes 20-31
 	// This is a union structure - the same bytes have different meanings
 	// depending on the context of the hash call
-	switch adrs.GetType() {
+	switch typ {
 
 	case WOTS_HASH:
 		// Type 0: Hashing within WOTS+ chain
@@ -139,9 +159,9 @@ func (adrs *ADRS) GetBytes() []byte {
 		// Math: For WOTS+ with length L and winternitz parameter w,
 		// we need L * (w-1) distinct hash calls. This addressing ensures
 		// each call gets a unique input domain.
-		copy(ADRSc[20:24], adrs.KeyPairAddress[:])
-		copy(ADRSc[24:28], adrs.ChainAddress[:])
-		copy(ADRSc[28:32], adrs.HashAddress[:])
+		copy(dst[20:24], adrs.KeyPairAddress[:])
+		copy(dst[24:28], adrs.ChainAddress[:])
+		copy(dst[28:32], adrs.HashAddress[:])
 
 	case WOTS_PK:
 		// Type 1: Computing WOTS+ public key from the chain ends
@@ -151,7 +171,7 @@ func (adrs *ADRS) GetBytes() []byte {
 		// chain ends (each of length N bytes) into a single N-byte value.
 		// The address ensures this compression is domain-separated from
 		// other hash operations.
-		copy(ADRSc[20:24], adrs.KeyPairAddress[:])
+		copy(dst[20:24], adrs.KeyPairAddress[:])
 
 	case TREE:
 		// Type 2: Building Merkle tree nodes (internal hashes)
@@ -162,8 +182,8 @@ func (adrs *ADRS) GetBytes() []byte {
 		// Each node is computed as: parent = Hash(left_child || right_child)
 		// The address encodes (layer, tree, height, index) to uniquely
 		// identify each node in the hypertree structure.
-		copy(ADRSc[24:28], adrs.TreeHeight[:])
-		copy(ADRSc[28:32], adrs.TreeIndex[:])
+		copy(dst[24:28], adrs.TreeHeight[:])
+		copy(dst[28:32], adrs.TreeIndex[:])
 
 	case FORS_TREE:
 		// Type 3: Building FORS (Forest of Random Subsets) Merkle trees
@@ -174,9 +194,9 @@ func (adrs *ADRS) GetBytes() []byte {
 		// Math: FORS uses k independent Merkle trees, each of height a.
 		// Total leaves = k * 2^a. The address ensures each tree's nodes
 		// are domain-separated from other trees and from the main hypertree.
-		copy(ADRSc[20:24], adrs.KeyPairAddress[:])
-		copy(ADRSc[24:28], adrs.TreeHeight[:])
-		copy(ADRSc[28:32], adrs.TreeIndex[:])
+		copy(dst[20:24], adrs.KeyPairAddress[:])
+		copy(dst[24:28], adrs.TreeHeight[:])
+		copy(dst[28:32], adrs.TreeIndex[:])
 
 	case FORS_ROOTS:
 		// Type 4: Combining FORS tree roots into a single root
@@ -185,10 +205,8 @@ func (adrs *ADRS) GetBytes() []byte {
 		// Math: The k tree roots (each N bytes) are concatenated and hashed
 		// to produce a single N-byte value that represents the entire FORS
 		// structure. This value becomes a leaf in the bottom-layer Merkle tree.
-		copy(ADRSc[20:24], adrs.KeyPairAddress[:])
+		copy(dst[20:24], adrs.KeyPairAddress[:])
 	}
-
-	return ADRSc
 }
 
 // SetLayerAddress sets the layer index (0 to D-1)

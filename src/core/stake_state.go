@@ -24,7 +24,6 @@ import (
 const (
 	stakeQueueKey             = "protocol:stake_queue"
 	validatorIdentityPrefix   = "protocol:validator_identity:"
-	missedRoundPrefix         = "protocol:missed_rounds:"
 	validatorPausePrefix      = "protocol:validator_pause_epoch:"
 	stakeOwnerKeyPrefix       = "protocol:stake_owner:"
 	stakePublicKeyPrefix      = "protocol:validator_public_key:"
@@ -196,9 +195,14 @@ func (s *StateDB) validatorHasLiveStake(validatorID string) (bool, error) {
 	} else if err != nil && !errors.Is(err, database.ErrNotFound) {
 		return false, fmt.Errorf("read active stake for %s: %w", validatorID, err)
 	}
+	// ★ The `else` branch already proves err != nil (that is the negation of
+	// `err == nil`), so re-testing `err != nil` here is a tautology the
+	// nilness analyzer rejects. Testing only the ErrNotFound case keeps the
+	// behaviour identical: a missing record falls through, any other error is
+	// surfaced.
 	if _, err := s.GetContractValue(pendingWithdrawalPrefix + validatorID); err == nil {
 		return true, nil
-	} else if err != nil && !errors.Is(err, database.ErrNotFound) {
+	} else if !errors.Is(err, database.ErrNotFound) {
 		return false, fmt.Errorf("read pending withdrawal for %s: %w", validatorID, err)
 	}
 	queue, err := s.readStakeQueue()
@@ -255,10 +259,6 @@ func (s *StateDB) getValidatorIdentity(validatorID string) (*validatorIdentity, 
 	return identity, nil
 }
 
-func missedRoundKey(epoch uint64, validatorID string) string {
-	return missedRoundPrefix + strconv.FormatUint(epoch, 10) + ":" + validatorID
-}
-
 // applyMissedRoundPolicy is DISABLED, and deliberately so.
 //
 // ★ WHY IT IS OFF. It previously derived a miss from a validator's ABSENCE
@@ -298,6 +298,12 @@ func missedRoundKey(epoch uint64, validatorID string) string {
 // IN PLACE and wired. They are inert in practice because nothing can now write
 // a pause record, which is exactly the intended state: the gate is correct and
 // ready, and the policy that feeds it is the part that was unsafe.
+//
+// The per-(epoch, validator) miss record key and its "protocol:missed_rounds:"
+// namespace were removed along with their now-unused key builder, since with
+// the policy disabled nothing can read or write them. When the timeout
+// certificate format lands, reintroduce the builder here and re-add the
+// namespace to the key constant block above — no other caller referenced it.
 func (bc *Blockchain) applyMissedRoundPolicy(block *types.Block, stateDB *StateDB) error {
 	if block == nil || stateDB == nil {
 		return fmt.Errorf("apply missed-round policy: missing block or state DB")

@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"hash/maphash"
 	"io"
 
 	"golang.org/x/crypto/sha3"
@@ -119,7 +120,6 @@ var (
 	domainH1    = []byte{0x01} // branch A tag: double SHA-256
 	domainH2    = []byte{0x02} // branch B tag: SHAKE256
 	domainFinal = []byte{0x03} // final compress/expand step
-	domainCache = []byte{0x00} // cache-key derivation (kept disjoint from 0x01-0x03)
 
 	// Large-input path (> maxHashInputSize). The 64-byte prehash that
 	// replaces the data must NOT be indistinguishable from a genuine 64-byte
@@ -166,6 +166,7 @@ func NewSphinxHash(bitSize int, key []byte) (*SphinxHash, error) {
 		bitSize: bitSize,
 		key:     keyCopy,
 		cache:   NewLRUCache(DefaultCacheSize),
+		seed:    maphash.MakeSeed(),
 	}, nil
 }
 
@@ -192,6 +193,7 @@ func NewSphinxHashKeyed(bitSize int) (*SphinxHash, error) {
 		bitSize: bitSize,
 		key:     key,
 		cache:   NewLRUCache(DefaultCacheSize),
+		seed:    maphash.MakeSeed(),
 	}, nil
 }
 
@@ -223,33 +225,23 @@ func (s *SphinxHash) Clone() *SphinxHash {
 		bitSize: s.bitSize,
 		key:     keyCopy,
 		cache:   NewLRUCache(DefaultCacheSize),
+		seed:    maphash.MakeSeed(),
 	}
-}
-
-// cacheKey builds a collision-resistant cache key bound to both the full
-// input content and the instance's key, using its own domain tag so it can
-// never collide with the A/B/final branches of hashData even for the same
-// (key, data) pair. Same double-SHA256 shape as branch A of hashData, just
-// under a different domain tag.
-func (s *SphinxHash) cacheKey(data []byte) CacheKey {
-	inner := sha256.New()
-	inner.Write(s.key)
-	inner.Write(domainCache)
-	inner.Write(data)
-	return sha256.Sum256(inner.Sum(nil))
 }
 
 // GetHash retrieves or calculates the hash of the given data.
+// Inputs larger than MaxCachedInputSize bypass the cache.
 func (s *SphinxHash) GetHash(data []byte) []byte {
-	hashKey := s.cacheKey(data)
-	if cachedValue, found := s.cache.Get(hashKey); found {
-		return cachedValue
+	if len(data) > MaxCachedInputSize {
+		return s.hashData(data)
 	}
-
-	hash := s.hashData(data)
-	s.cache.Put(hashKey, hash)
-
-	return hash
+	key := CacheKey(maphash.Bytes(s.seed, data))
+	if v, ok := s.cache.Get(key, data); ok {
+		return v
+	}
+	out := s.hashData(data)
+	s.cache.Put(key, data, out)
+	return out
 }
 
 // GetHashUncached computes the hash of data directly, skipping the LRU
@@ -279,6 +271,40 @@ func (s *SphinxHash) GetHashUncached(data []byte) []byte {
 	return s.hashData(data)
 }
 
+// HashIntoUncached computes the digest of data directly (no cache lookup, no
+// key derivation, no store) and writes it into dst, returning dst[:Size()].
+//
+// CONTRACT:
+//   - len(dst) must be >= Size(), or this panics. It is a caller-owned buffer,
+//     so the caller must size it.
+//   - Exactly Size() bytes are written. Nothing beyond that is touched.
+//   - The hasher does NOT retain dst: it is not stored on the receiver and is
+//     not referenced after this call returns, so the caller may reuse or wipe
+//     the buffer immediately.
+//   - The RETURNED SLICE IS dst[:Size():Size()] — i.e. it deliberately aliases
+//     the caller's buffer. That is the point: the caller gets the digest
+//     without an allocation. The full slice expression caps it at Size() so an
+//     append by the caller cannot write into the caller's spare capacity. A
+//     caller who needs the digest to outlive (or survive mutation of) the
+//     buffer must copy it — use GetHashUncached for that.
+//
+// This exists because the digest is almost always consumed immediately by the
+// caller (copied out, or fed as input to another hash) rather than retained.
+// Allocating a fresh 32-byte slice per call and then throwing it away is pure
+// waste, and profiling a STHINCS signature showed finish()'s output was the
+// single largest source of allocations by object count — one per hash call,
+// for a buffer whose lifetime is a few instructions.
+//
+// Byte-for-byte identical to GetHashUncached(data); see
+// TestHashIntoMatchesGetHashUncached and TestHashIntoDoesNotRetainInternally.
+func (s *SphinxHash) HashIntoUncached(dst, data []byte) []byte {
+	if len(dst) < s.Size() {
+		panic(fmt.Sprintf("spxhash: HashIntoUncached destination too small: have %d bytes, need %d", len(dst), s.Size()))
+	}
+	out := s.hashDataInto(data, dst[:s.Size()])
+	return out[:s.Size():s.Size()]
+}
+
 // Read reads from the hash data into p.
 func (s *SphinxHash) Read(p []byte) (n int, err error) {
 	hash := s.GetHash(s.data)
@@ -306,25 +332,60 @@ func (s *SphinxHash) Reset() {
 	s.data = s.data[:0]
 }
 
-// hashData computes the SphinxHash-v2 digest of data. See the package-level
-// design comment above for the full construction and why it delivers
-// length-extension resistance and dual (SHA-256 + SHAKE256) collision
-// resistance without a KDF or a mixing-round loop.
+// hashData computes the SphinxHash-v2 digest of data, allocating the result.
+// Callers that already own a buffer should use HashIntoUncached instead, which
+// writes into it and skips this allocation.
 func (s *SphinxHash) hashData(data []byte) []byte {
-	tagA, tagB := domainH1, domainH2
+	return s.hashDataInto(data, make([]byte, s.Size()))
+}
 
-	// Large-payload path (e.g. a fallback CID over a >1 MB file): pre-absorb
-	// with a streaming SHAKE256 pass so memory stays bounded. This mirrors
-	// v1's large-input handling but without the Argon2 step.
-	//
-	// The prehash is keyed and domain-tagged, and the A/B branches below then
-	// run under their own "large" tags, so hash(bigInput) can never equal
-	// hash(x) for any small input x — including x = the prehash itself.
+// hashDataInto is hashData writing into a caller-supplied buffer. dst must be
+// at least Size() bytes (HashIntoUncached checks); it is written in full and
+// never retained.
+func (s *SphinxHash) hashDataInto(data, dst []byte) []byte {
+	tagB, d, inner := s.prepare(data)
+	return s.finish(tagB, d, inner, dst)
+}
+
+// finish completes the construction from A's inner digest, writing the result
+// into dst and returning it. Callers own dst; finish does not retain it.
+func (s *SphinxHash) finish(tagB, d []byte, inner [32]byte, dst []byte) []byte {
+	a := sha256.Sum256(inner[:])
+
+	shakeB := sha3.NewShake256()
+	shakeB.Write(s.key)
+	shakeB.Write(tagB)
+	shakeB.Write(d)
+	var b [32]byte
+	if _, err := shakeB.Read(b[:]); err != nil {
+		panic(fmt.Sprintf("spxhash: failed to read B: %v", err))
+	}
+
+	var combined [1 + 32 + 32]byte
+	combined[0] = domainFinal[0]
+	copy(combined[1:], a[:])
+	copy(combined[33:], b[:])
+
+	final := sha3.NewShake256()
+	final.Write(combined[:])
+	if _, err := final.Read(dst); err != nil {
+		panic(fmt.Sprintf("spxhash: failed to read final digest: %v", err))
+	}
+	return dst
+}
+
+// prepare applies the large-input prehash if needed and returns the branch-B
+// tag, the effective data, and A's inner digest SHA256(key || tagA || data).
+func (s *SphinxHash) prepare(data []byte) (tagB, d []byte, inner [32]byte) {
+	tagA := domainH1
+	tagB = domainH2
+	d = data
+
 	if len(data) > maxHashInputSize {
 		pre := sha3.NewShake256()
 		pre.Write(domainPre)
 		pre.Write(s.key)
-		const writeChunk = 1 << 18 // 256 KiB per Write
+		const writeChunk = 1 << 18
 		for off := 0; off < len(data); off += writeChunk {
 			end := off + writeChunk
 			if end > len(data) {
@@ -336,46 +397,14 @@ func (s *SphinxHash) hashData(data []byte) []byte {
 		if _, err := pre.Read(digest); err != nil {
 			panic(fmt.Sprintf("spxhash: failed to read large-input prehash: %v", err))
 		}
-		data = digest
+		d = digest
 		tagA, tagB = domainH1Large, domainH2Large
 	}
 
-	// A: SHA256(SHA256(key || tag || data)) — Bitcoin-style double hash, 32
-	// bytes. Immune to length-extension: extending the original message
-	// would require the raw inner digest, which the outer SHA-256 call
-	// never exposes.
-	innerA := sha256.New()
-	innerA.Write(s.key)
-	innerA.Write(tagA)
-	innerA.Write(data)
-	a := sha256.Sum256(innerA.Sum(nil))
-
-	// B: SHAKE256(key || tag || data), squeezed to 32 bytes — computed
-	// independently of A (sponge construction, length-extension safe on its
-	// own regardless of keying).
-	shakeB := sha3.NewShake256()
-	shakeB.Write(s.key)
-	shakeB.Write(tagB)
-	shakeB.Write(data)
-	b := make([]byte, 32)
-	if _, err := shakeB.Read(b); err != nil {
-		panic(fmt.Sprintf("spxhash: failed to read B: %v", err))
-	}
-
-	// Concatenation combiner: forging a collision now requires colliding in
-	// both A and B at once (see design comment above) — this is why B is
-	// concatenated onto A rather than A being piped into B as input.
-	combined := make([]byte, 0, len(domainFinal)+len(a)+len(b))
-	combined = append(combined, domainFinal...)
-	combined = append(combined, a[:]...)
-	combined = append(combined, b...)
-
-	// Final expand/compress to the configured output size in a single pass.
-	final := sha3.NewShake256()
-	final.Write(combined)
-	out := make([]byte, s.Size())
-	if _, err := final.Read(out); err != nil {
-		panic(fmt.Sprintf("spxhash: failed to read final digest: %v", err))
-	}
-	return out
+	h := sha256.New()
+	h.Write(s.key)
+	h.Write(tagA)
+	h.Write(d)
+	h.Sum(inner[:0])
+	return
 }

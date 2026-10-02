@@ -31,6 +31,11 @@ const (
 	keySize = 32
 
 	DefaultCacheSize = 100 // Default LRU cache size for SphinxHash
+
+	// MaxCachedInputSize bounds the input length eligible for caching. Entries
+	// store a copy of the input, so worst-case cache memory is
+	// DefaultCacheSize * MaxCachedInputSize per instance.
+	MaxCachedInputSize = 4 << 10
 )
 
 // ProtocolSalt is the fixed, public key to use with NewSphinxHash at every

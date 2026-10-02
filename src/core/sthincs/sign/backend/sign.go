@@ -6,6 +6,7 @@ package sign
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -1341,7 +1342,25 @@ func (sm *STHINCSManager) VerifySignature(
 	//
 	// This is expensive (processes 7-35 KB of signature data), which is why
 	// we only do it AFTER the cheap signature hash check above.
-	if !sthincs.Spx_verify(sm.parameters.Params, messageWithTimestampAndNonce, sig, pk) {
+	//
+	// Measurement only: records call volume and (pk, signature-hash) repeat
+	// rate when metrics are enabled. It is a counter, not a cache — the real
+	// Spx_verify below still runs unconditionally, and the cheap-check /
+	// Spx_verify ordering above is unchanged.
+	var repKey string
+	if VerifyMetricsEnabled() {
+		// Both the key and the serialized signature are already in hand at
+		// this point, so the repeat key costs one hash of data the caller
+		// already has in memory. Nothing is re-serialized.
+		h := sha256.New()
+		h.Write(pk.PKseed)
+		h.Write(pk.PKroot)
+		h.Write(sigBytes)
+		repKey = string(h.Sum(nil))
+	}
+	verdict := sthincs.Spx_verify(sm.parameters.Params, messageWithTimestampAndNonce, sig, pk)
+	recordVerifyCall(len(sigBytes), verdict, repKey)
+	if !verdict {
 		return false
 	}
 

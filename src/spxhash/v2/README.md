@@ -24,11 +24,14 @@ out = SHAKE256(0x03 || A || B), Size() bytes
 ```
 
 **Bottom line: SpxHash v2 is slower than SHA-512/256 for every input size
-measured here.** It is not a drop-in speed win over a single standard hash — a
-single cold digest costs roughly **4.9x–8.5x** a SHA-512/256 digest. v2 pays for
-its dual-primitive collision resistance and length-extension resistance with
-CPU time, and it does that on purpose. What it does *not* pay is Argon2 latency,
-and repeated hashing of the same input is served from an LRU cache.
+measured here *when it actually hashes*.** A single cold digest costs roughly
+**3.2x–4.7x** a SHA-512/256 digest. v2 pays for its dual-primitive collision
+resistance and length-extension resistance with CPU time, and it does that on
+purpose. What it does *not* pay is Argon2 latency, and — since the LRU key
+changed from a double SHA-256 to a seeded `maphash` — a **repeated** digest is
+now served from cache *faster* than SHA-512/256. See
+[Cached vs uncached](#cached-vs-uncached-read-this-before-comparing-to-sthincs)
+for why those two facts are both true and do not conflict.
 
 ## Test Command
 
@@ -92,7 +95,13 @@ are warm-up/calibration runs and are ignored. `SpxHash (cold)` creates a fresh
 instance per op (worst case, empty LRU cache); `SpxHash (cached)` reuses one
 instance for the same input so the digest is served from its LRU cache.
 
-| Input Size | SpxHash v2 cold (ns/op) | SpxHash v2 cached (ns/op) | SHA-512/256 (ns/op) | Cold vs SHA-512/256 | Cached vs SHA-512/256 |
+The rows below are the **pre-`maphash` historical measurements**, kept only to
+show what the cache-key change bought. The `cached` column here is the OLD cost
+(a double SHA-256 key derivation ran on every call, so a cache hit was *slower*
+than just hashing). They are **not** current numbers — see
+`testvc/README.md` for the current benchmark run.
+
+| Input Size | cold, OLD (ns/op) | cached, OLD (ns/op) | SHA-512/256 (ns/op) | Cold vs SHA-512/256 | Cached vs SHA-512/256 (OLD) |
 |---:|---:|---:|---:|---:|---:|
 | 0 bytes | 2,781.00 | 603.01 | 329.26 | **8.45x slower** | **1.83x slower** |
 | 1 byte | 2,763.00 | 580.23 | 333.98 | **8.27x slower** | **1.74x slower** |
@@ -100,6 +109,20 @@ instance for the same input so the digest is served from its LRU cache.
 | 1,024 bytes | 11,492.00 | 3,423.62 | 2,241.18 | **5.13x slower** | **1.53x slower** |
 | 2,048 bytes | 20,687.00 | 6,179.07 | 4,137.05 | **5.00x slower** | **1.49x slower** |
 | 4,096 bytes | 38,549.00 | 11,748.67 | 7,932.42 | **4.86x slower** | **1.48x slower** |
+
+**Measured on this machine** (i7-7700HQ, 4C/8T; `-benchtime=300ms`, highest
+iteration count row). These are real numbers from
+`go test ./src/spxhash/v2/testvc/ -run '^$' -bench 'Cached|Uncached|SHA512_256'`,
+not carried over from an earlier run:
+
+| Input | cold / uncached | cached (hit) | SHA-512/256 | cold vs SHA-512/256 | cached vs SHA-512/256 |
+|---:|---:|---:|---:|---:|---:|
+| 0 B | 1,524 ns | **52 ns** | 327 ns | 4.66x slower | **0.16x — 6.3x faster** |
+| 1 B | 1,504 ns | **57 ns** | 328 ns | 4.58x slower | **0.17x — 5.8x faster** |
+| 1,023 B | 7,693 ns | **184 ns** | 2,285 ns | 3.37x slower | **0.08x — 12.4x faster** |
+| 1,024 B | 7,625 ns | **179 ns** | 2,262 ns | 3.37x slower | **0.08x — 12.6x faster** |
+| 2,048 B | 14,194 ns | **302 ns** | 4,130 ns | 3.44x slower | **0.07x — 13.7x faster** |
+| 4,096 B | 25,042 ns | **538 ns** | 7,859 ns | 3.19x slower | **0.07x — 14.6x faster** |
 
 Allocations:
 
@@ -117,37 +140,78 @@ SpxHash v2, cached:   ~590 ns fixed + ~2.7 ns per input byte
 SHA-512/256:          ~330 ns fixed + ~1.9 ns per input byte
 ```
 
+## Cached vs uncached (read this before comparing to STHINCS)
+
+Two benchmark sets can appear to contradict each other. They do not, because
+they measure **different code paths**:
+
+| Path | What it does | vs SHA-512/256 |
+|---|---|---|
+| `GetHashUncached` / a **cache miss** | Runs the full v2 construction every call | **3.2x–4.7x slower** |
+| `GetHash` on a **cache hit** | Skips hashing entirely; returns the stored digest | **~6x–15x faster** |
+
+Which one you pay depends entirely on **whether the same input repeats**:
+
+- **Repeating inputs** (a block/transaction hash seen again, a memoized
+  address) hit the LRU and are *much* faster than a single SHA-512/256.
+- **Never-repeating inputs** always miss, so they pay the full construction
+  *plus* the `Put` copy — the worst of both, and slower than not caching.
+
+**STHINCS is the never-repeating case.** Every tweakable call (`F`, `H`, `T_l`,
+`PRF`) absorbs a distinct `ADRS` or a distinct WOTS+ chain value into its
+input, so across the ~10^6 calls in one signature the cache hit rate is
+essentially zero. That is exactly why `tweakable.SphinxHashTweak` calls
+`common.SpxHashUncached` — not `SpxHash`. Using the cached entry point there
+would add key derivation and a store on every call for no possible hit.
+
+So the STHINCS benchmark's "`SPHINXHASH` is 2.4x–3.6x slower than `SHA256`"
+is measuring the **uncached** path, and the micro-benchmark's "cache hits are
+6x–14x faster" is measuring the **cached** path. Both are correct; they apply to
+different workloads.
+
+Practical rule:
+
+- Hashing the same bytes repeatedly → use `GetHash`, it wins decisively.
+- Hashing fresh bytes every time → use `GetHashUncached`, it avoids paying for
+  a cache that cannot hit.
+
 ## Key Findings
 
 ### Small inputs
 
-For 0-byte and 1-byte inputs, SpxHash v2 is about **8.3x–8.5x slower** than
-SHA-512/256 on the cold path, and still about **1.7x–1.8x slower** even when the
-digest is a cache hit. The fixed cost is dominated by the final SHAKE256 squeeze
-plus per-instance allocation (an LRU cache and map per `NewSphinxHash` call),
-which is why tiny inputs are the worst relative case.
+For 0-byte and 1-byte inputs, SpxHash v2 is about **4.6x slower** than
+SHA-512/256 on the **cold/uncached** path (1,524 ns vs 327 ns) — the ratio is
+worst for tiny inputs because the fixed cost (final SHAKE256 squeeze plus
+per-instance allocation of an LRU cache and map) dominates when there is no
+payload to amortize it over. On a **cache hit** the same inputs are ~**6x
+faster** than SHA-512/256 (52 ns vs 327 ns), because a hit skips hashing
+entirely.
 
 ### Medium inputs (~1 KB)
 
-At 1 KB the gap drops to roughly **5x slower** cold and **1.5x slower** cached.
-The two implementations are no longer close: SHA-512/256 hashes 1,024 bytes in
-~2.2 µs while a cold SpxHash v2 digest takes ~11.5 µs.
+At 1 KB the cold gap is ~**3.4x slower** (7,625 ns vs 2,262 ns), while a cache
+hit is ~**12.6x faster** (179 ns).
 
 ### Larger inputs (2 KB – 4 KB)
 
-At 2 KB and 4 KB the ratio stabilizes at **~4.9x–5.0x slower** cold. Unlike v1,
-SpxHash v2 is **not flat** across input sizes — its cost grows roughly linearly
-with the input, because the data is walked several times:
+At 2 KB and 4 KB the cold ratio is ~**3.2x–3.4x slower** (14,194 ns and
+25,042 ns vs 4,130 ns and 7,859 ns); a cache hit is ~**14x faster** (302 ns and
+538 ns). Unlike v1, SpxHash v2 is **not flat** across input sizes — its
+cold cost grows roughly linearly with the input, because the data is walked
+several times:
 
-| Pass over the input | Purpose |
-|---|---|
-| 2 x SHA-256 | `cacheKey` derivation (inner + outer), on **every** call |
-| 1 x SHA-256 | branch `A` inner digest (its outer digest is over 32 bytes) |
-| 1 x SHAKE256 | branch `B` |
-| — | final `SHAKE256(0x03 || A || B)` squeeze over 68 bytes |
+| Pass over the input | Purpose | Applies to |
+|---|---|---|
+| 1 x SHA-256 | branch `A` inner digest (its outer digest is over 32 bytes) | every call |
+| 1 x SHAKE256 | branch `B` | every call |
+| — | final `SHAKE256(0x03 ‖ A ‖ B)` squeeze over 68 bytes | every call |
+| `maphash` | LRU bucket selection only (not a cryptographic pass) | `GetHash` only |
 
-That is 3 SHA-256 passes plus 1 SHAKE256 pass over the payload, versus one
-SHA-512/256 pass for the baseline. The ~5x ratio is consistent with that.
+That is **2 SHA-256 passes** over the payload (one inner, plus an outer over the
+32-byte inner digest) plus 1 SHAKE256 pass, versus one SHA-512/256 pass for the
+baseline. The ~3.2x–4.7x cold ratio is consistent with that. The old key
+derivation added 2 more SHA-256 passes, which is what used to make the ratio
+~5x–8.5x.
 
 ### Why these numbers look worse than v1's
 
@@ -166,11 +230,20 @@ document.
 
 ### The LRU cache
 
-Repeated hashing of the *same* input on the *same* instance is **3.3x–4.6x
-faster** than cold (e.g. 4,096 bytes: 38,549 -> 11,749 ns/op). It is not free,
-though: `GetHash` derives the cache key from the full input on every call, so a
-cache hit still performs two SHA-256 passes over the data. The cache removes the
-SHAKE256 branch and the final squeeze, not the key derivation.
+Repeated hashing of the *same* input on the *same* instance is now **~46x**
+faster than cold (e.g. 4,096 bytes: 25,042 -> 538 ns/op), and lands well
+under a plain SHA-512/256 digest.
+
+That is a change from before the `maphash` switch. The old cache key was a
+double SHA-256 over the full input, so a hit still paid two SHA-256 passes and
+landed *slower* than just hashing the data directly (~1.5x). Selecting the
+bucket with a seeded `maphash` is a non-cryptographic pass over the input, so
+the hit path is now dominated by the map lookup and the `bytes.Equal`
+confirmation.
+
+Collision safety is unchanged in kind: `Get(key, input)` only reports a hit
+when the stored input compares equal, so a key collision is a **miss**, never a
+wrong digest.
 
 ## CPU Profile
 
@@ -186,7 +259,7 @@ Duration: 48.23s, Total samples = 43.42s (90.03%)
 Top frames, which match the construction exactly:
 
 ```text
-    15.23s 35.08%  crypto/internal/fips140/sha256.blockAVX2   // 3 SHA-256 passes/digest
+    15.23s 35.08%  crypto/internal/fips140/sha256.blockAVX2   // branch A (1 pass/digest)
      9.88s 22.75%  crypto/internal/fips140/sha512.blockAVX2   // the SHA-512/256 baseline
      4.84s 11.15%  runtime.madvise                            // page release from per-op allocs
      3.90s  8.98%  crypto/internal/fips140/sha3.keccakF1600   // SHAKE256 branches + squeeze
@@ -236,37 +309,28 @@ Two constructors with different guarantees remain:
 - Low CPU and low allocation budgets matter. SHA-512/256 allocates nothing per
   digest, while a cold SpxHash v2 op allocates 832 B across 11 allocations.
 
-Do **not** choose SpxHash v2 for speed. It is slower than SHA-512/256 in every
-measured case; it is chosen for its security properties, not its throughput.
+Do **not** choose SpxHash v2 for cold throughput — it is slower than
+SHA-512/256 in every measured uncached case. Choose it for its security
+properties, and choose `GetHashUncached` for never-repeating inputs so you do
+not pay for a cache that cannot hit.
 
 ## Optimization Opportunities
 
-### 1. Stop re-deriving the cache key over the whole input
+### 1. ~~Stop re-deriving the cache key over the whole input~~ — **DONE**
 
-`GetHash` computes `cacheKey(data)` before looking in the cache, and `cacheKey`
-is a double SHA-256 over `key || 0x00 || data`. That is 2 of the 3 SHA-256
-passes per call, paid even on a cache hit:
+_Status: implemented. The key is now a seeded `maphash`, not a double SHA-256._
 
-```go
-// Current: two SHA-256 passes over the full input, every call.
-func (s *SphinxHash) cacheKey(data []byte) CacheKey {
-	inner := sha256.New()
-	inner.Write(s.key)
-	inner.Write(domainCache)
-	inner.Write(data)
-	return sha256.Sum256(inner.Sum(nil))
-}
-```
+`GetHash` previously computed `cacheKey(data)` — a double SHA-256 over
+`key || 0x00 || data` — before every lookup, so two of the three SHA-256
+passes per call were spent on a cache index that a non-cryptographic hash
+serves just as well. `CacheKey` is now a `uint64` from `maphash.Bytes` with a
+per-instance seed.
 
-A cheaper non-cryptographic key (the cache is an optimization, not a security
-boundary, so a collision only costs a recomputation) would remove about
-two-thirds of the SHA-256 work.
+### 2. ~~Reuse branch `A`'s inner digest~~ — **OBSOLETE, dropped**
 
-### 2. Reuse branch `A`'s inner digest
-
-`cacheKey` and branch `A` are both double-SHA256 keyed hashes that differ only
-in domain tag. Deriving the cache key from the `A` branch's already-computed
-inner digest would eliminate a full extra pass.
+_Status: superseded. This only made sense when the cache key was a double
+SHA-256 structurally similar to branch `A`. With a `maphash` key there is no
+SHA-256 work left to reuse, so there is nothing to save._
 
 ### 3. Cut per-op allocation
 
@@ -303,18 +367,26 @@ If the workload repeats inputs, benchmark and tune against
 
 ## Summary
 
-SpxHash v2 is **slower than SHA-512/256 for every input size measured**, by
-about **8.3x–8.5x** for tiny inputs and **~4.9x–5.0x** from 1 KB to 4 KB.
+SpxHash v2 is **slower than SHA-512/256 on the uncached path for every input
+size measured** — about **4.6x** for tiny inputs and **~3.2x–3.4x** from 1 KB to
+4 KB — and **much faster than it on a cache hit** (**~6x–15x**).
 
 That is the expected consequence of the design, not a regression: v2 trades the
 Argon2id KDF and 1000-round mixing loop for three fast hash calls, and keeps
 length-extension resistance plus collision resistance that survives a break in
 either SHA-256 or SHAKE256. Collision/dual-primitive hardness and
-length-extension resistance are the reasons to select it; speed is not.
+length-extension resistance are the reasons to select it; raw speed is not.
 
-Repeated hashing of the same input is the one place it gets close — the LRU
-cache brings it to roughly **1.5x** SHA-512/256 for inputs >= 1 KB (1.7x–1.8x
-for tiny ones). If a workload hashes mostly small, unique inputs, SHA-512/256
-will be several times faster. If it must resist a length-extension attack and
-survive a break in a single one of its two hash primitives, SpxHash v2 pays
-~5x and delivers those properties.
+Which column you actually pay depends on your workload:
+
+- **Hashing mostly unique inputs** (STHINCS tweaks, tree hashing, any
+  non-repeating stream) → the uncached path, and SHA-512/256 is several times
+  faster. Use `GetHashUncached`; a cache there can only ever miss and adds a
+  store per call.
+- **Hashing the same bytes repeatedly** (re-validating a known address, a
+  re-submitted transaction, a memoized key) → the cached path, where SpxHash v2
+  wins by roughly an order of magnitude.
+
+If it must resist a length-extension attack *and* survive a break in a single
+one of its two hash primitives, SpxHash v2 is the right tool and ~3.4x on the
+cold path is the bill.

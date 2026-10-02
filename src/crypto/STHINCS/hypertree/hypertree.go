@@ -7,6 +7,7 @@ package hypertree
 import (
 	"crypto/subtle"
 	"fmt"
+	"sync"
 
 	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/address"
 	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/parameters"
@@ -122,67 +123,153 @@ func Ht_PKgen(params *parameters.Parameters, SKseed []byte, PKseed []byte) ([]by
 //
 // Fixed: Returns error
 func Ht_sign(params *parameters.Parameters, M []byte, SKseed []byte, PKseed []byte, idx_tree uint64, idx_leaf int) (*HTSignature, error) {
+	return Ht_signCached(params, M, SKseed, PKseed, idx_tree, idx_leaf, nil)
+}
+
+// Ht_signCached is Ht_sign with an optional precomputed top layer.
+//
+// topCache, when non-nil, must be the layer-(D-1), tree-0 tree for this key.
+// That layer is the one whose contents never vary per signature, so reusing it
+// removes 1/D of the tree-building work (1/3 for the `s` sets, which have D=3).
+// Pass nil to build every layer, which is what a caller with no cache does.
+//
+// The produced signature is byte-identical either way: the cached tree is the
+// same tree, and AuthPathFromLeaves performs the same fold a full build does.
+func Ht_signCached(params *parameters.Parameters, M []byte, SKseed []byte, PKseed []byte,
+	idx_tree uint64, idx_leaf int, topCache *xmss.Xmss_treeCache) (*HTSignature, error) {
 	// Validate inputs
 	if params == nil || M == nil || SKseed == nil || PKseed == nil {
 		return nil, fmt.Errorf("nil parameters provided")
 	}
 
-	// Initialize address structure
-	adrs := new(address.ADRS)
+	// Resolve every layer's (tree, leaf) index up front. Each layer signs the
+	// root of the layer below it, so the SIGNS are sequential — but the TREES
+	// they authenticate are not: layer j's tree is fully determined by
+	// (SKseed, PKseed, layer address, tree address), none of which depends on
+	// the message or on any other layer. So all D trees can be built in
+	// parallel, and only the cheap WOTS+ signing is left sequential.
+	//
+	// hPrime is the per-layer tree height: H/D. (params.Hprime is the same
+	// value; the local name matches the index arithmetic below.)
+	hPrime := params.H / params.D
+	layers := make([]struct {
+		leaf int
+		tree uint64
+	}, params.D)
 
-	// Layer 0: Sign the actual message
-	adrs.SetLayerAddress(0)
-	adrs.SetTreeAddress(idx_tree)
+	// Layer 0 authenticates the message itself and is the only one whose tree
+	// index is not a shifted copy of idx_tree.
+	layers[0] = struct {
+		leaf int
+		tree uint64
+	}{idx_leaf, idx_tree}
 
-	SIG_tmp, err := xmss.Xmss_sign(params, M, SKseed, idx_leaf, PKseed, adrs)
-	if err != nil {
-		return nil, fmt.Errorf("XMSS sign failed for layer 0: %w", err)
-	}
-
-	SIG_HT := make([]*xmss.XMSSSignature, 0)
-	SIG_HT = append(SIG_HT, SIG_tmp)
-
-	// Compute root of layer 0 tree from signature
-	// This root will be signed by layer 1
-	root, err := xmss.Xmss_pkFromSig(params, idx_leaf, SIG_tmp, M, PKseed, adrs)
-	if err != nil {
-		return nil, fmt.Errorf("XMSS pkFromSig failed for layer 0: %w", err)
-	}
-
-	// Process higher layers (1 to D-1)
-	current_idx_tree := idx_tree
-	current_idx_leaf := idx_leaf
-
+	curTree := idx_tree
 	for j := 1; j < params.D; j++ {
-		// Extract leaf index for this layer
-		// Leaf index = least significant (H/D) bits of idx_tree
-		// This works because each layer compresses the tree index by factor 2^(H/D)
-		current_idx_leaf = int(current_idx_tree % (1 << uint64(params.H/params.D)))
+		leaf := int(curTree % (1 << uint64(hPrime)))
+		curTree = curTree >> hPrime
+		layers[j] = struct {
+			leaf int
+			tree uint64
+		}{leaf, curTree}
+	}
 
-		// Extract tree index for this layer
-		// Tree index = most significant bits after shifting right by (H/D)
-		current_idx_tree = current_idx_tree >> (params.H / params.D)
+	// Pass 1 (parallel): build every layer's tree once, keeping the root and
+	// the auth path. This is the expensive part — 2^Hprime WOTS+ keygens per
+	// layer — and the layers are mutually independent.
+	//
+	// The top layer is skipped when a cache was supplied: its leaves and root
+	// are already known, and only the auth path (which depends on this
+	// signature's leaf index) has to be folded out of the cached leaves.
+	top := params.D - 1
+	roots := make([][]byte, params.D)
+	auths := make([][]byte, params.D)
+	if err := buildLayerTrees(params, SKseed, PKseed, layers, roots, auths, top, topCache); err != nil {
+		return nil, err
+	}
 
-		// Sign the root from previous layer
+	// Pass 2 (sequential): WOTS+ signing. Layer 0 signs the message; layer j
+	// signs the root of layer j-1, so this chain must stay in order.
+	//
+	// The root of the top layer is never consumed — it is the public key —
+	// but it is built anyway, because the top layer's auth path needs the
+	// whole tree.
+	SIG_HT := make([]*xmss.XMSSSignature, 0, params.D)
+	msg := M
+	for j := 0; j < params.D; j++ {
+		adrs := new(address.ADRS)
 		adrs.SetLayerAddress(j)
-		adrs.SetTreeAddress(current_idx_tree)
+		adrs.SetTreeAddress(layers[j].tree)
 
-		SIG_tmp, err = xmss.Xmss_sign(params, root, SKseed, current_idx_leaf, PKseed, adrs)
+		sig, err := xmss.Xmss_signWithAuthPath(params, msg, SKseed, layers[j].leaf, PKseed, adrs, auths[j])
 		if err != nil {
 			return nil, fmt.Errorf("XMSS sign failed for layer %d: %w", j, err)
 		}
-		SIG_HT = append(SIG_HT, SIG_tmp)
-
-		// Compute root of this layer (for next layer, except at top)
-		if j < params.D-1 {
-			root, err = xmss.Xmss_pkFromSig(params, current_idx_leaf, SIG_tmp, root, PKseed, adrs)
-			if err != nil {
-				return nil, fmt.Errorf("XMSS pkFromSig failed for layer %d: %w", j, err)
-			}
-		}
+		SIG_HT = append(SIG_HT, sig)
+		msg = roots[j]
 	}
 
 	return &HTSignature{XMSSSignatures: SIG_HT}, nil
+}
+
+// buildLayerTrees builds every hypertree layer's tree in parallel and stores
+// the root and auth path for the layer's signing leaf.
+//
+// The ADRS passed in is per-layer and private, so no layer can observe
+// another's address state. Roots and auth paths are only written to their
+// slots after that layer's work completes, and the caller waits for all
+// workers, so the result is independent of scheduling.
+//
+// Layer topLayer is served from topCache when one is supplied (see
+// Ht_signCached); otherwise it is built like any other layer.
+func buildLayerTrees(params *parameters.Parameters, SKseed, PKseed []byte,
+	layers []struct {
+		leaf int
+		tree uint64
+	}, roots, auths [][]byte, topLayer int, topCache *xmss.Xmss_treeCache) error {
+
+	var wg sync.WaitGroup
+	errs := make(chan error, len(layers))
+	for j := range layers {
+		wg.Add(1)
+		go func(j int) {
+			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					errs <- fmt.Errorf("panic building layer %d: %v", j, r)
+				}
+			}()
+			adrs := new(address.ADRS)
+			adrs.SetLayerAddress(j)
+			adrs.SetTreeAddress(layers[j].tree)
+
+			if j == topLayer && topCache != nil {
+				// The cached tree was built at this same layer/tree address, so
+				// its root and the auth path folded from its leaves are the same
+				// values a fresh build would produce.
+				roots[j] = topCache.Root()
+				auths[j] = topCache.AuthPathFromLeaves(params, PKseed, adrs, layers[j].leaf)
+				return
+			}
+
+			// A tree depends only on the seeds, the address and the leaf
+			// index — never on the message — so this needs nothing from the
+			// layer below and the D builds are mutually independent.
+			root, auth, err := xmss.Xmss_treeWithAuth(params, SKseed, PKseed, adrs, layers[j].leaf)
+			if err != nil {
+				errs <- fmt.Errorf("tree build failed for layer %d: %w", j, err)
+				return
+			}
+			roots[j] = root
+			auths[j] = auth
+		}(j)
+	}
+	wg.Wait()
+	close(errs)
+	for e := range errs {
+		return e
+	}
+	return nil
 }
 
 // Ht_verify verifies a hypertree signature

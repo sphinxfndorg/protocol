@@ -104,6 +104,24 @@ func LoadFromFile(file string) ([]NodePortConfig, error) {
 // directly in bind.
 const baseWSPort = 8700
 
+// unsetWSPortDefault is the literal default the CLI declares for --ws-port. It
+// is a sentinel meaning "unset", not a port the node listens on.
+const unsetWSPortDefault = "127.0.0.1:8600"
+
+// ResolveWalletRPCAddr returns the wallet/JSON-RPC address for one node.
+//
+// Both the listener (bind.StartNode) and every in-process client that dials the
+// wallet RPC (the custody watcher) must resolve through this one function, so a
+// --config-supplied address cannot bind the listener while a caller dials
+// 8700+offset. An unset or sentinel value yields baseWSPort+portOffset; any
+// explicit value is honoured verbatim.
+func ResolveWalletRPCAddr(wsPort string, portOffset int) string {
+	if wsPort == "" || wsPort == unsetWSPortDefault {
+		return fmt.Sprintf("127.0.0.1:%d", baseWSPort+portOffset)
+	}
+	return wsPort
+}
+
 // FindFreePort finds an available port starting from basePort.
 // Parameters:
 //   - basePort: Starting port number to check

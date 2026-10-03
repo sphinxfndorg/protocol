@@ -467,11 +467,11 @@ func runNodeCmd(args []string) error {
 		if _, err := core.LoadEscrowPolicy(*dataDir); err != nil {
 			return fmt.Errorf("load escrow policy from genesis document: %w", err)
 		}
-		const unsetWSPortDefault = "127.0.0.1:8600"
-		walletRPC := *wsPort
-		if walletRPC == "" || walletRPC == unsetWSPortDefault {
-			walletRPC = fmt.Sprintf("127.0.0.1:%d", 8700+*portOffset)
-		}
+		// Dial the SAME address bind.StartNode binds. Reading the flag
+		// (*wsPort) here instead of nodeConfig.WSPort made a --config node
+		// listen on the file's ws_port while this watcher dialled
+		// 8700+offset.
+		walletRPC := network.ResolveWalletRPCAddr(nodeConfig.WSPort, *portOffset)
 		spendArgs, err := autoWatchArgs(
 			core.GenesisStateFilePathForDataDir(*dataDir), walletRPC, proposalsDir)
 		if err != nil {

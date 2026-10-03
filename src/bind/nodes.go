@@ -1483,15 +1483,10 @@ func StartNodeWithOptions(
 	// separate WebSocket server is started here — so we reuse that slot
 	// rather than adding a new flag/config field.
 	//
-	// ★ wallet/JSON-RPC listen address. cli.go's --ws-port flag is declared
-	// with the fixed literal default "127.0.0.1:8600", so an unmodified value
-	// means "not set". Derive the wallet-RPC port as 8700 + --port-offset in
-	// that case; any explicit --ws-port value is honoured as-is.
-	const unsetWSPortDefault = "127.0.0.1:8600"
-	rpcListenAddr := nodeConfig.WSPort
-	if rpcListenAddr == "" || rpcListenAddr == unsetWSPortDefault {
-		rpcListenAddr = fmt.Sprintf("127.0.0.1:%d", 8700+portOffset)
-	}
+	// ★ wallet/JSON-RPC listen address. ResolveWalletRPCAddr is the single
+	// source of truth: the CLI custody watcher resolves the same value from the
+	// same nodeConfig.WSPort, so the two cannot disagree.
+	rpcListenAddr := network.ResolveWalletRPCAddr(nodeConfig.WSPort, portOffset)
 	rpcMsgCh := make(chan *security.Message, 100)
 	walletRPCServer := transport.NewTCPServer(rpcListenAddr, rpcMsgCh, rpcServer, nil)
 	if err := walletRPCServer.Start(); err != nil {

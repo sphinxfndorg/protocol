@@ -2783,7 +2783,7 @@ func (c *Consensus) attachAttestationsBeforeCommit(block Block, blockHash string
 	}
 
 	// COMPOSITION FIX: if a peer already broadcast a CommitCertificate for
-	// this block hash (see commit_certificate.go), adopt it verbatim instead
+	// this block hash (see certificate.go), adopt it verbatim instead
 	// of deriving from this node's own local vote snapshot below. This is
 	// what actually closes the cross-node composition gap that sorting
 	// alone (further down) cannot: two nodes that reached quorum with
@@ -2819,7 +2819,7 @@ func (c *Consensus) attachAttestationsBeforeCommit(block Block, blockHash string
 	// every voter that makes it into the attestation list. This is what lets
 	// a peer receiving this node's CommitCertificate broadcast (further
 	// below) independently re-verify each attestation — see
-	// commit_certificate.go's TRUST MODEL note for exactly why the full blob
+	// certificate.go's TRUST MODEL note for exactly why the full blob
 	// is required and the extracted bytes alone are not enough.
 	voteSignatures := make(map[string][]byte, len(votesSnapshot))
 	var deserFailures int
@@ -2885,7 +2885,7 @@ func (c *Consensus) attachAttestationsBeforeCommit(block Block, blockHash string
 	// legitimate proof), not a bug on its own, and doesn't affect chain
 	// safety since the block hash never depends on Attestations. The
 	// composition gap itself is closed by the CommitCertificate broadcast
-	// below (see commit_certificate.go): this node reached quorum and built
+	// below (see certificate.go): this node reached quorum and built
 	// its list first, so it publishes that list as the canonical one for
 	// every peer that hasn't derived its own yet (checked at the top of this
 	// function) to adopt as-is.
@@ -3633,7 +3633,7 @@ func (c *Consensus) commitBlock(block Block) {
 		// Backstop cleanup: a peer's commit certificate for this now-stale
 		// block hash may still be cached (received but never consumed, e.g.
 		// this node lost the race to a synced block instead). See
-		// commit_certificate.go's commitCertCap note for why this matters.
+		// certificate.go's commitCertCap note for why this matters.
 		evictCommitCertificate(block.GetHash())
 		evictPrepareCertificate(block.GetHash())
 		logger.Warn("commitBlock: dropped stale block %s at height %d (chain tip already advanced) — reset to PhaseIdle at height %d",

@@ -134,6 +134,17 @@ rotate its proposer.
   `data/node<N>`. It never changes a node's identity and never affects
   validator membership.
 - **UDP = TCP + 1000** for peer discovery.
+- **Wallet RPC is `8700+N`, not `8600+N`.** `--ws-port` is declared with the
+  literal default `127.0.0.1:8600`, but that value is a *sentinel meaning
+  "unset"* — the node never listens on 8600. Both the listener and the
+  in-process custody watcher resolve the address through
+  `network.ResolveWalletRPCAddr`, so they cannot disagree. Verified against a
+  live node:
+
+  ```
+  offset 0 → Wallet/JSON-RPC listener bound on 127.0.0.1:8700
+  offset 1 → Wallet/JSON-RPC listener bound on 127.0.0.1:8701
+  ```
 - **Node identity** is derived from the TCP address as `Node-<host:port>`.
 
 Verified from the run:

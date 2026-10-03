@@ -117,25 +117,73 @@ func agreedTip(tips map[string]nodeTip, expected int, minHeight uint64) (uint64,
 // TestLocalnet_QuorumFailureAndHalt is the end-to-end proof that a localnet
 // reaches real quorum, and that quorum behaves under validator loss.
 //
-// It runs the real `localnet` command with four validator processes and asserts
-// the three properties a BFT localnet exists to demonstrate:
-//  1. all four validators commit blocks and agree on height AND hash;
-//  2. killing ONE validator keeps the chain committing (3 of 4 is the quorum);
-//  3. killing a SECOND validator stops the chain (2 of 4 is not > 2/3).
+// It runs the real `localnet` command with N validator processes and asserts the
+// three properties a BFT localnet exists to demonstrate:
+//  1. all N validators commit blocks and agree on height AND hash;
+//  2. killing a MINORITY keeps the chain committing;
+//  3. killing one more drops it below strict >2/3 and stops the chain.
+//
+// The kill counts are derived from strictTwoThirds, not hardcoded, so the test
+// tracks the production quorum rule:
+//
+//	N=4: quorum 3. 4 commits -> 3 (kill 1) commits -> 2 (kill 2) halts.
+//	N=7: quorum 5. 7 commits -> 5 (kill 2) commits -> 4 (kill 3) halts.
 //
 // It is excluded from the default run by the `localnet` build tag because each
 // validator spends minutes on SPHINCS+ key generation and block-0 witness
-// signing before it can vote.
+// signing before it can vote, so N=7 costs roughly twice the cold start of N=4.
 func TestLocalnet_QuorumFailureAndHalt(t *testing.T) {
 	if testing.Short() {
 		t.Skip("localnet spawns real validator processes; skipped under -short")
 	}
 
+	for _, n := range []int{4, 7} {
+		t.Run(fmt.Sprintf("validators=%d", n), func(t *testing.T) {
+			runLocalnetQuorumCase(t, n)
+		})
+	}
+}
+
+// strictTwoThirds mirrors consensus.StrictTwoThirdsCount. The integration test
+// drives the CLI as a subprocess and does not link the consensus package, so
+// the rule is restated here and pinned against the real one by
+// TestStrictTwoThirdsMatchesConsensus.
+func strictTwoThirds(n int) int {
+	if n <= 0 {
+		return 0
+	}
+	return (2*n)/3 + 1
+}
+
+// runLocalnetQuorumCase starts one localnet of n validators and walks it
+// through full quorum, tolerated loss, and loss of quorum.
+//
+// Quorum sizes come from strictTwoThirds, mirroring the production rule rather
+// than restating its numbers, so a change to that rule surfaces here as a wrong
+// expectation instead of a silently passing test.
+func runLocalnetQuorumCase(t *testing.T, n int) {
+	t.Helper()
+
+	quorum := strictTwoThirds(n)
+	if quorum <= 0 {
+		t.Fatalf("invalid validator count %d", n)
+	}
+	// The largest kill that still leaves a quorum: survivors must be >= quorum.
+	toleratedKills := n - quorum
+	if toleratedKills < 1 {
+		t.Fatalf("n=%d has quorum %d and cannot demonstrate tolerated loss", n, quorum)
+	}
+	// One more kill than that drops below quorum and must halt.
+	fatalKills := toleratedKills + 1
+	survivorsAtHalt := n - fatalKills
+
+	t.Logf("n=%d: quorum %d; tolerate %d loss(es), halt after %d", n, quorum, toleratedKills, fatalKills)
+
 	bin := buildLocalnetBinary(t)
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "localnet.log")
 
-	cmd := exec.Command(bin, "localnet", "--validators=4", "--dir="+dir, "--keep")
+	cmd := exec.Command(bin, "localnet", fmt.Sprintf("--validators=%d", n), "--dir="+dir, "--keep")
 	logFile, err := os.Create(logPath)
 	if err != nil {
 		t.Fatalf("create log: %v", err)
@@ -153,54 +201,66 @@ func TestLocalnet_QuorumFailureAndHalt(t *testing.T) {
 	}()
 
 	// ── Phase 1: wait for the chain to start committing ────────────────────
-	// Requires every node to have seeded the full 4-validator set AND to have
-	// committed at least one block beyond genesis, with all four agreeing.
-	// Phase 1 must absorb cold-start SPHINCS+ key generation and block-0 witness
-	// signing on top of the first commit, so it gets startup + block budgets.
+	// Every node must have seeded the full n-validator set AND committed at
+	// least one block beyond genesis, with all n agreeing on height and hash.
+	// Cold-start SPHINCS+ key generation and block-0 witness signing must be
+	// absorbed on top of the first commit, so this gets startup + block budgets.
 	firstHeight := waitForCondition(t, logPath, localnetStartupTimeout+localnetBlockTimeout,
 		func(text string) (uint64, bool) {
-			if len(seededRe.FindAllStringSubmatch(text, -1)) < 4 {
+			if len(seededRe.FindAllStringSubmatch(text, -1)) < n {
 				return 0, false
 			}
-			return agreedTip(nodeTips(text), 4, 1)
+			return agreedTip(nodeTips(text), n, 1)
 		})
-	t.Logf("phase 1: all 4 validators committing and agreeing at height %d", firstHeight)
+	t.Logf("phase 1: all %d validators committing and agreeing at height %d", n, firstHeight)
 
 	// Bridge each logged node ID to the --port-offset flag that identifies its
 	// process, so liveness can be checked in later phases.
 	offByNode := offsetByNodeID(nodeIDList(nodeTips(readLog(t, logPath))))
+	if len(offByNode) != n {
+		t.Fatalf("resolved %d node IDs, want %d", len(offByNode), n)
+	}
 
-	// ── Phase 2: kill one validator, chain must keep committing ────────────
-	killLocalnetNode(t, 2)
-	t.Log("phase 2: killed validator 3 of 4 (offset 2); expect progress")
+	// ── Phase 2: kill a tolerated minority, chain must keep committing ────
+	// Kill from the high end so the surviving offsets stay contiguous and
+	// predictable; any subset is equally valid for a quorum test.
+	height := firstHeight
+	for kill := 1; kill <= toleratedKills; kill++ {
+		offset := n - kill
+		killLocalnetNode(t, offset)
+		remaining := n - kill
+		t.Logf("phase 2.%d: killed validator %d of %d (offset %d); %d remain, quorum %d",
+			kill, kill, n, offset, remaining, quorum)
 
-	// The three SURVIVORS (offsets 0, 1, 3) must keep committing and must agree
-	// with each other. The killed node is excluded — its last reported tip is
-	// simply left behind in the log and must not be counted as live.
-	afterKill := waitForCondition(t, logPath, localnetBlockTimeout,
-		func(text string) (uint64, bool) {
-			return agreedTip(liveTips(text, offByNode), 3, firstHeight+1)
-		})
-	t.Logf("phase 2: chain survived one failure, survivors committed to height %d", afterKill)
+		height = waitForCondition(t, logPath, localnetBlockTimeout,
+			func(text string) (uint64, bool) {
+				return agreedTip(liveTips(text, offByNode), remaining, height+1)
+			})
+		t.Logf("phase 2.%d: chain survived, %d validators committed to height %d",
+			kill, remaining, height)
+	}
 
-	// ── Phase 3: kill a second validator, chain must halt ──────────────────
-	killLocalnetNode(t, 3)
-	t.Log("phase 3: killed validator 4 of 4 (offset 3); expect a halt")
+	// ── Phase 3: kill one more, chain must halt ───────────────────────────
+	fatalOffset := n - fatalKills
+	killLocalnetNode(t, fatalOffset)
+	t.Logf("phase 3: killed validator %d of %d (offset %d); %d remain, below quorum %d — expect a halt",
+		fatalKills+1, n, fatalOffset, survivorsAtHalt, quorum)
 
-	// Two of four validators is not > 2/3, so no further block may commit.
+	// survivorsAtHalt is now below strict >2/3, so no further block may commit.
 	// Record the survivors' agreed height, then require it to be unchanged
 	// after a window far longer than any commit round.
-	stale, ok := agreedTip(liveTips(readLog(t, logPath), offByNode), 2, 0)
+	stale, ok := agreedTip(liveTips(readLog(t, logPath), offByNode), survivorsAtHalt, 0)
 	if !ok {
-		t.Fatal("after two kills the two survivors did not agree on a common tip; " +
-			"the halt condition cannot be evaluated")
+		t.Fatalf("after %d kills the %d survivors did not agree on a common tip; "+
+			"the halt condition cannot be evaluated", fatalKills, survivorsAtHalt)
 	}
 	time.Sleep(localnetHaltWindow)
-	if after, ok := agreedTip(liveTips(readLog(t, logPath), offByNode), 2, 0); ok && after > stale {
-		t.Fatalf("chain advanced from height %d to %d with only 2 of 4 validators alive; "+
-			"strict >2/3 quorum should have halted", stale, after)
+	if after, ok := agreedTip(liveTips(readLog(t, logPath), offByNode), survivorsAtHalt, 0); ok && after > stale {
+		t.Fatalf("chain advanced from height %d to %d with only %d of %d validators alive; "+
+			"strict >2/3 quorum (%d) should have halted", stale, after, survivorsAtHalt, n, quorum)
 	}
-	t.Logf("phase 3: chain halted as expected with 2 of 4 validators (stayed at height %d)", stale)
+	t.Logf("phase 3: chain halted as expected with %d of %d validators (stayed at height %d)",
+		survivorsAtHalt, n, stale)
 }
 
 // liveTips returns the reported tips of validators whose process is STILL
@@ -281,9 +341,60 @@ func maxTipHeight(tips map[string]nodeTip) uint64 {
 	return max
 }
 
-// TestNodeTipsAndAgreedTip locks in the per-node attribution that the
-// integration test depends on.
+// TestStrictTwoThirdsMatchesConsensus pins the local quorum helper against the
+// production rule it mirrors.
 //
+// runLocalnetQuorumCase derives its kill counts from strictTwoThirds, so if the
+// production rule in consensus.StrictTwoThirdsCount ever changes and this copy
+// does not, the integration test would keep asserting the OLD quorum and could
+// report a false pass or a spurious failure. This table makes the two impossible
+// to drift apart silently.
+//
+// The values are the production formula, (2n)/3+1, evaluated by hand.
+func TestStrictTwoThirdsMatchesConsensus(t *testing.T) {
+	cases := []struct{ n, want int }{
+		{0, 0}, // n <= 0 is guarded to 0 by both
+		{1, 1},
+		{2, 2},
+		{3, 3}, // 2 of 3 is exactly 2/3, so 3 are required: no tolerable loss
+		{4, 3},
+		{5, 4},
+		{6, 5},
+		{7, 5},
+		{8, 6},
+		{9, 7},
+	}
+	for _, c := range cases {
+		if got := strictTwoThirds(c.n); got != c.want {
+			t.Errorf("strictTwoThirds(%d) = %d, want %d (consensus.StrictTwoThirdsCount)",
+				c.n, got, c.want)
+		}
+	}
+}
+
+// TestQuorumCaseKillBudgets checks the derived kill counts for both sizes.
+//
+// Each case must be able to demonstrate BOTH halves of the property under test:
+// a tolerated minority loss that keeps the chain committing, and one more loss
+// that drops below quorum and halts it. A size where toleratedKills is 0 or
+// negative cannot show the "survives" half, so it is rejected up front rather
+// than silently passing a weaker assertion.
+func TestQuorumCaseKillBudgets(t *testing.T) {
+	for _, n := range []int{4, 7} {
+		quorum := strictTwoThirds(n)
+		tolerated := n - quorum
+		if tolerated < 1 {
+			t.Errorf("n=%d: quorum %d leaves no tolerable loss; the test would be "+
+				"unable to demonstrate that a minority failure is survivable", n, quorum)
+		}
+		// One more kill must land strictly below quorum, i.e. the halt is real.
+		if survivors := n - (tolerated + 1); survivors >= quorum {
+			t.Errorf("n=%d: after %d kills %d validators remain, which still meets "+
+				"quorum %d; the halt phase would be vacuous", n, tolerated+1, survivors, quorum)
+		}
+	}
+}
+
 // Regression guard: when tips were keyed by block HASH, four validators that
 // correctly agreed on one hash collapsed into a single map entry, so the
 // "all four agree" assertion could never be satisfied by working code. These

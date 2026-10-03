@@ -135,25 +135,33 @@ Startup is slow: each validator generates SPHINCS+ keys and node 0 signs the
 block-0 witness book, which takes minutes. `Ctrl-C` stops every process.
 
 **Quorum and failure behaviour.** All N validators run the real PBFT round, so the
-network commits blocks and tolerates a single failure. Under strict `> 2/3`:
+network commits blocks and tolerates a minority of failures. Under strict `> 2/3`
+the quorum size is `(2N)/3 + 1`:
 
-| Live validators | Quorum met | Chain |
-|---|---|---|
-| 4 of 4 | yes | commits |
-| 3 of 4 | yes | keeps committing |
-| 2 of 4 | no (2/3 is not `> 2/3`) | halts |
+| N | Quorum | Live | Quorum met | Chain |
+|---|---|---|---|---|
+| 4 | 3 | 4 | yes | commits |
+| 4 | 3 | 3 | yes | keeps committing |
+| 4 | 3 | 2 | no (2/3 is not `> 2/3`) | halts |
+| 7 | 5 | 7 | yes | commits |
+| 7 | 5 | 5 | yes | keeps committing |
+| 7 | 5 | 4 | no | halts |
 
 That behaviour is covered end-to-end by `src/cli/utils/localnet_integration_test.go`,
-which runs the real command against four validator processes. It is build-tagged
-because each validator spends minutes on SPHINCS+ key generation and block-0
-witness signing before it can vote:
+which runs the real command against `N=4` and `N=7` validator processes. It is
+build-tagged because each validator spends minutes on SPHINCS+ key generation and
+block-0 witness signing before it can vote — a cold `N=4` localnet takes roughly
+**3 minutes** to its first committed block, and `N=7` costs about twice that:
 
 ```bash
-go test -tags localnet ./src/cli/utils/ -run TestLocalnet -timeout 40m
+go test -tags localnet ./src/cli/utils/ -run TestLocalnet -timeout 90m
 ```
 
-The test asserts all three properties above: four validators agree on height
-**and** hash; killing one keeps the chain committing; killing a second halts it.
+For each size the test asserts all three properties: every validator agrees on
+height **and** hash; killing a tolerated minority keeps the chain committing; and
+killing one more drops below quorum and halts it. The kill counts are derived from
+the quorum formula rather than hardcoded, so the test follows the production rule
+instead of restating it.
 
 ---
 

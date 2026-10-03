@@ -2105,7 +2105,7 @@ func (c *Consensus) processProposal(proposal *Proposal) {
 	// does I/O and must run outside c.mu), so we release the lock then commit.
 	blockHash := proposal.Block.GetHash()
 	view := proposal.View
-	if c.phase != PhaseCommitted && c.hasQuorum(blockHash, c.snapshotForVoting()) {
+	if c.phase != PhaseCommitted && c.hasQuorum(blockHash, c.snapshotForVotingLocked()) {
 		blockToCommit := proposal.Block
 		logger.Info("Commit quorum was already reached for %s before proposal arrived — committing now", blockHash[:16])
 		// ========== FIX: Attach attestations BEFORE commit ==========
@@ -2226,7 +2226,7 @@ func (c *Consensus) processPrepareVote(vote *Vote) {
 
 	// Calculate current vote count and quorum requirements
 	totalVotes := len(c.prepareVotes[vote.BlockHash])
-	snap := c.snapshotForVoting()
+	snap := c.snapshotForVotingLocked()
 	quorumSize := StrictTwoThirdsCount(len(snap.Validators))
 
 	logger.Info("Prepare vote received: node=%s, from=%s, block=%s, votes=%d/%d, phase=%v, prepared=%v",
@@ -2272,7 +2272,7 @@ func (c *Consensus) processPrepareVote(vote *Vote) {
 // processPrepareVote closes that race: whichever of {the proposal, the
 // quorum-completing vote} arrives second is the one that completes it.
 func (c *Consensus) tryEnterPreparedPhase(blockHash string, view uint64) {
-	if !c.hasPrepareQuorum(blockHash, c.snapshotForVoting()) {
+	if !c.hasPrepareQuorum(blockHash, c.snapshotForVotingLocked()) {
 		return // not yet — still waiting on prepare votes
 	}
 	if c.phase == PhasePrepared || c.phase == PhaseCommitted {
@@ -2675,7 +2675,7 @@ func (c *Consensus) processVoteLocked(vote *Vote) Block {
 
 	// Calculate current vote count and quorum requirements
 	totalVotes := len(c.receivedVotes[vote.BlockHash])
-	snap := c.snapshotForVoting()
+	snap := c.snapshotForVotingLocked()
 	quorumSize := StrictTwoThirdsCount(len(snap.Validators))
 	logger.Info("Commit vote received: node=%s, from=%s, block=%s, votes=%d/%d, phase=%v",
 		c.nodeID, vote.VoterID, vote.BlockHash, totalVotes, quorumSize, c.phase)
@@ -3266,6 +3266,21 @@ func StrictTwoThirdsCount(n int) int {
 // replayed the same blocks, which is exactly what a quorum denominator must be.
 func (c *Consensus) snapshotForVoting() *ValidatorSnapshot {
 	return ValidatorSetAt(c.GetCurrentHeight())
+}
+
+// snapshotForVotingLocked is snapshotForVoting for a caller that ALREADY holds
+// c.mu.
+//
+// snapshotForVoting delegates to GetCurrentHeight, which takes c.mu.RLock().
+// sync.RWMutex is NOT reentrant, so calling it from a c.mu.Lock() holder blocks
+// that goroutine on itself forever. processProposal, processPrepareVote,
+// processVoteLocked and tryEnterPreparedPhase all hold c.mu when they need the
+// voting snapshot, so they must use this variant.
+//
+// This is the same pattern as membershipEpochLocked, which exists for exactly
+// the same reason.
+func (c *Consensus) snapshotForVotingLocked() *ValidatorSnapshot {
+	return ValidatorSetAt(c.currentHeight)
 }
 
 // quorumFromSnapshot runs the ONE quorum rule, against a snapshot.
@@ -4146,18 +4161,26 @@ func (c *Consensus) SetParticipationGate(gate func(validatorID string, height ui
 	c.participationGate = gate
 }
 
+// participationAllowed reports whether validatorID may participate at height.
+//
+// The gate is Blockchain.IsValidatorPausedForHeight, whose boolean means
+// "is PAUSED". This function must therefore return the INVERSE of what the gate
+// returns. Reading the gate's false ("not paused") as "not allowed" rejected
+// every proposal from every validator, because no pause record can ever exist:
+// the policy that would write one is disabled, so the gate always reported
+// "not paused" and the network never reached quorum.
 func (c *Consensus) participationAllowed(validatorID string, height uint64) bool {
 	gate := c.participationGate
 	if gate == nil {
 		return true
 	}
-	allowed, err := gate(validatorID, height)
+	paused, err := gate(validatorID, height)
 	if err != nil {
 		logger.Error("Consensus participation gate failed for %s at height %d: %v",
 			validatorID, height, err)
 		return false
 	}
-	return allowed
+	return !paused
 }
 
 // FastForward commits a block that was fetched from a peer during a sync

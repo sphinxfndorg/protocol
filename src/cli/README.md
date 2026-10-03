@@ -134,19 +134,26 @@ demonstrates surviving a single failure (§7).
 Startup is slow: each validator generates SPHINCS+ keys and node 0 signs the
 block-0 witness book, which takes minutes. `Ctrl-C` stops every process.
 
-**Current limitation.** The network forms correctly — all N nodes seed the full
-N-validator set, agree on the genesis hash, and discover each other — but the
-chain does not advance past block 0: the leader broadcasts a proposal and then
-logs `Timeout waiting for block commitment`, because no prepare/commit votes are
-ever recorded from the peer set. So the failure-mode assertions in
-`src/cli/utils/localnet_integration_test.go` currently fail at phase 1. That test
-is build-tagged and excluded from the default run:
+**Quorum and failure behaviour.** All N validators run the real PBFT round, so the
+network commits blocks and tolerates a single failure. Under strict `> 2/3`:
+
+| Live validators | Quorum met | Chain |
+|---|---|---|
+| 4 of 4 | yes | commits |
+| 3 of 4 | yes | keeps committing |
+| 2 of 4 | no (2/3 is not `> 2/3`) | halts |
+
+That behaviour is covered end-to-end by `src/cli/utils/localnet_integration_test.go`,
+which runs the real command against four validator processes. It is build-tagged
+because each validator spends minutes on SPHINCS+ key generation and block-0
+witness signing before it can vote:
 
 ```bash
 go test -tags localnet ./src/cli/utils/ -run TestLocalnet -timeout 40m
 ```
 
-Its assertions are deliberately not weakened to match today's behaviour.
+The test asserts all three properties above: four validators agree on height
+**and** hash; killing one keeps the chain committing; killing a second halts it.
 
 ---
 

@@ -117,16 +117,10 @@ func localnetRewardAddress(i, offset int) string {
 // and the rest are unstaked peers, every process here is a genesis validator —
 // so the network actually exercises quorum.
 //
-// This is a development/test tool. The genesis it writes is ordinary devnet
-// genesis: membership still comes from the document, never from a flag or a
-// node count, and every node derives the same set by reading the same file.
-// runLocalnetCmd implements `sphinx localnet`.
-//
-// It generates N validator identity keypairs, writes ONE genesis document that
-// names all N, and starts N node processes with distinct --port-offset values.
-// Unlike the hand-run devnet flow, where the first node is the only validator
-// and the rest are unstaked peers, every process here is a genesis validator —
-// so the network actually exercises quorum.
+// A validator process that exits is reported and tolerated: the survivors keep
+// running, which is what makes quorum loss observable rather than an instant
+// teardown. The command returns only when every node has exited, or on a
+// termination signal.
 //
 // This is a development/test tool. The genesis it writes is ordinary devnet
 // genesis: membership still comes from the document, never from a flag or a
@@ -258,17 +252,28 @@ func superviseLocalnet(nodes []localnetNode) error {
 		}(n.nodeID, cmd)
 	}
 
-	select {
-	case sig := <-sigs:
-		fmt.Printf("\nlocalnet: %v received, stopping %d nodes\n", sig, len(nodes))
-		stopAll()
-		drain(exited, len(started))
-		return nil
-	case msg := <-exited:
-		fmt.Fprintf(os.Stderr, "localnet: %s\n", msg)
-		stopAll()
-		drain(exited, len(started)-1)
-		return fmt.Errorf("localnet aborted: %s", msg)
+	// A validator going down is the behaviour this command exists to exercise:
+	// the network must keep committing on a minority loss, and must visibly stop
+	// committing once quorum is gone. Tearing the survivors down the moment one
+	// child exits would make both behaviours impossible to observe, so an
+	// individual exit is reported and tolerated.
+	remaining := len(started)
+	for {
+		select {
+		case sig := <-sigs:
+			fmt.Printf("\nlocalnet: %v received, stopping %d node(s)\n", sig, remaining)
+			stopAll()
+			drain(exited, remaining)
+			return nil
+		case msg := <-exited:
+			remaining--
+			if remaining <= 0 {
+				return fmt.Errorf("localnet aborted: every node exited (last: %s)", msg)
+			}
+			fmt.Fprintf(os.Stderr, "\nlocalnet: %s\n", msg)
+			fmt.Fprintf(os.Stderr, "localnet: %d validator(s) still running — the chain keeps "+
+				"committing only while a strict >2/3 quorum of them remains\n\n", remaining)
+		}
 	}
 }
 

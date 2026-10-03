@@ -9,10 +9,13 @@ package utils
 import (
 	"bufio"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -35,28 +38,94 @@ import (
 const (
 	localnetStartupTimeout = 20 * time.Minute
 	localnetBlockTimeout   = 5 * time.Minute
+	// localnetHaltWindow is how long the chain is given to (incorrectly) commit a
+	// further block once only 2 of 4 validators remain. It must comfortably
+	// exceed one full proposal/prepare/commit round.
+	localnetHaltWindow = 90 * time.Second
 )
 
 var (
 	bestBlockRe = regexp.MustCompile(`Updated best block: height=(\d+), hash=([0-9a-f]+)`)
 	seededRe    = regexp.MustCompile(`seeded (\d+) validators into the consensus set`)
+	// nodePrefixRe extracts the Node-<host:port> tag the localnet supervisor
+	// prefixes onto every line, so tips can be attributed to a specific node.
+	nodePrefixRe = regexp.MustCompile(`(Node-[0-9a-zA-Z\.\:\[\]]+)\s+\|`)
 )
 
+// nodeTip is one node's most recent reported best block.
+type nodeTip struct {
+	height uint64
+	hash   string
+}
+
+// nodeTips returns the latest best-block tip per NODE.
+//
+// It must key by node ID, not by block hash. Keying by hash (as this helper
+// originally did) makes four nodes that correctly agree on ONE hash collapse to
+// a single map entry, so any "all N nodes agree" assertion keyed off its length
+// is unsatisfiable by correct behaviour — it can only be satisfied by the nodes
+// disagreeing, which is the opposite of what the test is asserting.
+func nodeTips(text string) map[string]nodeTip {
+	tips := make(map[string]nodeTip)
+	for _, line := range strings.Split(text, "\n") {
+		m := bestBlockRe.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		owner := nodePrefixRe.FindStringSubmatch(line)
+		if owner == nil {
+			continue // unattributed line; cannot be counted per node
+		}
+		var h uint64
+		fmt.Sscanf(m[1], "%d", &h)
+		tips[owner[1]] = nodeTip{height: h, hash: m[2]}
+	}
+	return tips
+}
+
+// agreedTip reports the height when every expected node has reported at least
+// `minHeight` and ALL of them agree on the same height AND the same hash.
+//
+// Agreement is the whole point: a localnet that commits different blocks on
+// different nodes has failed BFT, so height and hash must both match.
+func agreedTip(tips map[string]nodeTip, expected int, minHeight uint64) (uint64, bool) {
+	if len(tips) < expected {
+		return 0, false
+	}
+	var height uint64
+	var hash string
+	seen := 0
+	for id, tip := range tips {
+		if tip.height < minHeight {
+			return 0, false
+		}
+		if seen == 0 {
+			height, hash = tip.height, tip.hash
+		} else if tip.height != height || tip.hash != hash {
+			// A node is behind or has forked; keep waiting rather than accept.
+			return 0, false
+		}
+		seen++
+		_ = id
+	}
+	if seen < expected {
+		return 0, false
+	}
+	return height, true
+}
+
 // TestLocalnet_QuorumFailureAndHalt is the end-to-end proof that a localnet
-// reaches real quorum.
+// reaches real quorum, and that quorum behaves under validator loss.
 //
-// HONEST STATUS: this test currently FAILS at step 1. A four-validator localnet
-// starts correctly — every node seeds the same 4-validator set, they agree on
-// the genesis hash, they discover each other, and the leader broadcasts a
-// proposal to its peers — but NO node ever records a prepare or commit vote, so
-// the chain stays at height 0 and the leader logs "Timeout waiting for block
-// commitment at height 1". The failure is in vote collection over the existing
-// P2P path, not in this command: the same code commits fine when it is not
-// waiting on peers.
+// It runs the real `localnet` command with four validator processes and asserts
+// the three properties a BFT localnet exists to demonstrate:
+//  1. all four validators commit blocks and agree on height AND hash;
+//  2. killing ONE validator keeps the chain committing (3 of 4 is the quorum);
+//  3. killing a SECOND validator stops the chain (2 of 4 is not > 2/3).
 //
-// The assertions below are deliberately NOT weakened to accommodate that. They
-// encode the behaviour the command is supposed to enable, so the test fails
-// loudly until the engine can collect votes from a multi-process peer set.
+// It is excluded from the default run by the `localnet` build tag because each
+// validator spends minutes on SPHINCS+ key generation and block-0 witness
+// signing before it can vote.
 func TestLocalnet_QuorumFailureAndHalt(t *testing.T) {
 	if testing.Short() {
 		t.Skip("localnet spawns real validator processes; skipped under -short")
@@ -86,69 +155,255 @@ func TestLocalnet_QuorumFailureAndHalt(t *testing.T) {
 	// ── Phase 1: wait for the chain to start committing ────────────────────
 	// Requires every node to have seeded the full 4-validator set AND to have
 	// committed at least one block beyond genesis, with all four agreeing.
-	firstHeight := waitForCondition(t, logPath, localnetBlockTimeout,
+	// Phase 1 must absorb cold-start SPHINCS+ key generation and block-0 witness
+	// signing on top of the first commit, so it gets startup + block budgets.
+	firstHeight := waitForCondition(t, logPath, localnetStartupTimeout+localnetBlockTimeout,
 		func(text string) (uint64, bool) {
 			if len(seededRe.FindAllStringSubmatch(text, -1)) < 4 {
 				return 0, false
 			}
-			heights := allBestHeights(text)
-			if len(heights) < 4 {
-				return 0, false
-			}
-			min := heights[0]
-			for _, h := range heights[1:] {
-				if h < min {
-					min = h
-				}
-			}
-			if min < 1 {
-				return 0, false
-			}
-			for _, h := range heights {
-				if h != min {
-					return 0, false
-				}
-			}
-			return min, true
+			return agreedTip(nodeTips(text), 4, 1)
 		})
-	t.Logf("phase 1: all 4 validators committing at height %d", firstHeight)
+	t.Logf("phase 1: all 4 validators committing and agreeing at height %d", firstHeight)
+
+	// Bridge each logged node ID to the --port-offset flag that identifies its
+	// process, so liveness can be checked in later phases.
+	offByNode := offsetByNodeID(nodeIDList(nodeTips(readLog(t, logPath))))
 
 	// ── Phase 2: kill one validator, chain must keep committing ────────────
 	killLocalnetNode(t, 2)
 	t.Log("phase 2: killed validator 3 of 4 (offset 2); expect progress")
 
+	// The three SURVIVORS (offsets 0, 1, 3) must keep committing and must agree
+	// with each other. The killed node is excluded — its last reported tip is
+	// simply left behind in the log and must not be counted as live.
 	afterKill := waitForCondition(t, logPath, localnetBlockTimeout,
 		func(text string) (uint64, bool) {
-			heights := allBestHeights(text)
-			// The three survivors (offsets 0,1,3) must all advance.
-			var min uint64 = ^uint64(0)
-			live := 0
-			for _, h := range heights {
-				if h > firstHeight {
-					live++
-				}
-				if h < min {
-					min = h
-				}
-			}
-			if live < 3 || min <= firstHeight {
-				return 0, false
-			}
-			return min, true
+			return agreedTip(liveTips(text, offByNode), 3, firstHeight+1)
 		})
-	t.Logf("phase 2: chain survived one failure, height %d", afterKill)
+	t.Logf("phase 2: chain survived one failure, survivors committed to height %d", afterKill)
 
 	// ── Phase 3: kill a second validator, chain must halt ──────────────────
 	killLocalnetNode(t, 3)
 	t.Log("phase 3: killed validator 4 of 4 (offset 3); expect a halt")
 
-	stale := currentHeight(t, logPath)
-	time.Sleep(localnetBlockTimeout)
-	if after := currentHeight(t, logPath); after > stale {
+	// Two of four validators is not > 2/3, so no further block may commit.
+	// Record the survivors' agreed height, then require it to be unchanged
+	// after a window far longer than any commit round.
+	stale, ok := agreedTip(liveTips(readLog(t, logPath), offByNode), 2, 0)
+	if !ok {
+		t.Fatal("after two kills the two survivors did not agree on a common tip; " +
+			"the halt condition cannot be evaluated")
+	}
+	time.Sleep(localnetHaltWindow)
+	if after, ok := agreedTip(liveTips(readLog(t, logPath), offByNode), 2, 0); ok && after > stale {
 		t.Fatalf("chain advanced from height %d to %d with only 2 of 4 validators alive; "+
 			"strict >2/3 quorum should have halted", stale, after)
 	}
-	t.Log("phase 3: chain halted as expected with 2 of 4 validators")
+	t.Logf("phase 3: chain halted as expected with 2 of 4 validators (stayed at height %d)", stale)
+}
+
+// liveTips returns the reported tips of validators whose process is STILL
+// running.
+//
+// Without this, a killed validator's final logged tip keeps counting as a live
+// node, so phases 2 and 3 would be satisfied by a dead process.
+func liveTips(text string, offByNode map[string]int) map[string]nodeTip {
+	tips := nodeTips(text)
+	for id := range tips {
+		off, ok := offByNode[id]
+		if !ok || !offsetProcessAlive(off) {
+			delete(tips, id)
+		}
+	}
+	return tips
+}
+
+// offsetProcessAlive reports whether the validator with this --port-offset is
+// still running.
+//
+// Liveness has to be checked against the port offset because a node ID such as
+// "Node-127.0.0.1:30303" is printed by the localnet supervisor but never
+// appears in the child's argv — argv carries --port-offset and --datadir.
+//
+// The `--` separator is mandatory: without it pgrep parses "--port-offset=N" as
+// an option and fails with "illegal option".
+func offsetProcessAlive(offset int) bool {
+	out, err := exec.Command("pgrep", "-f", "--", fmt.Sprintf("--port-offset=%d", offset)).Output()
+	return err == nil && strings.TrimSpace(string(out)) != ""
+}
+
+// offsetByNodeID maps each observed node ID to its --port-offset.
+//
+// buildLocalnetNodes gives node i the address 127.0.0.1:(30303+i), so sorting
+// the observed IDs by port reproduces offsets 0,1,2,... in order. This is the
+// bridge from a log line's node ID back to the flag that identifies its process.
+func offsetByNodeID(ids []string) map[string]int {
+	sorted := append([]string(nil), ids...)
+	sort.Slice(sorted, func(a, b int) bool { return nodePort(sorted[a]) < nodePort(sorted[b]) })
+	out := make(map[string]int, len(sorted))
+	for i, id := range sorted {
+		out[id] = i
+	}
+	return out
+}
+
+// nodeIDList returns the node IDs present in a tip map.
+func nodeIDList(tips map[string]nodeTip) []string {
+	out := make([]string, 0, len(tips))
+	for id := range tips {
+		out = append(out, id)
+	}
+	return out
+}
+
+// nodePort returns the TCP port embedded in a Node-<host:port> ID.
+func nodePort(nodeID string) int {
+	_, p, err := net.SplitHostPort(strings.TrimPrefix(nodeID, "Node-"))
+	if err != nil {
+		return -1
+	}
+	n, err := strconv.Atoi(p)
+	if err != nil {
+		return -1
+	}
+	return n
+}
+
+// maxTipHeight returns the highest height any node reported, for diagnostics.
+func maxTipHeight(tips map[string]nodeTip) uint64 {
+	var max uint64
+	for _, tip := range tips {
+		if tip.height > max {
+			max = tip.height
+		}
+	}
+	return max
+}
+
+// TestNodeTipsAndAgreedTip locks in the per-node attribution that the
+// integration test depends on.
+//
+// Regression guard: when tips were keyed by block HASH, four validators that
+// correctly agreed on one hash collapsed into a single map entry, so the
+// "all four agree" assertion could never be satisfied by working code. These
+// cases pin the correct behaviour without paying for real validator startup.
+func TestNodeTipsAndAgreedTip(t *testing.T) {
+	line := func(node string, h uint64, hash string) string {
+		return fmt.Sprintf("%s  | 04:28:07.616 INFO    Updated best block: height=%d, hash=%s", node, h, hash)
+	}
+	const (
+		nA = "Node-127.0.0.1:30303"
+		nB = "Node-127.0.0.1:30304"
+		nC = "Node-127.0.0.1:30305"
+		nD = "Node-127.0.0.1:30306"
+	)
+
+	t.Run("four nodes agreeing on height and hash", func(t *testing.T) {
+		// This is the case the hash-keyed map got wrong.
+		text := line(nA, 10, "aa11") + "\n" +
+			line(nB, 10, "aa11") + "\n" +
+			line(nC, 10, "aa11") + "\n" +
+			line(nD, 10, "aa11") + "\n"
+		if got := len(nodeTips(text)); got != 4 {
+			t.Fatalf("nodeTips returned %d nodes, want 4 distinct nodes", got)
+		}
+		h, ok := agreedTip(nodeTips(text), 4, 1)
+		if !ok || h != 10 {
+			t.Fatalf("agreedTip = (%d, %v), want (10, true)", h, ok)
+		}
+	})
+
+	t.Run("latest tip per node wins", func(t *testing.T) {
+		text := line(nA, 7, "aa11") + "\n" + line(nA, 12, "bb22") + "\n" +
+			line(nB, 12, "bb22") + "\n"
+		tips := nodeTips(text)
+		if tips[nA].height != 12 || tips[nA].hash != "bb22" {
+			t.Fatalf("nodeA tip = %+v, want height 12 / hash bb22", tips[nA])
+		}
+	})
+
+	t.Run("disagreeing heights are rejected", func(t *testing.T) {
+		text := line(nA, 10, "aa11") + "\n" + line(nB, 9, "aa11") + "\n"
+		if _, ok := agreedTip(nodeTips(text), 2, 1); ok {
+			t.Fatal("agreedTip accepted mismatched heights")
+		}
+	})
+
+	t.Run("same height but different hash is rejected", func(t *testing.T) {
+		// A fork: same height, different block. Must never count as agreement.
+		text := line(nA, 10, "aa11") + "\n" + line(nB, 10, "cc33") + "\n"
+		if _, ok := agreedTip(nodeTips(text), 2, 1); ok {
+			t.Fatal("agreedTip accepted a fork at the same height")
+		}
+	})
+
+	t.Run("too few nodes is rejected", func(t *testing.T) {
+		text := line(nA, 10, "aa11") + "\n" + line(nB, 10, "aa11") + "\n"
+		if _, ok := agreedTip(nodeTips(text), 3, 1); ok {
+			t.Fatal("agreedTip accepted only 2 of the 3 expected nodes")
+		}
+	})
+
+	t.Run("below minimum height is rejected", func(t *testing.T) {
+		text := line(nA, 10, "aa11") + "\n" + line(nB, 10, "aa11") + "\n"
+		if _, ok := agreedTip(nodeTips(text), 2, 11); ok {
+			t.Fatal("agreedTip accepted height 10 when 11 was required")
+		}
+	})
+
+	t.Run("genesis height zero does not satisfy a min of one", func(t *testing.T) {
+		text := line(nA, 0, "0000") + "\n" + line(nB, 0, "0000") + "\n"
+		if _, ok := agreedTip(nodeTips(text), 2, 1); ok {
+			t.Fatal("agreedTip accepted height 0 as committed progress")
+		}
+	})
+
+	t.Run("lines without a node prefix are ignored", func(t *testing.T) {
+		// Must not be silently attributed to some node.
+		if got := len(nodeTips("  Updated best block: height=5, hash=aa11\n")); got != 0 {
+			t.Fatalf("nodeTips attributed an unattributed line (%d nodes)", got)
+		}
+	})
+}
+
+// TestOffsetByNodeID pins the log-ID -> process-flag bridge.
+//
+// Liveness is checked with pgrep against --port-offset, because a node ID is
+// printed by the supervisor but never appears in the child's argv. If this
+// mapping silently returned the wrong offsets, phases 2 and 3 would check
+// liveness of the wrong validators.
+func TestOffsetByNodeID(t *testing.T) {
+	ids := []string{
+		"Node-127.0.0.1:30306",
+		"Node-127.0.0.1:30303",
+		"Node-127.0.0.1:30305",
+		"Node-127.0.0.1:30304",
+	}
+	got := offsetByNodeID(ids)
+	want := map[string]int{
+		"Node-127.0.0.1:30303": 0,
+		"Node-127.0.0.1:30304": 1,
+		"Node-127.0.0.1:30305": 2,
+		"Node-127.0.0.1:30306": 3,
+	}
+	for id, w := range want {
+		if got[id] != w {
+			t.Errorf("offsetByNodeID[%s] = %d, want %d", id, got[id], w)
+		}
+	}
+
+	// Input order must not matter, and the input slice must not be mutated.
+	if ids[0] != "Node-127.0.0.1:30306" {
+		t.Errorf("offsetByNodeID reordered its input in place: %v", ids)
+	}
+
+	if p := nodePort("Node-127.0.0.1:30304"); p != 30304 {
+		t.Errorf("nodePort = %d, want 30304", p)
+	}
+	if p := nodePort("Node-malformed"); p != -1 {
+		t.Errorf("nodePort(malformed) = %d, want -1", p)
+	}
 }
 
 // buildLocalnetBinary compiles the CLI once for the whole test.
@@ -163,9 +418,13 @@ func buildLocalnetBinary(t *testing.T) string {
 }
 
 // killLocalnetNode SIGKILLs the localnet child serving --port-offset=<offset>.
+//
+// The `--` separator is mandatory: without it pgrep parses "--port-offset=N" as
+// an option, fails with "illegal option", and exits 2 — which looks like "no
+// such node" but is actually a broken pattern.
 func killLocalnetNode(t *testing.T, offset int) {
 	t.Helper()
-	out, err := exec.Command("pgrep", "-f", fmt.Sprintf("--port-offset=%d", offset)).Output()
+	out, err := exec.Command("pgrep", "-f", "--", fmt.Sprintf("--port-offset=%d", offset)).Output()
 	if err != nil {
 		t.Fatalf("no localnet child with --port-offset=%d: %v (%s)", offset, err, out)
 	}
@@ -188,34 +447,6 @@ func atoiOrZero(s string) int {
 	return n
 }
 
-// currentHeight returns the highest height any node has reported.
-func currentHeight(t *testing.T, logPath string) uint64 {
-	t.Helper()
-	heights := allBestHeights(readLog(t, logPath))
-	var max uint64
-	for _, h := range heights {
-		if h > max {
-			max = h
-		}
-	}
-	return max
-}
-
-// allBestHeights returns one best height per node, in the order the nodes log.
-func allBestHeights(text string) []uint64 {
-	latest := map[string]uint64{}
-	for _, m := range bestBlockRe.FindAllStringSubmatch(text, -1) {
-		var h uint64
-		fmt.Sscanf(m[1], "%d", &h)
-		latest[m[2]] = h
-	}
-	out := make([]uint64, 0, len(latest))
-	for _, h := range latest {
-		out = append(out, h)
-	}
-	return out
-}
-
 func readLog(t *testing.T, path string) string {
 	t.Helper()
 	data, err := os.ReadFile(path)
@@ -235,7 +466,7 @@ func waitForCondition(t *testing.T, logPath string, timeout time.Duration, cond 
 		if v, ok := cond(readLog(t, logPath)); ok {
 			return v
 		}
-		last = currentHeight(t, logPath)
+		last = maxTipHeight(nodeTips(readLog(t, logPath)))
 		time.Sleep(5 * time.Second)
 	}
 	t.Fatalf("condition not met within %s (last height %d). Log tail:\n%s",

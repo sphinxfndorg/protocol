@@ -1901,6 +1901,109 @@ func devnetAddressForPublicKey(pkBytes []byte) (string, error) {
 	return canonical, nil
 }
 
+// ValidatorIDPrefix labels the key-derived validator identity.
+const ValidatorIDPrefix = "VKID-"
+
+// ValidatorIDFromPublicKey derives a validator's stable identity from its
+// SPHINCS+ public key.
+//
+// It reuses the repository's existing address convention exactly — the same
+// SHAKE256-with-org -> FormatOrgAddress -> CanonicalSPIFAddress chain
+// devnetAddressForPublicKey uses — so no new hashing or encoding scheme is
+// introduced. The fingerprint is relabelled with ValidatorIDPrefix so a
+// validator identity can never be mistaken for a spendable SPIF address.
+//
+// This lives in bind rather than consensus because consensus must not import
+// usi/core/key (it would close a usi/core/key -> core -> consensus cycle), and
+// the fingerprint primitive lives in usi/core/key.
+//
+// Unlike the address-derived "Node-<host:port>" form, the result does not change
+// when the node's listen address changes.
+func ValidatorIDFromPublicKey(pk []byte) (string, error) {
+	if len(pk) == 0 {
+		return "", fmt.Errorf("validator public key is empty")
+	}
+	fingerprint := usiKey.GetPublicKeyFingerprintFromBytes(pk, usiKey.OrgSPIF)
+	canonical := common.CanonicalSPIFAddress(fingerprint)
+	if !common.ValidateSPIFAddress(canonical) {
+		return "", fmt.Errorf("derived validator id %q is not a valid SPIF fingerprint", fingerprint)
+	}
+	return ValidatorIDPrefix + strings.TrimPrefix(canonical, common.SPIFPrefix), nil
+}
+
+// ValidatorIDAliasEntry records that one validator is reachable under two
+// identity strings: the key-derived form and the address-derived
+// "Node-<host:port>" form.
+//
+// Both remain valid. This exists so a later migration can translate between them
+// without re-deriving either side.
+type ValidatorIDAliasEntry struct {
+	KeyDerivedID  string `json:"key_derived_id"`
+	AddressID     string `json:"address_id"`
+	PublicKeyHex  string `json:"public_key_hex"`
+	ListenAddress string `json:"listen_address,omitempty"`
+}
+
+// ValidatorIDAliases maps between the two validator identity forms. It is
+// additive: nothing in consensus, the snapshot key, or the wire formats reads
+// it yet.
+type ValidatorIDAliases struct {
+	mu sync.RWMutex
+	// byKeyDerived maps the key-derived form to the address form.
+	byKeyDerived map[string]string
+	// byAddress maps the address form to the key-derived form.
+	byAddress map[string]string
+}
+
+// NewValidatorIDAliases returns an empty alias registry.
+func NewValidatorIDAliases() *ValidatorIDAliases {
+	return &ValidatorIDAliases{
+		byKeyDerived: make(map[string]string),
+		byAddress:    make(map[string]string),
+	}
+}
+
+// Register records the two identity forms for one validator. A repeated
+// keyDerivedID bound to a different addressID is rejected so the mapping cannot
+// silently diverge.
+func (r *ValidatorIDAliases) Register(entry ValidatorIDAliasEntry) error {
+	if entry.KeyDerivedID == "" || entry.AddressID == "" {
+		return fmt.Errorf("validator alias needs both a key-derived and an address-derived id")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if prev, ok := r.byKeyDerived[entry.KeyDerivedID]; ok && prev != entry.AddressID {
+		return fmt.Errorf("validator %s is already aliased to %s, refusing to remap to %s",
+			entry.KeyDerivedID, prev, entry.AddressID)
+	}
+	r.byKeyDerived[entry.KeyDerivedID] = entry.AddressID
+	r.byAddress[entry.AddressID] = entry.KeyDerivedID
+	return nil
+}
+
+// AddressIDFor returns the address-derived id for a key-derived id.
+func (r *ValidatorIDAliases) AddressIDFor(keyDerivedID string) (string, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	addr, ok := r.byKeyDerived[keyDerivedID]
+	return addr, ok
+}
+
+// KeyDerivedIDFor returns the key-derived id for an address-derived id.
+func (r *ValidatorIDAliases) KeyDerivedIDFor(addressID string) (string, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	id, ok := r.byAddress[addressID]
+	return id, ok
+}
+
+// Len reports how many validators are registered.
+func (r *ValidatorIDAliases) Len() int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.byKeyDerived)
+}
+
 // ============================================================================
 // Genesis authoring decision
 //

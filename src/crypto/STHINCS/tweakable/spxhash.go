@@ -44,7 +44,7 @@ import (
 // projected to ~19 HOURS per signature — using common.SpxHash for the hot
 // loop was simply not viable.
 //
-// The hash package's v2 construction (double SHA-256 + SHAKE256, see
+// The hash package's v2 construction (SHA-512/256 + SHAKE256, see
 // spxhash/hash/spxhash.go) has no Argon2id and no KDF: ~3 fast hash calls
 // per digest, low-microsecond instead of tens of milliseconds. The reason
 // for the two-backend split is gone, so every function below now goes
@@ -117,7 +117,7 @@ const seedStackBound = 256
 const digestStackBound = 64
 
 // spxHashExpand hashes domain||length-prefixed(parts) with
-// common.SpxHashUncached (v2-backed: SHA-256 double-hash + SHAKE256, see
+// common.SpxHashUncached (v2-backed: SHA-512/256 + SHAKE256, see
 // spxhash/hash/spxhash.go), then expands that 32-byte result via SHAKE256 to
 // exactly outLen bytes. Length-prefixing every field makes the encoding
 // unambiguous — without it, spxHashExpand(d, n, "ab", "c") and
@@ -160,20 +160,15 @@ func spxHashExpand(domain byte, outLen int, parts ...[]byte) []byte {
 	// interface method), so these arrays provably stay on the stack.
 	var dstack [digestStackBound]byte
 	var dbuf []byte
-	if digest := common.SpxHashDigestSize(); digest > 0 && digest <= digestStackBound {
+	if digest := common.SpxHashDigestSize(); digest <= digestStackBound {
 		dbuf = dstack[:digest]
-	} else if digest > 0 {
+	} else {
 		dbuf = make([]byte, digest)
 	}
 
+	// SpxHashUncachedInto never returns nil: an unavailable shared hasher
+	// panics inside common, so there is no per-call failure to handle here.
 	base := common.SpxHashUncachedInto(dbuf, seed)
-	if base == nil {
-		// common.SpxHashUncached only returns nil on internal hasher
-		// construction failure (see getSpxHasher); that's an unrecoverable
-		// environment error, not a per-call condition, so fail loudly rather
-		// than silently degrade signature security.
-		panic("tweakable: common.SpxHashUncached returned nil — SphinxHash instance unavailable")
-	}
 	// The seed holds WOTS+ chain values and PRF output — derived secret
 	// material. On the heap path the allocator may retain those bytes; on the
 	// stack path the frame is reused and overwritten. Wiping here is what

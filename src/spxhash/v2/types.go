@@ -42,9 +42,10 @@ type Node struct {
 // is used directly as the HMAC/SHAKE key (see hashData in spxhash.go) — so
 // there is only one key value to track, not two.
 type SphinxHash struct {
-	bitSize int    // Output bit size: 256, 384, or 512
-	data    []byte // Accumulated input data (written via Write)
-	key     []byte // Per-instance key: either the caller's fixed value
+	bitSize int        // Output bit size: 256, 384, or 512
+	data    []byte     // Accumulated input data (written via Write)
+	dmu     sync.Mutex // Guards data
+	key     []byte     // Per-instance key: either the caller's fixed value
 	// (NewSphinxHash) or freshly random (NewSphinxHashKeyed)
 	cache *LRUCache    // LRU cache of previously computed hashes
 	seed  maphash.Seed // Per-instance seed for cache-key hashing

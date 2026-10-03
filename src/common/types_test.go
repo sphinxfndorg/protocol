@@ -310,3 +310,56 @@ func TestSpxHashDeterminismAcrossRuns(t *testing.T) {
 		}
 	}
 }
+
+func TestSpxHashMatchesProtocolHash(t *testing.T) {
+	s, err := spxhash.NewProtocolHash(256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, in := range [][]byte{{}, []byte("a"), bytes.Repeat([]byte{7}, 5000), bytes.Repeat([]byte{9}, 1<<20+1)} {
+		want := s.GetHashUncached(in)
+		if !bytes.Equal(SpxHash(in), want) {
+			t.Fatalf("SpxHash != protocol hash, len=%d", len(in))
+		}
+		if !bytes.Equal(SpxHashUncached(in), want) {
+			t.Fatalf("SpxHashUncached != protocol hash, len=%d", len(in))
+		}
+		buf := make([]byte, SpxHashDigestSize()+16)
+		got := SpxHashUncachedInto(buf, in)
+		if !bytes.Equal(got, want) || cap(got) != SpxHashDigestSize() {
+			t.Fatalf("SpxHashUncachedInto mismatch, len=%d", len(in))
+		}
+	}
+}
+
+func TestSpxHashUncachedIntoShortBufferPanics(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected panic for undersized dst")
+		}
+	}()
+	SpxHashUncachedInto(make([]byte, SpxHashDigestSize()-1), []byte("x"))
+}
+
+func TestSpxHashDigestSize(t *testing.T) {
+	if SpxHashDigestSize() != 32 {
+		t.Fatalf("digest size = %d, want 32", SpxHashDigestSize())
+	}
+}
+
+func TestSpxHashKnownAnswers(t *testing.T) {
+	vectors := map[int]string{
+		0:    "c20d0d33850ecbbef216a18ed16f5132d427dbbf043692800a227195613def1f",
+		1:    "0a856fc4ae8d01805c039a4c1adb2de7aad04984a8678ca1d3abbd5af960f886",
+		1024: "a580507009efe63ecc02460749a938600c14a1d460347388da09c8afa4644cc3",
+	}
+	for n, want := range vectors {
+		in := make([]byte, n)
+		for i := range in {
+			in[i] = byte(i % 251)
+		}
+		if got := fmt.Sprintf("%x", SpxHash(in)); got != want {
+			t.Errorf("len=%d: got %s, want %s", n, got, want)
+		}
+	}
+}

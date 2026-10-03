@@ -22,6 +22,9 @@ func NewLRUCache(capacity int) *LRUCache {
 
 // Get returns a copy of the cached value for key if the stored input equals input.
 func (l *LRUCache) Get(key CacheKey, input []byte) ([]byte, bool) {
+	if len(input) > MaxCachedInputSize {
+		return nil, false
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -37,8 +40,18 @@ func (l *LRUCache) Get(key CacheKey, input []byte) ([]byte, bool) {
 
 // Put stores copies of input and value under key, replacing any entry with the same key.
 func (l *LRUCache) Put(key CacheKey, input, value []byte) {
+	if len(input) > MaxCachedInputSize {
+		return
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
+	if l.cache == nil {
+		l.cache = make(map[CacheKey]*Node)
+	}
+	if l.capacity < 1 {
+		l.capacity = 1
+	}
 
 	buf := make([]byte, len(input)+len(value))
 	copy(buf, input)

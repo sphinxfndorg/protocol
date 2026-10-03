@@ -203,9 +203,17 @@ func TestDeployAndWaitFailsOnRejectedDeploy(t *testing.T) {
 // were stale. The formula and the inputs are unchanged — only the hash backend
 // moved — and the node derives through the identical call, so client and node
 // still agree (TestDeploySIP721BindsTheDerivedAddress covers that directly).
+//
+// Re-pinned AGAIN when spxhash v2's branch-A primitive moved from a double
+// SHA-256 to a single SHA-512/256. Same reasoning as the v1->v2 move, and the
+// same consensus caveat: this is a protocol-level change, so a contract already
+// deployed at the previous literal is no longer reachable at its derived
+// address. SpxHash is the protocol-wide hash, so this re-pin belongs with the
+// STHINCS SPHINXHASH golden re-baseline in the same change. Same formula, same
+// inputs, same shared derivation on both sides — only the digest moved.
 const (
-	goldenSIP721Address = "SPIF B877 D970 4C65 05AD 1D32 A9F1 CEE4 0515 8E14 DC68 01E0 4DAF 60C3 6657 8DF6 09EC"
-	goldenSIP20Address  = "SPIF 547E B0E1 EFCA 2A28 E298 A971 2A91 838E 4771 506C D4CA 731E E8F6 7823 44F7 D90D"
+	goldenSIP721Address = "SPIF 8213 E60F 11EF 4C3E 6A10 F325 CB06 5FAB DB4F 52F4 2D3B AECE BAB1 4411 0FA5 F2F9"
+	goldenSIP20Address  = "SPIF 39E2 159A 5843 B8F2 1AAB 6BD9 632B 030C 426C B530 E0ED D10D 3FC7 07F0 E0CE 9711"
 )
 
 func TestDeployDerivedAddressMatchesThePinnedFormula(t *testing.T) {

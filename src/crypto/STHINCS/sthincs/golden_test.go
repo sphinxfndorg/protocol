@@ -65,6 +65,14 @@ func fixedKey(t *testing.T, params *parameters.Parameters, label string) (*SPHIN
 // consensus-level break: a node on the new code and a node on the old code
 // would disagree about the same signature. Re-baseline ONLY for an
 // intentional protocol change.
+//
+// RE-BASELINE (SPHINXHASH rows only): the three SPHINXHASH-* digests below were
+// regenerated when the spxhash/v2 branch-`A` primitive changed from a double
+// SHA-256 to a single SHA-512/256 (see src/spxhash/v2/README.md, "Changed
+// (branch A)"). Only the SPHINXHASH backend routes through spxhash/v2, so the
+// SHA256-* and SHAKE256-* digests are unchanged. Signature *lengths* are
+// unchanged; only the bytes moved. This is the deliberate, documented protocol
+// change permitted by the paragraph above.
 var goldenSignatures = map[string]struct {
 	Len       int
 	SigSHA256 string
@@ -75,9 +83,9 @@ var goldenSignatures = map[string]struct {
 	"SHA256-192f-simple":     {15216, "9193e4ec2c175b971304fda0eefac8fbda2d3ba6ed8e03b8944f69fec5518a1c"},
 	"SHAKE256-128f-simple":   {7216, "1b1b66857ceaf46040edeb66b134e18287a917ea4245bc3337e5c8dbab4d468a"},
 	"SHAKE256-128f-robust":   {7216, "f4f878771ecfb82ad3a4fb440da49f92fdfb49371e0bd8c05d51f10bcf9cb8c9"},
-	"SPHINXHASH-128f-simple": {7216, "155bbdfcfc7e7743a044048b4bc093719fc13099371a7bed1e1a6ecff512f903"},
-	"SPHINXHASH-128f-robust": {7216, "ec784ac2c70432d7ee037abcf7d81a96376f3306ddeb0954cfddee62b44f6a9a"},
-	"SPHINXHASH-192f-robust": {15216, "f92908844091572529dfb80623630b2f885e81c479de11ced5085530581677f4"},
+	"SPHINXHASH-128f-simple": {7216, "08401a244e6f9f43149f0aff8a68b44798fe13d8944b5f77ea413175267db9d1"},
+	"SPHINXHASH-128f-robust": {7216, "2c3a56284907c76c8abb5db182431a4d3c6d06faf6df2d5928ed3145bd7870b0"},
+	"SPHINXHASH-192f-robust": {15216, "e82c565bcbd217118c67e05c0f8378b20df5b97ff01426efd8297c6a4099eb6c"},
 }
 
 // TestGoldenSignatures pins the signature bytes for every backend.

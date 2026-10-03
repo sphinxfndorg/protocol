@@ -20,21 +20,24 @@ var spxParams = Params{
 }
 
 // spxHasher is the shared SphinxHash instance used by SpxHash and
-// SpxHashUncached, keyed with spxhash.ProtocolSalt and built once on first
-// use. Sharing it keeps the LRU cache warm across calls. It is safe for
-// concurrent use as long as callers only invoke GetHash/GetHashUncached
-// (never Write/Read/Sum/Reset, which mutate the accumulated data buffer).
+// SpxHashUncached, keyed with the immutable v2 protocol salt (not the mutable
+// spxhash.ProtocolSalt slice) and built once on first use. Sharing it keeps the
+// LRU cache warm across calls. Construction failure is fatal: returning a nil
+// digest would let every input collide at call sites that do not check it.
 var (
 	spxHasher     *spxhash.SphinxHash
 	spxHasherOnce sync.Once
-	spxHasherErr  error
 )
 
-func getSpxHasher() (*spxhash.SphinxHash, error) {
+func getSpxHasher() *spxhash.SphinxHash {
 	spxHasherOnce.Do(func() {
-		spxHasher, spxHasherErr = spxhash.NewSphinxHash(spxParams.BitSize, spxhash.ProtocolSalt)
+		h, err := spxhash.NewProtocolHash(spxParams.BitSize)
+		if err != nil {
+			panic("common: cannot build protocol hasher: " + err.Error())
+		}
+		spxHasher = h
 	})
-	return spxHasher, spxHasherErr
+	return spxHasher
 }
 
 // SpxHash hashes data with SphinxHash under the protocol's canonical salt.
@@ -49,11 +52,7 @@ func getSpxHasher() (*spxhash.SphinxHash, error) {
 //
 // Use SpxHashUncached for secret or one-off inputs.
 func SpxHash(data []byte) []byte {
-	hasher, err := getSpxHasher()
-	if err != nil {
-		return nil
-	}
-	return hasher.GetHash(data)
+	return getSpxHasher().GetHash(data)
 }
 
 // SpxHashUncached is SpxHash without the cache: same instance, same key,
@@ -62,11 +61,7 @@ func SpxHash(data []byte) []byte {
 // (it also avoids evicting entries that will). A miss through SpxHash costs
 // an extra allocation and copy in Put that this path skips.
 func SpxHashUncached(data []byte) []byte {
-	hasher, err := getSpxHasher()
-	if err != nil {
-		return nil
-	}
-	return hasher.GetHashUncached(data)
+	return getSpxHasher().GetHashUncached(data)
 }
 
 // SpxHashUncachedInto is SpxHashUncached writing into a caller-supplied
@@ -79,22 +74,14 @@ func SpxHashUncached(data []byte) []byte {
 // per-call digest allocation was the largest single source of allocated
 // objects, for a buffer whose lifetime is a few instructions.
 //
-// On hasher-construction failure it returns nil, matching SpxHashUncached.
+// It panics if dst is shorter than SpxHashDigestSize().
 func SpxHashUncachedInto(dst, data []byte) []byte {
-	hasher, err := getSpxHasher()
-	if err != nil {
-		return nil
-	}
-	return hasher.HashIntoUncached(dst, data)
+	return getSpxHasher().HashIntoUncached(dst, data)
 }
 
 // SpxHashDigestSize returns the digest length in bytes for the shared
 // instance's configured bit size, so a caller can size a buffer for
-// SpxHashUncachedInto. Returns 0 if the shared hasher cannot be built.
+// SpxHashUncachedInto.
 func SpxHashDigestSize() int {
-	hasher, err := getSpxHasher()
-	if err != nil {
-		return 0
-	}
-	return hasher.Size()
+	return getSpxHasher().Size()
 }

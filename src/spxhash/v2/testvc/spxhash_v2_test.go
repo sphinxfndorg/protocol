@@ -66,7 +66,7 @@ var vectors = []testVec{
 	{
 		inputLen:  0,
 		salt:      fixedSalt,
-		hash:      "9e9bc2e34f1d3da65fdb52b36c80918fee908bf367cfdbdc6dc87988a26acba5",
+		hash:      "95137d3704f1dcdab0e3554e9aa69e9f0bc11cc80b3115a184a10e4a206d6ea9",
 		keyedHash: computeKeyedHash(0),
 		deriveKey: computeDerivedKey(0),
 		input:     func() []byte { return generateInput(0) },
@@ -74,7 +74,7 @@ var vectors = []testVec{
 	{
 		inputLen:  1,
 		salt:      fixedSalt,
-		hash:      "da4cb911569fe117213087cbbfb056b16b82376d4449f3c1dba7c0e597d1b814",
+		hash:      "8056e9fefb4abb330b9abdb140a4078429aa26cbc723eedbfdd085cc4325e520",
 		keyedHash: computeKeyedHash(1),
 		deriveKey: computeDerivedKey(1),
 		input:     func() []byte { return generateInput(1) },
@@ -82,7 +82,7 @@ var vectors = []testVec{
 	{
 		inputLen:  1023,
 		salt:      fixedSalt,
-		hash:      "d858517d03f20da691682fc90f3649e21df846a5f7f8b6e5f3b9d5e74c7a8ebe",
+		hash:      "695ca40f30c64ec1cd9e63c0f826706d307bb5dff549b9d3c5727e268ec5f5ea",
 		keyedHash: computeKeyedHash(1023),
 		deriveKey: computeDerivedKey(1023),
 		input:     func() []byte { return generateInput(1023) },
@@ -90,7 +90,7 @@ var vectors = []testVec{
 	{
 		inputLen:  1024,
 		salt:      fixedSalt,
-		hash:      "05afa62fba53e9da77cf4e24b6964221e7a400faf1a255de6465e304b8dd4a54",
+		hash:      "d87ca72102aedae10889f7e0425f62930463752481c4d8a48a36e1c937854f57",
 		keyedHash: computeKeyedHash(1024),
 		deriveKey: computeDerivedKey(1024),
 		input:     func() []byte { return generateInput(1024) },
@@ -98,7 +98,7 @@ var vectors = []testVec{
 	{
 		inputLen:  2048,
 		salt:      fixedSalt,
-		hash:      "be20b69a1691a8b42933e71b93eb694f961fe9b1921b980e6b57a6530d20ff86",
+		hash:      "0ec378cb0b9584412038f88348c19ea9fe703af96b45cfa2907f2a5f0e64a902",
 		keyedHash: computeKeyedHash(2048),
 		deriveKey: computeDerivedKey(2048),
 		input:     func() []byte { return generateInput(2048) },
@@ -106,7 +106,7 @@ var vectors = []testVec{
 	{
 		inputLen:  4096,
 		salt:      fixedSalt,
-		hash:      "a4db67bf23b223a2917b0c56cc1fd9db39336fbfb0035a78b17b50131c5d5557",
+		hash:      "0b7e69435fee14f84379ae2ea3a1d7748ffcae9db7d0e09ef6d78ec5354c7443",
 		keyedHash: computeKeyedHash(4096),
 		deriveKey: computeDerivedKey(4096),
 		input:     func() []byte { return generateInput(4096) },

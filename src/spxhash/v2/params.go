@@ -26,7 +26,7 @@ package spxhash
 // actually needs.
 const (
 	// keySize is the size, in bytes, of the randomly generated key used by
-	// NewSphinxHashKeyed. 32 bytes matches SHA-256's output size and gives a
+	// NewSphinxHashKeyed. 32 bytes matches SHA-512/256's output size and gives a
 	// 256-bit search space for per-instance keys.
 	keySize = 32
 
@@ -45,7 +45,7 @@ const (
 //
 // This value is NOT a secret — its only purpose is domain separation (so
 // SphinxHash output doesn't collide with some other unrelated use of
-// SHA-256/SHAKE256), not unpredictability. Writing it as raw bytes instead
+// SHA-512/256/SHAKE256), not unpredictability. Writing it as raw bytes instead
 // of a string changes nothing about that: it is public either way, and it
 // adds no security.
 //
@@ -61,9 +61,9 @@ const (
 //
 // v2 REDESIGN: the value and its role are unchanged from v1 — it is still
 // used as the fixed instance key — but it is no longer run through Argon2id
-// first. It is used directly as the prefix key for the SHA-256 and SHAKE256
-// branches, which is what makes the v2 construction fast: there is no
-// per-call KDF cost to pay.
+// first. It is used directly as the prefix key for the SHA-512/256 and
+// SHAKE256 branches, which is what makes the v2 construction fast: there is
+// no per-call KDF cost to pay.
 //
 // Treat it as read-only: it is an exported slice, so any package can mutate
 // it. NewSphinxHash copies the key at construction, so later mutation cannot

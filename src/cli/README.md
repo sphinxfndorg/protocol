@@ -134,7 +134,40 @@ demonstrates surviving a single failure (§7).
 Startup is slow: each validator generates SPHINCS+ keys and node 0 signs the
 block-0 witness book, which takes minutes. `Ctrl-C` stops every process.
 
-**Quorum and failure behaviour.** All N validators run the real PBFT round, so the
+**Cold start cost.** A localnet must generate SPHINCS+ keys and complete a
+full peer mesh before it can commit, so startup scales with N. Measured on this
+machine, to the first committed block:
+
+| Phase | N=4 | N=7 |
+|---|---|---|
+| Supervisor identity keys | 0s | 0s |
+| Custody provisioning (CGE escrow + 3 custodians) | 54s | 79s |
+| Genesis + witness book | +17s | +28s |
+| Node 0 boot | +97s | +136s |
+| Peer discovery + first quorum round | +186s | +407s |
+| **Total to first commit** | **186s** | **407s** |
+| Directed peer handshakes logged | 22 | 79 |
+| Full mesh required | 12 (4×3) | 42 (7×6) |
+| Handshake window | 53s | 220s |
+
+The dominant cost is **peer handshake**: a full mesh needs `N*(N-1)` directed
+handshakes at roughly 2s each, so the handshake window alone grows from 53s at
+N=4 to 220s at N=7 and accounts for most of the N-dependent growth. Note the
+handshake count observed in the log exceeds `N*(N-1)` because peers retry.
+
+**Known gaps.** Two failure scenarios are not covered by a passing test, and
+both are left visible as skipped tests in
+`src/cli/utils/localnet_integration_test.go`:
+
+- *Leader failure is not survivable.* Killing the current leader stalls the
+  chain: survivors keep their height indefinitely and **no view change is ever
+  triggered**, so nobody is re-elected. Measured: survivors frozen for 6+
+  minutes with 0 `View change triggered` lines, against 267 in a healthy run.
+- *Validator rejoin is unverified.* A killed validator restarts cleanly on its
+  existing datadir and keys and the chain keeps advancing, but the rejoined node
+  emits no height+hash log line, so "it re-synced and all four agree on height
+  and hash" cannot be asserted. Closing this needs either a best-height/hash RPC
+  or a sync log line that carries both.
 network commits blocks and tolerates a minority of failures. Under strict `> 2/3`
 the quorum size is `(2N)/3 + 1`:
 

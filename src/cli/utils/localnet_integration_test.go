@@ -422,6 +422,25 @@ func TestLocalnet_ValidatorRejoinsAfterFailure(t *testing.T) {
 	if testing.Short() {
 		t.Skip("localnet spawns real validator processes; skipped under -short")
 	}
+	// NOT YET VERIFIABLE — see below. Kept, not deleted, so the coverage gap
+	// stays visible and this goes green as soon as rejoin is observable.
+	//
+	// Measured 2026-10-04: the kill and the restart both work mechanically —
+	// the survivors kept committing to height 3 while the node was down, the
+	// restarted process came back up on the same datadir/keys, and the chain
+	// continued to height 12 with four processes alive.
+	//
+	// What could NOT be established is the assertion that matters: that the
+	// rejoined node caught up and agreed on height AND hash. The restarted
+	// node emits no "Updated best block" lines into the captured log, so
+	// nodeTips never produces a tip for it and 4-way agreement is unobservable
+	// through this channel. Asserting it anyway would mean asserting nothing.
+	//
+	// To make this testable, one of these is needed:
+	//   - an RPC that reports a node's best height and hash (there is none today),
+	//   - or a log line carrying height+hash that a freshly synced node emits.
+	t.Skip("NOT VERIFIED: a rejoined validator emits no height+hash log line, " +
+		"so 'it re-synced and all four agree' cannot be asserted through the log")
 	const n = 4
 
 	bin := buildLocalnetBinary(t)

@@ -101,7 +101,56 @@ excludes mutable audit totals and derived metadata.
 
 ---
 
-## 2. Start a node and add peers
+## 2. Run a localnet (recommended)
+
+For anything involving more than one validator, use `localnet`. It generates N
+validator keypairs, writes **one genesis document naming all N**, and starts N
+node processes with distinct port offsets:
+
+```bash
+./sphinx localnet --validators=4
+```
+
+Every process is a real genesis validator, so the network runs actual quorum —
+unlike the hand-run flow in the next section, where only the first node holds
+stake and the rest are unstaked peers.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--validators` | `4` | Number of validator processes. **Minimum 4.** |
+| `--dir` | temp dir | Root for the per-node datadirs (`<dir>/node-<i>/`). Removed on exit unless `--dir` is given. |
+| `--base-port-offset` | `0` | Offset of node 0; node *i* uses `base + i`. |
+| `--keep` | off | Keep the data directory on exit. |
+
+Node *i* listens on TCP `30303+base+i`, HTTP `8545+base+i`, wallet RPC
+`8700+base+i`, and stores data under `<dir>/node-<i>/`. Node 0 authors genesis;
+the others fetch that exact document over the devnet bundle, so all N derive
+the identical validator set.
+
+Why the minimum is 4: under strict `> 2/3`, `K=3` tolerates **no** offline
+validator — two of three is exactly 2/3. Four is the smallest set that
+demonstrates surviving a single failure (§7).
+
+Startup is slow: each validator generates SPHINCS+ keys and node 0 signs the
+block-0 witness book, which takes minutes. `Ctrl-C` stops every process.
+
+**Current limitation.** The network forms correctly — all N nodes seed the full
+N-validator set, agree on the genesis hash, and discover each other — but the
+chain does not advance past block 0: the leader broadcasts a proposal and then
+logs `Timeout waiting for block commitment`, because no prepare/commit votes are
+ever recorded from the peer set. So the failure-mode assertions in
+`src/cli/utils/localnet_integration_test.go` currently fail at phase 1. That test
+is build-tagged and excluded from the default run:
+
+```bash
+go test -tags localnet ./src/cli/utils/ -run TestLocalnet -timeout 40m
+```
+
+Its assertions are deliberately not weakened to match today's behaviour.
+
+---
+
+## 2a. Start a node by hand and add peers
 
 A fresh devnet node authors its own genesis and starts with itself as the
 initial validator. Start another process with a distinct local port/datadir and

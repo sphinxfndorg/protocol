@@ -47,6 +47,8 @@ func Execute() error {
 			return runWalletCmd(os.Args[2:])
 		case "multisig":
 			return runMultisigCmd(os.Args[2:])
+		case "localnet":
+			return runLocalnetCmd(os.Args[2:])
 		case "help", "--help", "-h":
 			printHelp()
 			return nil
@@ -102,6 +104,7 @@ func printHelp() {
 
 SUBCOMMANDS
   node          Start a validator node
+  localnet      Start N real validator nodes in one command (devnet quorum testing)
   send-tx       Send a transaction from one address to another
   get-balance   Query the balance of an address
   watch-tx      Poll until a transaction is confirmed

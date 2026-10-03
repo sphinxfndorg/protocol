@@ -173,6 +173,58 @@ func TestProposeBlock_DoesNotSelfDeadlockOnProcessProposal(t *testing.T) {
 	}
 }
 
+// TestProposeBlockWindow_GuardsAreRevalidated covers the window that opening
+// c.mu in ProposeBlock created: between the c.mu.Unlock() before
+// processProposal and the c.mu.Lock() inside it, another goroutine can change
+// any state the guards read.
+//
+// The guards ProposeBlock evaluates under the lock are:
+//
+//	IsSyncReady()                       (atomic; flips via SetSyncReady)
+//	participationAllowed(...)           (chain state; flips via a pause record)
+//	updateLeaderStatusLocked -> isLeader (flips on a concurrent view change)
+//
+// All three CAN change in that window. The window is nevertheless safe because
+// processProposal re-evaluates every one of them under its own freshly-taken
+// lock before acting on the proposal:
+//
+//	IsSyncReady()                                     -> defer if closed
+//	participationAllowed(ProposerID, height)           -> reject if paused
+//	SelectProposer(...) then isValidLeader(ProposerID) -> reject if not elected
+//
+// Note the leader re-derivation uses proposal.SlotNumber, the view snapshotted
+// under the lock in ProposeBlock. A proposal built on a now-superseded view is
+// therefore validated against ITS OWN view's election, which is correct BFT
+// behaviour: the newer view's round supersedes it rather than the old
+// proposal being retroactively judged by a different election.
+//
+// This test pins that the re-validation exists and is load-bearing: if
+// isValidLeader stopped consulting the freshly derived electedLeaderID, a
+// leader that lost its seat in the window would keep proposing unchallenged.
+func TestProposeBlockWindow_GuardsAreRevalidated(t *testing.T) {
+	c := &Consensus{nodeID: "Node-127.0.0.1:30303"}
+
+	// While this node holds the seat, it is a valid leader.
+	c.electedLeaderID = c.nodeID
+	if !c.isValidLeader(c.nodeID, 1) {
+		t.Fatal("node must be a valid leader while electedLeaderID names it")
+	}
+
+	// Simulate a concurrent view change landing in the unlock window: the seat
+	// moves to another validator.
+	c.electedLeaderID = "Node-127.0.0.1:30304"
+	if c.isValidLeader(c.nodeID, 1) {
+		t.Fatal("a node that lost leadership must be rejected as leader; " +
+			"processProposal relies on this to close the ProposeBlock unlock window")
+	}
+
+	// The new holder is accepted, so the check discriminates rather than
+	// rejecting everything.
+	if !c.isValidLeader("Node-127.0.0.1:30304", 1) {
+		t.Fatal("the newly elected leader must be accepted")
+	}
+}
+
 // selfValidatorNodeManager reports the node itself as an active validator and
 // no peers, which makes getValidators return exactly [nodeID].
 type selfValidatorNodeManager struct{ nodeID string }

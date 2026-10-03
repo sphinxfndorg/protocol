@@ -359,19 +359,23 @@ that case — it is the honest model of a large-input or never-repeating
 workload, and it costs far less than `BenchmarkSpxHash` because it skips both
 the key derivation and the LRU insert.
 
-### `vectorsoutput.txt` Keeps Growing
+### `vectorsoutput.txt` Is Now Truncated Per Run
 
-**Issue:** the file has the same `=== RUN TestPrintHashes` block repeated many
-times and gets larger on every run.
+`TestVectors` opens the file with `O_TRUNC`, so the file holds exactly one
+run's vectors.
 
-**Cause:** the driver opens it with `O_APPEND` and never truncates, so every
-run adds another copy. This is pre-existing behaviour, not a failure.
+It previously used `O_APPEND`, which appended another `=== RUN TestPrintHashes`
+block on every run and grew the file without bound. The accumulated duplicates
+have been removed from the committed copy. `vectorsoutput.txt` is a
+regenerated artifact of `TestVectors` alone, so truncating makes its contents
+depend only on the code under test, and a test run no longer dirties the
+worktree.
 
-**Workaround:** reset it before a run you intend to keep:
-
-```bash
-git checkout src/spxhash/v2/testvc/vectorsoutput.txt
-```
+Two other writers in this package still append: the `Benchmark*` functions
+(`BenchmarkSpxHash`, `BenchmarkSpxHashCached`, `BenchmarkSpxHashUncached`,
+`BenchmarkSHA512_256`) write to the same file, so running them with `-bench=.`
+still appends benchmark output. Those are only run deliberately, not by
+`go test ./src/...`.
 
 ## Quick Reference
 

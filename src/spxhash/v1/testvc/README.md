@@ -105,6 +105,10 @@ Automatically created output file containing:
 2. `KeyedHash` and `DeriveKey` values
 3. Benchmark results with `ns/op` metrics
 
+`TestVectors` truncates this file, so it holds exactly one run's vectors. The
+`Benchmark*` functions append to the same file, so a `-bench=.` run adds
+benchmark output on top.
+
 ### `test_vectors_output.txt`
 
 Contains detailed test vector information in a structured format.

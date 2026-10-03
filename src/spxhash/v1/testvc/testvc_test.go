@@ -177,7 +177,13 @@ func computeHash(inputLen int, logFile *os.File) string {
 // TestVectors verifies the test vectors and prints them in the required format
 func TestVectors(t *testing.T) {
 	filename := filepath.Join(".", "vectorsoutput.txt")
-	f, err := os.OpenFile(filename, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	// Truncate rather than append: this driver opened the file with O_APPEND
+	// and never reset it, so every run appended another copy of the same
+	// === RUN TestPrintHashes block and the file grew without bound. The file is
+	// a regenerated artifact of this one test, so the correct contents after a
+	// run are exactly this run's vectors -- O_TRUNC makes the output depend only
+	// on the code under test and stops a test run from dirtying the worktree.
+	f, err := os.OpenFile(filename, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
 	if err != nil {
 		t.Fatalf("Failed to open TXT file: %v", err)
 	}

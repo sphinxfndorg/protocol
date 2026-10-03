@@ -478,8 +478,10 @@ go test -run TestReportSeedTotals      -v ./src/crypto/STHINCS/tweakable/
 go test -run TestReportHmsgDigestLengths -v ./src/crypto/STHINCS/tweakable/
 ```
 
-`testvc/spxhash_v2_test.go` appends to `vectorsoutput.txt` on every run; restore
-it with `git checkout` if you want a clean tree.
+`testvc/spxhash_v2_test.go` truncates `vectorsoutput.txt` on each run, so the
+committed copy stays in sync with the code. The `Benchmark*` functions still
+append to that file when run with `-bench=.`; `git checkout` it if a benchmark
+run dirtied the tree.
 
 ### Run-to-run variation (single-shot measurements)
 

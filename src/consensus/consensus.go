@@ -861,7 +861,21 @@ func (c *Consensus) SignBlockHeader(block Block) error {
 // ProposeBlock creates and broadcasts a new block proposal when this node is the leader
 func (c *Consensus) ProposeBlock(block interface{}) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	// releaseC.mu guards the deferred unlock below so this function can drop the
+	// lock early for the one call that takes it itself.
+	//
+	// processProposal takes c.mu.Lock() on entry, and sync.RWMutex is not
+	// reentrant, so calling it while still holding c.mu deadlocks this
+	// goroutine on itself — exactly the wedge that stopped every vote
+	// processor from acquiring the lock. The other guards here (sync-ready,
+	// participation, leader, signing) all read c.mu state, so they stay under
+	// the lock; only the processProposal call is moved out.
+	releaseC := true
+	defer func() {
+		if releaseC {
+			c.mu.Unlock()
+		}
+	}()
 
 	// SYNC GATE: a node that hasn't finished adopting the canonical chain
 	// must never propose — a proposal built on a stale/incomplete local tip
@@ -946,6 +960,11 @@ func (c *Consensus) ProposeBlock(block interface{}) error {
 	// ========== FIX: Process proposal locally IMMEDIATELY ==========
 	// The leader needs preparedBlock set before prepare votes arrive.
 	// Process synchronously (this will set preparedBlock), then broadcast.
+	//
+	// c.mu is released first: processProposal acquires it itself, so holding it
+	// across this call would self-deadlock on the non-reentrant mutex.
+	c.mu.Unlock()
+	releaseC = false
 	c.processProposal(proposal)
 	logger.Info("Leader %s processed its own proposal locally", c.nodeID)
 

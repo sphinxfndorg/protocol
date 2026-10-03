@@ -116,7 +116,7 @@ SUBCOMMANDS
                  'ipfs repin' to re-pin a payload whose anchor recorded only a
                  local content hash.)
   wallet        Manage ` + common.SPIFPrefix + ` wallets (init, list, burn, send)
-              Burn coins: send SPX to ` + common.DEADPrefix + ` ` + common.DefaultBurnAddress + ` (provably unspendable)
+              Burn coins: send SPX to ` + common.DefaultBurnAddress + ` (provably unspendable)
   multisig      M-of-N custody for the genesis vault / CGE escrow
                   devnet  --role escrow|vault --custodians N --threshold M
                           (writes the policy JSON the node auto-loads, plus

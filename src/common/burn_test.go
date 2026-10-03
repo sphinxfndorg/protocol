@@ -17,7 +17,7 @@ func TestBurnAddressDefaults(t *testing.T) {
 		t.Fatalf("DefaultBurnAddress %q not detected as burn address", DefaultBurnAddress)
 	}
 	// SPIF addresses must NOT be detected as burn.
-	spif, err := FormatSPIFAddress("262C098D17D0D99F315CD9B7C4D9AEDA685A65FD8630DEFDCE21F98460B1FA30")
+	spif, err := FormatSPIFAddress("F470993890D8C4B470C4025D7693272F6562DA6CF438CE167595780E190E894F")
 	if err != nil {
 		t.Fatalf("FormatSPIFAddress: %v", err)
 	}
@@ -26,7 +26,7 @@ func TestBurnAddressDefaults(t *testing.T) {
 	}
 	// DEAD rendering of the same hex body must be a burn address with the
 	// same canonical hex.
-	dead, err := FormatDEADAddress("262C098D17D0D99F315CD9B7C4D9AEDA685A65FD8630DEFDCE21F98460B1FA30")
+	dead, err := FormatDEADAddress("F470993890D8C4B470C4025D7693272F6562DA6CF438CE167595780E190E894F")
 	if err != nil {
 		t.Fatalf("FormatDEADAddress: %v", err)
 	}

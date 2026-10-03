@@ -70,13 +70,13 @@ export function isBurnAddress(addr: string): boolean {
   const raw = t.replace(/\s+/g, '').replace(/-/g, '').toUpperCase();
   const stripped = raw.replace(/^(SPIF|DEAD)/, '');
   return (
-    stripped === '262C098D17D0D99F315CD9B7C4D9AEDA685A65FD8630DEFDCE21F98460B1FA30'
+    stripped === 'F470993890D8C4B470C4025D7693272F6562DA6CF438CE167595780E190E894F'
   );
 }
 
 /** The protocol default burn address (provably unspendable). */
 export const DEFAULT_BURN_ADDRESS =
-  'DEAD 262C 098D 17D0 D99F 315C D9B7 C4D9 AEDA 685A 65FD 8630 DEFD CE21 F984 60B1 FA30';
+  'DEAD F470 9938 90D8 C4B4 70C4 025D 7693 272F 6562 DA6C F438 CE16 7595 780E 190E 894F';
 
 /**
  * Strips "SPIF" prefix, spaces, and hyphens from a SPIF address,

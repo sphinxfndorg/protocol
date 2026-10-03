@@ -44,11 +44,11 @@ const DEADPrefix = "DEAD"
 // is provably unspendable.
 //
 // Display form (canonical, grouped):
-const DefaultBurnAddress = "DEAD 262C 098D 17D0 D99F 315C D9B7 C4D9 AEDA 685A 65FD 8630 DEFD CE21 F984 60B1 FA30"
+const DefaultBurnAddress = "DEAD F470 9938 90D8 C4B4 70C4 025D 7693 272F 6562 DA6C F438 CE16 7595 780E 190E 894F"
 
 // DefaultBurnPublicKeyHex is the SPHINCS+ public key the default burn address
 // was derived from (hex-encoded, retained for auditability — it cannot spend).
-const DefaultBurnPublicKeyHex = "01c56901bf349670d46d3830bfd7033d05c06f06b73d9c7bd860363fafc6112e"
+const DefaultBurnPublicKeyHex = "902c07557a9ea822b38bfea5b8ad1d69fab170e1a407c475c57633b5506850c6"
 
 // IsBurnAddress reports whether addr is a burn (DEAD-prefixed) address.
 // It accepts the grouped display form ("DEAD XXXX ..."), raw hex with a

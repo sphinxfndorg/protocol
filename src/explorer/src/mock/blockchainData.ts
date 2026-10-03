@@ -358,7 +358,7 @@ export function initializeBlockchain() {
     symbol: 'SPX',
     genesisHash: '0x_genesis_' + genHex(48),
     syncMode: 'Fully Audited (SPHINCS+ Hash Signature Verified)',
-    burnAddress: 'DEAD 262C 098D 17D0 D99F 315C D9B7 C4D9 AEDA 685A 65FD 8630 DEFD CE21 F984 60B1 FA30',
+    burnAddress: 'DEAD F470 9938 90D8 C4B4 70C4 025D 7693 272F 6562 DA6C F438 CE16 7595 780E 190E 894F',
     burnedSpx: '37.5',
     burnedNspx: '37500019956267073340',
     circulatingSpx: '1240004251.31',

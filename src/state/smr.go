@@ -1534,13 +1534,3 @@ func (sm *StateMachine) persistState(snapshot *StateSnapshot) error {
 
 	return nil
 }
-
-// calculateQuorumSize calculates the required quorum size for Byzantine fault tolerance
-func calculateQuorumSize(totalValidators int) int {
-	if totalValidators == 0 {
-		return 1
-	}
-	// Byzantine fault tolerance: f < n/3, quorum = 2f + 1
-	// For n validators, quorum = floor(2n/3) + 1
-	return (2*totalValidators)/3 + 1
-}

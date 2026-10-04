@@ -401,6 +401,61 @@ func TestLeaderDeath_StaleAndForeignVotesDoNotCountAsProgress(t *testing.T) {
 	}
 }
 
+// TestLeaderDeath_VotesWithoutAcceptedProposalAreNotProgress closes the last
+// hole: preparedBlockHash is set ONLY when a proposal is accepted (see
+// processProposal), so when it is "" no proposal has been accepted this round.
+//
+// voteIsCurrentRound previously SKIPPED its block check in that case, so a
+// validator could keep sending distinct votes for arbitrary block hashes at the
+// right height and view, each one re-arming the round clock and holding the
+// view-change gate shut for good.
+func TestLeaderDeath_VotesWithoutAcceptedProposalAreNotProgress(t *testing.T) {
+	ResetSnapshots()
+	t.Cleanup(ResetSnapshots)
+
+	ids := []string{"Node-a", "Node-b", "Node-c", "Node-d"}
+	unit := big.NewInt(3200000000000000000)
+	snapshot := &ValidatorSnapshot{Epoch: 0, TotalStake: new(big.Int).Mul(unit, big.NewInt(4)),
+		Validators: make(map[string]*StakedValidator, len(ids))}
+	for _, id := range ids {
+		snapshot.Validators[id] = &StakedValidator{ID: id, StakeAmount: new(big.Int).Set(unit)}
+	}
+	StoreSnapshotForTest(*snapshot)
+
+	clock := newTestClock()
+	c := newGateNode(t, "Node-b", ids, clock)
+
+	// Leader died before proposing: correct height and view, but NO proposal was
+	// ever accepted, so preparedBlockHash is empty.
+	c.currentHeight = 1
+	c.currentView = 4
+	c.preparedBlockHash = ""
+	c.lastBlockTime = clock.now()
+	c.lastViewChange = clock.now()
+	c.lastRoundActivity = clock.now()
+
+	// Feed an invented-block vote every 5s. None of them may refresh the round
+	// clock, so the gate must open once roundActivityWindow has elapsed.
+	for step := 1; step <= 60; step++ {
+		c.prepareVotes = map[string]map[string]*Vote{}
+		c.processPrepareVote(&Vote{
+			BlockHash: "invented-" + strconv.Itoa(step),
+			ChainID:   c.chainID,
+			Height:    c.currentHeight + 1,
+			Phase:     VotePhasePrepare,
+			View:      c.currentView,
+			VoterID:   ids[step%len(ids)],
+		})
+
+		clock.advance(5 * time.Second)
+		if !c.shouldPreventViewChange() {
+			return // the window elapsed and the view change may start
+		}
+	}
+	t.Fatalf("votes for blocks nobody proposed kept the view-change gate shut for "+
+		"5+ minutes: lastRoundActivity is only %v old", clock.now().Sub(c.lastRoundActivity))
+}
+
 // TestSelectProposerSequenceOverViews prints and checks which validator
 // SelectProposer elects for each view slot 1..20 at one fixed height.
 //

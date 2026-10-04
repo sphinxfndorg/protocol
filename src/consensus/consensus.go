@@ -360,10 +360,11 @@ func (c *Consensus) voteIsCurrentRound(vote *Vote) bool {
 	if vote == nil || vote.Height != c.currentHeight+1 || vote.View != c.currentView {
 		return false
 	}
-	if h := c.preparedBlockHash; h != "" && vote.BlockHash != h {
-		return false
-	}
-	return true
+	// preparedBlockHash is set ONLY when a proposal is accepted (processProposal),
+	// so an empty value means no proposal was accepted this round: there is no
+	// round for a vote to belong to, however well-formed the vote is.
+	h := c.preparedBlockHash
+	return h != "" && vote.BlockHash == h
 }
 
 // markRoundProgress records that the chain made REAL progress: a valid proposal

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"math/big"
+	"net"
 	"strings"
 	"time"
 
@@ -494,7 +495,7 @@ func (sm *StateMachine) convertToFinalStateInfo(sig *consensus.ConsensusSignatur
 		// Node information - use the actual block proposer, not the signer
 		NodeID:      nodeID,
 		NodeName:    fmt.Sprintf("Node-%s", nodeID),
-		NodeAddress: fmt.Sprintf("127.0.0.1:%s", nodeID),
+		NodeAddress: nodeAddressFromID(nodeID),
 
 		// Chain state
 		TotalBlocks: sm.storage.GetTotalBlocks(),
@@ -558,7 +559,7 @@ func (sm *StateMachine) createGenesisFinalState(sig *consensus.ConsensusSignatur
 		// Node information
 		NodeID:      sig.SignerNodeID,
 		NodeName:    fmt.Sprintf("Node-%s", sig.SignerNodeID),
-		NodeAddress: fmt.Sprintf("127.0.0.1:%s", sig.SignerNodeID),
+		NodeAddress: nodeAddressFromID(sig.SignerNodeID),
 
 		// Chain state
 		TotalBlocks: sm.storage.GetTotalBlocks(),
@@ -647,6 +648,21 @@ func (sm *StateMachine) ForcePopulateFinalStates() error {
 	return nil
 }
 
+// nodeAddressFromID turns a Node-<host:port> identity back into its address.
+// The identity is the authoritative record of where a node lives, so the
+// address is derived from it rather than interpolated. Anything that is not a
+// usable host:port yields "", which serialises as omitted.
+func nodeAddressFromID(nodeID string) string {
+	addr := strings.TrimPrefix(nodeID, "Node-")
+	if addr == "" {
+		return ""
+	}
+	if _, _, err := net.SplitHostPort(addr); err != nil {
+		return ""
+	}
+	return addr
+}
+
 // createFinalStateFromBlock creates a FinalStateInfo from a block
 func (sm *StateMachine) createFinalStateFromBlock(block *types.Block) *FinalStateInfo {
 	return &FinalStateInfo{
@@ -656,7 +672,7 @@ func (sm *StateMachine) createFinalStateFromBlock(block *types.Block) *FinalStat
 		BlockTimestamp:   block.GetTimestamp(),
 		NodeID:           sm.nodeID,
 		NodeName:         fmt.Sprintf("Node-%s", sm.nodeID),
-		NodeAddress:      "127.0.0.1:32307",
+		NodeAddress:      nodeAddressFromID(sm.nodeID),
 		TotalBlocks:      sm.storage.GetTotalBlocks(),
 		SignerNodeID:     sm.nodeID,
 		Signature:        fmt.Sprintf("block_signature_%s", block.GetHash()[:16]),

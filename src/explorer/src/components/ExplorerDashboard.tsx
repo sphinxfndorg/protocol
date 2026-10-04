@@ -166,6 +166,14 @@ export default function ExplorerDashboard({
           <p className="text-xs text-slate-400 font-mono truncate">
             Finality: {stats.syncMode.split(' ')[0]}
           </p>
+          {stats.listenAddr && (
+            <p
+              className="text-[10px] text-slate-500 font-mono truncate mt-1"
+              title="This node's P2P listen address (not the chain's default_port)"
+            >
+              P2P {stats.listenAddr}
+            </p>
+          )}
         </div>
 
         {/* Card 2: TPS */}

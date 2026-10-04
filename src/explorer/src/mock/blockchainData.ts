@@ -368,6 +368,8 @@ export function initializeBlockchain() {
     maxSupplySpx: '500000000',
     burnPercent: 0.000003,
     blockTimeSeconds: 12,
+    listenAddr: '127.0.0.1:30303',
+    p2pPort: 30303,
   };
 }
 

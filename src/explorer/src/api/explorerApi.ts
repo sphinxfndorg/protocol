@@ -78,6 +78,8 @@ function handleMockFallback<T>(endpoint: string): T {
         symbol: state.stats.symbol,
         genesis_hash: state.stats.genesisHash,
         sync_mode: state.stats.syncMode,
+        listen_addr: state.stats.listenAddr,
+        p2p_port: state.stats.p2pPort,
       },
       burn: {
         address: state.stats.burnAddress,
@@ -206,6 +208,8 @@ export async function fetchStats(): Promise<NetworkStats> {
     genesisHash: raw.chain?.genesis_hash || '',
     syncMode: raw.chain?.sync_mode || 'Fully Audited (SPHINCS+ Hash Signature Verified)',
     blockTimeSeconds: Number(raw.chain?.block_time_seconds) || 12,
+    listenAddr: raw.chain?.listen_addr || '',
+    p2pPort: Number(raw.chain?.p2p_port) || 0,
     burnAddress: burn.address || wallets.burn_address || '',
     burnedSpx: burn.burned_spx || wallets.burned_spx || '0',
     burnedNspx: burn.burned_nspx || wallets.burned_nspx || '0',

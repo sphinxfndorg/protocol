@@ -174,6 +174,11 @@ export interface NetworkStats {
   // Target block time in seconds, from the chain consensus config, so the
   // explorer can estimate when the next block is likely to be sealed.
   blockTimeSeconds: number;
+  // The address/port this node's P2P listener is actually bound to, from
+  // chain.listen_addr / chain.p2p_port. Distinct from the chain's
+  // default_port parameter, which is not a port this node listens on.
+  listenAddr?: string;
+  p2pPort?: number;
   // Supply and burn accounting, served verbatim by /explorer/stats. Burned coins
   // live at the provably-unspendable DEAD address, so the totals below are the
   // single auditable source for "how many coins have been burned".

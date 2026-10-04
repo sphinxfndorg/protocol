@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sphinxfndorg/protocol/src/bind"
 	"github.com/sphinxfndorg/protocol/src/common"
 	"github.com/sphinxfndorg/protocol/src/core"
 	spxKey "github.com/sphinxfndorg/protocol/src/core/sthincs/key/backend"
@@ -59,9 +60,15 @@ func buildLocalnetNodes(root string, n, baseOffset int) ([]localnetNode, error) 
 		if err := common.EnsureNodeDirs(tcpAddr); err != nil {
 			return nil, fmt.Errorf("prepare dirs for node-%d: %w", i, err)
 		}
-		pk, err := generateLocalnetIdentityKey(tcpAddr)
+		pkHex, pkBytes, err := generateLocalnetIdentityKey(tcpAddr)
 		if err != nil {
 			return nil, fmt.Errorf("generate identity key for node-%d: %w", i, err)
+		}
+		// The reward address is derived from this node's own SPHINCS+ public
+		// key, so it is a real, key-verifiable address rather than a constant.
+		reward, err := localnetRewardAddress(pkBytes)
+		if err != nil {
+			return nil, fmt.Errorf("derive reward address for node-%d: %w", i, err)
 		}
 		nodes = append(nodes, localnetNode{
 			index:      i,
@@ -69,8 +76,8 @@ func buildLocalnetNodes(root string, n, baseOffset int) ([]localnetNode, error) 
 			tcpAddr:    tcpAddr,
 			nodeID:     "Node-" + tcpAddr,
 			portOffset: offset,
-			reward:     localnetRewardAddress(i, offset),
-			pubKey:     pk,
+			reward:     reward,
+			pubKey:     pkHex,
 		})
 	}
 	return nodes, nil
@@ -79,46 +86,60 @@ func buildLocalnetNodes(root string, n, baseOffset int) ([]localnetNode, error) 
 // generateLocalnetIdentityKey mints a validator identity keypair and persists it
 // exactly as network.generateIdentityKeysFileOnly does, so the on-disk format
 // and permissions match what a node expects to load on startup.
-func generateLocalnetIdentityKey(address string) (string, error) {
+//
+// It returns the hex public key (what the genesis document names) and the raw
+// public key bytes. The bytes are needed because the validator's reward address
+// is DERIVED from this public key, so it corresponds to a real SPHINCS+ keypair
+// rather than being an invented value that merely looks like an address.
+func generateLocalnetIdentityKey(address string) (string, []byte, error) {
 	km, err := spxKey.NewKeyManager()
 	if err != nil {
-		return "", fmt.Errorf("key manager: %w", err)
+		return "", nil, fmt.Errorf("key manager: %w", err)
 	}
 	sk, pk, err := km.GenerateKey()
 	if err != nil {
-		return "", fmt.Errorf("generate: %w", err)
+		return "", nil, fmt.Errorf("generate: %w", err)
 	}
 	skBytes, pkBytes, err := km.SerializeKeyPair(sk, pk)
 	if err != nil {
-		return "", fmt.Errorf("serialize: %w", err)
+		return "", nil, fmt.Errorf("serialize: %w", err)
 	}
 	if len(skBytes) != 2*len(pkBytes) {
-		return "", fmt.Errorf("size invariant violated: sk=%d pk=%d (expected sk=2*pk)", len(skBytes), len(pkBytes))
+		return "", nil, fmt.Errorf("size invariant violated: sk=%d pk=%d (expected sk=2*pk)", len(skBytes), len(pkBytes))
 	}
 	if err := common.WriteKeysToFile(address, skBytes, pkBytes); err != nil {
-		return "", fmt.Errorf("persist: %w", err)
+		return "", nil, fmt.Errorf("persist: %w", err)
 	}
-	return hex.EncodeToString(pkBytes), nil
+	return hex.EncodeToString(pkBytes), pkBytes, nil
 }
 
-// localnetRewardAddress returns the genesis reward address for validator i.
+// localnetRewardAddress returns the genesis reward address for a validator,
+// DERIVED from that validator's SPHINCS+ public key.
 //
-// Genesis requires a reward address per validator but nothing requires it to be
-// a key this process holds, so a deterministic per-node address is used. It is
-// funded below minimum stake on purpose: validators get their weight from the
-// genesis Validators section, not from an account balance.
+// An earlier version formatted a made-up constant ("%064x" of 0x10c0ffee+offset)
+// through common.MustFormatSPIFAddress. That produced a string which passes
+// common.ValidateSPIFAddress, but only because that validator checks SHAPE
+// (prefix + hex length) and never provenance — it was a fabricated value wearing
+// a SPIF prefix, exactly the failure mode the project forbids. A reward address
+// minted from a real key pair is verifiable against that key; a constant cannot
+// be.
 //
-// The hex body is rendered through the protocol's own SPIF formatter rather
-// than returned as a bare "%064x" string. Every address this project produces
-// is a SPIF address (src/common/hexutil.go), and genesis reads reward addresses
-// through common.CanonicalSPIFAddress — so the raw-hex spelling happened to
-// validate, but writing the canonical display form is what every other address
-// in the codebase does and what tooling, CLI output and operators expect.
+// Genesis requires a reward address per validator but nothing requires this
+// process to hold the key, so the address is derived from the node's own
+// identity public key (the same SPHINCS+ keypair written by
+// generateLocalnetIdentityKey). It is funded below minimum stake on purpose:
+// validators get their weight from the genesis Validators section, not from an
+// account balance.
 //
-// MustFormatSPIFAddress cannot fail here: the argument is %064x of a uint64, so
-// it is always exactly 64 valid hex characters.
-func localnetRewardAddress(i, offset int) string {
-	return common.MustFormatSPIFAddress(fmt.Sprintf("%064x", uint64(0x10c0ffee00000000)+uint64(offset)))
+// The derivation is bind.DevnetAddressForPublicKey — the project's single
+// devnet address construction — so a localnet reward address is indistinguishable
+// from any other valid key-derived address in the state DB.
+func localnetRewardAddress(pubKeyBytes []byte) (string, error) {
+	addr, err := bind.DevnetAddressForPublicKey(pubKeyBytes)
+	if err != nil {
+		return "", fmt.Errorf("derive reward address from validator public key: %w", err)
+	}
+	return addr, nil
 }
 
 // It generates N validator identity keypairs, writes ONE genesis document that

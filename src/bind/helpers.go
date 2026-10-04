@@ -1892,13 +1892,32 @@ func loadOrCreateDevnetKey(dir string) (string, []byte, []byte, error) {
 // raw-hex SPIF address that state keys and balance lookups use — the same
 // derivation used for devnet reward keys, so a faucet-funded address and any
 // other valid reward address are indistinguishable to the state DB.
-func devnetAddressForPublicKey(pkBytes []byte) (string, error) {
+// DevnetAddressForPublicKey renders a SPHINCS public key as the canonical
+// raw-hex SPIF address that state keys and balance lookups use.
+//
+// Exported so other packages derive devnet addresses the SAME way rather than
+// inventing a value and formatting it: `sphinx localnet` derives each
+// validator's genesis reward address through this, so a localnet reward address
+// is a real key-derived SPIF address and is indistinguishable from any other
+// valid one in the state DB.
+//
+// Formatting a made-up hex string with common.FormatSPIFAddress produces
+// something that PASSES common.ValidateSPIFAddress — that validator checks
+// shape (prefix + hex length) only, never provenance — so only this kind of
+// key-derived construction can be trusted to correspond to a real key.
+func DevnetAddressForPublicKey(pkBytes []byte) (string, error) {
 	formatted := usiKey.GetPublicKeyFingerprintFromBytes(pkBytes, usiKey.OrgSPIF)
 	canonical := common.CanonicalSPIFAddress(formatted)
 	if !common.ValidateSPIFAddress(canonical) {
 		return "", fmt.Errorf("derived address %q is not a valid SPIF address", formatted)
 	}
 	return canonical, nil
+}
+
+// devnetAddressForPublicKey is the unexported spelling retained for the
+// in-package callers in this file.
+func devnetAddressForPublicKey(pkBytes []byte) (string, error) {
+	return DevnetAddressForPublicKey(pkBytes)
 }
 
 // ValidatorIDPrefix labels the key-derived validator identity.

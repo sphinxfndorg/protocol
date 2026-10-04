@@ -263,6 +263,7 @@ func NewConsensus(
 		viewChangeMutex:      sync.Mutex{},                    // Mutex for view change
 		lastBlockTime:        common.GetTimeService().Now(),   // Last block commit timestamp
 		lastRoundActivity:    common.GetTimeService().Now(),   // Last proposal/vote progress timestamp
+		nowFn:                common.GetTimeService().Now,     // Injectable clock for the view-change gates
 		validatorSet:         validatorSet,                    // Set of active validators
 		randao:               randao,                          // VDF-based RANDAO instance
 		selector:             selector,                        // Leader selector
@@ -329,6 +330,35 @@ func (c *Consensus) Start() error {
 	go c.syncLoop()
 
 	return nil
+}
+
+// setNowFunc installs the clock the view-change gates read. Test-only: it makes
+// the timeout windows drivable without sleeping. Must be called before Start.
+func (c *Consensus) setNowFunc(fn func() time.Time) {
+	if fn == nil {
+		return
+	}
+	c.nowFn = fn
+}
+
+// now reads the injectable clock, falling back to the process time source.
+func (c *Consensus) now() time.Time {
+	if c.nowFn != nil {
+		return c.nowFn()
+	}
+	return common.GetTimeService().Now()
+}
+
+// markRoundProgress records that the chain made REAL progress: a valid proposal
+// was accepted, a quorum advanced, or a block committed.
+//
+// ONLY those events may refresh it. A node sending its own vote, or recording a
+// duplicate/rebroadcasted one, is not progress: once the leader dies the
+// survivors keep exchanging votes in a dead round, and if that refreshed the
+// clock the 45s stalledRoundThreshold and 90s roundActivityWindow would never
+// expire, so no further view change could ever start.
+func (c *Consensus) markRoundProgress() {
+	c.lastRoundActivity = c.now()
 }
 
 // MarkRoundStart tells the engine that PBFT rounds can actually begin now
@@ -1156,7 +1186,7 @@ const (
 func (c *Consensus) logSkipOnce(format string, args ...interface{}) {
 	c.skipLogMu.Lock()
 	defer c.skipLogMu.Unlock()
-	now := common.GetTimeService().Now()
+	now := c.now()
 	if !c.skipLogAt.IsZero() && now.Sub(c.skipLogAt) < 10*time.Second {
 		return
 	}
@@ -1169,7 +1199,7 @@ func (c *Consensus) shouldPreventViewChange() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	now := common.GetTimeService().Now()
+	now := c.now()
 	sinceBlock := now.Sub(c.lastBlockTime)
 	sinceRound := now.Sub(c.lastRoundActivity)
 	sinceViewChange := now.Sub(c.lastViewChange)
@@ -3044,7 +3074,7 @@ func (c *Consensus) processTimeout(timeout *TimeoutMsg) {
 		// commit votes ignored). Block 1 then waited ~95s for the next view.
 		// Same rule startViewChange already applies to our OWN timer: while a
 		// round is active and not stalled, do not abandon it.
-		now := common.GetTimeService().Now()
+		now := c.now()
 		stalled := !c.lastRoundActivity.IsZero() && now.Sub(c.lastRoundActivity) >= stalledRoundThreshold
 		if (c.phase == PhasePrePrepared || c.phase == PhasePrepared) && !stalled {
 			logger.Info("Ignoring view-change request to view %d from %s: round in progress (phase=%v, last activity %v ago)",
@@ -3053,7 +3083,7 @@ func (c *Consensus) processTimeout(timeout *TimeoutMsg) {
 		}
 		logger.Info("View change requested to view %d by %s", timeout.View, timeout.VoterID)
 		c.currentView = timeout.View
-		c.lastViewChange = common.GetTimeService().Now()
+		c.lastViewChange = c.now()
 		for view := range c.timeoutVotes {
 			if view <= c.currentView {
 				delete(c.timeoutVotes, view)
@@ -3719,7 +3749,7 @@ func (c *Consensus) commitBlock(block Block) {
 
 	newHeight := block.GetHeight()
 	c.currentHeight = newHeight
-	c.lastBlockTime = common.GetTimeService().Now()
+	c.lastBlockTime = c.now()
 	// FIX: reset lastRoundActivity at commit so shouldPreventViewChange's 30s
 	// window starts from NOW. Without this, lastRoundActivity was left at the
 	// timestamp of the last incoming vote, which could be several seconds in
@@ -3878,7 +3908,7 @@ func (c *Consensus) startViewChange() {
 
 	c.mu.Lock()
 
-	now := common.GetTimeService().Now()
+	now := c.now()
 	if !c.participationAllowed(c.nodeID, c.currentHeight+1) {
 		logger.Debug("View change skipped - %s is paused at height %d", c.nodeID, c.currentHeight+1)
 		c.mu.Unlock()

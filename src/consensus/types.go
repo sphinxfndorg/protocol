@@ -330,6 +330,11 @@ type Consensus struct {
 	skipLogMu sync.Mutex
 	skipLogAt time.Time
 
+	// nowFn is the clock the view-change gates read. It defaults to the
+	// process time source; tests replace it via setNowFunc to drive the
+	// timeout windows deterministically instead of sleeping. Set before Start.
+	nowFn func() time.Time
+
 	// Cache fields
 	merkleRootCache     map[string]string
 	cacheMutex          sync.RWMutex

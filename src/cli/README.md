@@ -159,10 +159,25 @@ handshake count observed in the log exceeds `N*(N-1)` because peers retry.
 both are left visible as skipped tests in
 `src/cli/utils/localnet_integration_test.go`:
 
-- *Leader failure is not survivable.* Killing the current leader stalls the
-  chain: survivors keep their height indefinitely and **no view change is ever
-  triggered**, so nobody is re-elected. Measured: survivors frozen for 6+
-  minutes with 0 `View change triggered` lines, against 267 in a healthy run.
+- ~~*Leader failure is not survivable.*~~ **Fixed.** The cause was not the
+  leader's death itself: `sendPrepareVote` and `voteForBlock` wrote
+  `lastRoundActivity` when the node sent its **own** vote, and
+  `processPrepareVote`/`processVoteLocked` wrote it for **any** incoming vote. Once
+  the leader died, the survivors kept trading votes in a dead round, so the 45s
+  `stalledRoundThreshold` and 90s `roundActivityWindow` never expired,
+  `shouldPreventViewChange` stayed true, and the watchdog silently suppressed
+  every further view change. Measured before the fix: **204s** from leader death
+  to the first view change, with the gate continuously re-armed by vote traffic.
+  Only real progress (accepted proposal, newly recorded vote, commit) refreshes
+  that clock now. Verified at N=4: killing the leader at 02:45:13, the survivors
+  elected a live leader at view 19 and committed heights 18 and 19 with **all
+  three agreeing on height and hash**. Recovery latency is bounded below by
+  `roundActivityWindow` (90s) plus the 20s watchdog tick, because a genuinely
+  healthy round must not be abandoned early.
+- *Note:* `View change triggered` is **not** a consensus signal. It comes from
+  `state/smr.go`'s local StateMachine counter, which increments once a second and
+  is never broadcast. The consensus signal is
+  `View change completed: node=…, new_view=N` from `consensus.go`.
 - *Validator rejoin is unverified.* A killed validator restarts cleanly on its
   existing datadir and keys and the chain keeps advancing, but the rejoined node
   emits no height+hash log line, so "it re-synced and all four agree on height

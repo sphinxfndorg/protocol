@@ -594,17 +594,20 @@ var (
 		`View change initiated: node=([A-Za-z0-9.:\[\]-]+), from_view=(\d+), to_view=(\d+), since_last_progress_ms=(\d+)`)
 )
 
-// lastProgressToViewChange returns the largest since_last_progress_ms reported by
-// any view-change initiation: how long the chain went without real progress
-// before a node abandoned the round. Returns 0 when none was logged.
+// lastProgressToViewChange returns the since_last_progress_ms of the FIRST
+// view-change initiation in the log: how long the chain went without real
+// progress before a node first abandoned the round. That is the
+// last-progress-to-first-view-change latency. Returns 0 when none was logged.
 func lastProgressToViewChange(text string) int {
-	max := 0
-	for _, m := range viewChangeInitiationRe.FindAllStringSubmatch(text, -1) {
-		if ms, err := strconv.Atoi(m[4]); err == nil && ms > max {
-			max = ms
-		}
+	m := viewChangeInitiationRe.FindStringSubmatch(text)
+	if m == nil {
+		return 0
 	}
-	return max
+	ms, err := strconv.Atoi(m[4])
+	if err != nil {
+		return 0
+	}
+	return ms
 }
 
 // highestReachedView returns the largest to_view across all initiation lines.
@@ -801,6 +804,53 @@ func TestQuorumCaseKillBudgets(t *testing.T) {
 // correctly agreed on one hash collapsed into a single map entry, so the
 // "all four agree" assertion could never be satisfied by working code. These
 // cases pin the correct behaviour without paying for real validator startup.
+// TestViewChangeInitiationHelpers pins the parsing of the permanent view-change
+// instrumentation: lastProgressToViewChange takes the FIRST initiation's stall
+// (last-progress-to-first-view-change) and highestReachedView the largest
+// to_view, both from the same line format.
+func TestViewChangeInitiationHelpers(t *testing.T) {
+	const line = "View change initiated: node=Node-127.0.0.1:30305, from_view=4, to_view=5, since_last_progress_ms=104321\n"
+
+	t.Run("first initiation ms", func(t *testing.T) {
+		if got := lastProgressToViewChange(line); got != 104321 {
+			t.Errorf("lastProgressToViewChange = %d, want 104321", got)
+		}
+	})
+
+	t.Run("takes the FIRST not the largest", func(t *testing.T) {
+		two := line +
+			"View change initiated: node=Node-127.0.0.1:30306, from_view=5, to_view=6, since_last_progress_ms=900000\n"
+		if got := lastProgressToViewChange(two); got != 104321 {
+			t.Errorf("lastProgressToViewChange = %d, want the first line's 104321", got)
+		}
+	})
+
+	t.Run("highest target view", func(t *testing.T) {
+		two := line +
+			"View change initiated: node=Node-127.0.0.1:30306, from_view=5, to_view=7, since_last_progress_ms=900000\n"
+		if got := highestReachedView(two); got != 7 {
+			t.Errorf("highestReachedView = %d, want 7", got)
+		}
+	})
+
+	t.Run("no lines yields zero", func(t *testing.T) {
+		if got := lastProgressToViewChange("nothing here"); got != 0 {
+			t.Errorf("lastProgressToViewChange = %d, want 0", got)
+		}
+		if got := highestReachedView("nothing here"); got != 0 {
+			t.Errorf("highestReachedView = %d, want 0", got)
+		}
+	})
+
+	t.Run("ignores the SMR counter line", func(t *testing.T) {
+		// "View change triggered" is state/smr.go's local counter, not consensus.
+		smr := "View change triggered, new view: 70\n"
+		if got := lastProgressToViewChange(smr); got != 0 {
+			t.Errorf("SMR counter line was parsed as a consensus initiation: %d", got)
+		}
+	})
+}
+
 // TestNodeTipsReadsBothCommitFormats pins that nodeTips attributes a tip from
 // EITHER height+hash line, so a validator that only emits the consensus engine's
 // per-commit line (which is what a node restarting on an existing datadir does)

@@ -560,8 +560,14 @@ var (
 	// leaderStatusRe captures "Leader status after commit: isLeader=bool,
 	// electedLeader=Node-<host:port>", emitted by every node after each commit.
 	leaderStatusRe = regexp.MustCompile(`isLeader=(true|false), electedLeader=(Node-[0-9a-zA-Z\.\:\[\]]+)`)
-	// viewChangeRe captures "View change triggered, new view: N".
-	viewChangeRe = regexp.MustCompile(`View change triggered, new view: (\d+)`)
+	// viewChangeRe captures "View change completed: node=<id>, new_view=<N>".
+	//
+	// It previously matched "View change triggered, new view: N", a string that
+	// does NOT exist anywhere in the source — maxView() therefore always
+	// returned 0 and the leader-kill test's view-change assertion was vacuous.
+	// The real completion line is emitted at consensus.go:3049 by processTimeout
+	// once a timeout quorum advances the view.
+	viewChangeRe = regexp.MustCompile(`View change completed: node=Node-[0-9a-zA-Z\.\:\[\]]+, new_view=(\d+)`)
 	// proposalViewRe captures "Processing proposal for block at height H, view V
 	// from Node-...", which pairs a view number with a height.
 	proposalViewRe = regexp.MustCompile(`Processing proposal for block at height (\d+), view (\d+)`)
@@ -779,9 +785,9 @@ func TestLeaderAndViewObservation(t *testing.T) {
 	})
 
 	t.Run("maxView tracks the highest view", func(t *testing.T) {
-		text := "View change triggered, new view: 1\n" +
-			"View change triggered, new view: 7\n" +
-			"View change triggered, new view: 3\n"
+		text := "View change completed: node=Node-127.0.0.1:30303, new_view=1, leader=false (elected=x)\n" +
+			"View change completed: node=Node-127.0.0.1:30304, new_view=7, leader=true (elected=x)\n" +
+			"View change completed: node=Node-127.0.0.1:30305, new_view=3, leader=false (elected=x)\n"
 		if got := maxView(text); got != 7 {
 			t.Fatalf("maxView = %d, want 7", got)
 		}

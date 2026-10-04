@@ -22,65 +22,6 @@ import (
 	sthincs "github.com/sphinxfndorg/protocol/src/core/sthincs/key/backend"
 )
 
-// Add this method to NodeManager for chain recognition
-// GetChainInfo returns information about the current blockchain network
-func (nm *NodeManager) GetChainInfo() map[string]interface{} {
-	// Return map with chain identification parameters
-	return map[string]interface{}{
-		"chain_id":         7331,         // Unique chain identifier
-		"chain_name":       "Sphinx",     // Human-readable chain name
-		"symbol":           "SPX",        // Currency symbol
-		"protocol_version": "1.0.0",      // Protocol version
-		"network_magic":    "0x53504858", // Network magic bytes ("SPHX" in hex)
-		"default_port":     32307,        // Default P2P port
-		"bip44_coin_type":  7331,         // BIP44 coin type for wallets
-	}
-}
-
-// GenerateNodeIdentification generates node identification with chain info
-// Parameters:
-//   - nodeID: Unique identifier for the node
-//
-// Returns: Formatted string with node and chain information
-func (nm *NodeManager) GenerateNodeIdentification(nodeID string) string {
-	// Get current chain information
-	chainInfo := nm.GetChainInfo()
-	// Format identification string with node and chain details
-	return fmt.Sprintf(
-		"Sphinx Node: %s\n"+
-			"Network: %s\n"+
-			"Chain ID: %d\n"+
-			"Protocol: %s\n"+
-			"User Agent: SphinxNode/%s",
-		nodeID,
-		chainInfo["chain_name"],
-		chainInfo["chain_id"],
-		chainInfo["protocol_version"],
-		chainInfo["protocol_version"],
-	)
-}
-
-// ValidateChainCompatibility checks if remote node is compatible with Sphinx chain
-// Parameters:
-//   - remoteChainInfo: Chain information from remote node
-//
-// Returns: true if chains are compatible
-func (nm *NodeManager) ValidateChainCompatibility(remoteChainInfo map[string]interface{}) bool {
-	// Get local chain information
-	localInfo := nm.GetChainInfo()
-
-	// Check chain ID compatibility
-	// Attempt to extract remote chain ID as integer
-	remoteChainID, ok := remoteChainInfo["chain_id"].(int)
-	if !ok {
-		return false // Invalid or missing chain ID
-	}
-
-	// Compare remote chain ID with local chain ID
-	return remoteChainID == localInfo["chain_id"]
-}
-
-// EXISTING FUNCTIONS CONTINUE UNCHANGED...
 // NewNodeManager creates a new NodeManager with Kademlia buckets and a DHT implementation.
 // Parameters:
 //   - bucketSize: Size of each Kademlia bucket (default 16 if <=0)

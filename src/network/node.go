@@ -16,41 +16,6 @@ import (
 	database "github.com/sphinxfndorg/protocol/src/core/state"
 )
 
-// Chain identification constants
-const (
-	SphinxChainID       = 7331
-	SphinxChainName     = "Sphinx"
-	SphinxSymbol        = "SPX"
-	SphinxBIP44CoinType = 7331
-	SphinxMagicNumber   = 0x53504858
-	SphinxDefaultPort   = 32307
-)
-
-func (n *Node) GetChainInfo() map[string]interface{} {
-	return map[string]interface{}{
-		"chain_id":        SphinxChainID,
-		"chain_name":      SphinxChainName,
-		"symbol":          SphinxSymbol,
-		"bip44_coin_type": SphinxBIP44CoinType,
-		"magic_number":    SphinxMagicNumber,
-		"default_port":    SphinxDefaultPort,
-		"node_id":         n.ID,
-		"node_role":       n.Role,
-	}
-}
-
-func (n *Node) GenerateChainHandshake() string {
-	chainInfo := n.GetChainInfo()
-	return fmt.Sprintf(
-		"SPHINX_HANDSHAKE\nChain: %s\nChain ID: %d\nNode: %s\nRole: %s\nProtocol: 1.0.0\nTimestamp: %d",
-		chainInfo["chain_name"],
-		chainInfo["chain_id"],
-		n.ID,
-		n.Role,
-		time.Now().Unix(),
-	)
-}
-
 // Global consensus registry
 var (
 	consensusRegistry = make(map[string]*consensus.Consensus)

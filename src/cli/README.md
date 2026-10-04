@@ -169,11 +169,20 @@ both are left visible as skipped tests in
   every further view change. Measured before the fix: **204s** from leader death
   to the first view change, with the gate continuously re-armed by vote traffic.
   Only real progress (accepted proposal, newly recorded vote, commit) refreshes
-  that clock now. Verified at N=4: killing the leader at 02:45:13, the survivors
-  elected a live leader at view 19 and committed heights 18 and 19 with **all
-  three agreeing on height and hash**. Recovery latency is bounded below by
-  `roundActivityWindow` (90s) plus the 20s watchdog tick, because a genuinely
+  that clock now. Verified on real localnets: at **N=4**, killing the leader at
+  02:45:13, the survivors elected a live leader at view 19 and committed heights
+  18 and 19; at **N=7**, killing the leader at 03:33:28, view 16 elected a live
+  leader and heights 14 and 15 followed. In both runs every survivor reported the
+  **same hash for every height** (one distinct hash per height).
+- *Measured recovery.* N=4: **109s** from the last real progress to a live
+  leader being elected. N=7: **234s** from leader death to view 16 completing
+  (the chain was still committing during part of that window). Both are bounded
+  below by `roundActivityWindow` (90s) plus the 20s watchdog tick, because a
   healthy round must not be abandoned early.
+- *Round time is far below the window, so the thresholds are not retuned.* At
+  N=7 a healthy round takes **min 18s / median 20s / max 21s** from first
+  proposal to best block — roughly 4x inside `roundActivityWindow`. No
+  per-view backoff is needed, and none was added.
 - *Note:* `View change triggered` is **not** a consensus signal. It comes from
   `state/smr.go`'s local StateMachine counter, which increments once a second and
   is never broadcast. The consensus signal is

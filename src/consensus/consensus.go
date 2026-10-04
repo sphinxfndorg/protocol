@@ -349,6 +349,15 @@ func (c *Consensus) now() time.Time {
 	return common.GetTimeService().Now()
 }
 
+// viewChangeInitiationLog formats the one Info line emitted when this node starts
+// a view change. since_last_progress_ms is the stall measured from the last REAL
+// progress (markRoundProgress) through the injectable clock, so localnet tests
+// can report recovery latency from last progress rather than from the kill.
+func (c *Consensus) viewChangeInitiationLog(targetView uint64) string {
+	return fmt.Sprintf("View change initiated: node=%s, from_view=%d, to_view=%d, since_last_progress_ms=%d",
+		c.nodeID, c.currentView, targetView, c.now().Sub(c.lastRoundActivity).Milliseconds())
+}
+
 // voteIsCurrentRound reports whether a vote belongs to the round this node is
 // actually running: the expected height, the current view, and — once the
 // round's block is known — that block. Height and duplicate checks already
@@ -3982,7 +3991,7 @@ func (c *Consensus) startViewChange() {
 
 	// Calculate new view number
 	newView := c.currentView + 1
-	logger.Info("Node %s initiating view-change vote for view %d", c.nodeID, newView)
+	logger.Info("%s", c.viewChangeInitiationLog(newView))
 	c.lastViewChange = now
 
 	// Unlock before broadcasting to avoid deadlock

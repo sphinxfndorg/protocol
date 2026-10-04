@@ -395,6 +395,13 @@ func TestLocalnet_LeaderKillCompletesViewChange(t *testing.T) {
 		t.Errorf("no view change observed after killing the leader: max view still %d "+
 			"(was %d before the kill). The survivors must elect a new leader.", viewAfter, viewBefore)
 	}
+	// Recovery latency measured from LAST REAL PROGRESS, not from the kill: the
+	// chain may keep committing for a while after the leader dies, and counting
+	// that time against recovery conflates a working chain with a stalled one.
+	t.Logf("phase 2: last-progress-to-view-change = %dms (initiations: %d, highest target view %d)",
+		lastProgressToViewChange(text),
+		len(viewChangeInitiationRe.FindAllStringSubmatch(text, -1)),
+		highestReachedView(text))
 	if v := viewForHeight(text, recovered); v != 0 && v <= viewBefore {
 		t.Errorf("height %d was proposed at view %d, not above the pre-kill view %d; "+
 			"the round that committed it reused the dead leader's view",
@@ -569,7 +576,39 @@ var (
 	// proposalViewRe captures "Processing proposal for block at height H, view V
 	// from Node-...", which pairs a view number with a height.
 	proposalViewRe = regexp.MustCompile(`Processing proposal for block at height (\d+), view (\d+)`)
+	// viewChangeInitiationRe captures the permanent view-change instrumentation:
+	// "View change initiated: node=..., from_view=A, to_view=B,
+	// since_last_progress_ms=N". N is the stall measured from the last REAL
+	// progress, so it is the recovery latency that matters — measuring from the
+	// moment of the kill conflates it with the time the chain was still
+	// legitimately committing.
+	viewChangeInitiationRe = regexp.MustCompile(
+		`View change initiated: node=([A-Za-z0-9.:\[\]-]+), from_view=(\d+), to_view=(\d+), since_last_progress_ms=(\d+)`)
 )
+
+// lastProgressToViewChange returns the largest since_last_progress_ms reported by
+// any view-change initiation: how long the chain went without real progress
+// before a node abandoned the round. Returns 0 when none was logged.
+func lastProgressToViewChange(text string) int {
+	max := 0
+	for _, m := range viewChangeInitiationRe.FindAllStringSubmatch(text, -1) {
+		if ms, err := strconv.Atoi(m[4]); err == nil && ms > max {
+			max = ms
+		}
+	}
+	return max
+}
+
+// highestReachedView returns the largest to_view across all initiation lines.
+func highestReachedView(text string) uint64 {
+	var max uint64
+	for _, m := range viewChangeInitiationRe.FindAllStringSubmatch(text, -1) {
+		if v, err := strconv.ParseUint(m[3], 10, 64); err == nil && v > max {
+			max = v
+		}
+	}
+	return max
+}
 
 // currentLeader returns the node the network most recently reported as leader.
 //

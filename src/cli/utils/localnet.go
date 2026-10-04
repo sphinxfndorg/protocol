@@ -107,8 +107,18 @@ func generateLocalnetIdentityKey(address string) (string, error) {
 // a key this process holds, so a deterministic per-node address is used. It is
 // funded below minimum stake on purpose: validators get their weight from the
 // genesis Validators section, not from an account balance.
+//
+// The hex body is rendered through the protocol's own SPIF formatter rather
+// than returned as a bare "%064x" string. Every address this project produces
+// is a SPIF address (src/common/hexutil.go), and genesis reads reward addresses
+// through common.CanonicalSPIFAddress — so the raw-hex spelling happened to
+// validate, but writing the canonical display form is what every other address
+// in the codebase does and what tooling, CLI output and operators expect.
+//
+// MustFormatSPIFAddress cannot fail here: the argument is %064x of a uint64, so
+// it is always exactly 64 valid hex characters.
 func localnetRewardAddress(i, offset int) string {
-	return fmt.Sprintf("%064x", uint64(0x10c0ffee00000000)+uint64(offset))
+	return common.MustFormatSPIFAddress(fmt.Sprintf("%064x", uint64(0x10c0ffee00000000)+uint64(offset)))
 }
 
 // It generates N validator identity keypairs, writes ONE genesis document that

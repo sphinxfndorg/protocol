@@ -174,11 +174,17 @@ both are left visible as skipped tests in
   18 and 19; at **N=7**, killing the leader at 03:33:28, view 16 elected a live
   leader and heights 14 and 15 followed. In both runs every survivor reported the
   **same hash for every height** (one distinct hash per height).
-- *Measured recovery.* N=4: **109s** from the last real progress to a live
-  leader being elected. N=7: **234s** from leader death to view 16 completing
-  (the chain was still committing during part of that window). Both are bounded
-  below by `roundActivityWindow` (90s) plus the 20s watchdog tick, because a
-  healthy round must not be abandoned early.
+- *Measured recovery.* The leader-kill localnet test passes: survivors commit the
+  target height **2m19s** after the kill and the view advances **0 → 4**, with the
+  recovered blocks committed at a higher view than the pre-kill one. From last
+  real progress the figure is **~109s** at N=4, matching `roundActivityWindow`
+  (90s) plus the 20s watchdog tick; at N=7 it was **234s** from kill to view 16
+  completing. A healthy round must not be abandoned early, so that is the floor.
+- *Minority failure is unaffected.* `TestLocalnet_QuorumFailureAndHalt` passes
+  unchanged at both sizes: at N=4 a 1-of-4 kill kept committing and dropping to
+  2-of-4 halted at the same height; at N=7 the chain survived 1-of-7 and 2-of-7
+  kills and halted at 4-of-7. Removing the self-vote refresh did not change
+  quorum-failure behaviour.
 - *Round time is far below the window, so the thresholds are not retuned.* At
   N=7 a healthy round takes **min 18s / median 20s / max 21s** from first
   proposal to best block — roughly 4x inside `roundActivityWindow`. No

@@ -317,22 +317,20 @@ func TestLocalnet_LeaderKillCompletesViewChange(t *testing.T) {
 	if testing.Short() {
 		t.Skip("localnet spawns real validator processes; skipped under -short")
 	}
-	// KNOWN FAILING — documents a real recovery gap, see below.
+	// Leader recovery. Proven cause of the old stall: sendPrepareVote and
+	// voteForBlock wrote lastRoundActivity when the node sent its OWN vote, and
+	// processPrepareVote/processVoteLocked wrote it for ANY incoming vote. After
+	// the leader died the survivors kept voting in a dead round, so the 45s
+	// stalledRoundThreshold and 90s roundActivityWindow never expired,
+	// shouldPreventViewChange stayed true, and consensusLoop suppressed every
+	// further view change: measured at 204s before the first one started.
+	// Only real progress (accepted proposal, recorded vote, commit) refreshes
+	// that clock now; see markRoundProgress.
 	//
-	// Verified 2026-10-04 against a 4-validator localnet: after killing the
-	// current leader (Node-127.0.0.1:30306, offset 3), the 3 survivors stayed
-	// exactly at height 2 for 6+ minutes and the log contained ZERO
-	// "View change triggered" lines, while a healthy run of the same shape
-	// logged 17 "No new blocks for 20s" and 267 "View change triggered".
-	// The stall is in shouldPreventViewChange, which keeps returning true for
-	// the survivors' half-finished round, so consensusLoop never advances the
-	// view and nobody is ever re-elected. The leader can propose, so its death
-	// is unrecoverable.
-	//
-	// This is left skipped rather than deleted so the gap stays visible and the
-	// test turns green the moment recovery works. Remove this skip to reproduce.
-	t.Skip("KNOWN GAP: killing the leader stalls the chain; no view change occurs " +
-		"(survivors frozen at the kill height for 6+ min, 0 view changes logged)")
+	// NOTE: "View change triggered" is NOT a consensus line. It comes from
+	// state/smr.go's local StateMachine view counter, which increments once a
+	// second and is never broadcast. The consensus signal asserted below is
+	// "View change completed: node=..., new_view=N" (consensus.go).
 	const n = 4
 
 	bin := buildLocalnetBinary(t)

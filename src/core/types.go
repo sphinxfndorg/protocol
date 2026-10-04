@@ -228,6 +228,11 @@ type Blockchain struct {
 	// cgeWitnessDir overrides DefaultCGEWitnessDir for CGE witness staging
 	// (tests). Empty means the default. Set via SetCGEWitnessDir.
 	cgeWitnessDir string
+
+	// listenAddr is the P2P address this process actually bound, set via SetListenAddr.
+	// Runtime-only: never persisted and never part of any digest.
+	listenAddrMu sync.RWMutex
+	listenAddr   string
 }
 
 // GenesisState holds the complete genesis configuration used to bootstrap a node.

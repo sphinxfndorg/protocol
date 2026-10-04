@@ -1224,7 +1224,7 @@ func (bc *Blockchain) GetChainInfo() map[string]interface{} {
 	genesisTimeISO := common.GetTimeService().GetTimeInfo(params.GenesisTime).ISOUTC
 
 	// Build and return comprehensive chain information map
-	return map[string]interface{}{
+	info := map[string]interface{}{
 		"chain_id":        params.ChainID,                          // Unique chain identifier
 		"chain_name":      params.ChainName,                        // Human-readable chain name
 		"symbol":          params.Symbol,                           // Currency symbol
@@ -1242,6 +1242,25 @@ func (bc *Blockchain) GetChainInfo() map[string]interface{} {
 		// when the next block is likely to be sealed.
 		"block_time_seconds": params.ConsensusConfig.BlockTime.Seconds(),
 	}
+
+	// ★ listen_addr / p2p_port: WHAT THIS NODE IS ACTUALLY ON.
+	//
+	// default_port above is the chain parameter from params/commit/header.go
+	// (32307; 32309 on devnet). It is persisted in chain_state.json and is NOT a
+	// port this process listens on — the node binds --tcp-addr, which
+	// --port-offset shifts to 30303+offset. Publishing it unqualified is what made
+	// the explorer and the RPC name a socket nothing was bound to.
+	//
+	// Emitted only when bind registered a bound address, so a Blockchain built
+	// without one (tests, tooling) keeps the exact previous payload instead of
+	// gaining a misleading 0.
+	if addr := bc.GetListenAddr(); addr != "" {
+		info["listen_addr"] = addr
+		if port := bc.GetListenPort(); port != 0 {
+			info["p2p_port"] = port
+		}
+	}
+	return info
 }
 
 // IsSphinxChain validates if this blockchain follows Sphinx protocol using actual genesis hash

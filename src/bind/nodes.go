@@ -1416,7 +1416,12 @@ func StartNodeWithOptions(
 	if err != nil {
 		return fmt.Errorf("failed to bind TCP listener: %w", err)
 	}
-	logger.Info("TCP listener bound on %s", currentAddress)
+	// Ask the kernel what we actually got: identical to currentAddress for an
+	// explicit host:port, and the only correct answer for port 0 or a wildcard
+	// host. It is a runtime fact, so it never touches the persisted chain params.
+	boundAddress := tcpListener.Addr().String()
+	bc.SetListenAddr(boundAddress)
+	logger.Info("TCP listener bound on %s", boundAddress)
 	// Register this node's OWN datadir as its PUBLIC bundle source for the
 	// devnet bundle endpoint (handleIncomingConn "devnet_bundle_request").
 	// Only devnet nodes serve; only allowlisted PUBLIC files; custody/ never.

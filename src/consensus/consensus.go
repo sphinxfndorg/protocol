@@ -3600,6 +3600,14 @@ func (c *Consensus) commitBlock(block Block) {
 
 	committedHash := block.GetHash()
 
+	// Permanent per-commit observation line. bind already logs "Updated best
+	// block" from the syncing view, which a node restarting on an existing
+	// datadir does not always emit, so a rejoining validator was invisible and
+	// "did it catch up?" could not be asserted. This comes from the consensus
+	// engine at the commit itself, so every participant — including a rejoined
+	// one — reports its own height and hash.
+	logger.Info("Committed block: node=%s, height=%d, hash=%s", c.nodeID, block.GetHeight(), committedHash)
+
 	// ★ FIX: Re-check tip height under c.mu BEFORE calling
 	// blockChain.CommitBlock. There is a race between the initial
 	// currentTip check at the top of this function (which runs without

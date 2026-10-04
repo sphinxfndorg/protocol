@@ -349,6 +349,23 @@ func (c *Consensus) now() time.Time {
 	return common.GetTimeService().Now()
 }
 
+// voteIsCurrentRound reports whether a vote belongs to the round this node is
+// actually running: the expected height, the current view, and — once the
+// round's block is known — that block. Height and duplicate checks already
+// happen in the handlers; what this adds is the view and block.
+//
+// A newly recorded vote that clears all of it is real progress. Anything else
+// is chatter from a round that is already dead, and must not refresh the clock.
+func (c *Consensus) voteIsCurrentRound(vote *Vote) bool {
+	if vote == nil || vote.Height != c.currentHeight+1 || vote.View != c.currentView {
+		return false
+	}
+	if h := c.preparedBlockHash; h != "" && vote.BlockHash != h {
+		return false
+	}
+	return true
+}
+
 // markRoundProgress records that the chain made REAL progress: a valid proposal
 // was accepted, a quorum advanced, or a block committed.
 //
@@ -2297,7 +2314,9 @@ func (c *Consensus) processPrepareVote(vote *Vote) {
 
 	// Store the vote
 	c.prepareVotes[vote.BlockHash][vote.VoterID] = vote
-	c.markRoundProgress()
+	if c.voteIsCurrentRound(vote) {
+		c.markRoundProgress()
+	}
 
 	// Add voter's stake to weighted vote total
 	stake := c.getValidatorStake(vote.VoterID)
@@ -2732,7 +2751,9 @@ func (c *Consensus) processVoteLocked(vote *Vote) Block {
 
 	// Store the vote
 	c.receivedVotes[vote.BlockHash][vote.VoterID] = vote
-	c.markRoundProgress()
+	if c.voteIsCurrentRound(vote) {
+		c.markRoundProgress()
+	}
 
 	// Get voter's stake
 	stake := c.getValidatorStake(vote.VoterID)

@@ -50,8 +50,9 @@ const (
 )
 
 var (
-	bestBlockRe = regexp.MustCompile(`Updated best block: height=(\d+), hash=([0-9a-f]+)`)
-	seededRe    = regexp.MustCompile(`seeded (\d+) validators into the consensus set`)
+	bestBlockRe      = regexp.MustCompile(`Updated best block: height=(\d+), hash=([0-9a-f]+)`)
+	committedBlockRe = regexp.MustCompile(`Committed block: node=[A-Za-z0-9.:\[\]-]+, height=(\d+), hash=([0-9a-f]+)`)
+	seededRe         = regexp.MustCompile(`seeded (\d+) validators into the consensus set`)
 	// nodePrefixRe extracts the Node-<host:port> tag the localnet supervisor
 	// prefixes onto every line, so tips can be attributed to a specific node.
 	nodePrefixRe = regexp.MustCompile(`(Node-[0-9a-zA-Z\.\:\[\]]+)\s+\|`)
@@ -74,6 +75,13 @@ func nodeTips(text string) map[string]nodeTip {
 	tips := make(map[string]nodeTip)
 	for _, line := range strings.Split(text, "\n") {
 		m := bestBlockRe.FindStringSubmatch(line)
+		if m == nil {
+			// A node restarting on an existing datadir does not re-emit
+			// bind's "Updated best block", so a rejoining validator was
+			// invisible and 4-way agreement unobservable. The consensus
+			// engine's per-commit line is emitted by every participant.
+			m = committedBlockRe.FindStringSubmatch(line)
+		}
 		if m == nil {
 			continue
 		}
@@ -793,6 +801,39 @@ func TestQuorumCaseKillBudgets(t *testing.T) {
 // correctly agreed on one hash collapsed into a single map entry, so the
 // "all four agree" assertion could never be satisfied by working code. These
 // cases pin the correct behaviour without paying for real validator startup.
+// TestNodeTipsReadsBothCommitFormats pins that nodeTips attributes a tip from
+// EITHER height+hash line, so a validator that only emits the consensus engine's
+// per-commit line (which is what a node restarting on an existing datadir does)
+// is still counted. It must keep the old "Updated best block" capture working.
+func TestNodeTipsReadsBothCommitFormats(t *testing.T) {
+	const hash = "abc123def456"
+
+	// Old format only: must still parse exactly as before.
+	oldOnly := "Node-127.0.0.1:30303  | 01:02:03.004 INFO    Updated best block: height=7, hash=" + hash + ", total=9\n"
+	tips := nodeTips(oldOnly)
+	if got, ok := tips["Node-127.0.0.1:30303"]; !ok {
+		t.Fatalf("old format no longer parsed, tips=%v", tips)
+	} else if got.height != 7 || got.hash != hash {
+		t.Errorf("old format parsed as %+v, want height 7 hash %s", got, hash)
+	}
+
+	// New per-commit format only: previously invisible.
+	newOnly := "Node-127.0.0.1:30304  | 01:02:04.004 INFO    Committed block: node=Node-127.0.0.1:30304, height=12, hash=" + hash + "\n"
+	tips = nodeTips(newOnly)
+	if got, ok := tips["Node-127.0.0.1:30304"]; !ok {
+		t.Fatalf("per-commit format not parsed, tips=%v", tips)
+	} else if got.height != 12 || got.hash != hash {
+		t.Errorf("per-commit format parsed as %+v, want height 12 hash %s", got, hash)
+	}
+
+	// Mixed, as in a real restart log: the latest line per node wins.
+	mixed := oldOnly +
+		"Node-127.0.0.1:30303  | 01:02:09.004 INFO    Committed block: node=Node-127.0.0.1:30303, height=15, hash=" + hash + "\n"
+	if got := nodeTips(mixed)["Node-127.0.0.1:30303"]; got.height != 15 {
+		t.Errorf("latest line did not win, got height %d want 15", got.height)
+	}
+}
+
 // TestLeaderAndViewObservation pins the log-scraping used to identify the
 // leader and detect a view change.
 //

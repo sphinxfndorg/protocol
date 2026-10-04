@@ -2,7 +2,9 @@ package consensus
 
 import (
 	"math/big"
+	"sync"
 	"testing"
+	"time"
 
 	types "github.com/sphinxfndorg/protocol/src/core/transaction"
 )
@@ -159,6 +161,175 @@ func TestCommitCertCache_IsKeyedByBlockNotView(t *testing.T) {
 		}
 	}
 	evictCommitCertificate(blockX)
+}
+
+// TestLeaderDeath_ViewChangeNotBlockedBySelfVoteRefresh is the regression test
+// for the measured 204s stall.
+//
+// After the leader dies the survivors keep sending their OWN prepare and commit
+// votes in a dead round. That is not progress. When it refreshed
+// lastRoundActivity, the 45s stalledRoundThreshold and the 90s
+// roundActivityWindow never expired, so shouldPreventViewChange stayed true and
+// no further view change could ever start.
+func TestLeaderDeath_ViewChangeNotBlockedBySelfVoteRefresh(t *testing.T) {
+	ResetSnapshots()
+	t.Cleanup(ResetSnapshots)
+
+	ids := []string{"Node-a", "Node-b", "Node-c", "Node-d"}
+	unit := big.NewInt(3200000000000000000)
+	snapshot := &ValidatorSnapshot{Epoch: 0, TotalStake: new(big.Int).Mul(unit, big.NewInt(4)),
+		Validators: make(map[string]*StakedValidator, len(ids))}
+	for _, id := range ids {
+		snapshot.Validators[id] = &StakedValidator{ID: id, StakeAmount: new(big.Int).Set(unit)}
+	}
+	StoreSnapshotForTest(*snapshot)
+
+	clock := newTestClock()
+	survivor := newGateNode(t, "Node-b", ids, clock)
+
+	// Post-leader-death state: committed long ago, nothing advancing since.
+	survivor.currentHeight = 1
+	survivor.lastBlockTime = clock.now().Add(-10 * time.Minute)
+	survivor.lastViewChange = clock.now().Add(-10 * time.Minute)
+	survivor.lastRoundActivity = clock.now().Add(-10 * time.Minute)
+
+	if survivor.shouldPreventViewChange() {
+		t.Fatal("with a 10-minute-old stall the gate is shut; no view change could start")
+	}
+
+	// Advance past the 90s window. Each step models one more view: resetConsensusState
+	// clears the per-block sent-vote maps, so the survivor legitimately re-sends its
+	// own prepare and commit votes for the same dead round. That is not progress.
+	// If it refreshed the round clock the gate would shut again and never reopen.
+	for elapsed := time.Duration(0); elapsed < 4*time.Minute; elapsed += 5 * time.Second {
+		survivor.sentPrepareVotes = map[string]bool{}
+		survivor.sentVotes = map[string]bool{}
+		survivor.sendPrepareVote("dead-round-block", 1, 2)
+		survivor.voteForBlock("dead-round-block", 1, 2)
+		clock.advance(5 * time.Second)
+
+		if survivor.shouldPreventViewChange() {
+			t.Fatalf("view change was suppressed %v into a dead round that made "+
+				"no progress; re-sending its own votes must not refresh the "+
+				"round-activity clock", elapsed+5*time.Second)
+		}
+	}
+
+	if got := clock.now().Sub(survivor.lastBlockTime); got <= roundActivityWindow {
+		t.Fatalf("test did not advance past the window (lastBlockTime age %v)", got)
+	}
+}
+
+// TestLeaderDeath_LegitimateSlowRoundStillSuppressesViewChange is the regression
+// guard: real progress MUST keep refreshing the clock, so a slow but healthy
+// round is never abandoned early.
+func TestLeaderDeath_LegitimateSlowRoundStillSuppressesViewChange(t *testing.T) {
+	ResetSnapshots()
+	t.Cleanup(ResetSnapshots)
+
+	ids := []string{"Node-a", "Node-b", "Node-c", "Node-d"}
+	unit := big.NewInt(3200000000000000000)
+	snapshot := &ValidatorSnapshot{Epoch: 0, TotalStake: new(big.Int).Mul(unit, big.NewInt(4)),
+		Validators: make(map[string]*StakedValidator, len(ids))}
+	for _, id := range ids {
+		snapshot.Validators[id] = &StakedValidator{ID: id, StakeAmount: new(big.Int).Set(unit)}
+	}
+	StoreSnapshotForTest(*snapshot)
+
+	clock := newTestClock()
+	c := newGateNode(t, "Node-b", ids, clock)
+	c.currentHeight = 1
+	c.lastBlockTime = clock.now().Add(-10 * time.Minute)
+	c.lastViewChange = clock.now().Add(-10 * time.Minute)
+	c.lastRoundActivity = clock.now().Add(-10 * time.Minute)
+
+	// A real proposal is accepted, then the round makes progress every 30s for
+	// five minutes of injected time. Each progress event refreshes the clock,
+	// so the gate must stay shut throughout.
+	for elapsed := time.Duration(0); elapsed < 5*time.Minute; elapsed += 30 * time.Second {
+		clock.advance(30 * time.Second)
+		c.markRoundProgress()
+
+		if !c.shouldPreventViewChange() {
+			t.Fatalf("a round making real progress was abandoned %v in; the gate "+
+				"must stay shut while progress continues", elapsed+30*time.Second)
+		}
+	}
+}
+
+// testClock is a manually advanced clock for the view-change timeout windows.
+type testClock struct {
+	mu sync.Mutex
+	at time.Time
+}
+
+func newTestClock() *testClock {
+	return &testClock{at: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+}
+
+func (c *testClock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.at
+}
+
+func (c *testClock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.at = c.at.Add(d)
+}
+
+// newGateNode returns a Consensus wired only far enough to exercise the
+// view-change gates: no goroutines, an injected clock, sync gate open.
+// stubNodeManager swallows broadcasts: the gate tests need the vote-send paths
+// to run for their side effects, not to reach a network.
+type stubNodeManager struct{ sent int }
+
+func (s *stubNodeManager) GetPeers() map[string]Peer { return nil }
+func (s *stubNodeManager) GetNode(string) Node       { return nil }
+func (s *stubNodeManager) BroadcastMessage(string, interface{}) error {
+	s.sent++
+	return nil
+}
+func (s *stubNodeManager) BroadcastRANDAOState([32]byte, map[uint64]map[string]*VDFSubmission) error {
+	return nil
+}
+
+func newGateNode(t *testing.T, id string, allIDs []string, clock *testClock) *Consensus {
+	t.Helper()
+	unit := big.NewInt(3200000000000000000)
+	vs := NewValidatorSet(unit)
+	if err := vs.AddGenesisValidator(id, unit); err != nil {
+		t.Fatalf("AddGenesisValidator: %v", err)
+	}
+	for _, other := range allIDs {
+		if other == id {
+			continue
+		}
+		if err := vs.AddGenesisValidator(other, unit); err != nil {
+			t.Fatalf("AddGenesisValidator(%s): %v", other, err)
+		}
+	}
+	vs.ProcessEpochTransition(0)
+	vs.SealGenesis()
+
+	c := &Consensus{
+		nodeID:               id,
+		chainID:              7331,
+		nowFn:                clock.now,
+		phase:                PhaseIdle,
+		validatorSet:         vs,
+		nodeManager:          &stubNodeManager{},
+		receivedVotes:        map[string]map[string]*Vote{},
+		prepareVotes:         map[string]map[string]*Vote{},
+		sentVotes:            map[string]bool{},
+		sentPrepareVotes:     map[string]bool{},
+		timeoutVotes:         map[uint64]map[string]*TimeoutMsg{},
+		weightedPrepareVotes: map[string]*big.Int{},
+		weightedCommitVotes:  map[string]*big.Int{},
+	}
+	c.SetSyncReady(true)
+	return c
 }
 
 // TestSelectProposerSequenceOverViews prints and checks which validator

@@ -521,7 +521,12 @@ func TestLocalnet_ValidatorRejoinsAfterFailure(t *testing.T) {
 	var liveAtRestart uint64
 	waitForCondition(t, logPath, localnetBlockTimeout,
 		func(text string) (uint64, bool) {
-			h, ok := agreedTip(liveTips(text, offByNode), n-1, afterKill)
+			// SURVIVORS ONLY. The rejoined node is now visible (it emits the
+			// per-commit line), and agreedTip requires EVERY node in the map to
+			// be at least minHeight. Including a rejoined node that is still
+			// catching up made this pre-rejoin barrier unsatisfiable, because
+			// that is exactly the state the barrier is meant to precede.
+			h, ok := agreedTip(survivorTips(text, offByNode, dead), n-1, afterKill)
 			if ok {
 				liveAtRestart = h
 			}
@@ -665,6 +670,19 @@ func liveTips(text string, offByNode map[string]int) map[string]nodeTip {
 	for id := range tips {
 		off, ok := offByNode[id]
 		if !ok || !offsetProcessAlive(off) {
+			delete(tips, id)
+		}
+	}
+	return tips
+}
+
+// survivorTips returns tips for every node EXCEPT the one serving excludeOffset.
+// A rejoined node is live and now observable, so it would otherwise be folded
+// into "the survivors agreed" checks it is not yet part of.
+func survivorTips(text string, offByNode map[string]int, excludeOffset int) map[string]nodeTip {
+	tips := liveTips(text, offByNode)
+	for id, off := range offByNode {
+		if off == excludeOffset {
 			delete(tips, id)
 		}
 	}

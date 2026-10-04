@@ -3,6 +3,7 @@ package consensus
 import (
 	"math/big"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -454,6 +455,43 @@ func TestLeaderDeath_VotesWithoutAcceptedProposalAreNotProgress(t *testing.T) {
 	}
 	t.Fatalf("votes for blocks nobody proposed kept the view-change gate shut for "+
 		"5+ minutes: lastRoundActivity is only %v old", clock.now().Sub(c.lastRoundActivity))
+}
+
+// TestViewChangeInitiationLog_UsesInjectedClock pins that the permanent
+// view-change instrumentation reports the stall measured from LAST REAL PROGRESS
+// (markRoundProgress), read through the injectable clock — so localnet tests can
+// report latency from last progress rather than from the moment of the kill.
+func TestViewChangeInitiationLog_UsesInjectedClock(t *testing.T) {
+	ResetSnapshots()
+	t.Cleanup(ResetSnapshots)
+
+	ids := []string{"Node-a", "Node-b", "Node-c", "Node-d"}
+	clock := newTestClock()
+	c := newGateNode(t, "Node-b", ids, clock)
+
+	c.currentView = 4
+	c.lastRoundActivity = clock.now()
+
+	// Nothing has happened for 12.5s of injected time.
+	clock.advance(12500 * time.Millisecond)
+
+	line := c.viewChangeInitiationLog(5)
+	if !strings.Contains(line, "node=Node-b") {
+		t.Errorf("line missing node: %q", line)
+	}
+	if !strings.Contains(line, "from_view=4") || !strings.Contains(line, "to_view=5") {
+		t.Errorf("line missing views: %q", line)
+	}
+	if !strings.Contains(line, "since_last_progress_ms=12500") {
+		t.Errorf("since_last_progress_ms not read from the injected clock: %q", line)
+	}
+
+	// A fresh progress event resets the measured stall.
+	c.markRoundProgress()
+	clock.advance(3 * time.Second)
+	if got := c.viewChangeInitiationLog(6); !strings.Contains(got, "since_last_progress_ms=3000") {
+		t.Errorf("stall not measured from the latest progress: %q", got)
+	}
 }
 
 // TestSelectProposerSequenceOverViews prints and checks which validator

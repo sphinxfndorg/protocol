@@ -6,6 +6,7 @@ package common
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
@@ -240,6 +241,106 @@ func FormatAddressWithPrefix(addr, prefix string) (string, error) {
 		groups = append(groups, raw[i:end])
 	}
 	return p + " " + strings.Join(groups, " "), nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cryptographic-address rejection defense
+//
+// The validators above are SYNTACTIC on purpose: they answer "is this string
+// shaped like an address", which is what state keys and canonicalization need.
+// They cannot answer "did a key pair produce this", because no public key is in
+// scope there and src/common cannot import src/usi/core/key (that package
+// imports src/common, so the dependency is one-way by design).
+//
+// These helpers add the two halves of a real rejection gate that the callers
+// with a public key can then enforce:
+//
+//   - a STRICT shape check, so a body that no SPHINCS+ key could ever have
+//     produced is refused outright; and
+//   - a canonical comparison primitive, so a caller holding the public key can
+//     require that the address is exactly what that key derives to.
+//
+// A caller that has only an address string still cannot prove provenance — see
+// IsKeyDerivedAddress for the honest statement of that limit.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// SPHINCSAddressHexLen is the canonical body length of an address derived from a
+// 32-byte SPHINCS+ public key under this protocol's construction
+// (usi/core/key.GetPublicKeyFingerprintFromBytes).
+//
+// 64 hex chars is not arbitrary: SplitAddressPrefix also admits a 40-hex form,
+// which is legacy 20-byte material and is used for system-style escrow entries
+// ("0000...0002"). No SPHINCS+ key produces a 40-hex body, so a caller that must
+// only accept key-derived addresses can reject that length without ambiguity.
+const SPHINCSAddressHexLen = 64
+
+// IsSPHINCSAddressShape reports whether addr has the exact shape of a
+// SPHINCS+-derived address: a 64-hex body, with or without a SPIF/DEAD prefix.
+//
+// This is a NECESSARY but NOT SUFFICIENT gate. It rejects fabricated values
+// whose length or alphabet could never come from the key derivation — including
+// the 40-hex legacy form — but it cannot by itself tell a fabricated 64-hex
+// body from a real one. Callers that hold the public key must additionally use
+// ValidateKeyDerivedAddress.
+func IsSPHINCSAddressShape(addr string) bool {
+	_, raw, err := SplitAddressPrefix(addr)
+	return err == nil && len(raw) == SPHINCSAddressHexLen
+}
+
+// ValidateSPHINCSAddressShape is IsSPHINCSAddressShape with a rejection reason.
+func ValidateSPHINCSAddressShape(addr string) error {
+	if _, _, err := SplitAddressPrefix(addr); err != nil {
+		return fmt.Errorf("address %q is malformed: %w", addr, err)
+	}
+	if !IsSPHINCSAddressShape(addr) {
+		return fmt.Errorf("address %q is not a cryptographic-standard address: "+
+			"a SPHINCS+-derived body is %d hex characters", addr, SPHINCSAddressHexLen)
+	}
+	return nil
+}
+
+// IsKeyDerivedAddress reports whether addr is exactly the address that derived
+// derives to (typically derived := the value computed from a public key).
+//
+// Comparison is on the CANONICAL form, so "SPIF ab cd …", "ab cd …" and
+// lowercase all compare equal to the same derived value, and it is
+// constant-time so a mismatched address does not leak its prefix position.
+//
+// LIMITATION — read before relying on this: this compares two strings. It
+// proves provenance ONLY when the caller supplies derived from a real public key
+// they hold. Handed a self-consistent pair chosen by an attacker it proves
+// nothing, which is exactly why every call site must compute `derived` itself
+// and never accept it from the same untrusted input as `addr`.
+func IsKeyDerivedAddress(addr, derived string) bool {
+	a, err := NormalizeAddress(addr)
+	if err != nil {
+		return false
+	}
+	d, err := NormalizeAddress(derived)
+	if err != nil {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(a), []byte(d)) == 1
+}
+
+// ValidateKeyDerivedAddress is the rejection primitive for callers that hold a
+// public key: it rejects anything that is not well-shaped AND not the value that
+// key derives to.
+//
+// derived MUST be computed by the caller from its own public key (for this
+// protocol, keys.GetPublicKeyFingerprintFromBytes(pubKey, keys.OrgSPIF)). Passing
+// an attacker-supplied `derived` alongside an attacker-supplied `addr` turns
+// this into a tautology, so the derivation must never come from the same
+// untrusted source as the address being checked.
+func ValidateKeyDerivedAddress(addr, derived string) error {
+	if err := ValidateSPHINCSAddressShape(addr); err != nil {
+		return err
+	}
+	if !IsKeyDerivedAddress(addr, derived) {
+		return fmt.Errorf("address %q is not derived from the supplied public key; "+
+			"expected %s", addr, derived)
+	}
+	return nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

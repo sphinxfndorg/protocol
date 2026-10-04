@@ -5,15 +5,89 @@ import (
 	"testing"
 )
 
-// TestFabricatedSPIFAddressIsAccepted documents a KNOWN GAP: src/common's
+// TestSPHINCSShapeGateRejectsNonCryptographicAddresses covers the rejection half
+// of the defense that src/common can provide on its own.
+//
+// These are bodies no SPHINCS+ key could have produced: the 40-hex legacy form,
+// an odd-length body, a non-hex body, and an empty string. All pass the
+// syntactic validators (that is what they are for) and MUST be refused by the
+// strict cryptographic gate.
+func TestSPHINCSShapeGateRejectsNonCryptographicAddresses(t *testing.T) {
+	rejected := []struct {
+		name string
+		addr string
+	}{
+		{"40-hex legacy body", "0000000000000000000000000000000000000002"},
+		{"40-hex system escrow", "system:staking-fee-pool"},
+		{"odd-length body", "ABC"},
+		{"non-hex body", strings.Repeat("Z", 64)},
+		{"empty", ""},
+		{"prefix only", "SPIF"},
+		{"too long", strings.Repeat("A", 66)},
+	}
+	for _, c := range rejected {
+		t.Run(c.name, func(t *testing.T) {
+			if IsSPHINCSAddressShape(c.addr) {
+				t.Fatalf("IsSPHINCSAddressShape(%q) = true; a SPHINCS+-derived body is "+
+					"always %d hex characters, so this value cannot be key-derived",
+					c.addr, SPHINCSAddressHexLen)
+			}
+			if err := ValidateSPHINCSAddressShape(c.addr); err == nil {
+				t.Fatalf("ValidateSPHINCSAddressShape(%q) returned nil; want a rejection", c.addr)
+			}
+		})
+	}
+}
+
+// TestValidateKeyDerivedAddressRejectsFabrication covers the provenance half.
+//
+// The `derived` value stands in for the address a real public key produces; the
+// point is that anything else is refused, even though it is a perfectly
+// well-shaped 64-hex SPIF address.
+func TestValidateKeyDerivedAddressRejectsFabrication(t *testing.T) {
+	derived := strings.Repeat("AB", 32) // 64 hex chars
+	if err := ValidateKeyDerivedAddress(derived, derived); err != nil {
+		t.Fatalf("the genuinely derived address must be accepted: %v", err)
+	}
+
+	// Same address in every spelling the project accepts.
+	for _, spelling := range []string{
+		derived,
+		strings.ToLower(derived),
+		SPIFPrefix + " " + derived[:4] + " " + derived[4:],
+		"SPIF-" + derived[:4] + "-" + derived[4:8] + "-" + derived[8:],
+	} {
+		if err := ValidateKeyDerivedAddress(spelling, derived); err != nil {
+			t.Fatalf("spelling %q of a genuine address was rejected: %v", spelling, err)
+		}
+	}
+
+	// Fabricated: well-shaped, SPIF-prefixed, but not what the key derives to.
+	for _, fake := range []string{
+		strings.Repeat("11", 32),
+		SPIFPrefix + " " + strings.Repeat("11", 32),
+		DefaultBurnAddress, // real key, wrong org prefix
+	} {
+		if IsKeyDerivedAddress(fake, derived) {
+			t.Fatalf("IsKeyDerivedAddress(%q, %q) = true; a fabricated address must be rejected", fake, derived)
+		}
+		if err := ValidateKeyDerivedAddress(fake, derived); err == nil {
+			t.Fatalf("ValidateKeyDerivedAddress(%q, %q) returned nil; want rejection", fake, derived)
+		}
+	}
+}
+
+// TestFabricatedSPIFAddressIsAccepted documents the KNOWN GAP: src/common's
 // validators are purely SYNTACTIC and cannot tell a real SPHINCS+-derived
 // address from an invented one.
 //
 // This test pins the CURRENT (weak) behaviour so that anyone who later hardens
-// ValidateAddress sees it flip. It is not an endorsement.
+// ValidateAddress sees it flip. It is not an endorsement — the strict gate above
+// (IsSPHINCSAddressShape / ValidateKeyDerivedAddress) and the vault's
+// ValidateAndNormalizeRecipientsBoundToKeys are the actual defense.
 //
 // What it shows: an address that was never derived from any key pair is
-// accepted as a protocol address, and canonicalizes to itself.
+// accepted by the shape-only validators, and canonicalizes to itself.
 func TestFabricatedSPIFAddressIsAccepted(t *testing.T) {
 	// 64 hex characters that no SPHINCS+ key produced: it is the SPIF prefix
 	// plus an all-1s body.
@@ -36,6 +110,15 @@ func TestFabricatedSPIFAddressIsAccepted(t *testing.T) {
 	}
 	if IsBurnAddress(spif) {
 		t.Fatalf("a fabricated SPIF address must not be classified as burn")
+	}
+	// The strict gate is what the rest of the project now uses to refuse it:
+	// it is well-shaped, yet it is not the value any given key derives to.
+	if !IsSPHINCSAddressShape(spif) {
+		t.Fatalf("this fabricated value is well-shaped by construction; the strict gate " +
+			"must accept its shape and reject it only via ValidateKeyDerivedAddress")
+	}
+	if err := ValidateKeyDerivedAddress(spif, strings.Repeat("00", 32)); err == nil {
+		t.Fatal("the strict gate accepted a fabricated address against an unrelated key")
 	}
 }
 

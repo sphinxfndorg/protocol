@@ -86,6 +86,49 @@ func ValidateAndNormalizeRecipients(recipientFingerprints []string) ([]string, e
 	return normalized, nil
 }
 
+// ValidateAndNormalizeRecipientsBoundToKeys is the REJECTION gate for recipients
+// supplied together with their public keys.
+//
+// ValidateAndNormalizeRecipients only checks that a fingerprint is
+// well-shaped, so on its own it accepts an invented address that no key pair can
+// verify. This variant re-derives each recipient's address from the public key
+// it is paired with (keys.GetPublicKeyFingerprintFromBytes) and REJECTS any
+// recipient whose fingerprint does not match — so a fabricated address, or an
+// address belonging to a DIFFERENT key, cannot be encrypted to.
+//
+// pubKeys[i] must be the recipient's SPHINCS+ signature public key, and
+// fingerprints[i] the address claimed for it. Callers must obtain pubKeys from a
+// trusted source (the published bundle directory, or the operator), never from
+// the same untrusted input as the fingerprint — otherwise the check is a
+// tautology.
+func ValidateAndNormalizeRecipientsBoundToKeys(
+	recipientFingerprints []string,
+	pubKeys [][]byte,
+	orgCode keys.OrgCode,
+) ([]string, error) {
+	if len(recipientFingerprints) != len(pubKeys) {
+		return nil, fmt.Errorf("recipient count (%d) does not match public key count (%d)",
+			len(recipientFingerprints), len(pubKeys))
+	}
+	normalized, err := ValidateAndNormalizeRecipients(recipientFingerprints)
+	if err != nil {
+		return nil, err
+	}
+	for i, fp := range normalized {
+		if len(pubKeys[i]) == 0 {
+			return nil, fmt.Errorf("recipient %d: no public key supplied, cannot verify "+
+				"that %s was key-derived", i+1, fp)
+		}
+		// Re-derive from the key and compare in constant time on the canonical form.
+		if !ValidateAddressFingerprint(pubKeys[i], fp, orgCode) {
+			return nil, fmt.Errorf("recipient %d: address %s is not derived from its "+
+				"supplied public key; refusing to encrypt to a fabricated address", i+1, fp)
+		}
+	}
+	log.Printf("[SUCCESS] ValidateAndNormalizeRecipientsBoundToKeys: verified %d recipient(s) against their public keys", len(normalized))
+	return normalized, nil
+}
+
 // ResolveRecipient verifies a bundle from the public directory and extracts the HybridPublicKey
 func ResolveRecipient(store pubkeydir.Store, fingerprint string) (*HybridPublicKey, error) {
 	log.Printf("[INFO] ResolveRecipient: resolving recipient: %.16s...", fingerprint)

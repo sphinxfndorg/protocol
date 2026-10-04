@@ -370,7 +370,11 @@ func (c *Consensus) markRoundProgress() {
 // whole network into a view change just as the first proposal was in flight.
 func (c *Consensus) MarkRoundStart() {
 	c.mu.Lock()
-	c.lastRoundActivity = common.GetTimeService().Now()
+	// Kept as progress: this fires ONCE, when the block-production loop first
+	// finds enough READY validators. It grants the boot grace period so a node
+	// that waited for its peers does not manufacture a view change. It is not
+	// per-round, so it cannot mask a stall.
+	c.markRoundProgress()
 	c.mu.Unlock()
 }
 
@@ -1710,7 +1714,7 @@ func (c *Consensus) deferProposalUntilSyncReady(p *Proposal) {
 func (c *Consensus) processProposal(proposal *Proposal) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.lastRoundActivity = common.GetTimeService().Now()
+	c.markRoundProgress()
 
 	// Mark this proposal as in-flight for the entire duration of validation
 	// (deserialization, block validation, SPHINCS+ signature verification).
@@ -2293,7 +2297,7 @@ func (c *Consensus) processPrepareVote(vote *Vote) {
 
 	// Store the vote
 	c.prepareVotes[vote.BlockHash][vote.VoterID] = vote
-	c.lastRoundActivity = common.GetTimeService().Now()
+	c.markRoundProgress()
 
 	// Add voter's stake to weighted vote total
 	stake := c.getValidatorStake(vote.VoterID)
@@ -2728,7 +2732,7 @@ func (c *Consensus) processVoteLocked(vote *Vote) Block {
 
 	// Store the vote
 	c.receivedVotes[vote.BlockHash][vote.VoterID] = vote
-	c.lastRoundActivity = common.GetTimeService().Now()
+	c.markRoundProgress()
 
 	// Get voter's stake
 	stake := c.getValidatorStake(vote.VoterID)
@@ -3178,7 +3182,8 @@ func (c *Consensus) sendPrepareVote(blockHash string, view, height uint64) {
 
 	// Mark as sent and broadcast
 	c.sentPrepareVotes[blockHash] = true
-	c.lastRoundActivity = common.GetTimeService().Now()
+	// NOT round progress: sending our own vote for a round that is already dead
+	// is what kept the view-change gate shut for 204s after a leader died.
 
 	// ========== FIX: register our own vote locally before broadcasting ==========
 	// broadcastPrepareVote only sends this vote to peers — it never arrives back
@@ -3254,7 +3259,7 @@ func (c *Consensus) voteForBlock(blockHash string, view, height uint64) {
 
 	// Mark as sent and broadcast
 	c.sentVotes[blockHash] = true
-	c.lastRoundActivity = common.GetTimeService().Now()
+	// NOT round progress: see the note in sendPrepareVote.
 
 	// ========== FIX: register our own commit vote locally before broadcasting ==========
 	// Same issue as sendPrepareVote above: broadcastVote only reaches peers, so
@@ -3756,7 +3761,7 @@ func (c *Consensus) commitBlock(block Block) {
 	// the past; combined with the 30-second window this could expire almost
 	// immediately, letting followers fire spurious view-changes within seconds
 	// of a commit and advancing their currentView ahead of the leader.
-	c.lastRoundActivity = common.GetTimeService().Now()
+	c.markRoundProgress()
 
 	// Capture every commit vote this node collected for the block BEFORE
 	// receivedVotes is reset below. Without this, commitBlock only ever
@@ -4219,7 +4224,7 @@ func (c *Consensus) SetSyncReady(ready bool) {
 		// participate; otherwise time spent booting/syncing can make the
 		// watchdog manufacture a view change before the first proposal.
 		c.mu.Lock()
-		c.lastRoundActivity = common.GetTimeService().Now()
+		c.markRoundProgress()
 		c.mu.Unlock()
 	}
 }

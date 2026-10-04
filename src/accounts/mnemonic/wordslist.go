@@ -164,20 +164,18 @@ func GeneratePassphrase(words []string, wordCount int) (string, string, error) {
 	}
 
 	// Use the generated passphrase as part of the salt (to stretch)
-	salt := "mnemonic" + passphraseStr
-	// Convert the salt string to a byte slice for encoding
-	saltBytes := []byte(salt)
-
-	// Use SpxHash from the common package to generate a hash (256-bit)
-	hash := common.SpxHash([]byte(passphraseStr))
-
-	// Append the hash to the salt or use it directly in the stretching process
-	extendedSalt := append(saltBytes, hash...) // Combine salt and hash
-
-	// Use Argon2 IDKey to stretch the passphrase and salt into a fixed-length hash
-	stretchedHash := argon2.IDKey(passphraseBytes, extendedSalt, iterations, memory, parallelism, tagSize)
-	// Convert the stretched hash to a hexadecimal string representation
-	stretchedHashStr := fmt.Sprintf("%x", stretchedHash)
+	// NOTE: the SpxHash input is a mnemonic passphrase, i.e. secret material.
+	// SpxHashUncached is used deliberately: it is byte-identical to SpxHash
+	// (same shared instance, same protocol key) but stores nothing, so the
+	// passphrase is not copied into the process-wide LRU cache where it would
+	// linger in memory and leak cache-hit timing. See common.SpxHash's SECURITY
+	// note. Do NOT "fix" the SHA-512/256 primitive here: it is not the password
+	// KDF (that is Argon2id, below) and changing it would alter SIPS-0001 and
+	// the pinned test vectors.
+	stretchedHashStr, err := stretchPassphrase(passphraseStr)
+	if err != nil {
+		return "", "", err
+	}
 
 	// Lock the mutex to ensure thread safety when accessing shared data
 	mu.Lock()
@@ -192,6 +190,45 @@ func GeneratePassphrase(words []string, wordCount int) (string, string, error) {
 	passphraseHashes[stretchedHashStr] = struct{}{}
 
 	return passphraseStr, stretchedHashStr, nil // Return the generated passphrase and stretched hash
+}
+
+// stretchPassphrase derives the hex-encoded Argon2id verifier for a mnemonic
+// passphrase.
+//
+// Construction (unchanged, pinned by TestStretchPassphraseMatchesPreChangeBehaviour):
+//
+//	extendedSalt = []byte("mnemonic"+passphrase) || SpxHash(passphrase)  // 8+n+32 bytes
+//	verifier     = hex(argon2.IDKey(passphrase, extendedSalt, iterations, memory, parallelism, tagSize))
+//
+// The SpxHash call is an intermediate that expands the passphrase before Argon2id,
+// not the password KDF itself — Argon2id is what makes guessing expensive. Its
+// input is secret, so it goes through the uncached path (see common.SpxHash's
+// SECURITY note); the digest is byte-identical either way.
+//
+// It repeats the UTF-8 check GeneratePassphrase already does so the helper is
+// safe to call on its own; that is the only validation, and it is unchanged.
+func stretchPassphrase(passphraseStr string) (string, error) {
+	if !utf8.ValidString(passphraseStr) {
+		return "", errors.New("invalid UTF-8 encoding in passphrase")
+	}
+
+	// Use the generated passphrase as part of the salt (to stretch)
+	salt := "mnemonic" + passphraseStr
+	// Convert the salt string to a byte slice for encoding
+	saltBytes := []byte(salt)
+
+	// Use SpxHash from the common package to generate a hash (256-bit).
+	// Uncached: the passphrase is secret material and must not be retained in
+	// the shared LRU cache.
+	hash := common.SpxHashUncached([]byte(passphraseStr))
+
+	// Append the hash to the salt or use it directly in the stretching process
+	extendedSalt := append(saltBytes, hash...) // Combine salt and hash
+
+	// Use Argon2 IDKey to stretch the passphrase and salt into a fixed-length hash
+	stretchedHash := argon2.IDKey([]byte(passphraseStr), extendedSalt, iterations, memory, parallelism, tagSize)
+	// Convert the stretched hash to a hexadecimal string representation
+	return fmt.Sprintf("%x", stretchedHash), nil
 }
 
 // isValidEntropy checks if the entropy is a valid multiple of 32 bits and within the allowed range.

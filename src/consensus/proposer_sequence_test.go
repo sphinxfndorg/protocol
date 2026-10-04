@@ -2,6 +2,7 @@ package consensus
 
 import (
 	"math/big"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -330,6 +331,74 @@ func newGateNode(t *testing.T, id string, allIDs []string, clock *testClock) *Co
 	}
 	c.SetSyncReady(true)
 	return c
+}
+
+// TestLeaderDeath_StaleAndForeignVotesDoNotCountAsProgress is the vote-guard
+// test. processPrepareVote and processVoteLocked already reject wrong heights
+// and duplicates, so the remaining gap is a vote at the RIGHT height but a
+// STALE VIEW or a DIFFERENT block. Those arrive freely once the leader is dead:
+// survivors keep voting, and each newly recorded one used to refresh the round
+// clock, holding the view-change gate shut for good.
+//
+// Only a vote for this node's current round counts as progress.
+func TestLeaderDeath_StaleAndForeignVotesDoNotCountAsProgress(t *testing.T) {
+	ResetSnapshots()
+	t.Cleanup(ResetSnapshots)
+
+	ids := []string{"Node-a", "Node-b", "Node-c", "Node-d"}
+	unit := big.NewInt(3200000000000000000)
+	snapshot := &ValidatorSnapshot{Epoch: 0, TotalStake: new(big.Int).Mul(unit, big.NewInt(4)),
+		Validators: make(map[string]*StakedValidator, len(ids))}
+	for _, id := range ids {
+		snapshot.Validators[id] = &StakedValidator{ID: id, StakeAmount: new(big.Int).Set(unit)}
+	}
+	StoreSnapshotForTest(*snapshot)
+
+	clock := newTestClock()
+	c := newGateNode(t, "Node-b", ids, clock)
+
+	// A round is in progress for block "real-block" at view 4.
+	c.currentHeight = 1
+	c.currentView = 4
+	c.preparedBlockHash = "real-block"
+	c.lastBlockTime = clock.now().Add(-10 * time.Minute)
+	c.lastViewChange = clock.now().Add(-10 * time.Minute)
+	c.lastRoundActivity = clock.now().Add(-10 * time.Minute)
+
+	foreign := func(i int, hash string, view uint64) *Vote {
+		return &Vote{
+			BlockHash: hash,
+			ChainID:   c.chainID,
+			Height:    c.currentHeight + 1,
+			Phase:     VotePhasePrepare,
+			View:      view,
+			VoterID:   ids[i],
+		}
+	}
+
+	// Each step feeds a vote that is NOT this round's vote: a different block,
+	// or the right block in a stale view. None may refresh the clock.
+	step := 0
+	for elapsed := time.Duration(0); elapsed < 4*time.Minute; elapsed += 5 * time.Second {
+		step++
+		c.prepareVotes = map[string]map[string]*Vote{} // new round, maps reset
+		c.processPrepareVote(foreign(0, "other-block-"+strconv.Itoa(step), 4))
+		c.processPrepareVote(foreign(1, "real-block", 3))
+
+		clock.advance(5 * time.Second)
+		if c.shouldPreventViewChange() {
+			t.Fatalf("view change suppressed %v into a dead round by stale-view "+
+				"and foreign-block votes; only a vote for the current round counts "+
+				"as progress", elapsed+5*time.Second)
+		}
+	}
+
+	// Control: a vote for THIS round at THIS view is progress and must hold the
+	// gate shut, or the guard would be too strict and abandon healthy rounds.
+	c.markRoundProgress()
+	if !c.shouldPreventViewChange() {
+		t.Fatal("a genuine current-round vote did not count as progress")
+	}
 }
 
 // TestSelectProposerSequenceOverViews prints and checks which validator

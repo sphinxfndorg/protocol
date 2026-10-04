@@ -1150,12 +1150,29 @@ const (
 	staleSignatureTTL = 120 * time.Second
 )
 
+// logSkipOnce emits a Debug skip diagnostic at most once per 10s per node.
+// The watchdog and shouldPreventViewChange are otherwise silent when they
+// suppress a view change, which is what made a 204s stall unexplainable.
+func (c *Consensus) logSkipOnce(format string, args ...interface{}) {
+	c.skipLogMu.Lock()
+	defer c.skipLogMu.Unlock()
+	now := common.GetTimeService().Now()
+	if !c.skipLogAt.IsZero() && now.Sub(c.skipLogAt) < 10*time.Second {
+		return
+	}
+	c.skipLogAt = now
+	logger.Debug(format, args...)
+}
+
 // shouldPreventViewChange determines if view change should be blocked due to active consensus
 func (c *Consensus) shouldPreventViewChange() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
 	now := common.GetTimeService().Now()
+	sinceBlock := now.Sub(c.lastBlockTime)
+	sinceRound := now.Sub(c.lastRoundActivity)
+	sinceViewChange := now.Sub(c.lastViewChange)
 
 	// A view change is a recovery mechanism for an active round. At genesis,
 	// before the first proposal arrives, PhaseIdle with no round state is
@@ -1178,17 +1195,25 @@ func (c *Consensus) shouldPreventViewChange() bool {
 	// rejected as stale the instant verification completes, even though
 	// the leader was actively making progress.
 	if c.proposalInFlight {
+		c.logSkipOnce("view-change suppressed: proposalInFlight since_round=%v (window=%v) since_block=%v since_vc=%v",
+			sinceRound, roundActivityWindow, sinceBlock, sinceViewChange)
 		return true
 	}
 	// Block view change while in prepare phases.
 	if c.phase == PhasePrePrepared || c.phase == PhasePrepared {
+		c.logSkipOnce("view-change suppressed: phase=%v since_round=%v (window=%v) since_block=%v since_vc=%v",
+			c.phase, sinceRound, roundActivityWindow, sinceBlock, sinceViewChange)
 		return true
 	}
 	// Block view change while the current round still has votes in flight.
 	if len(c.receivedVotes) > 0 || len(c.prepareVotes) > 0 {
+		c.logSkipOnce("view-change suppressed: votes received=%d prepare=%d since_round=%v (window=%v) since_block=%v since_vc=%v",
+			len(c.receivedVotes), len(c.prepareVotes), sinceRound, roundActivityWindow, sinceBlock, sinceViewChange)
 		return true
 	}
-	if c.currentHeight > 0 && now.Sub(c.lastBlockTime) < 15*time.Second {
+	if c.currentHeight > 0 && sinceBlock < 15*time.Second {
+		c.logSkipOnce("view-change suppressed: recent block since_block=%v (guard=15s) since_round=%v since_vc=%v",
+			sinceBlock, sinceRound, sinceViewChange)
 		return true
 	}
 	// FIX: Use a fixed window instead of c.timeout. c.timeout may be set to
@@ -1196,7 +1221,9 @@ func (c *Consensus) shouldPreventViewChange() bool {
 	// cons.SetTimeout(1 * time.Hour)), which caused shouldPreventViewChange to
 	// return true for 60 minutes after every round, permanently blocking all
 	// view-changes and freezing the chain after block 1.
-	if !c.lastRoundActivity.IsZero() && now.Sub(c.lastRoundActivity) < roundActivityWindow {
+	if !c.lastRoundActivity.IsZero() && sinceRound < roundActivityWindow {
+		c.logSkipOnce("view-change suppressed: round-activity window since_round=%v (window=%v, stalled=%v) activeRound=%v since_block=%v since_vc=%v",
+			sinceRound, roundActivityWindow, stalledRoundThreshold, activeRound, sinceBlock, sinceViewChange)
 		return true
 	}
 	return false
@@ -1233,6 +1260,7 @@ func (c *Consensus) consensusLoop() {
 			// bumped itself to view 1, and broadcast it; followers replayed
 			// that stale timeout on startup and jumped views for no reason.
 			if !c.IsSyncReady() {
+				c.logSkipOnce("watchdog: sync gate closed, no view change")
 				viewTimer.Reset(timeout)
 				continue
 			}
@@ -1249,6 +1277,8 @@ func (c *Consensus) consensusLoop() {
 
 				chainBlock := c.blockChain.GetLatestBlock()
 				if chainBlock != nil && chainBlock.GetHeight() > currentHeight {
+					c.logSkipOnce("watchdog: chain advanced to height=%d (from %d), deferring view change",
+						chainBlock.GetHeight(), currentHeight)
 					c.mu.Lock()
 					c.currentHeight = chainBlock.GetHeight()
 					c.mu.Unlock()

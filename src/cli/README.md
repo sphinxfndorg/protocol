@@ -783,12 +783,30 @@ view-change, and multi-process quorum behavior separately.
 On one machine, SPHINCS+ signing is slow: a PBFT round needs several signatures
 and each costs seconds of CPU. The generous timeouts are deliberate.
 
-### Known limitation: the reported `default_port` does not match reality
+### `default_port` is a chain parameter; `listen_addr` / `p2p_port` are what the node is on
 
-The chain-info record reports `default_port: 32307` (it comes from
-`params/commit/header.go` and is persisted in chain state), but the node
-actually listens on `30303 + port-offset`. It is **display-only** — the value
-is never used to dial anything — so it affects nothing functionally, but the
-P2P chain handshake and the HTTP explorer both advertise a port the node is not
-listening on. Left as-is deliberately: changing it would alter persisted chain
-parameters.
+The chain-info record carries two different things, and conflating them was the
+old bug:
+
+- **`default_port: 32307`** (devnet: `32309`) is the **chain parameter** from
+  `params/commit/header.go`. It is persisted in chain state and is **display-only**
+  — no code path ever dials it, and no chain-compatibility check compares a port
+  (`network`'s checks `chain_id`; `consensus`'s checks `chain_id` + genesis hash).
+  It is deliberately left alone: changing it would alter persisted chain parameters.
+- **`listen_addr` and `p2p_port`** are the **runtime** address this process
+  actually bound, read from the P2P listener's `Addr()` in `bind.StartNode`.
+  They are never persisted and never enter a digest, so they are correct for
+  `--port-offset` and for `--config`.
+
+Both appear in the chain-info map served at `/api/explorer/stats` (and shown as
+`P2P <addr>` on the explorer's Block Height card). They are omitted when no
+address was registered. The explorer previously showed only the chain
+parameter, so it advertised a port the node was not listening on.
+
+**Scope, stated precisely:** the value never reached a running handshake. The
+key-exchange handshake already carried the correct address (`bind/kex.go` sets
+`Address` to this node's own `--tcp-addr`, and `derivePeerListenAddr` keeps the
+claimed port), and the P2P `chaininfo` sync message carries no port at all. The
+two places that still hardcode `32307` — `network/node.go`'s `GetChainInfo` and
+`network/manager.go`'s `NodeManager.GetChainInfo` — are **unused helpers with no
+callers**, so they reached no wire and no UI. They are left in place as dead code.

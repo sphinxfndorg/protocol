@@ -4,6 +4,8 @@
 package utils
 
 import (
+	"fmt"
+	"os"
 	"strings"
 	"testing"
 
@@ -112,5 +114,150 @@ func TestConfigFileEntry_NeverIndexesByPortOffset(t *testing.T) {
 	// An empty file is refused too.
 	if _, err := configFileEntry(nil, 0); err == nil {
 		t.Error("an empty --config file must be refused")
+	}
+}
+
+func TestValidateProductionNodeStart_RejectsDevelopmentShapes(t *testing.T) {
+	t.Setenv("SPHINX_MAINNET_GENESIS_DIGEST", strings.Repeat("a", 64))
+
+	cases := []struct {
+		name string
+		args struct {
+			network    string
+			tcp        string
+			dataDir    string
+			seeds      string
+			portOffset int
+		}
+		want string
+	}{
+		{
+			name: "devnet",
+			args: struct {
+				network    string
+				tcp        string
+				dataDir    string
+				seeds      string
+				portOffset int
+			}{network: "devnet", tcp: "203.0.113.10:30303", dataDir: "/var/lib/sphinx/mainnet", seeds: "203.0.113.1:30303"},
+			want: "devnet",
+		},
+		{
+			name: "portOffset",
+			args: struct {
+				network    string
+				tcp        string
+				dataDir    string
+				seeds      string
+				portOffset int
+			}{network: "mainnet", tcp: "203.0.113.10:30303", dataDir: "/var/lib/sphinx/mainnet", seeds: "203.0.113.1:30303", portOffset: 1},
+			want: "--port-offset",
+		},
+		{
+			name: "localhost",
+			args: struct {
+				network    string
+				tcp        string
+				dataDir    string
+				seeds      string
+				portOffset int
+			}{network: "mainnet", tcp: "127.0.0.1:30303", dataDir: "/var/lib/sphinx/mainnet", seeds: "203.0.113.1:30303"},
+			want: "public --tcp-addr",
+		},
+		{
+			name: "defaultDatadir",
+			args: struct {
+				network    string
+				tcp        string
+				dataDir    string
+				seeds      string
+				portOffset int
+			}{network: "mainnet", tcp: "203.0.113.10:30303", dataDir: "data", seeds: "203.0.113.1:30303"},
+			want: "persistent --datadir",
+		},
+		{
+			name: "missingSeeds",
+			args: struct {
+				network    string
+				tcp        string
+				dataDir    string
+				seeds      string
+				portOffset int
+			}{network: "mainnet", tcp: "203.0.113.10:30303", dataDir: "/var/lib/sphinx/mainnet"},
+			want: "--seeds",
+		},
+		{
+			name: "relativeDatadir",
+			args: struct {
+				network    string
+				tcp        string
+				dataDir    string
+				seeds      string
+				portOffset int
+			}{network: "mainnet", tcp: "203.0.113.10:30303", dataDir: "prod/mainnet", seeds: "203.0.113.1:30303"},
+			want: "absolute persistent --datadir",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateProductionNodeStart("production", tc.args.network, tc.args.tcp, tc.args.dataDir, tc.args.seeds, tc.args.portOffset)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("validateProductionNodeStart error = %v, want containing %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestValidateProductionNodeStart_RequiresDigestPin(t *testing.T) {
+	t.Setenv("SPHINX_TESTNET_GENESIS_DIGEST", "")
+	err := validateProductionNodeStart("production", "testnet", "203.0.113.10:30303", "/var/lib/sphinx/testnet", "203.0.113.1:30303", 0)
+	if err == nil || !strings.Contains(err.Error(), "SPHINX_TESTNET_GENESIS_DIGEST") {
+		t.Fatalf("validateProductionNodeStart error = %v, want missing testnet digest", err)
+	}
+}
+
+func TestValidateProductionNodeStart_AcceptsProductionShape(t *testing.T) {
+	t.Setenv("SPHINX_MAINNET_GENESIS_DIGEST", strings.Repeat("a", 64))
+	err := validateProductionNodeStart("production", "mainnet", "validator-1.example.org:30303", "/var/lib/sphinx/mainnet", "boot-1.example.org:30303", 0)
+	if err != nil {
+		t.Fatalf("validateProductionNodeStart rejected production shape: %v", err)
+	}
+}
+
+func TestValidateProductionNodeStart_DevelopmentModeNoops(t *testing.T) {
+	t.Setenv("SPHINX_MAINNET_GENESIS_DIGEST", "")
+	err := validateProductionNodeStart("development", "devnet", "127.0.0.1:30303", "data", "", 2)
+	if err != nil {
+		t.Fatalf("development mode should not apply production guardrails: %v", err)
+	}
+}
+
+func TestIsLocalProductionHost(t *testing.T) {
+	for _, host := range []string{"127.0.0.1", "localhost", "::1", "0.0.0.0", "[::]"} {
+		if !isLocalProductionHost(host) {
+			t.Fatalf("%s should be treated as local", host)
+		}
+	}
+	for _, host := range []string{"203.0.113.10", "validator.example.org"} {
+		if isLocalProductionHost(host) {
+			t.Fatalf("%s should not be treated as local", host)
+		}
+	}
+}
+
+func TestValidateProductionNodeStart_RejectsInvalidMode(t *testing.T) {
+	err := validateProductionNodeStart("prod", "mainnet", "203.0.113.10:30303", "/var/lib/sphinx/mainnet", "203.0.113.1:30303", 0)
+	if err == nil || !strings.Contains(err.Error(), "--mode") {
+		t.Fatalf("validateProductionNodeStart error = %v, want invalid mode", err)
+	}
+}
+
+func TestValidateProductionNodeStart_ErrorMentionsResolvedDatadir(t *testing.T) {
+	t.Setenv("SPHINX_MAINNET_GENESIS_DIGEST", strings.Repeat("a", 64))
+	dir := fmt.Sprintf("data%snode1", string(os.PathSeparator))
+	err := validateProductionNodeStart("production", "mainnet", "203.0.113.10:30303", dir, "203.0.113.1:30303", 0)
+	if err == nil || !strings.Contains(err.Error(), dir) {
+		t.Fatalf("validateProductionNodeStart error = %v, want resolved datadir mentioned", err)
 	}
 }

@@ -89,6 +89,33 @@ func TestEvaluateSyncReadiness_FreshGenesisIsReady(t *testing.T) {
 	}
 }
 
+func TestShouldWaitForPeerResponse_AllowsFreshGenesisWithoutPeers(t *testing.T) {
+	if shouldWaitForPeerResponse(false, true, 0, 0) {
+		t.Fatal("fresh local genesis with no peer response should still reach the readiness gate")
+	}
+	if !shouldWaitForPeerResponse(false, true, 2, 0) {
+		t.Fatal("non-genesis local height must not treat peer silence as catch-up")
+	}
+	if !shouldWaitForPeerResponse(false, false, 0, 0) {
+		t.Fatal("node without genesis must wait for peer evidence")
+	}
+	if shouldWaitForPeerResponse(true, true, 2, 6) {
+		t.Fatal("a peer response should continue into normal sync/readiness handling")
+	}
+}
+
+func TestShouldFetchPeerBlocks_FollowsSingleReachablePeerForDownload(t *testing.T) {
+	if !shouldFetchPeerBlocks(0, 6, "127.0.0.1:30303") {
+		t.Fatal("a single reachable seed ahead of the local node must be usable as a block download source")
+	}
+	if shouldFetchPeerBlocks(6, 6, "127.0.0.1:30303") {
+		t.Fatal("equal-height peers should not trigger catch-up downloads")
+	}
+	if shouldFetchPeerBlocks(0, 6, "") {
+		t.Fatal("a claimed tip without a source address cannot be used for block download")
+	}
+}
+
 // Case (e): local height already equals the corroborated tip.
 func TestEvaluateSyncReadiness_AtCorroboratedTipIsReady(t *testing.T) {
 	d := EvaluateSyncReadiness(SyncReadinessInput{

@@ -94,8 +94,7 @@ const (
 	//
 	//	grep -rn 'RETIRE-WHEN' src/core/
 	//
-	// TODO(ceremony-loader): attach the ticket that tracks building the loader;
-	// the pending test file carries the same unlinked placeholder.
+	// TRACKED-BY: https://github.com/sphinxfndorg/protocol/issues?q=is%3Aissue+ceremony-loader
 	custodyProposalsSubdir = "config/spend_proposals"
 	vaultKeysSubdir        = "custody/devnet-auto/vault"
 	escrowKeysSubdir       = "custody/devnet-auto/escrow"

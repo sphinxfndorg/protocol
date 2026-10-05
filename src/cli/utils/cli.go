@@ -97,6 +97,65 @@ func applyPortOffset(offset int, tcpAddr, httpAddr, wsAddr, dataDir *string) {
 	}
 }
 
+func validateProductionNodeStart(mode, networkType, tcpAddr, dataDir, seeds string, portOffset int) error {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	networkType = strings.ToLower(strings.TrimSpace(networkType))
+	if mode == "" {
+		mode = "development"
+	}
+	if mode != "development" && mode != "production" {
+		return fmt.Errorf("--mode must be development or production, got %q", mode)
+	}
+	if mode != "production" {
+		return nil
+	}
+	if networkType == "devnet" {
+		return fmt.Errorf("--mode=production cannot run on --network=devnet; use --network=testnet or --network=mainnet with a pinned genesis")
+	}
+	if networkType != "testnet" && networkType != "mainnet" {
+		return fmt.Errorf("--mode=production requires --network=testnet or --network=mainnet, got %q", networkType)
+	}
+	envName := "SPHINX_MAINNET_GENESIS_DIGEST"
+	if networkType == "testnet" {
+		envName = "SPHINX_TESTNET_GENESIS_DIGEST"
+	}
+	if strings.TrimSpace(os.Getenv(envName)) == "" {
+		return fmt.Errorf("--mode=production requires %s to pin the out-of-band genesis digest", envName)
+	}
+	if portOffset != 0 {
+		return fmt.Errorf("--mode=production refuses --port-offset=%d; set explicit --tcp-addr, --http-port, --ws-port, --udp-port, and --datadir", portOffset)
+	}
+	if strings.TrimSpace(seeds) == "" {
+		return fmt.Errorf("--mode=production requires --seeds with reachable bootnodes or DNS discovery")
+	}
+	if dataDir == "" || dataDir == defaultDataDir || strings.HasPrefix(filepath.Clean(dataDir), filepath.Clean(defaultDataDir)+string(os.PathSeparator)) {
+		return fmt.Errorf("--mode=production requires an explicit persistent --datadir, not %q", dataDir)
+	}
+	if !filepath.IsAbs(dataDir) {
+		return fmt.Errorf("--mode=production requires an absolute persistent --datadir, not %q", dataDir)
+	}
+	host, _, err := net.SplitHostPort(tcpAddr)
+	if err != nil {
+		return fmt.Errorf("--mode=production requires --tcp-addr as public host:port: %w", err)
+	}
+	if isLocalProductionHost(host) {
+		return fmt.Errorf("--mode=production requires a stable public --tcp-addr, got %q", tcpAddr)
+	}
+	return nil
+}
+
+func isLocalProductionHost(host string) bool {
+	host = strings.Trim(strings.ToLower(strings.TrimSpace(host)), "[]")
+	if host == "" || host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback() || ip.IsUnspecified()
+}
+
 func printHelp() {
 	// Use fmt.Print directly to avoid format string parsing issues
 	// since the help text contains % characters that logger.Info would try to parse
@@ -185,9 +244,9 @@ How it reaches a node:
               bootstrap node is still signing).
     * any other network — there is NO automatic fetch. The file must be placed at
                 <datadir>/config/genesis_state.json out of band (copy/scp it)
-                BEFORE the node starts. A node started without it still runs, but
-                it has no genesis validators and no funded accounts, so it stays
-                a peer until a Stake transaction admits it.
+                BEFORE the node starts. Mainnet/testnet also require
+                SPHINX_MAINNET_GENESIS_DIGEST or SPHINX_TESTNET_GENESIS_DIGEST;
+                without both the file and the pin, startup refuses to guess.
 
   A node derives its own identity from --tcp-addr as Node-<host:port>, so the
   node_id recorded in genesis_state.json must match that exact string.
@@ -304,6 +363,7 @@ func runNodeCmd(args []string) error {
 	// node identity. An explicit --tcp-addr/--http-port/--ws-port/--datadir
 	// always wins.
 	applyPortOffset(*portOffset, tcpAddr, httpPort, wsPort, dataDir)
+	common.SetDataDir(*dataDir)
 
 	// Multisig treasury spend broadcast is always on — no flags, no
 	// destination or amount to configure, and no custodian keys. The node
@@ -374,6 +434,10 @@ func runNodeCmd(args []string) error {
 		nodeConfig.WSPort = *wsPort
 	}
 
+	if err := validateProductionNodeStart(*mode, *networkFlag, nodeConfig.TCPAddr, *dataDir, *seeds, *portOffset); err != nil {
+		return err
+	}
+
 	// ★ REPORT THE EFFECTIVE UDP PORT, NOT THE EMPTY FLAG.
 	//
 	// --udp-port deliberately defaults to "" so that bind can derive the DHT
@@ -436,15 +500,11 @@ func runNodeCmd(args []string) error {
 	// ════════════════════════════════════════════════════════════════════
 	// ★ DEVNET AUTO-CUSTODY MUST BE THE FIRST THING THAT TOUCHES GENESIS.
 	//
-	// core.GetGenesisHash() below (the --pbft branch derives VDF parameters
-	// from it) is a process-global sync.Once that BUILDS block 0 on first use.
-	// Block 0's distributions are paid by the genesis vault, so the vault policy
-	// and the escrow policy must exist before that build — otherwise genesis is
-	// cached with the legacy unsigned vault address and block 0 later fails with
-	// a misleading "insufficient balance" while executing. Provisioning here,
-	// before any path that can call GetGenesisHash(), is what makes that
-	// impossible; bind.StartNode re-invokes it as a no-op safety net for hosts
-	// that call it directly.
+	// bind.StartNode derives VDF parameters after it has authored or loaded the
+	// complete genesis document. The CLI must not call core.GetGenesisHash()
+	// earlier: on a cold devnet datadir auto-custody has written only the
+	// policy/witness sections at this point, so an eager hash would freeze a
+	// zero-validator genesis before StartNode can add this validator.
 	// ════════════════════════════════════════════════════════════════════
 	custody, custodyErr := core.AutoProvisionDevnetCustody(core.DevnetCustodyOptions{
 		NetworkType:   *networkFlag,
@@ -498,30 +558,7 @@ func runNodeCmd(args []string) error {
 		logger.Info("   - there is no 'blocks 0-1 need no stake' phase")
 		logger.Info("   - VDF-derived leader selection runs over that same staked set")
 		logger.Info("═══════════════════════════════════════════════════════════════")
-
-		// Derive VDF parameters
-		expectedGenesisHash := core.GetGenesisHash()
-		logger.Info("Deriving VDF parameters from genesis hash: %s", expectedGenesisHash)
-
-		rawGenesisHash := expectedGenesisHash
-		if len(rawGenesisHash) > 8 && rawGenesisHash[:8] == "GENESIS_" {
-			rawGenesisHash = rawGenesisHash[8:]
-			logger.Info("Using raw genesis hash: %s", rawGenesisHash)
-		}
-
-		consensus.InitVDFFromGenesis(func() (string, error) {
-			return rawGenesisHash, nil
-		})
-
-		vdfParamsTemp, err := consensus.LoadCanonicalVDFParams()
-		if err != nil {
-			return fmt.Errorf("failed to load VDF parameters: %w", err)
-		}
-		vdfParams = &vdfParamsTemp
-
-		logger.Info("VDF parameters derived successfully:")
-		logger.Info("   Discriminant D: %d bits", vdfParams.Discriminant.BitLen())
-		logger.Info("   T (iterations): %d", vdfParams.T)
+		logger.Info("VDF parameters will be derived after genesis is authored/loaded")
 
 		logger.Info("Node will continue running - press Ctrl+C to stop")
 

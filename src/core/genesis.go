@@ -1236,9 +1236,9 @@ func (gf *GenesisStateFile) HasValidatorSet() bool {
 }
 
 // ConsensusDigest hashes the canonical chain-defining projection of the
-// genesis document. Human-readable audit totals and block-derived summaries
-// are deliberately excluded because they are rewritten from the executed
-// genesis block and do not alter consensus inputs.
+// genesis document. Human-readable audit totals, block-derived summaries, and
+// the devnet witness book are deliberately excluded because they are rewritten
+// from the executed genesis block and do not alter consensus inputs.
 func (gf *GenesisStateFile) ConsensusDigest() (string, error) {
 	if gf == nil {
 		return "", fmt.Errorf("genesis document is nil")
@@ -1251,7 +1251,6 @@ func (gf *GenesisStateFile) ConsensusDigest() (string, error) {
 		FundedAccounts []GenesisFundedAccount     `json:"funded_accounts,omitempty"`
 		Multisig       *multisig.MultiPartyPolicy `json:"multisig,omitempty"`
 		EscrowMultisig *multisig.MultiPartyPolicy `json:"escrow_multisig,omitempty"`
-		Witnesses      *GenesisWitnessBook        `json:"witnesses,omitempty"`
 		Bootstrap      bool                       `json:"bootstrap,omitempty"`
 	}{
 		Version:        gf.Version,
@@ -1261,7 +1260,6 @@ func (gf *GenesisStateFile) ConsensusDigest() (string, error) {
 		FundedAccounts: gf.FundedAccounts,
 		Multisig:       gf.Multisig,
 		EscrowMultisig: gf.EscrowMultisig,
-		Witnesses:      gf.Witnesses,
 		Bootstrap:      gf.Bootstrap,
 	}
 	canonical, err := json.Marshal(document)

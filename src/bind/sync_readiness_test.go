@@ -228,3 +228,45 @@ func TestSyncLoopGate_NotOneWay(t *testing.T) {
 		}
 	})
 }
+
+// TestEvaluateSyncReadiness_ToleratesOneBlockOfRoundLatency pins the bound that
+// stops a healthy node withdrawing from a live quorum.
+//
+// A committing validator routinely sees the tip one block ahead of its own,
+// because SPHINCS+ signing costs seconds per round. Withdrawing a live voter on
+// that transient lag is not conservative: at N=4 the quorum is 3, so one
+// survivor trailing by a block would leave two and halt a healthy chain.
+// Measured on a real localnet: node 30305 withdrew at height 3 seeing a
+// corroborated tip of 4, and the chain stopped committing.
+func TestEvaluateSyncReadiness_ToleratesOneBlockOfRoundLatency(t *testing.T) {
+	d := EvaluateSyncReadiness(SyncReadinessInput{
+		LocalHeight:      3,
+		PeerTips:         peersAt(3, 4),
+		ValidatorSetSize: 4,
+		HasGenesis:       true,
+		ReadyBefore:      true,
+	})
+	if !d.Ready {
+		t.Fatalf("node 1 block behind was withdrawn from a live quorum: Ready=false (%s); "+
+			"a healthy round must not lose a voter to round latency", d.Reason)
+	}
+	if d.Behind != 1 {
+		t.Errorf("Behind = %d, want 1", d.Behind)
+	}
+}
+
+// TestEvaluateSyncReadiness_RefusesMoreThanOneBlockOfLag confirms the tolerance
+// is bounded: two blocks behind has missed more than one round, so the node is
+// genuinely not at the tip and must re-enter Syncing.
+func TestEvaluateSyncReadiness_RefusesMoreThanOneBlockOfLag(t *testing.T) {
+	d := EvaluateSyncReadiness(SyncReadinessInput{
+		LocalHeight:      2,
+		PeerTips:         peersAt(3, 4),
+		ValidatorSetSize: 4,
+		HasGenesis:       true,
+		ReadyBefore:      true,
+	})
+	if d.Ready {
+		t.Fatal("node 2 blocks behind stayed ready; the lag tolerance must be bounded")
+	}
+}

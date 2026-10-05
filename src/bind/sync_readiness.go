@@ -83,10 +83,30 @@ type SyncReadinessDecision struct {
 const (
 	// TipCorroborationCount is how many DISTINCT responders must agree on a
 	// tip before that tip counts as corroborated. Two is the minimum that
-	// ReadinessRespondersRequired returns the number of distinct responders a node
 	// makes an uncorroborated single-peer claim (a lying, forked, or unrelated
 	// peer) insufficient to move the target.
 	TipCorroborationCount = 2
+
+	// MaxReadyLagBlocks is how many blocks a node may trail the corroborated
+	// network tip and still count as ready, so a healthy node is not withdrawn
+	// from PBFT for ordinary round latency.
+	//
+	// Why a non-zero value is required. A committing validator observes the tip a
+	// little behind the fastest peer: SPHINCS+ signing costs seconds per round
+	// (measured 18-21s per round at N=7), so a node that has committed height N
+	// can transiently see N+1 from a faster peer. Withdrawing on ANY positive lag
+	// therefore removes live voters from a healthy round. That is not a harmless
+	// conservatism: at N=4 the quorum is 3, so if one of the three survivors
+	// transiently trails by one block and withdraws, only two remain, the network
+	// drops below quorum, and the chain halts with nothing wrong with any node.
+	// Measured: node 30305 withdrew at height 3 seeing a corroborated tip of 4,
+	// and the chain stopped committing.
+	//
+	// One block is the smallest bound that survives round latency while still
+	// catching the defect: a restarted validator in the rejoin test trails by four
+	// blocks, so it is still refused. A node two or more blocks behind has missed
+	// more than one round and is genuinely not at the tip.
+	MaxReadyLagBlocks = 1
 )
 
 // ReadinessRespondersRequired returns the number of distinct responders a node
@@ -183,9 +203,11 @@ func EvaluateSyncReadiness(in SyncReadinessInput) SyncReadinessDecision {
 		d.Reason = "network is at genesis"
 		return d
 
-	// Peer evidence says we are behind a corroborated tip. Stays not-ready
-	// until blocks are actually applied; no timer overrides this.
-	case d.Behind > 0:
+	// Peer evidence says we are behind by more than a round of latency. Stays
+	// not-ready until blocks are actually applied; no timer overrides this.
+	// Lag within MaxReadyLagBlocks is tolerated so a healthy node is not
+	// withdrawn from a live quorum for ordinary round latency.
+	case d.Behind > MaxReadyLagBlocks:
 		d.Reason = "local height trails the corroborated network tip"
 		return d
 

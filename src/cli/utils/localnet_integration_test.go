@@ -50,8 +50,9 @@ const (
 )
 
 var (
-	bestBlockRe = regexp.MustCompile(`Updated best block: height=(\d+), hash=([0-9a-f]+)`)
-	seededRe    = regexp.MustCompile(`seeded (\d+) validators into the consensus set`)
+	bestBlockRe      = regexp.MustCompile(`Updated best block: height=(\d+), hash=([0-9a-f]+)`)
+	committedBlockRe = regexp.MustCompile(`Committed block: node=[A-Za-z0-9.:\[\]-]+, height=(\d+), hash=([0-9a-f]+)`)
+	seededRe         = regexp.MustCompile(`seeded (\d+) validators into the consensus set`)
 	// nodePrefixRe extracts the Node-<host:port> tag the localnet supervisor
 	// prefixes onto every line, so tips can be attributed to a specific node.
 	nodePrefixRe = regexp.MustCompile(`(Node-[0-9a-zA-Z\.\:\[\]]+)\s+\|`)
@@ -74,6 +75,13 @@ func nodeTips(text string) map[string]nodeTip {
 	tips := make(map[string]nodeTip)
 	for _, line := range strings.Split(text, "\n") {
 		m := bestBlockRe.FindStringSubmatch(line)
+		if m == nil {
+			// A node restarting on an existing datadir does not re-emit
+			// bind's "Updated best block", so a rejoining validator was
+			// invisible and 4-way agreement unobservable. The consensus
+			// engine's per-commit line is emitted by every participant.
+			m = committedBlockRe.FindStringSubmatch(line)
+		}
 		if m == nil {
 			continue
 		}
@@ -317,22 +325,20 @@ func TestLocalnet_LeaderKillCompletesViewChange(t *testing.T) {
 	if testing.Short() {
 		t.Skip("localnet spawns real validator processes; skipped under -short")
 	}
-	// KNOWN FAILING — documents a real recovery gap, see below.
+	// Leader recovery. Proven cause of the old stall: sendPrepareVote and
+	// voteForBlock wrote lastRoundActivity when the node sent its OWN vote, and
+	// processPrepareVote/processVoteLocked wrote it for ANY incoming vote. After
+	// the leader died the survivors kept voting in a dead round, so the 45s
+	// stalledRoundThreshold and 90s roundActivityWindow never expired,
+	// shouldPreventViewChange stayed true, and consensusLoop suppressed every
+	// further view change: measured at 204s before the first one started.
+	// Only real progress (accepted proposal, recorded vote, commit) refreshes
+	// that clock now; see markRoundProgress.
 	//
-	// Verified 2026-10-04 against a 4-validator localnet: after killing the
-	// current leader (Node-127.0.0.1:30306, offset 3), the 3 survivors stayed
-	// exactly at height 2 for 6+ minutes and the log contained ZERO
-	// "View change triggered" lines, while a healthy run of the same shape
-	// logged 17 "No new blocks for 20s" and 267 "View change triggered".
-	// The stall is in shouldPreventViewChange, which keeps returning true for
-	// the survivors' half-finished round, so consensusLoop never advances the
-	// view and nobody is ever re-elected. The leader can propose, so its death
-	// is unrecoverable.
-	//
-	// This is left skipped rather than deleted so the gap stays visible and the
-	// test turns green the moment recovery works. Remove this skip to reproduce.
-	t.Skip("KNOWN GAP: killing the leader stalls the chain; no view change occurs " +
-		"(survivors frozen at the kill height for 6+ min, 0 view changes logged)")
+	// NOTE: "View change triggered" is NOT a consensus line. It comes from
+	// state/smr.go's local StateMachine view counter, which increments once a
+	// second and is never broadcast. The consensus signal asserted below is
+	// "View change completed: node=..., new_view=N" (consensus.go).
 	const n = 4
 
 	bin := buildLocalnetBinary(t)
@@ -397,6 +403,13 @@ func TestLocalnet_LeaderKillCompletesViewChange(t *testing.T) {
 		t.Errorf("no view change observed after killing the leader: max view still %d "+
 			"(was %d before the kill). The survivors must elect a new leader.", viewAfter, viewBefore)
 	}
+	// Recovery latency measured from LAST REAL PROGRESS, not from the kill: the
+	// chain may keep committing for a while after the leader dies, and counting
+	// that time against recovery conflates a working chain with a stalled one.
+	t.Logf("phase 2: last-progress-to-view-change = %dms (initiations: %d, highest target view %d)",
+		lastProgressToViewChange(text),
+		len(viewChangeInitiationRe.FindAllStringSubmatch(text, -1)),
+		highestReachedView(text))
 	if v := viewForHeight(text, recovered); v != 0 && v <= viewBefore {
 		t.Errorf("height %d was proposed at view %d, not above the pre-kill view %d; "+
 			"the round that committed it reused the dead leader's view",
@@ -422,25 +435,12 @@ func TestLocalnet_ValidatorRejoinsAfterFailure(t *testing.T) {
 	if testing.Short() {
 		t.Skip("localnet spawns real validator processes; skipped under -short")
 	}
-	// NOT YET VERIFIABLE — see below. Kept, not deleted, so the coverage gap
-	// stays visible and this goes green as soon as rejoin is observable.
-	//
-	// Measured 2026-10-04: the kill and the restart both work mechanically —
-	// the survivors kept committing to height 3 while the node was down, the
-	// restarted process came back up on the same datadir/keys, and the chain
-	// continued to height 12 with four processes alive.
-	//
-	// What could NOT be established is the assertion that matters: that the
-	// rejoined node caught up and agreed on height AND hash. The restarted
-	// node emits no "Updated best block" lines into the captured log, so
-	// nodeTips never produces a tip for it and 4-way agreement is unobservable
-	// through this channel. Asserting it anyway would mean asserting nothing.
-	//
-	// To make this testable, one of these is needed:
-	//   - an RPC that reports a node's best height and hash (there is none today),
-	//   - or a log line carrying height+hash that a freshly synced node emits.
-	t.Skip("NOT VERIFIED: a rejoined validator emits no height+hash log line, " +
-		"so 'it re-synced and all four agree' cannot be asserted through the log")
+	// Rejoin observability: the consensus engine now emits a permanent
+	// "Committed block: node=..., height=..., hash=..." line at every commit. A
+	// validator restarting on an existing datadir emits that, even though it does
+	// not re-emit bind's syncing-view "Updated best block" line, so a rejoining
+	// node is now observable and 4-way agreement on height AND hash is a real
+	// assertion rather than an unobservable one.
 	const n = 4
 
 	bin := buildLocalnetBinary(t)
@@ -521,7 +521,12 @@ func TestLocalnet_ValidatorRejoinsAfterFailure(t *testing.T) {
 	var liveAtRestart uint64
 	waitForCondition(t, logPath, localnetBlockTimeout,
 		func(text string) (uint64, bool) {
-			h, ok := agreedTip(liveTips(text, offByNode), n-1, afterKill)
+			// SURVIVORS ONLY. The rejoined node is now visible (it emits the
+			// per-commit line), and agreedTip requires EVERY node in the map to
+			// be at least minHeight. Including a rejoined node that is still
+			// catching up made this pre-rejoin barrier unsatisfiable, because
+			// that is exactly the state the barrier is meant to precede.
+			h, ok := agreedTip(survivorTips(text, offByNode, dead), n-1, afterKill)
 			if ok {
 				liveAtRestart = h
 			}
@@ -571,7 +576,42 @@ var (
 	// proposalViewRe captures "Processing proposal for block at height H, view V
 	// from Node-...", which pairs a view number with a height.
 	proposalViewRe = regexp.MustCompile(`Processing proposal for block at height (\d+), view (\d+)`)
+	// viewChangeInitiationRe captures the permanent view-change instrumentation:
+	// "View change initiated: node=..., from_view=A, to_view=B,
+	// since_last_progress_ms=N". N is the stall measured from the last REAL
+	// progress, so it is the recovery latency that matters — measuring from the
+	// moment of the kill conflates it with the time the chain was still
+	// legitimately committing.
+	viewChangeInitiationRe = regexp.MustCompile(
+		`View change initiated: node=([A-Za-z0-9.:\[\]-]+), from_view=(\d+), to_view=(\d+), since_last_progress_ms=(\d+)`)
 )
+
+// lastProgressToViewChange returns the since_last_progress_ms of the FIRST
+// view-change initiation in the log: how long the chain went without real
+// progress before a node first abandoned the round. That is the
+// last-progress-to-first-view-change latency. Returns 0 when none was logged.
+func lastProgressToViewChange(text string) int {
+	m := viewChangeInitiationRe.FindStringSubmatch(text)
+	if m == nil {
+		return 0
+	}
+	ms, err := strconv.Atoi(m[4])
+	if err != nil {
+		return 0
+	}
+	return ms
+}
+
+// highestReachedView returns the largest to_view across all initiation lines.
+func highestReachedView(text string) uint64 {
+	var max uint64
+	for _, m := range viewChangeInitiationRe.FindAllStringSubmatch(text, -1) {
+		if v, err := strconv.ParseUint(m[3], 10, 64); err == nil && v > max {
+			max = v
+		}
+	}
+	return max
+}
 
 // currentLeader returns the node the network most recently reported as leader.
 //
@@ -630,6 +670,19 @@ func liveTips(text string, offByNode map[string]int) map[string]nodeTip {
 	for id := range tips {
 		off, ok := offByNode[id]
 		if !ok || !offsetProcessAlive(off) {
+			delete(tips, id)
+		}
+	}
+	return tips
+}
+
+// survivorTips returns tips for every node EXCEPT the one serving excludeOffset.
+// A rejoined node is live and now observable, so it would otherwise be folded
+// into "the survivors agreed" checks it is not yet part of.
+func survivorTips(text string, offByNode map[string]int, excludeOffset int) map[string]nodeTip {
+	tips := liveTips(text, offByNode)
+	for id, off := range offByNode {
+		if off == excludeOffset {
 			delete(tips, id)
 		}
 	}
@@ -756,6 +809,86 @@ func TestQuorumCaseKillBudgets(t *testing.T) {
 // correctly agreed on one hash collapsed into a single map entry, so the
 // "all four agree" assertion could never be satisfied by working code. These
 // cases pin the correct behaviour without paying for real validator startup.
+// TestViewChangeInitiationHelpers pins the parsing of the permanent view-change
+// instrumentation: lastProgressToViewChange takes the FIRST initiation's stall
+// (last-progress-to-first-view-change) and highestReachedView the largest
+// to_view, both from the same line format.
+func TestViewChangeInitiationHelpers(t *testing.T) {
+	const line = "View change initiated: node=Node-127.0.0.1:30305, from_view=4, to_view=5, since_last_progress_ms=104321\n"
+
+	t.Run("first initiation ms", func(t *testing.T) {
+		if got := lastProgressToViewChange(line); got != 104321 {
+			t.Errorf("lastProgressToViewChange = %d, want 104321", got)
+		}
+	})
+
+	t.Run("takes the FIRST not the largest", func(t *testing.T) {
+		two := line +
+			"View change initiated: node=Node-127.0.0.1:30306, from_view=5, to_view=6, since_last_progress_ms=900000\n"
+		if got := lastProgressToViewChange(two); got != 104321 {
+			t.Errorf("lastProgressToViewChange = %d, want the first line's 104321", got)
+		}
+	})
+
+	t.Run("highest target view", func(t *testing.T) {
+		two := line +
+			"View change initiated: node=Node-127.0.0.1:30306, from_view=5, to_view=7, since_last_progress_ms=900000\n"
+		if got := highestReachedView(two); got != 7 {
+			t.Errorf("highestReachedView = %d, want 7", got)
+		}
+	})
+
+	t.Run("no lines yields zero", func(t *testing.T) {
+		if got := lastProgressToViewChange("nothing here"); got != 0 {
+			t.Errorf("lastProgressToViewChange = %d, want 0", got)
+		}
+		if got := highestReachedView("nothing here"); got != 0 {
+			t.Errorf("highestReachedView = %d, want 0", got)
+		}
+	})
+
+	t.Run("ignores the SMR counter line", func(t *testing.T) {
+		// "View change triggered" is state/smr.go's local counter, not consensus.
+		smr := "View change triggered, new view: 70\n"
+		if got := lastProgressToViewChange(smr); got != 0 {
+			t.Errorf("SMR counter line was parsed as a consensus initiation: %d", got)
+		}
+	})
+}
+
+// TestNodeTipsReadsBothCommitFormats pins that nodeTips attributes a tip from
+// EITHER height+hash line, so a validator that only emits the consensus engine's
+// per-commit line (which is what a node restarting on an existing datadir does)
+// is still counted. It must keep the old "Updated best block" capture working.
+func TestNodeTipsReadsBothCommitFormats(t *testing.T) {
+	const hash = "abc123def456"
+
+	// Old format only: must still parse exactly as before.
+	oldOnly := "Node-127.0.0.1:30303  | 01:02:03.004 INFO    Updated best block: height=7, hash=" + hash + ", total=9\n"
+	tips := nodeTips(oldOnly)
+	if got, ok := tips["Node-127.0.0.1:30303"]; !ok {
+		t.Fatalf("old format no longer parsed, tips=%v", tips)
+	} else if got.height != 7 || got.hash != hash {
+		t.Errorf("old format parsed as %+v, want height 7 hash %s", got, hash)
+	}
+
+	// New per-commit format only: previously invisible.
+	newOnly := "Node-127.0.0.1:30304  | 01:02:04.004 INFO    Committed block: node=Node-127.0.0.1:30304, height=12, hash=" + hash + "\n"
+	tips = nodeTips(newOnly)
+	if got, ok := tips["Node-127.0.0.1:30304"]; !ok {
+		t.Fatalf("per-commit format not parsed, tips=%v", tips)
+	} else if got.height != 12 || got.hash != hash {
+		t.Errorf("per-commit format parsed as %+v, want height 12 hash %s", got, hash)
+	}
+
+	// Mixed, as in a real restart log: the latest line per node wins.
+	mixed := oldOnly +
+		"Node-127.0.0.1:30303  | 01:02:09.004 INFO    Committed block: node=Node-127.0.0.1:30303, height=15, hash=" + hash + "\n"
+	if got := nodeTips(mixed)["Node-127.0.0.1:30303"]; got.height != 15 {
+		t.Errorf("latest line did not win, got height %d want 15", got.height)
+	}
+}
+
 // TestLeaderAndViewObservation pins the log-scraping used to identify the
 // leader and detect a view change.
 //

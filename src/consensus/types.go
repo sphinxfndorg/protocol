@@ -324,6 +324,17 @@ type Consensus struct {
 	lastBlockTime     time.Time
 	lastRoundActivity time.Time
 
+	// skipLogMu/skipLogAt rate-limit the watchdog's skip diagnostics to one
+	// line per 10s, so a suppressed view change is explainable without
+	// flooding a 20s ticker.
+	skipLogMu sync.Mutex
+	skipLogAt time.Time
+
+	// nowFn is the clock the view-change gates read. It defaults to the
+	// process time source; tests replace it via setNowFunc to drive the
+	// timeout windows deterministically instead of sleeping. Set before Start.
+	nowFn func() time.Time
+
 	// Cache fields
 	merkleRootCache     map[string]string
 	cacheMutex          sync.RWMutex

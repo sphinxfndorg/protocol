@@ -2,7 +2,13 @@ package consensus
 
 import (
 	"math/big"
+	"strconv"
+	"strings"
+	"sync"
 	"testing"
+	"time"
+
+	types "github.com/sphinxfndorg/protocol/src/core/transaction"
 )
 
 // installTestSnapshot registers a four-validator epoch-0 snapshot for tests.
@@ -29,6 +35,462 @@ func installTestSnapshot(t *testing.T, ids ...string) {
 		Epoch:      epoch,
 		Validators: vals,
 		TotalStake: total,
+	}
+}
+
+// TestCommitCertCache_RejectsUnderQuorumBeforeCaching pins the invariant the
+// block-hash-keyed cache relies on: the ONLY path that populates it verifies
+// strict 2/3 against the height's snapshot first.
+//
+// The adopt path in attachAttestationsBeforeCommit does a bare lookup and
+// re-attaches without re-checking quorum, so an under-quorum certificate
+// reaching the cache would be adopted as a sub-quorum attestation set.
+func TestCommitCertCache_RejectsUnderQuorumBeforeCaching(t *testing.T) {
+	ResetSnapshots()
+	t.Cleanup(ResetSnapshots)
+
+	ids := []string{"Node-a", "Node-b", "Node-c", "Node-d"}
+	unit := big.NewInt(3200000000000000000)
+	snapshot := &ValidatorSnapshot{Epoch: 0, TotalStake: new(big.Int).Mul(unit, big.NewInt(4)),
+		Validators: make(map[string]*StakedValidator, len(ids))}
+	for _, id := range ids {
+		snapshot.Validators[id] = &StakedValidator{ID: id, StakeAmount: new(big.Int).Set(unit)}
+	}
+	StoreSnapshotForTest(*snapshot)
+
+	// signingService nil: HandleCommitCertificate then accepts on the
+	// stake-quorum check alone, which is exactly the gate under test.
+	c := &Consensus{chainID: 7331, currentHeight: 0}
+
+	atts := func(n int, hash string) []*types.Attestation {
+		out := make([]*types.Attestation, 0, n)
+		for i := 0; i < n; i++ {
+			out = append(out, &types.Attestation{
+				ValidatorID: ids[i],
+				BlockHash:   hash,
+				ChainID:     7331,
+				Height:      1,
+				Phase:       VotePhaseCommit,
+				View:        1,
+			})
+		}
+		return out
+	}
+
+	// 2 of 4 is exactly 2/3, which is NOT enough: the rule is strict.
+	const hash = "under-quorum-block"
+	if err := c.HandleCommitCertificate(&CommitCertificate{
+		BlockHash:    hash,
+		View:         1,
+		Attestations: atts(2, hash),
+	}); err == nil {
+		t.Fatal("a 2-of-4 certificate was accepted; strict 2/3 must reject it")
+	}
+	if _, cached := lookupCommitCertificate(hash); cached {
+		t.Fatal("an under-quorum certificate reached the cache; the adopt path " +
+			"would then re-attach a sub-quorum attestation set")
+	}
+
+	const okHash = "quorum-block"
+	if err := c.HandleCommitCertificate(&CommitCertificate{
+		BlockHash:    okHash,
+		View:         1,
+		Attestations: atts(3, okHash),
+	}); err != nil {
+		t.Fatalf("a 3-of-4 certificate was rejected: %v", err)
+	}
+	cached, ok := lookupCommitCertificate(okHash)
+	if !ok || len(cached) != 3 {
+		t.Fatalf("verified certificate not cached: ok=%v len=%d", ok, len(cached))
+	}
+	evictCommitCertificate(okHash)
+}
+
+// TestCommitCertCache_IsKeyedByBlockNotView pins the scoping the cache relies
+// on: a certificate is reachable ONLY under its own block hash. That is what
+// stops a view-N certificate being adopted for a DIFFERENT block proposed at the
+// same height after a view change, which would be the route to two blocks
+// committing at one height.
+func TestCommitCertCache_IsKeyedByBlockNotView(t *testing.T) {
+	ResetSnapshots()
+	t.Cleanup(ResetSnapshots)
+
+	ids := []string{"Node-a", "Node-b", "Node-c", "Node-d"}
+	unit := big.NewInt(3200000000000000000)
+	snapshot := &ValidatorSnapshot{Epoch: 0, TotalStake: new(big.Int).Mul(unit, big.NewInt(4)),
+		Validators: make(map[string]*StakedValidator, len(ids))}
+	for _, id := range ids {
+		snapshot.Validators[id] = &StakedValidator{ID: id, StakeAmount: new(big.Int).Set(unit)}
+	}
+	StoreSnapshotForTest(*snapshot)
+
+	c := &Consensus{chainID: 7331, currentHeight: 0}
+
+	const blockX = "block-X-at-height-1"
+	atts := make([]*types.Attestation, 0, 3)
+	for i := 0; i < 3; i++ {
+		atts = append(atts, &types.Attestation{
+			ValidatorID: ids[i],
+			BlockHash:   blockX,
+			ChainID:     7331,
+			Height:      1,
+			Phase:       VotePhaseCommit,
+			View:        4, // produced in view 4
+		})
+	}
+	if err := c.HandleCommitCertificate(&CommitCertificate{
+		BlockHash: blockX, View: 4, Attestations: atts,
+	}); err != nil {
+		t.Fatalf("cache setup: %v", err)
+	}
+
+	// A competing block Y at the SAME height, proposed by the view-5 leader,
+	// must not see X's certificate.
+	const blockY = "block-Y-at-height-1"
+	if _, ok := lookupCommitCertificate(blockY); ok {
+		t.Fatal("block Y's lookup returned block X's certificate; the cache is " +
+			"not scoped to the block hash, so a view change could adopt the old " +
+			"block's attestations for a competing block at the same height")
+	}
+
+	got, ok := lookupCommitCertificate(blockX)
+	if !ok || len(got) != 3 {
+		t.Fatalf("block X certificate lost: ok=%v len=%d", ok, len(got))
+	}
+	for _, a := range got {
+		if a.BlockHash != blockX {
+			t.Fatalf("cached attestation claims block %q, want %q", a.BlockHash, blockX)
+		}
+	}
+	evictCommitCertificate(blockX)
+}
+
+// TestLeaderDeath_ViewChangeNotBlockedBySelfVoteRefresh is the regression test
+// for the measured 204s stall.
+//
+// After the leader dies the survivors keep sending their OWN prepare and commit
+// votes in a dead round. That is not progress. When it refreshed
+// lastRoundActivity, the 45s stalledRoundThreshold and the 90s
+// roundActivityWindow never expired, so shouldPreventViewChange stayed true and
+// no further view change could ever start.
+func TestLeaderDeath_ViewChangeNotBlockedBySelfVoteRefresh(t *testing.T) {
+	ResetSnapshots()
+	t.Cleanup(ResetSnapshots)
+
+	ids := []string{"Node-a", "Node-b", "Node-c", "Node-d"}
+	unit := big.NewInt(3200000000000000000)
+	snapshot := &ValidatorSnapshot{Epoch: 0, TotalStake: new(big.Int).Mul(unit, big.NewInt(4)),
+		Validators: make(map[string]*StakedValidator, len(ids))}
+	for _, id := range ids {
+		snapshot.Validators[id] = &StakedValidator{ID: id, StakeAmount: new(big.Int).Set(unit)}
+	}
+	StoreSnapshotForTest(*snapshot)
+
+	clock := newTestClock()
+	survivor := newGateNode(t, "Node-b", ids, clock)
+
+	// Post-leader-death state: committed long ago, nothing advancing since.
+	survivor.currentHeight = 1
+	survivor.lastBlockTime = clock.now().Add(-10 * time.Minute)
+	survivor.lastViewChange = clock.now().Add(-10 * time.Minute)
+	survivor.lastRoundActivity = clock.now().Add(-10 * time.Minute)
+
+	if survivor.shouldPreventViewChange() {
+		t.Fatal("with a 10-minute-old stall the gate is shut; no view change could start")
+	}
+
+	// Advance past the 90s window. Each step models one more view: resetConsensusState
+	// clears the per-block sent-vote maps, so the survivor legitimately re-sends its
+	// own prepare and commit votes for the same dead round. That is not progress.
+	// If it refreshed the round clock the gate would shut again and never reopen.
+	for elapsed := time.Duration(0); elapsed < 4*time.Minute; elapsed += 5 * time.Second {
+		survivor.sentPrepareVotes = map[string]bool{}
+		survivor.sentVotes = map[string]bool{}
+		survivor.sendPrepareVote("dead-round-block", 1, 2)
+		survivor.voteForBlock("dead-round-block", 1, 2)
+		clock.advance(5 * time.Second)
+
+		if survivor.shouldPreventViewChange() {
+			t.Fatalf("view change was suppressed %v into a dead round that made "+
+				"no progress; re-sending its own votes must not refresh the "+
+				"round-activity clock", elapsed+5*time.Second)
+		}
+	}
+
+	if got := clock.now().Sub(survivor.lastBlockTime); got <= roundActivityWindow {
+		t.Fatalf("test did not advance past the window (lastBlockTime age %v)", got)
+	}
+}
+
+// TestLeaderDeath_LegitimateSlowRoundStillSuppressesViewChange is the regression
+// guard: real progress MUST keep refreshing the clock, so a slow but healthy
+// round is never abandoned early.
+func TestLeaderDeath_LegitimateSlowRoundStillSuppressesViewChange(t *testing.T) {
+	ResetSnapshots()
+	t.Cleanup(ResetSnapshots)
+
+	ids := []string{"Node-a", "Node-b", "Node-c", "Node-d"}
+	unit := big.NewInt(3200000000000000000)
+	snapshot := &ValidatorSnapshot{Epoch: 0, TotalStake: new(big.Int).Mul(unit, big.NewInt(4)),
+		Validators: make(map[string]*StakedValidator, len(ids))}
+	for _, id := range ids {
+		snapshot.Validators[id] = &StakedValidator{ID: id, StakeAmount: new(big.Int).Set(unit)}
+	}
+	StoreSnapshotForTest(*snapshot)
+
+	clock := newTestClock()
+	c := newGateNode(t, "Node-b", ids, clock)
+	c.currentHeight = 1
+	c.lastBlockTime = clock.now().Add(-10 * time.Minute)
+	c.lastViewChange = clock.now().Add(-10 * time.Minute)
+	c.lastRoundActivity = clock.now().Add(-10 * time.Minute)
+
+	// A real proposal is accepted, then the round makes progress every 30s for
+	// five minutes of injected time. Each progress event refreshes the clock,
+	// so the gate must stay shut throughout.
+	for elapsed := time.Duration(0); elapsed < 5*time.Minute; elapsed += 30 * time.Second {
+		clock.advance(30 * time.Second)
+		c.markRoundProgress()
+
+		if !c.shouldPreventViewChange() {
+			t.Fatalf("a round making real progress was abandoned %v in; the gate "+
+				"must stay shut while progress continues", elapsed+30*time.Second)
+		}
+	}
+}
+
+// testClock is a manually advanced clock for the view-change timeout windows.
+type testClock struct {
+	mu sync.Mutex
+	at time.Time
+}
+
+func newTestClock() *testClock {
+	return &testClock{at: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+}
+
+func (c *testClock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.at
+}
+
+func (c *testClock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.at = c.at.Add(d)
+}
+
+// newGateNode returns a Consensus wired only far enough to exercise the
+// view-change gates: no goroutines, an injected clock, sync gate open.
+// stubNodeManager swallows broadcasts: the gate tests need the vote-send paths
+// to run for their side effects, not to reach a network.
+type stubNodeManager struct{ sent int }
+
+func (s *stubNodeManager) GetPeers() map[string]Peer { return nil }
+func (s *stubNodeManager) GetNode(string) Node       { return nil }
+func (s *stubNodeManager) BroadcastMessage(string, interface{}) error {
+	s.sent++
+	return nil
+}
+func (s *stubNodeManager) BroadcastRANDAOState([32]byte, map[uint64]map[string]*VDFSubmission) error {
+	return nil
+}
+
+func newGateNode(t *testing.T, id string, allIDs []string, clock *testClock) *Consensus {
+	t.Helper()
+	unit := big.NewInt(3200000000000000000)
+	vs := NewValidatorSet(unit)
+	if err := vs.AddGenesisValidator(id, unit); err != nil {
+		t.Fatalf("AddGenesisValidator: %v", err)
+	}
+	for _, other := range allIDs {
+		if other == id {
+			continue
+		}
+		if err := vs.AddGenesisValidator(other, unit); err != nil {
+			t.Fatalf("AddGenesisValidator(%s): %v", other, err)
+		}
+	}
+	vs.ProcessEpochTransition(0)
+	vs.SealGenesis()
+
+	c := &Consensus{
+		nodeID:               id,
+		chainID:              7331,
+		nowFn:                clock.now,
+		phase:                PhaseIdle,
+		validatorSet:         vs,
+		nodeManager:          &stubNodeManager{},
+		receivedVotes:        map[string]map[string]*Vote{},
+		prepareVotes:         map[string]map[string]*Vote{},
+		sentVotes:            map[string]bool{},
+		sentPrepareVotes:     map[string]bool{},
+		timeoutVotes:         map[uint64]map[string]*TimeoutMsg{},
+		weightedPrepareVotes: map[string]*big.Int{},
+		weightedCommitVotes:  map[string]*big.Int{},
+	}
+	c.SetSyncReady(true)
+	return c
+}
+
+// TestLeaderDeath_StaleAndForeignVotesDoNotCountAsProgress is the vote-guard
+// test. processPrepareVote and processVoteLocked already reject wrong heights
+// and duplicates, so the remaining gap is a vote at the RIGHT height but a
+// STALE VIEW or a DIFFERENT block. Those arrive freely once the leader is dead:
+// survivors keep voting, and each newly recorded one used to refresh the round
+// clock, holding the view-change gate shut for good.
+//
+// Only a vote for this node's current round counts as progress.
+func TestLeaderDeath_StaleAndForeignVotesDoNotCountAsProgress(t *testing.T) {
+	ResetSnapshots()
+	t.Cleanup(ResetSnapshots)
+
+	ids := []string{"Node-a", "Node-b", "Node-c", "Node-d"}
+	unit := big.NewInt(3200000000000000000)
+	snapshot := &ValidatorSnapshot{Epoch: 0, TotalStake: new(big.Int).Mul(unit, big.NewInt(4)),
+		Validators: make(map[string]*StakedValidator, len(ids))}
+	for _, id := range ids {
+		snapshot.Validators[id] = &StakedValidator{ID: id, StakeAmount: new(big.Int).Set(unit)}
+	}
+	StoreSnapshotForTest(*snapshot)
+
+	clock := newTestClock()
+	c := newGateNode(t, "Node-b", ids, clock)
+
+	// A round is in progress for block "real-block" at view 4.
+	c.currentHeight = 1
+	c.currentView = 4
+	c.preparedBlockHash = "real-block"
+	c.lastBlockTime = clock.now().Add(-10 * time.Minute)
+	c.lastViewChange = clock.now().Add(-10 * time.Minute)
+	c.lastRoundActivity = clock.now().Add(-10 * time.Minute)
+
+	foreign := func(i int, hash string, view uint64) *Vote {
+		return &Vote{
+			BlockHash: hash,
+			ChainID:   c.chainID,
+			Height:    c.currentHeight + 1,
+			Phase:     VotePhasePrepare,
+			View:      view,
+			VoterID:   ids[i],
+		}
+	}
+
+	// Each step feeds a vote that is NOT this round's vote: a different block,
+	// or the right block in a stale view. None may refresh the clock.
+	step := 0
+	for elapsed := time.Duration(0); elapsed < 4*time.Minute; elapsed += 5 * time.Second {
+		step++
+		c.prepareVotes = map[string]map[string]*Vote{} // new round, maps reset
+		c.processPrepareVote(foreign(0, "other-block-"+strconv.Itoa(step), 4))
+		c.processPrepareVote(foreign(1, "real-block", 3))
+
+		clock.advance(5 * time.Second)
+		if c.shouldPreventViewChange() {
+			t.Fatalf("view change suppressed %v into a dead round by stale-view "+
+				"and foreign-block votes; only a vote for the current round counts "+
+				"as progress", elapsed+5*time.Second)
+		}
+	}
+
+	// Control: a vote for THIS round at THIS view is progress and must hold the
+	// gate shut, or the guard would be too strict and abandon healthy rounds.
+	c.markRoundProgress()
+	if !c.shouldPreventViewChange() {
+		t.Fatal("a genuine current-round vote did not count as progress")
+	}
+}
+
+// TestLeaderDeath_VotesWithoutAcceptedProposalAreNotProgress closes the last
+// hole: preparedBlockHash is set ONLY when a proposal is accepted (see
+// processProposal), so when it is "" no proposal has been accepted this round.
+//
+// voteIsCurrentRound previously SKIPPED its block check in that case, so a
+// validator could keep sending distinct votes for arbitrary block hashes at the
+// right height and view, each one re-arming the round clock and holding the
+// view-change gate shut for good.
+func TestLeaderDeath_VotesWithoutAcceptedProposalAreNotProgress(t *testing.T) {
+	ResetSnapshots()
+	t.Cleanup(ResetSnapshots)
+
+	ids := []string{"Node-a", "Node-b", "Node-c", "Node-d"}
+	unit := big.NewInt(3200000000000000000)
+	snapshot := &ValidatorSnapshot{Epoch: 0, TotalStake: new(big.Int).Mul(unit, big.NewInt(4)),
+		Validators: make(map[string]*StakedValidator, len(ids))}
+	for _, id := range ids {
+		snapshot.Validators[id] = &StakedValidator{ID: id, StakeAmount: new(big.Int).Set(unit)}
+	}
+	StoreSnapshotForTest(*snapshot)
+
+	clock := newTestClock()
+	c := newGateNode(t, "Node-b", ids, clock)
+
+	// Leader died before proposing: correct height and view, but NO proposal was
+	// ever accepted, so preparedBlockHash is empty.
+	c.currentHeight = 1
+	c.currentView = 4
+	c.preparedBlockHash = ""
+	c.lastBlockTime = clock.now()
+	c.lastViewChange = clock.now()
+	c.lastRoundActivity = clock.now()
+
+	// Feed an invented-block vote every 5s. None of them may refresh the round
+	// clock, so the gate must open once roundActivityWindow has elapsed.
+	for step := 1; step <= 60; step++ {
+		c.prepareVotes = map[string]map[string]*Vote{}
+		c.processPrepareVote(&Vote{
+			BlockHash: "invented-" + strconv.Itoa(step),
+			ChainID:   c.chainID,
+			Height:    c.currentHeight + 1,
+			Phase:     VotePhasePrepare,
+			View:      c.currentView,
+			VoterID:   ids[step%len(ids)],
+		})
+
+		clock.advance(5 * time.Second)
+		if !c.shouldPreventViewChange() {
+			return // the window elapsed and the view change may start
+		}
+	}
+	t.Fatalf("votes for blocks nobody proposed kept the view-change gate shut for "+
+		"5+ minutes: lastRoundActivity is only %v old", clock.now().Sub(c.lastRoundActivity))
+}
+
+// TestViewChangeInitiationLog_UsesInjectedClock pins that the permanent
+// view-change instrumentation reports the stall measured from LAST REAL PROGRESS
+// (markRoundProgress), read through the injectable clock — so localnet tests can
+// report latency from last progress rather than from the moment of the kill.
+func TestViewChangeInitiationLog_UsesInjectedClock(t *testing.T) {
+	ResetSnapshots()
+	t.Cleanup(ResetSnapshots)
+
+	ids := []string{"Node-a", "Node-b", "Node-c", "Node-d"}
+	clock := newTestClock()
+	c := newGateNode(t, "Node-b", ids, clock)
+
+	c.currentView = 4
+	c.lastRoundActivity = clock.now()
+
+	// Nothing has happened for 12.5s of injected time.
+	clock.advance(12500 * time.Millisecond)
+
+	line := c.viewChangeInitiationLog(5)
+	if !strings.Contains(line, "node=Node-b") {
+		t.Errorf("line missing node: %q", line)
+	}
+	if !strings.Contains(line, "from_view=4") || !strings.Contains(line, "to_view=5") {
+		t.Errorf("line missing views: %q", line)
+	}
+	if !strings.Contains(line, "since_last_progress_ms=12500") {
+		t.Errorf("since_last_progress_ms not read from the injected clock: %q", line)
+	}
+
+	// A fresh progress event resets the measured stall.
+	c.markRoundProgress()
+	clock.advance(3 * time.Second)
+	if got := c.viewChangeInitiationLog(6); !strings.Contains(got, "since_last_progress_ms=3000") {
+		t.Errorf("stall not measured from the latest progress: %q", got)
 	}
 }
 

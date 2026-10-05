@@ -263,6 +263,7 @@ func NewConsensus(
 		viewChangeMutex:      sync.Mutex{},                    // Mutex for view change
 		lastBlockTime:        common.GetTimeService().Now(),   // Last block commit timestamp
 		lastRoundActivity:    common.GetTimeService().Now(),   // Last proposal/vote progress timestamp
+		nowFn:                common.GetTimeService().Now,     // Injectable clock for the view-change gates
 		validatorSet:         validatorSet,                    // Set of active validators
 		randao:               randao,                          // VDF-based RANDAO instance
 		selector:             selector,                        // Leader selector
@@ -331,6 +332,62 @@ func (c *Consensus) Start() error {
 	return nil
 }
 
+// setNowFunc installs the clock the view-change gates read. Test-only: it makes
+// the timeout windows drivable without sleeping. Must be called before Start.
+func (c *Consensus) setNowFunc(fn func() time.Time) {
+	if fn == nil {
+		return
+	}
+	c.nowFn = fn
+}
+
+// now reads the injectable clock, falling back to the process time source.
+func (c *Consensus) now() time.Time {
+	if c.nowFn != nil {
+		return c.nowFn()
+	}
+	return common.GetTimeService().Now()
+}
+
+// viewChangeInitiationLog formats the one Info line emitted when this node starts
+// a view change. since_last_progress_ms is the stall measured from the last REAL
+// progress (markRoundProgress) through the injectable clock, so localnet tests
+// can report recovery latency from last progress rather than from the kill.
+func (c *Consensus) viewChangeInitiationLog(targetView uint64) string {
+	return fmt.Sprintf("View change initiated: node=%s, from_view=%d, to_view=%d, since_last_progress_ms=%d",
+		c.nodeID, c.currentView, targetView, c.now().Sub(c.lastRoundActivity).Milliseconds())
+}
+
+// voteIsCurrentRound reports whether a vote belongs to the round this node is
+// actually running: the expected height, the current view, and — once the
+// round's block is known — that block. Height and duplicate checks already
+// happen in the handlers; what this adds is the view and block.
+//
+// A newly recorded vote that clears all of it is real progress. Anything else
+// is chatter from a round that is already dead, and must not refresh the clock.
+func (c *Consensus) voteIsCurrentRound(vote *Vote) bool {
+	if vote == nil || vote.Height != c.currentHeight+1 || vote.View != c.currentView {
+		return false
+	}
+	// preparedBlockHash is set ONLY when a proposal is accepted (processProposal),
+	// so an empty value means no proposal was accepted this round: there is no
+	// round for a vote to belong to, however well-formed the vote is.
+	h := c.preparedBlockHash
+	return h != "" && vote.BlockHash == h
+}
+
+// markRoundProgress records that the chain made REAL progress: a valid proposal
+// was accepted, a quorum advanced, or a block committed.
+//
+// ONLY those events may refresh it. A node sending its own vote, or recording a
+// duplicate/rebroadcasted one, is not progress: once the leader dies the
+// survivors keep exchanging votes in a dead round, and if that refreshed the
+// clock the 45s stalledRoundThreshold and 90s roundActivityWindow would never
+// expire, so no further view change could ever start.
+func (c *Consensus) markRoundProgress() {
+	c.lastRoundActivity = c.now()
+}
+
 // MarkRoundStart tells the engine that PBFT rounds can actually begin now
 // (the block-production loop has passed its "enough READY validators" gate).
 // It restarts the round-activity clock so the automatic view-change timer
@@ -340,7 +397,11 @@ func (c *Consensus) Start() error {
 // whole network into a view change just as the first proposal was in flight.
 func (c *Consensus) MarkRoundStart() {
 	c.mu.Lock()
-	c.lastRoundActivity = common.GetTimeService().Now()
+	// Kept as progress: this fires ONCE, when the block-production loop first
+	// finds enough READY validators. It grants the boot grace period so a node
+	// that waited for its peers does not manufacture a view change. It is not
+	// per-round, so it cannot mask a stall.
+	c.markRoundProgress()
 	c.mu.Unlock()
 }
 
@@ -1150,12 +1211,29 @@ const (
 	staleSignatureTTL = 120 * time.Second
 )
 
+// logSkipOnce emits a Debug skip diagnostic at most once per 10s per node.
+// The watchdog and shouldPreventViewChange are otherwise silent when they
+// suppress a view change, which is what made a 204s stall unexplainable.
+func (c *Consensus) logSkipOnce(format string, args ...interface{}) {
+	c.skipLogMu.Lock()
+	defer c.skipLogMu.Unlock()
+	now := c.now()
+	if !c.skipLogAt.IsZero() && now.Sub(c.skipLogAt) < 10*time.Second {
+		return
+	}
+	c.skipLogAt = now
+	logger.Debug(format, args...)
+}
+
 // shouldPreventViewChange determines if view change should be blocked due to active consensus
 func (c *Consensus) shouldPreventViewChange() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	now := common.GetTimeService().Now()
+	now := c.now()
+	sinceBlock := now.Sub(c.lastBlockTime)
+	sinceRound := now.Sub(c.lastRoundActivity)
+	sinceViewChange := now.Sub(c.lastViewChange)
 
 	// A view change is a recovery mechanism for an active round. At genesis,
 	// before the first proposal arrives, PhaseIdle with no round state is
@@ -1178,17 +1256,25 @@ func (c *Consensus) shouldPreventViewChange() bool {
 	// rejected as stale the instant verification completes, even though
 	// the leader was actively making progress.
 	if c.proposalInFlight {
+		c.logSkipOnce("view-change suppressed: proposalInFlight since_round=%v (window=%v) since_block=%v since_vc=%v",
+			sinceRound, roundActivityWindow, sinceBlock, sinceViewChange)
 		return true
 	}
 	// Block view change while in prepare phases.
 	if c.phase == PhasePrePrepared || c.phase == PhasePrepared {
+		c.logSkipOnce("view-change suppressed: phase=%v since_round=%v (window=%v) since_block=%v since_vc=%v",
+			c.phase, sinceRound, roundActivityWindow, sinceBlock, sinceViewChange)
 		return true
 	}
 	// Block view change while the current round still has votes in flight.
 	if len(c.receivedVotes) > 0 || len(c.prepareVotes) > 0 {
+		c.logSkipOnce("view-change suppressed: votes received=%d prepare=%d since_round=%v (window=%v) since_block=%v since_vc=%v",
+			len(c.receivedVotes), len(c.prepareVotes), sinceRound, roundActivityWindow, sinceBlock, sinceViewChange)
 		return true
 	}
-	if c.currentHeight > 0 && now.Sub(c.lastBlockTime) < 15*time.Second {
+	if c.currentHeight > 0 && sinceBlock < 15*time.Second {
+		c.logSkipOnce("view-change suppressed: recent block since_block=%v (guard=15s) since_round=%v since_vc=%v",
+			sinceBlock, sinceRound, sinceViewChange)
 		return true
 	}
 	// FIX: Use a fixed window instead of c.timeout. c.timeout may be set to
@@ -1196,7 +1282,9 @@ func (c *Consensus) shouldPreventViewChange() bool {
 	// cons.SetTimeout(1 * time.Hour)), which caused shouldPreventViewChange to
 	// return true for 60 minutes after every round, permanently blocking all
 	// view-changes and freezing the chain after block 1.
-	if !c.lastRoundActivity.IsZero() && now.Sub(c.lastRoundActivity) < roundActivityWindow {
+	if !c.lastRoundActivity.IsZero() && sinceRound < roundActivityWindow {
+		c.logSkipOnce("view-change suppressed: round-activity window since_round=%v (window=%v, stalled=%v) activeRound=%v since_block=%v since_vc=%v",
+			sinceRound, roundActivityWindow, stalledRoundThreshold, activeRound, sinceBlock, sinceViewChange)
 		return true
 	}
 	return false
@@ -1233,6 +1321,7 @@ func (c *Consensus) consensusLoop() {
 			// bumped itself to view 1, and broadcast it; followers replayed
 			// that stale timeout on startup and jumped views for no reason.
 			if !c.IsSyncReady() {
+				c.logSkipOnce("watchdog: sync gate closed, no view change")
 				viewTimer.Reset(timeout)
 				continue
 			}
@@ -1249,6 +1338,8 @@ func (c *Consensus) consensusLoop() {
 
 				chainBlock := c.blockChain.GetLatestBlock()
 				if chainBlock != nil && chainBlock.GetHeight() > currentHeight {
+					c.logSkipOnce("watchdog: chain advanced to height=%d (from %d), deferring view change",
+						chainBlock.GetHeight(), currentHeight)
 					c.mu.Lock()
 					c.currentHeight = chainBlock.GetHeight()
 					c.mu.Unlock()
@@ -1650,7 +1741,7 @@ func (c *Consensus) deferProposalUntilSyncReady(p *Proposal) {
 func (c *Consensus) processProposal(proposal *Proposal) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.lastRoundActivity = common.GetTimeService().Now()
+	c.markRoundProgress()
 
 	// Mark this proposal as in-flight for the entire duration of validation
 	// (deserialization, block validation, SPHINCS+ signature verification).
@@ -2233,7 +2324,9 @@ func (c *Consensus) processPrepareVote(vote *Vote) {
 
 	// Store the vote
 	c.prepareVotes[vote.BlockHash][vote.VoterID] = vote
-	c.lastRoundActivity = common.GetTimeService().Now()
+	if c.voteIsCurrentRound(vote) {
+		c.markRoundProgress()
+	}
 
 	// Add voter's stake to weighted vote total
 	stake := c.getValidatorStake(vote.VoterID)
@@ -2668,7 +2761,9 @@ func (c *Consensus) processVoteLocked(vote *Vote) Block {
 
 	// Store the vote
 	c.receivedVotes[vote.BlockHash][vote.VoterID] = vote
-	c.lastRoundActivity = common.GetTimeService().Now()
+	if c.voteIsCurrentRound(vote) {
+		c.markRoundProgress()
+	}
 
 	// Get voter's stake
 	stake := c.getValidatorStake(vote.VoterID)
@@ -3014,7 +3109,7 @@ func (c *Consensus) processTimeout(timeout *TimeoutMsg) {
 		// commit votes ignored). Block 1 then waited ~95s for the next view.
 		// Same rule startViewChange already applies to our OWN timer: while a
 		// round is active and not stalled, do not abandon it.
-		now := common.GetTimeService().Now()
+		now := c.now()
 		stalled := !c.lastRoundActivity.IsZero() && now.Sub(c.lastRoundActivity) >= stalledRoundThreshold
 		if (c.phase == PhasePrePrepared || c.phase == PhasePrepared) && !stalled {
 			logger.Info("Ignoring view-change request to view %d from %s: round in progress (phase=%v, last activity %v ago)",
@@ -3023,7 +3118,7 @@ func (c *Consensus) processTimeout(timeout *TimeoutMsg) {
 		}
 		logger.Info("View change requested to view %d by %s", timeout.View, timeout.VoterID)
 		c.currentView = timeout.View
-		c.lastViewChange = common.GetTimeService().Now()
+		c.lastViewChange = c.now()
 		for view := range c.timeoutVotes {
 			if view <= c.currentView {
 				delete(c.timeoutVotes, view)
@@ -3118,7 +3213,8 @@ func (c *Consensus) sendPrepareVote(blockHash string, view, height uint64) {
 
 	// Mark as sent and broadcast
 	c.sentPrepareVotes[blockHash] = true
-	c.lastRoundActivity = common.GetTimeService().Now()
+	// NOT round progress: sending our own vote for a round that is already dead
+	// is what kept the view-change gate shut for 204s after a leader died.
 
 	// ========== FIX: register our own vote locally before broadcasting ==========
 	// broadcastPrepareVote only sends this vote to peers — it never arrives back
@@ -3194,7 +3290,7 @@ func (c *Consensus) voteForBlock(blockHash string, view, height uint64) {
 
 	// Mark as sent and broadcast
 	c.sentVotes[blockHash] = true
-	c.lastRoundActivity = common.GetTimeService().Now()
+	// NOT round progress: see the note in sendPrepareVote.
 
 	// ========== FIX: register our own commit vote locally before broadcasting ==========
 	// Same issue as sendPrepareVote above: broadcastVote only reaches peers, so
@@ -3504,6 +3600,14 @@ func (c *Consensus) commitBlock(block Block) {
 
 	committedHash := block.GetHash()
 
+	// Permanent per-commit observation line. bind already logs "Updated best
+	// block" from the syncing view, which a node restarting on an existing
+	// datadir does not always emit, so a rejoining validator was invisible and
+	// "did it catch up?" could not be asserted. This comes from the consensus
+	// engine at the commit itself, so every participant — including a rejoined
+	// one — reports its own height and hash.
+	logger.Info("Committed block: node=%s, height=%d, hash=%s", c.nodeID, block.GetHeight(), committedHash)
+
 	// ★ FIX: Re-check tip height under c.mu BEFORE calling
 	// blockChain.CommitBlock. There is a race between the initial
 	// currentTip check at the top of this function (which runs without
@@ -3689,14 +3793,14 @@ func (c *Consensus) commitBlock(block Block) {
 
 	newHeight := block.GetHeight()
 	c.currentHeight = newHeight
-	c.lastBlockTime = common.GetTimeService().Now()
+	c.lastBlockTime = c.now()
 	// FIX: reset lastRoundActivity at commit so shouldPreventViewChange's 30s
 	// window starts from NOW. Without this, lastRoundActivity was left at the
 	// timestamp of the last incoming vote, which could be several seconds in
 	// the past; combined with the 30-second window this could expire almost
 	// immediately, letting followers fire spurious view-changes within seconds
 	// of a commit and advancing their currentView ahead of the leader.
-	c.lastRoundActivity = common.GetTimeService().Now()
+	c.markRoundProgress()
 
 	// Capture every commit vote this node collected for the block BEFORE
 	// receivedVotes is reset below. Without this, commitBlock only ever
@@ -3848,7 +3952,7 @@ func (c *Consensus) startViewChange() {
 
 	c.mu.Lock()
 
-	now := common.GetTimeService().Now()
+	now := c.now()
 	if !c.participationAllowed(c.nodeID, c.currentHeight+1) {
 		logger.Debug("View change skipped - %s is paused at height %d", c.nodeID, c.currentHeight+1)
 		c.mu.Unlock()
@@ -3895,7 +3999,7 @@ func (c *Consensus) startViewChange() {
 
 	// Calculate new view number
 	newView := c.currentView + 1
-	logger.Info("Node %s initiating view-change vote for view %d", c.nodeID, newView)
+	logger.Info("%s", c.viewChangeInitiationLog(newView))
 	c.lastViewChange = now
 
 	// Unlock before broadcasting to avoid deadlock
@@ -4159,7 +4263,7 @@ func (c *Consensus) SetSyncReady(ready bool) {
 		// participate; otherwise time spent booting/syncing can make the
 		// watchdog manufacture a view change before the first proposal.
 		c.mu.Lock()
-		c.lastRoundActivity = common.GetTimeService().Now()
+		c.markRoundProgress()
 		c.mu.Unlock()
 	}
 }

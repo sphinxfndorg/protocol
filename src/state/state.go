@@ -1257,15 +1257,15 @@ func (s *Storage) createNodeInfo(index int) *NodeInfo {
 		genesisHash = "GENESIS_" + genesisHash
 	}
 
-	// FIX: Use correct port range (32307+) matching actual node configuration
-	// The actual nodes use ports 32307, 32308, 32309, not 32300, 32301, 32302
-	nodeAddress := fmt.Sprintf("127.0.0.1:%d", 32307+index)
-	nodeID := fmt.Sprintf("Node-%s", nodeAddress)
+	// NodeID fallback for a nil slot. The ADDRESS is not fabricated: no real
+	// listen address is known here, and an invented one named a socket nothing
+	// was bound to. It is left empty, and the NodeID derivation is unchanged.
+	nodeID := fmt.Sprintf("Node-%s", fmt.Sprintf("127.0.0.1:%d", 32307+index))
 
 	node := &NodeInfo{
 		NodeID:      nodeID,
 		NodeName:    nodeID,
-		NodeAddress: nodeAddress,
+		NodeAddress: "",
 		ChainInfo: map[string]interface{}{
 			"status":         "active",
 			"last_updated":   time.Now().Format(time.RFC3339),

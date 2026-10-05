@@ -367,9 +367,12 @@ type ChainIdentification struct {
 
 // NodeInfo represents information about a network node
 type NodeInfo struct {
-	NodeID      string                 `json:"node_id"`
-	NodeName    string                 `json:"node_name"`
-	NodeAddress string                 `json:"node_address"`
+	NodeID   string `json:"node_id"`
+	NodeName string `json:"node_name"`
+	// NodeAddress is omitted when unknown; it is never fabricated. Consumers
+	// checked for this key: Go (none read it), explorer API/UI (no reference),
+	// golden files (none contain it).
+	NodeAddress string                 `json:"node_address,omitempty"`
 	ChainInfo   map[string]interface{} `json:"chain_info"`
 	BlockHeight uint64                 `json:"block_height"`
 	BlockHash   string                 `json:"block_hash"`

@@ -115,12 +115,15 @@ func validateProductionNodeStart(mode, networkType, tcpAddr, dataDir, seeds stri
 	if networkType != "testnet" && networkType != "mainnet" {
 		return fmt.Errorf("--mode=production requires --network=testnet or --network=mainnet, got %q", networkType)
 	}
-	envName := "SPHINX_MAINNET_GENESIS_DIGEST"
-	if networkType == "testnet" {
-		envName = "SPHINX_TESTNET_GENESIS_DIGEST"
-	}
-	if strings.TrimSpace(os.Getenv(envName)) == "" {
+	envName, pinnedDigest := productionGenesisDigestPin(networkType)
+	if pinnedDigest == "" {
 		return fmt.Errorf("--mode=production requires %s to pin the out-of-band genesis digest", envName)
+	}
+	if len(pinnedDigest) != 64 {
+		return fmt.Errorf("--mode=production requires %s to be a 64-character hex genesis digest, got %d characters", envName, len(pinnedDigest))
+	}
+	if _, err := hex.DecodeString(pinnedDigest); err != nil {
+		return fmt.Errorf("--mode=production requires %s to be valid hex: %w", envName, err)
 	}
 	if portOffset != 0 {
 		return fmt.Errorf("--mode=production refuses --port-offset=%d; set explicit --tcp-addr, --http-port, --ws-port, --udp-port, and --datadir", portOffset)
@@ -142,6 +145,14 @@ func validateProductionNodeStart(mode, networkType, tcpAddr, dataDir, seeds stri
 		return fmt.Errorf("--mode=production requires a stable public --tcp-addr, got %q", tcpAddr)
 	}
 	return nil
+}
+
+func productionGenesisDigestPin(networkType string) (envName, pinnedDigest string) {
+	envName = "SPHINX_MAINNET_GENESIS_DIGEST"
+	if strings.ToLower(strings.TrimSpace(networkType)) == "testnet" {
+		envName = "SPHINX_TESTNET_GENESIS_DIGEST"
+	}
+	return envName, strings.TrimSpace(os.Getenv(envName))
 }
 
 func isLocalProductionHost(host string) bool {
@@ -365,36 +376,6 @@ func runNodeCmd(args []string) error {
 	applyPortOffset(*portOffset, tcpAddr, httpPort, wsPort, dataDir)
 	common.SetDataDir(*dataDir)
 
-	// Multisig treasury spend broadcast is always on — no flags, no
-	// destination or amount to configure, and no custodian keys. The node
-	// doesn't need to be told what to spend: it scans config/spend_proposals
-	// for spends the custodian quorum already signed (each carries its own
-	// destination/amount/nonce inside the signed payload), re-verifies each
-	// against the live policy, and broadcasts it. It never authorizes a spend
-	// on its own — the node re-verifies the witness at admission too (see
-	// multisig.CheckSpendWitness).
-	//
-	// Genesis distribution and CGE vesting release are separate, already-
-	// automatic flows (block 0 minting and applyCGEReleases respectively);
-	// this watcher does not touch either.
-	var autoSpendArgs []string
-	// ★ DEVNET BUNDLE FETCH — must run BEFORE anything touches genesis and
-	// before custody setup: a joiner (seeds != "") with an incomplete
-	// local bundle fetches the PUBLIC bundle over the network from its seeds,
-	// verifying the document before it touches disk, retrying while the
-	// bootstrap is still signing. Network transport only; custody/ never.
-	if wait, ferr := bind.EnsureDevnetBundleFromSeeds(*networkFlag, *seeds, *dataDir); ferr != nil {
-		return fmt.Errorf("devnet bundle fetch: %w", ferr)
-	} else if wait > 0 {
-		logger.Info("DEVNET BUNDLE: joiner waited %s for the bootstrap bundle", wait.Round(time.Second))
-	}
-	proposalsDir := core.CustodyProposalsDirForDataDir(*dataDir)
-	if _, statErr := os.Stat(proposalsDir); statErr != nil && *dataDir != "" {
-		if _, legacyErr := os.Stat(custodyProposalsDir); legacyErr == nil {
-			proposalsDir = custodyProposalsDir
-		}
-	}
-
 	// Build the NodePortConfig for THIS process. A node no longer describes a
 	// slot in a pre-agreed set of N nodes — only its own listen addresses.
 	// Validator membership comes from chain state (genesis + Stake txs), never
@@ -434,8 +415,41 @@ func runNodeCmd(args []string) error {
 		nodeConfig.WSPort = *wsPort
 	}
 
+	// Fail production shapes before any devnet/localnet side effect can run.
+	// bind.StartNode validates the selected genesis document against the same
+	// pin after loading it; this guard catches unsafe command shapes earlier.
 	if err := validateProductionNodeStart(*mode, *networkFlag, nodeConfig.TCPAddr, *dataDir, *seeds, *portOffset); err != nil {
 		return err
+	}
+
+	// Multisig treasury spend broadcast is always on — no flags, no
+	// destination or amount to configure, and no custodian keys. The node
+	// doesn't need to be told what to spend: it scans config/spend_proposals
+	// for spends the custodian quorum already signed (each carries its own
+	// destination/amount/nonce inside the signed payload), re-verifies each
+	// against the live policy, and broadcasts it. It never authorizes a spend
+	// on its own — the node re-verifies the witness at admission too (see
+	// multisig.CheckSpendWitness).
+	//
+	// Genesis distribution and CGE vesting release are separate, already-
+	// automatic flows (block 0 minting and applyCGEReleases respectively);
+	// this watcher does not touch either.
+	var autoSpendArgs []string
+	// ★ DEVNET BUNDLE FETCH — must run BEFORE anything touches genesis and
+	// before custody setup: a joiner (seeds != "") with an incomplete
+	// local bundle fetches the PUBLIC bundle over the network from its seeds,
+	// verifying the document before it touches disk, retrying while the
+	// bootstrap is still signing. Network transport only; custody/ never.
+	if wait, ferr := bind.EnsureDevnetBundleFromSeeds(*networkFlag, *seeds, *dataDir); ferr != nil {
+		return fmt.Errorf("devnet bundle fetch: %w", ferr)
+	} else if wait > 0 {
+		logger.Info("DEVNET BUNDLE: joiner waited %s for the bootstrap bundle", wait.Round(time.Second))
+	}
+	proposalsDir := core.CustodyProposalsDirForDataDir(*dataDir)
+	if _, statErr := os.Stat(proposalsDir); statErr != nil && *dataDir != "" {
+		if _, legacyErr := os.Stat(custodyProposalsDir); legacyErr == nil {
+			proposalsDir = custodyProposalsDir
+		}
 	}
 
 	// ★ REPORT THE EFFECTIVE UDP PORT, NOT THE EMPTY FLAG.

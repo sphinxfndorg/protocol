@@ -810,6 +810,12 @@ What is implemented today:
 
 - non-devnet genesis auto-authoring is refused;
 - mainnet/testnet genesis files are checked against an out-of-band digest pin;
+- the CLI refuses a pin that is not exactly 64 hex characters before the node
+  starts (early operator feedback; `bind.StartNode` still verifies the pinned
+  digest against the real document — the CLI check never replaces it);
+- the production guard runs before any devnet-only side effect: an unsafe
+  `--mode=production` command fails closed before the devnet bundle fetch or
+  any other startup step can touch the network or disk;
 - production mode rejects the most common devnet/localnet-only flags and
   addresses;
 - validator membership comes from genesis and on-chain Stake/Unstake state, not

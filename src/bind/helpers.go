@@ -457,6 +457,12 @@ func runBlockSyncLoop(
 
 	currentRetryInterval := baseRetryInterval
 	consecutiveFailures := 0
+	// startedAt bounds how long this loop has run, reported to the readiness
+	// decision as elapsed wait. It is informational: readiness never depends on
+	// the passage of time alone, so there is no timeout that can force a
+	// behind node to participate and no wait that can deadlock an
+	// equal-height restart.
+	startedAt := time.Now()
 	lastPeerRefresh := time.Now()
 	peerFailureCount := make(map[string]int)
 
@@ -507,18 +513,15 @@ func runBlockSyncLoop(
 			localHeight = localTip.GetHeight()
 			hasGenesis = true
 		}
-		if hasGenesis {
-			syncStateMu.Lock()
-			if *syncState == SyncStateSyncing {
-				*syncState = SyncStateCaughtUp
-				logger.Info("[%s] Local chain is initialized — sync readiness is based on chain state", nodeID)
-				if syncStarted {
-					syncStarted = false
-				}
-			}
-			syncStateMu.Unlock()
-		}
-
+		// ── READINESS IS A HEIGHT DECISION, NOT A LOCAL-CHAIN DECISION ──
+		// The gate used to open here on hasGenesis alone: any node holding a
+		// local tip became CaughtUp without ever comparing that tip against
+		// the network. A restarted validator therefore declared itself caught
+		// up, SetSyncReady(true) fired, and it entered PBFT from a stale
+		// height — proposing on a parent its peers had long left behind and
+		// rejecting their inbound votes. The actual decision now lives in
+		// EvaluateSyncReadiness and runs after the peer tip query below, where
+		// corroborated peer tips are available. Nothing is inferred here.
 		logger.Debug("[%s] Sync loop: localHeight=%d, hasGenesis=%v, retryInterval=%v",
 			nodeID, localHeight, hasGenesis, currentRetryInterval)
 
@@ -533,6 +536,17 @@ func runBlockSyncLoop(
 		bestPeerAddr := ""
 		reachablePeers := 0
 		peerResponded := false
+		// peerTips carries each answer WITH the responder identity, because
+		// corroboration counts distinct responders: an uncorroborated claim
+		// from one peer must not be able to move the sync target or open the
+		// gate. networkTip/bestPeerAddr remain the raw highest claim and are
+		// used only to pick a fetch source.
+		peerTips := make([]PeerTip, 0, len(peerAddrs)+1)
+		if hasGenesis {
+			// Self counts as a responder: this node observes its own tip
+			// directly and needs no network round trip to know it.
+			peerTips = append(peerTips, PeerTip{Responder: nodeID, Height: localHeight})
+		}
 		for _, addr := range peerAddrs {
 			if addr == "" {
 				continue
@@ -544,6 +558,7 @@ func runBlockSyncLoop(
 			}
 			peerResponded = true
 			reachablePeers++
+			peerTips = append(peerTips, PeerTip{Responder: addr, Height: tip})
 			// ★ FIX 1: keep the first reachable peer as fallback even if tip=0
 			if bestPeerAddr == "" {
 				bestPeerAddr = addr
@@ -841,6 +856,73 @@ func runBlockSyncLoop(
 			}
 		}
 
+		// ── READINESS DECISION ──
+		// One decision, applied in both directions. Previously this was two
+		// one-way transitions keyed on the RAW highest peer claim: any local
+		// tip at or above networkTip went to CaughtUp and never came back.
+		// The raw claim is now only transport input; corroboration decides.
+		var snapSize int
+		if snap := consensus.ValidatorSetAt(localHeight); snap != nil {
+			snapSize = len(snap.Validators)
+		} else {
+			snapSize = 1
+		}
+		syncStateMu.Lock()
+		wasReady := *syncState == SyncStateCaughtUp || *syncState == SyncStateConsensusParticipant
+		syncStateMu.Unlock()
+
+		decision := syncGateAdmits(SyncGateInput{
+			HasGenesis:          hasGenesis,
+			LocalHeight:         localHeight,
+			PeerTips:            peerTips,
+			ValidatorSetSize:    snapSize,
+			FreshGenesisNetwork: networkTip == 0 && localHeight == 0,
+			ElapsedWait:         time.Since(startedAt),
+			ReadyBefore:         wasReady,
+		})
+
+		if decision.Ready {
+			syncStateMu.Lock()
+			if *syncState == SyncStateSyncing {
+				logger.Info("[%s] Sync readiness satisfied at height %d — corroborated tip %d from %d/%d responders (%s); opening PBFT gate",
+					nodeID, localHeight, decision.CorroboratedTip, peerTipsLen(peerTips), decision.RequiredResponders, decision.Reason)
+			}
+			if *syncState == SyncStateSyncing || *syncState == SyncStateCaughtUp {
+				*syncState = SyncStateCaughtUp
+			}
+			if syncStarted {
+				syncStarted = false
+			}
+			syncStateMu.Unlock()
+			observeSync(decision.CorroboratedTip, reachablePeers)
+			logger.Debug("[%s] At the network tip — monitoring for new blocks (re-check every 10s)", nodeID)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(10 * time.Second):
+			}
+			continue
+		}
+
+		// Not ready. This is reached both on a cold start and by a node that
+		// was previously ready and has now fallen behind: the gate is
+		// symmetric, so falling behind re-enters Syncing and stops
+		// participation rather than persisting on a stale tip.
+		syncStateMu.Lock()
+		if wasReady && *syncState != SyncStateSyncing {
+			logger.Warn("[%s] Readiness regression — was participating at height %d but corroborated tip is now %d (%s); re-entering Syncing and ceasing to propose",
+				nodeID, localHeight, decision.CorroboratedTip, decision.Reason)
+		}
+		*syncState = SyncStateSyncing
+		syncStateMu.Unlock()
+		if cons != nil {
+			// Close the gate immediately, before any fetch is attempted, so a
+			// node that has fallen behind stops voting and proposing on the
+			// spot rather than at its next poll.
+			cons.SetSyncReady(false)
+		}
+		observeSync(decision.CorroboratedTip, reachablePeers)
+
 		if networkTip == 0 {
 			syncStateMu.Lock()
 			if hasGenesis && *syncState == SyncStateSyncing {
@@ -855,31 +937,6 @@ func runBlockSyncLoop(
 			// Keep retrying even if genesis has not arrived yet. A missing genesis
 			// document is not evidence that this node is synchronized.
 			logger.Info("[%s] Entering periodic sync check mode — will re-check every 10s", nodeID)
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(10 * time.Second):
-				continue
-			}
-		}
-
-		if localHeight >= networkTip {
-			// ★ FIX: Mark CAUGHT_UP on first pass, then enter periodic check.
-			// After reaching network tip, don't exit — keep monitoring for new
-			// blocks. This allows a node to stay synchronized without restarting.
-			syncStateMu.Lock()
-			if *syncState == SyncStateSyncing {
-				*syncState = SyncStateCaughtUp
-				logger.Info("[%s] Caught up at height %d (network tip %d) — entering periodic sync check",
-					nodeID, localHeight, networkTip)
-				if syncStarted {
-					syncStarted = false
-				}
-			}
-			syncStateMu.Unlock()
-			observeSync(networkTip, reachablePeers) // [observational] post-transition state
-			// Stay in loop, re-check periodically for new blocks
-			logger.Info("[%s] Monitoring for new blocks — will re-check every 10s", nodeID)
 			select {
 			case <-ctx.Done():
 				return

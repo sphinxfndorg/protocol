@@ -224,8 +224,11 @@ type SyncGateInput struct {
 
 // SyncGateResult is the gate's decision plus the evidence behind it.
 type SyncGateResult struct {
-	Ready  bool
-	Reason string
+	Ready              bool
+	Reason             string
+	CorroboratedTip    uint64
+	RequiredResponders int
+	Behind             uint64
 }
 
 // syncGateAdmits is the single predicate runBlockSyncLoop and
@@ -246,5 +249,22 @@ func syncGateAdmits(in SyncGateInput) SyncGateResult {
 		ElapsedWait:         in.ElapsedWait,
 		ReadyBefore:         in.ReadyBefore,
 	})
-	return SyncGateResult{Ready: d.Ready, Reason: d.Reason}
+	return SyncGateResult{
+		Ready:              d.Ready,
+		Reason:             d.Reason,
+		CorroboratedTip:    d.CorroboratedTip,
+		RequiredResponders: d.RequiredResponders,
+		Behind:             d.Behind,
+	}
+}
+
+// peerTipsLen counts distinct responders in a tip set, for logging.
+func peerTipsLen(tips []PeerTip) int {
+	seen := make(map[string]struct{}, len(tips))
+	for _, t := range tips {
+		if t.Responder != "" {
+			seen[t.Responder] = struct{}{}
+		}
+	}
+	return len(seen)
 }

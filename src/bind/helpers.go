@@ -44,12 +44,38 @@ func writeFramedMessage(conn net.Conn, data []byte) error {
 	// Write 4-byte big-endian length prefix
 	lenBuf := make([]byte, 4)
 	binary.BigEndian.PutUint32(lenBuf, uint32(len(data)))
-	if _, err := conn.Write(lenBuf); err != nil {
+	if err := writeAll(conn, lenBuf); err != nil {
 		return fmt.Errorf("writing length prefix: %w", err)
 	}
 	// Write payload
-	if _, err := conn.Write(data); err != nil {
+	if err := writeAll(conn, data); err != nil {
 		return fmt.Errorf("writing payload: %w", err)
+	}
+	return nil
+}
+
+// writeAll writes every byte of p, tolerating short writes.
+//
+// conn.Write performs ONE send and returns however many bytes it accepted. A
+// short write is normal once a frame exceeds the socket send buffer, and
+// discarding the remainder silently truncates the frame. That truncation was
+// invisible for small messages but fatal for a get_blocks reply: three
+// committed blocks carry three SPHINCS+ attestations each (~4864 bytes per
+// signature), so a reply is tens of KB and routinely exceeds one send. The tail
+// carrying the attestation signatures was dropped, and the syncing node
+// rejected every block with "attestation ... failed signature verification:
+// decode signed proof: EOF" -- a caught-up node could never apply a
+// peer-served block.
+func writeAll(conn net.Conn, p []byte) error {
+	for len(p) > 0 {
+		n, err := conn.Write(p)
+		if err != nil {
+			return err
+		}
+		if n <= 0 {
+			return fmt.Errorf("write returned %d with %d bytes left", n, len(p))
+		}
+		p = p[n:]
 	}
 	return nil
 }

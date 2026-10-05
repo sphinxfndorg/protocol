@@ -217,6 +217,20 @@ func TestValidateProductionNodeStart_RequiresDigestPin(t *testing.T) {
 	}
 }
 
+func TestValidateProductionNodeStart_RequiresDigestPinShape(t *testing.T) {
+	t.Setenv("SPHINX_MAINNET_GENESIS_DIGEST", "abc123")
+	err := validateProductionNodeStart("production", "mainnet", "203.0.113.10:30303", "/var/lib/sphinx/mainnet", "203.0.113.1:30303", 0)
+	if err == nil || !strings.Contains(err.Error(), "64-character hex") {
+		t.Fatalf("validateProductionNodeStart error = %v, want short digest error", err)
+	}
+
+	t.Setenv("SPHINX_MAINNET_GENESIS_DIGEST", strings.Repeat("z", 64))
+	err = validateProductionNodeStart("production", "mainnet", "203.0.113.10:30303", "/var/lib/sphinx/mainnet", "203.0.113.1:30303", 0)
+	if err == nil || !strings.Contains(err.Error(), "valid hex") {
+		t.Fatalf("validateProductionNodeStart error = %v, want non-hex digest error", err)
+	}
+}
+
 func TestValidateProductionNodeStart_AcceptsProductionShape(t *testing.T) {
 	t.Setenv("SPHINX_MAINNET_GENESIS_DIGEST", strings.Repeat("a", 64))
 	err := validateProductionNodeStart("production", "mainnet", "validator-1.example.org:30303", "/var/lib/sphinx/mainnet", "boot-1.example.org:30303", 0)
@@ -231,6 +245,31 @@ func TestValidateProductionNodeStart_DevelopmentModeNoops(t *testing.T) {
 	if err != nil {
 		t.Fatalf("development mode should not apply production guardrails: %v", err)
 	}
+}
+
+func TestRunNodeCmd_ProductionDevnetFailsBeforeDevnetBundle(t *testing.T) {
+	dir := t.TempDir()
+	err := runNodeCmd([]string{
+		"--mode=production",
+		"--network=devnet",
+		"--tcp-addr=203.0.113.10:30303",
+		"--datadir=" + dir,
+		"--seeds=127.0.0.1:30303",
+		"--pbft",
+	})
+	if err == nil || !strings.Contains(err.Error(), "--network=devnet") {
+		t.Fatalf("runNodeCmd error = %v, want production/devnet refusal", err)
+	}
+	if strings.Contains(err.Error(), "devnet bundle fetch") {
+		t.Fatalf("runNodeCmd reached devnet bundle fetch before production guard: %v", err)
+	}
+	if _, statErr := os.Stat(coreDevnetBundleProbePath(dir)); !os.IsNotExist(statErr) {
+		t.Fatalf("production/devnet refusal should not create devnet bundle artifacts; stat err = %v", statErr)
+	}
+}
+
+func coreDevnetBundleProbePath(dataDir string) string {
+	return fmt.Sprintf("%s%sconfig", dataDir, string(os.PathSeparator))
 }
 
 func TestIsLocalProductionHost(t *testing.T) {

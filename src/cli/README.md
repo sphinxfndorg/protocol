@@ -63,14 +63,32 @@ If you would rather not build a binary, every command in this document also
 works as `go run src/cli/main.go <command>` — just slower on each invocation,
 because the CLI is recompiled.
 
-Run the tests the way the `Makefile` does (the SPHINCS+ suites in `src/core`
-take about 3 minutes, which is why the default 10m `go test` timeout is too
-tight on a loaded machine):
+Run the tests with the `Makefile` targets:
 
 ```bash
-make test          # all suites, 40m timeout
-make test-cli      # just the CLI
-go test ./... -timeout 40m
+make test           # the whole suite: ./src/...
+make test-race      # race detector on consensus/bind/core (~10m for consensus alone)
+make test-localnet  # real multi-process localnets, build-tagged (~35m)
+make check          # vet + test — what CI runs
+make build          # ./sphinx binary
+make fmt            # gofmt -w src
+```
+
+Plain `go test ./src/...` needs no special handling. Measured on this machine
+(darwin/arm64): `src/policy/...` 2s, `src/core/...` 20s, `src/core/musig` 26s,
+`src/consensus/...` 52s, `src/bind/...` 86s. The slowest single package is
+`src/bind` at ~150s under load, comfortably inside Go's 10m per-package
+default. The old advice that `src/core`'s SPHINCS+ suites needed a long timeout
+was incorrect — that package takes about 20 seconds.
+
+What genuinely needs a long timeout is the **localnet** suite, because it boots
+real validators that spend minutes generating SPHINCS+ keys. Measured per test:
+quorum-failure/halt 291s at N=4 and 668s at N=7, leader-kill 520s, rejoin
+461-524s. Budget 90m for the whole tagged suite:
+
+```bash
+go test -tags localnet ./src/cli/utils/ -run TestLocalnet -timeout 90m
+# or: make test-localnet
 ```
 
 ### Verification
@@ -87,6 +105,12 @@ real-commit-path tests passed, along with `go build ./...`, `go vet ./...`, and
 dispatch, real SPHINCS+ evidence/quorum paths, and the changed consensus
 packages; they are not a claim that a separate-process multi-validator network
 has been tested.
+
+**Current status.** `make check` passes: 44 packages, 0 failures. The
+build-tagged `localnet` suite is run separately (see §2) and has one known
+open failure, the validator-rejoin defect documented there. `make fmt-check`
+currently reports 12 pre-existing unformatted files and is therefore excluded
+from `check`; run `make fmt` to normalise them.
 
 **Genesis commitment:** the block-0 header commits to the canonical
 chain-defining projection of the genesis document and the epoch-0 validator
@@ -155,9 +179,11 @@ handshakes at roughly 2s each, so the handshake window alone grows from 53s at
 N=4 to 220s at N=7 and accounts for most of the N-dependent growth. Note the
 handshake count observed in the log exceeds `N*(N-1)` because peers retry.
 
-**Known gaps.** Two failure scenarios are not covered by a passing test, and
-both are left visible as skipped tests in
-`src/cli/utils/localnet_integration_test.go`:
+**Failure scenarios.** Two scenarios that were previously only documented as
+skipped tests are now covered by live tests in
+`src/cli/utils/localnet_integration_test.go`. Leader failure is fixed and
+passing; validator rejoin is a **known open defect** — the test is present and
+currently fails. Both are build-tagged `-localnet`.
 
 - ~~*Leader failure is not survivable.*~~ **Fixed.** The cause was not the
   leader's death itself: `sendPrepareVote` and `voteForBlock` wrote
@@ -171,15 +197,20 @@ both are left visible as skipped tests in
   Only real progress (accepted proposal, newly recorded vote, commit) refreshes
   that clock now. Verified on real localnets: at **N=4**, killing the leader at
   02:45:13, the survivors elected a live leader at view 19 and committed heights
-  18 and 19; at **N=7**, killing the leader at 03:33:28, view 16 elected a live
-  leader and heights 14 and 15 followed. In both runs every survivor reported the
-  **same hash for every height** (one distinct hash per height).
-- *Measured recovery.* The leader-kill localnet test passes: survivors commit the
-  target height **2m19s** after the kill and the view advances **0 → 4**, with the
-  recovered blocks committed at a higher view than the pre-kill one. From last
-  real progress the figure is **~109s** at N=4, matching `roundActivityWindow`
-  (90s) plus the 20s watchdog tick; at N=7 it was **234s** from kill to view 16
-  completing. A healthy round must not be abandoned early, so that is the floor.
+  18 and 19; in a separate run at **N=7**, killing the leader at 03:33:28, view 16
+  elected a live leader and heights 14 and 15 followed. In both runs every
+  survivor reported the **same hash for every height** (one distinct hash per
+  height). Each size was run once; these are observations, not bounds.
+- *Measured recovery — single runs, not guarantees.* All figures below come
+  from individual localnet runs, not from a repeated-trial spread; treat them as
+  observations, not as bounds. The leader-kill localnet test passes: in one N=4
+  run the survivors committed the target height **2m19s** after the kill and the
+  view advanced **0 → 4**, with the recovered blocks committed at a higher view
+  than the pre-kill one. Measured from last real progress the figure was
+  **~109s** at N=4, matching `roundActivityWindow` (90s) plus the 20s watchdog
+  tick; a separate N=7 run took **234s** from kill to view 16 completing. A
+  healthy round must not be abandoned early, so that window is the floor. No
+  min/median/max has been measured — there is exactly one sample per size.
 - *Minority failure is unaffected.* `TestLocalnet_QuorumFailureAndHalt` passes
   unchanged at both sizes: at N=4 a 1-of-4 kill kept committing and dropping to
   2-of-4 halted at the same height; at N=7 the chain survived 1-of-7 and 2-of-7
@@ -193,13 +224,34 @@ both are left visible as skipped tests in
   `state/smr.go`'s local StateMachine counter, which increments once a second and
   is never broadcast. The consensus signal is
   `View change completed: node=…, new_view=N` from `consensus.go`.
-- *Validator rejoin is unverified.* A killed validator restarts cleanly on its
-  existing datadir and keys and the chain keeps advancing, but the rejoined node
-  emits no height+hash log line, so "it re-synced and all four agree on height
-  and hash" cannot be asserted. Closing this needs either a best-height/hash RPC
-  or a sync log line that carries both.
-network commits blocks and tolerates a minority of failures. Under strict `> 2/3`
-the quorum size is `(2N)/3 + 1`:
+- *Validator rejoin is a known open defect.* The test
+  `TestLocalnet_ValidatorRejoinsAfterFailure` is present and currently **fails**.
+  A restarted validator does **not** return to service: it stays at the height it
+  was killed at (2) while its peers advance to 6, then proposes on top of that
+  stale tip and rejects inbound votes for the newer height. Reproduced logs:
+
+  ```
+  [Node-127.0.0.1:30306] LEADER MODE ACTIVE — proposing block for height 7
+  [Node-127.0.0.1:30306] CreateBlock failed: CreateBlock: parent block 2...
+  WARN Ignoring timeout with chain/height 73310/7; expected 73310/3
+  ```
+
+  Root cause: the sync-readiness decision in `bind/helpers.go` (~:510-520) sets
+  `SyncStateCaughtUp` whenever the node has a local chain (`hasGenesis`), with
+  **no comparison against the network tip**. That breaks the sync-gate wait
+  (`helpers.go` ~:1197-1210) permanently, so the block-fetch path
+  (`requestBlocksFromPeer`) is never reached. The node believes it is caught up
+  when it is not, and participates from a stale height. A sync protocol does
+  exist and runs on restart; the gate predicate is what is wrong.
+
+  **Observability is no longer the blocker.** The consensus engine now emits
+  `Committed block: node=<id>, height=<n>, hash=<hash>` at every commit. A
+  real 4-node run produced 44 such lines across 11 committed heights — exactly
+  one per node per height — so a rejoined node's height and hash are observable
+  and "did it catch up and do all four agree?" is a real assertion. It is the
+  catch-up behaviour itself that is broken, not the visibility.
+A network with `N` validators commits blocks and tolerates a minority of
+failures. Under strict `> 2/3` the quorum size is `(2N)/3 + 1`:
 
 | N | Quorum | Live | Quorum met | Chain |
 |---|---|---|---|---|
@@ -212,9 +264,11 @@ the quorum size is `(2N)/3 + 1`:
 
 That behaviour is covered end-to-end by `src/cli/utils/localnet_integration_test.go`,
 which runs the real command against `N=4` and `N=7` validator processes. It is
-build-tagged because each validator spends minutes on SPHINCS+ key generation and
-block-0 witness signing before it can vote — a cold `N=4` localnet takes roughly
-**3 minutes** to its first committed block, and `N=7` costs about twice that:
+build-tagged `localnet` because each validator spends minutes on SPHINCS+ key
+generation and block-0 witness signing before it can vote — a cold `N=4`
+localnet takes roughly **3 minutes** to its first committed block, and `N=7`
+costs about twice that. It needs a long timeout, since one run of
+quorum-failure/halt at N=7 took **668s** and the N=4 rejoin run took 461–524s:
 
 ```bash
 go test -tags localnet ./src/cli/utils/ -run TestLocalnet -timeout 90m
@@ -837,6 +891,9 @@ parameter, so it advertised a port the node was not listening on.
 key-exchange handshake already carried the correct address (`bind/kex.go` sets
 `Address` to this node's own `--tcp-addr`, and `derivePeerListenAddr` keeps the
 claimed port), and the P2P `chaininfo` sync message carries no port at all. The
-two places that still hardcode `32307` — `network/node.go`'s `GetChainInfo` and
-`network/manager.go`'s `NodeManager.GetChainInfo` — are **unused helpers with no
-callers**, so they reached no wire and no UI. They are left in place as dead code.
+two places that still hardcoded `32307` — `network/node.go`'s `GetChainInfo` and
+`network/manager.go`'s `NodeManager.GetChainInfo`, plus `GenerateChainHandshake`,
+`GenerateNodeIdentification` and `ValidateChainCompatibility` — were unused
+helpers with no callers. They have been **removed** (commit `8fbb6102`), along
+with the `Sphinx*` chain constants and `SphinxDefaultPort`, which were only
+referenced from the code being deleted.

@@ -209,3 +209,42 @@ func EvaluateSyncReadiness(in SyncReadinessInput) SyncReadinessDecision {
 		return d
 	}
 }
+
+// SyncGateInput is what the sync loop knows each pass. It mirrors the fields
+// the loop already computes, so the gate helper can be exercised directly.
+type SyncGateInput struct {
+	HasGenesis          bool
+	LocalHeight         uint64
+	PeerTips            []PeerTip
+	ValidatorSetSize    int
+	FreshGenesisNetwork bool
+	ElapsedWait         time.Duration
+	ReadyBefore         bool
+}
+
+// SyncGateResult is the gate's decision plus the evidence behind it.
+type SyncGateResult struct {
+	Ready  bool
+	Reason string
+}
+
+// syncGateAdmits is the single predicate runBlockSyncLoop and
+// runBlockProductionLoop both consult before a node opens its PBFT gate.
+//
+// It delegates to EvaluateSyncReadiness so there is exactly one definition of
+// "ready" in the tree: the sync loop uses it to decide Syncing vs CaughtUp,
+// and the production loop uses it to decide whether it may propose. A node that
+// is behind therefore cannot describe itself as caught up in one place and
+// participating in the other.
+func syncGateAdmits(in SyncGateInput) SyncGateResult {
+	d := EvaluateSyncReadiness(SyncReadinessInput{
+		LocalHeight:         in.LocalHeight,
+		PeerTips:            in.PeerTips,
+		ValidatorSetSize:    in.ValidatorSetSize,
+		HasGenesis:          in.HasGenesis,
+		FreshGenesisNetwork: in.FreshGenesisNetwork,
+		ElapsedWait:         in.ElapsedWait,
+		ReadyBefore:         in.ReadyBefore,
+	})
+	return SyncGateResult{Ready: d.Ready, Reason: d.Reason}
+}

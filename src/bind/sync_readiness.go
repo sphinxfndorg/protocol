@@ -280,6 +280,17 @@ func syncGateAdmits(in SyncGateInput) SyncGateResult {
 	}
 }
 
+func shouldWaitForPeerResponse(peerResponded bool, hasGenesis bool, localHeight uint64, networkTip uint64) bool {
+	if peerResponded {
+		return false
+	}
+	return !(hasGenesis && localHeight == 0 && networkTip == 0)
+}
+
+func shouldFetchPeerBlocks(localHeight uint64, networkTip uint64, bestPeerAddr string) bool {
+	return bestPeerAddr != "" && networkTip > localHeight
+}
+
 // peerTipsLen counts distinct responders in a tip set, for logging.
 func peerTipsLen(tips []PeerTip) int {
 	seen := make(map[string]struct{}, len(tips))

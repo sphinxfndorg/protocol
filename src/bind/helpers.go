@@ -599,7 +599,7 @@ func runBlockSyncLoop(
 		// consults this; getsyncstatus reads it.
 		observeSync(networkTip, reachablePeers)
 
-		if !peerResponded {
+		if shouldWaitForPeerResponse(peerResponded, hasGenesis, localHeight, networkTip) {
 			// ★ FIX: this is the one actionable line when a node is waiting
 			// for peers that are not up yet (e.g. node 2/3 of a same-box
 			// devnet still booting, or a crashed peer), so name the addresses
@@ -907,7 +907,13 @@ func runBlockSyncLoop(
 			ReadyBefore:         wasReady,
 		})
 
-		if decision.Ready {
+		peerHasMissingBlocks := shouldFetchPeerBlocks(localHeight, networkTip, bestPeerAddr)
+		if decision.Ready && peerHasMissingBlocks {
+			logger.Info("[%s] Peer %s reports tip %d while local tip is %d — fetching missing blocks before opening PBFT gate",
+				nodeID, bestPeerAddr, networkTip, localHeight)
+		}
+
+		if decision.Ready && !peerHasMissingBlocks {
 			syncStateMu.Lock()
 			if *syncState == SyncStateSyncing {
 				logger.Info("[%s] Sync readiness satisfied at height %d — corroborated tip %d from %d/%d responders (%s); opening PBFT gate",

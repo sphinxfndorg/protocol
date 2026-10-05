@@ -923,13 +923,25 @@ func (bc *Blockchain) GetTransactionError(txID string) (string, bool) {
 // GetLatestBlock returns the head of the chain with adapter
 // Returns: Latest block as consensus.Block interface
 func (bc *Blockchain) GetLatestBlock() consensus.Block {
-	// Get latest block from storage
-	block, err := bc.storage.GetLatestBlock()
-	if err != nil || block == nil {
-		return nil // No block found
+	var latest *types.Block
+	if bc.storage != nil {
+		block, err := bc.storage.GetLatestBlock()
+		if err == nil && block != nil {
+			latest = block
+		}
 	}
-	// Wrap in adapter for consensus interface
-	return NewBlockHelper(block)
+	bc.lock.RLock()
+	if n := len(bc.chain); n > 0 {
+		mem := bc.chain[n-1]
+		if mem != nil && (latest == nil || mem.GetHeight() >= latest.GetHeight()) {
+			latest = mem
+		}
+	}
+	bc.lock.RUnlock()
+	if latest == nil {
+		return nil
+	}
+	return NewBlockHelper(latest)
 }
 
 // ValidateGenesisHash compares genesis hashes handling both GENESIS_ prefixed and hex-only formats

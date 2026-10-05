@@ -107,10 +107,13 @@ packages; they are not a claim that a separate-process multi-validator network
 has been tested.
 
 **Current status.** `make check` passes: 44 packages, 0 failures. The
-build-tagged `localnet` suite is run separately (see §2) and has one known
-open failure, the validator-rejoin defect documented there. `make fmt-check`
-currently reports 12 pre-existing unformatted files and is therefore excluded
-from `check`; run `make fmt` to normalise them.
+build-tagged `localnet` suite is run separately (see §2) because it starts real
+validator processes and can take close to 90 minutes. The validator-rejoin
+sync-gate defect that used to be documented here is covered by targeted
+sync-readiness tests; run the full tagged localnet suite before treating a
+release as production-ready. `make fmt-check` currently reports 12 pre-existing
+unformatted files and is therefore excluded from `check`; run `make fmt` to
+normalise them.
 
 **Genesis commitment:** the block-0 header commits to the canonical
 chain-defining projection of the genesis document and the epoch-0 validator
@@ -125,19 +128,23 @@ excludes mutable audit totals and derived metadata.
 
 ---
 
-## 2. Run a localnet (recommended)
+## 2. Run a local multi-validator devnet (recommended for development)
 
-For anything involving more than one validator, use `localnet`. It generates N
-validator keypairs, writes **one genesis document naming all N**, and starts N
-node processes with distinct port offsets:
+For anything involving more than one validator on one machine, use `localnet`.
+It is the real multi-validator **devnet** harness: it generates N validator
+keypairs, writes **one genesis document naming all N**, and starts N node
+processes with distinct port offsets:
 
 ```bash
 ./sphinx localnet --validators=4
 ```
 
-Every process is a real genesis validator, so the network runs actual quorum —
-unlike the hand-run flow in the next section, where only the first node holds
-stake and the rest are unstaked peers.
+Every process is a real genesis validator, so the network runs actual quorum.
+It is still not a production launch path: the generated custody keys,
+validator keys, genesis, datadirs, and localhost addresses are for disposable
+devnet testing. The hand-run flow in the next section is even narrower: only
+the first node holds stake and the rest are unstaked peers until admitted by
+chain state.
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -182,8 +189,10 @@ handshake count observed in the log exceeds `N*(N-1)` because peers retry.
 **Failure scenarios.** Two scenarios that were previously only documented as
 skipped tests are now covered by live tests in
 `src/cli/utils/localnet_integration_test.go`. Leader failure is fixed and
-passing; validator rejoin is a **known open defect** — the test is present and
-currently fails. Both are build-tagged `-localnet`.
+passing. Validator rejoin previously exposed a stale sync-gate bug; the gate now
+compares the local height with corroborated peer tips instead of treating
+`hasGenesis` as caught-up by itself. Both scenarios are build-tagged
+`-localnet`.
 
 - ~~*Leader failure is not survivable.*~~ **Fixed.** The cause was not the
   leader's death itself: `sendPrepareVote` and `voteForBlock` wrote
@@ -224,32 +233,12 @@ currently fails. Both are build-tagged `-localnet`.
   `state/smr.go`'s local StateMachine counter, which increments once a second and
   is never broadcast. The consensus signal is
   `View change completed: node=…, new_view=N` from `consensus.go`.
-- *Validator rejoin is a known open defect.* The test
-  `TestLocalnet_ValidatorRejoinsAfterFailure` is present and currently **fails**.
-  A restarted validator does **not** return to service: it stays at the height it
-  was killed at (2) while its peers advance to 6, then proposes on top of that
-  stale tip and rejects inbound votes for the newer height. Reproduced logs:
-
-  ```
-  [Node-127.0.0.1:30306] LEADER MODE ACTIVE — proposing block for height 7
-  [Node-127.0.0.1:30306] CreateBlock failed: CreateBlock: parent block 2...
-  WARN Ignoring timeout with chain/height 73310/7; expected 73310/3
-  ```
-
-  Root cause: the sync-readiness decision in `bind/helpers.go` (~:510-520) sets
-  `SyncStateCaughtUp` whenever the node has a local chain (`hasGenesis`), with
-  **no comparison against the network tip**. That breaks the sync-gate wait
-  (`helpers.go` ~:1197-1210) permanently, so the block-fetch path
-  (`requestBlocksFromPeer`) is never reached. The node believes it is caught up
-  when it is not, and participates from a stale height. A sync protocol does
-  exist and runs on restart; the gate predicate is what is wrong.
-
-  **Observability is no longer the blocker.** The consensus engine now emits
-  `Committed block: node=<id>, height=<n>, hash=<hash>` at every commit. A
-  real 4-node run produced 44 such lines across 11 committed heights — exactly
-  one per node per height — so a rejoined node's height and hash are observable
-  and "did it catch up and do all four agree?" is a real assertion. It is the
-  catch-up behaviour itself that is broken, not the visibility.
+- *Validator rejoin is sync-gated, not `hasGenesis`-gated.* A restarted
+  validator must compare its local height with corroborated peer tips before it
+  can re-enter PBFT. Holding a local genesis block is not sufficient evidence of
+  being caught up. The sync-readiness tests pin the stale-rejoin bug, the
+  zero-peer fresh-genesis exception, and the one-block round-latency tolerance.
+  Use the tagged localnet rejoin test for the separate-process proof.
 A network with `N` validators commits blocks and tolerates a minority of
 failures. Under strict `> 2/3` the quorum size is `(2N)/3 + 1`:
 
@@ -659,7 +648,7 @@ Run `./sphinx node --help` for the authoritative list. Defaults as of this tree:
 | `--network` | `devnet` | `devnet \| testnet \| mainnet` |
 | `--reward-address` | *(empty)* | Optional on devnet; one is auto-generated |
 | `--config` | *(empty)* | JSON file describing **one** node's addresses |
-| `--mode` | `development` | `development \| production` |
+| `--mode` | `development` | `development \| production`; production mode refuses devnet, localhost identity, `--port-offset`, default datadirs, missing seeds, and missing genesis digest pins |
 
 **`--config` describes one node.** A single-entry file is used whatever
 `--port-offset` is. A multi-entry file is **refused** with an explanatory error,
@@ -668,6 +657,15 @@ pre-agreed node roster — exactly the knowledge this design removes.
 
 `--role=validator` describes the process role; it does **not** grant validator
 membership or voting weight. Only the chain's active validator snapshot does.
+
+`--port-offset` is for same-host development. In production mode it is refused:
+set explicit `--tcp-addr`, `--http-port`, `--ws-port`, `--udp-port`, and
+`--datadir` values instead of deriving identity from an offset.
+
+`--ws-port` has a historical literal default of `127.0.0.1:8600`, but the node
+resolves that unset value to the wallet RPC default `127.0.0.1:8700` plus any
+port offset. If you pass a non-default `--ws-port` explicitly, that exact
+address is used.
 
 ### 8a. Stake, unstake, and submit double-sign evidence
 
@@ -752,6 +750,96 @@ The protocol permits at most 100 active or pending validators. A new stake
 admission is rejected while the set is full; an exiting validator stops
 occupying a slot at its committed exit boundary.
 
+### 9a. Production node path
+
+The production command is still `./sphinx node --pbft`, but production readiness
+comes from pinned inputs, stable identity, reachable peer discovery, and durable
+key custody. It does **not** come from `localnet`, from `--port-offset`, or from
+starting one auto-authored devnet node and adding peers.
+
+Production mode now fails closed on common development shapes. With
+`--mode=production`, startup refuses:
+
+- `--network=devnet`;
+- missing `SPHINX_MAINNET_GENESIS_DIGEST` or `SPHINX_TESTNET_GENESIS_DIGEST`;
+- localhost, unspecified, or otherwise non-public `--tcp-addr`;
+- `--port-offset`, because it is same-host development sugar;
+- the default disposable datadir (`data` or `data/nodeN`);
+- empty `--seeds`.
+
+Minimum mainnet/testnet command shape:
+
+```bash
+export SPHINX_MAINNET_GENESIS_DIGEST=<64-hex-digest-published-out-of-band>
+
+install -d /var/lib/sphinx/mainnet/config
+# place the agreed genesis document before startup:
+#   /var/lib/sphinx/mainnet/config/genesis_state.json
+
+./sphinx node --pbft \
+  --mode=production \
+  --network=mainnet \
+  --tcp-addr=<public-host-or-ip>:30303 \
+  --udp-port=31303 \
+  --http-port=127.0.0.1:8545 \
+  --ws-port=127.0.0.1:8700 \
+  --datadir=/var/lib/sphinx/mainnet \
+  --seeds=<bootnode-1>:30303,<bootnode-2>:30303
+```
+
+Use `SPHINX_TESTNET_GENESIS_DIGEST` with `--network=testnet`. The digest is the
+canonical `ConsensusDigest()` of `genesis_state.json`; publish it through a
+separate trusted channel. Do **not** calculate the digest from an untrusted file
+and then treat that same file as trusted.
+
+Minimum production inputs:
+
+- one agreed `genesis_state.json` distributed out of band to every operator;
+- one independently published genesis digest pin in the matching environment
+  variable;
+- a stable public P2P identity (`Node-<tcp-addr>`) that matches any founder
+  validator entry in genesis;
+- persistent datadir and backed-up node keys;
+- explicit listener/RPC addresses, with public RPC firewalled or bound to
+  localhost/reverse proxy;
+- reachable seeds or DNS discovery;
+- external monitoring of height, peer count, sync state, commit progress,
+  process restarts, disk, clock drift, and key custody.
+
+What is implemented today:
+
+- non-devnet genesis auto-authoring is refused;
+- mainnet/testnet genesis files are checked against an out-of-band digest pin;
+- production mode rejects the most common devnet/localnet-only flags and
+  addresses;
+- validator membership comes from genesis and on-chain Stake/Unstake state, not
+  from `--seeds`, peer count, or a CLI node count;
+- late joiners fetch blocks from peers and must catch up before opening the PBFT
+  gate.
+
+What is still missing compared with mature production chains:
+
+- private-validator/HSM or remote signer support; the node still owns its local
+  validator key files;
+- sentry-node topology and validator-only private P2P isolation;
+- fast snapshot/state-sync bootstrap; fresh nodes rely on genesis plus block
+  sync;
+- automatic bootnode registry, DNS seed publishing, and peer scoring policy
+  management;
+- Prometheus/OpenTelemetry style metrics and alert rules; operations are mostly
+  log/RPC driven;
+- automated key rotation, backup verification, disaster recovery, and upgrade
+  runbooks;
+- release gating that runs the full build-tagged localnet suite and records
+  quorum/failure/rejoin evidence for the exact binary being shipped.
+
+So the answer to "which command is the real production command?" is:
+`./sphinx node --pbft --mode=production --network=mainnet|testnet ...`, with the
+pinned genesis and explicit production addresses shown above. `./sphinx
+localnet` remains a disposable multi-validator devnet harness, and the hand-run
+`./sphinx node --pbft --seeds=...` tutorial remains a smoke test for one
+validator plus syncing peers.
+
 ---
 
 ## 10. Removed flags and membership-related commands
@@ -808,7 +896,7 @@ Stake flow in §8a.
 
 ## 12. What the single-validator three-process smoke test proves, and what it does not
 
-The single-validator smoke-test flow in §2 starts three real `sphinx node
+The single-validator smoke-test flow in §2a starts three real `sphinx node
 --pbft` processes with separate datadirs and ports. That is a genuine
 end-to-end run. Here is its exact scope.
 

@@ -118,12 +118,16 @@ func (m *MockChainParamsProvider) GetWalletDerivationPaths() map[string]string {
 	return keystoreConfig.GetWalletDerivationPaths()
 }
 
-// GetSphinxChainParams returns the mainnet parameters
-// This is the primary function that defines all mainnet chain parameters
-func GetSphinxChainParams() *SphinxChainParameters {
-	// Use the STANDARDIZED genesis hash that all nodes will use
-	// This ensures all nodes have the same genesis block
-	genesisHash := GetGenesisHash()
+func getSphinxChainParams(includeGenesis bool) *SphinxChainParameters {
+	genesisHash := ""
+	genesisTime := CanonicalGenesisTimestamp
+	if includeGenesis {
+		// Use the STANDARDIZED genesis hash that all nodes will use.
+		// This intentionally builds the cached genesis block, so callers that
+		// may still need to author a devnet genesis document must opt out.
+		genesisHash = GetGenesisHash()
+		genesisTime = GetGenesisTimestamp()
+	}
 
 	// Use the canonical extra data from DefaultGenesisState() to ensure consistency
 	// This guarantees the genesis extra data matches genesis.go
@@ -138,7 +142,7 @@ func GetSphinxChainParams() *SphinxChainParameters {
 		ChainID:       baseParams.ChainID,               // uint64
 		ChainName:     baseParams.ChainName,             // string
 		Symbol:        baseParams.Symbol,                // string
-		GenesisTime:   GetGenesisTimestamp(),            // int64 — frozen genesis timestamp (identical across all nodes)
+		GenesisTime:   genesisTime,                      // int64 — frozen genesis timestamp (identical across all nodes)
 		GenesisHash:   genesisHash,                      // Genesis block hash
 		Version:       baseParams.Version,               // string
 		MagicNumber:   baseParams.MagicNumber,           // uint32
@@ -185,6 +189,12 @@ func GetSphinxChainParams() *SphinxChainParameters {
 		// Performance Configuration - node optimization settings
 		PerformanceConfig: GetDefaultPerformanceConfig(),
 	}
+}
+
+// GetSphinxChainParams returns the mainnet parameters.
+// This is the primary function that defines all mainnet chain parameters.
+func GetSphinxChainParams() *SphinxChainParameters {
+	return getSphinxChainParams(true)
 }
 
 // GetSphinxChainHeader returns ONLY the header fields needed for Ledger headers and wallet operations.
@@ -319,7 +329,7 @@ func GetMainnetChainParams() *SphinxChainParameters {
 // GetDevnetChainParams returns development network parameters
 // Devnet is used for local development and debugging
 func GetDevnetChainParams() *SphinxChainParameters {
-	params := GetSphinxChainParams()
+	params := getSphinxChainParams(false)
 
 	// Devnet uses custom parameters (not defined in commit package)
 	params.ChainName = NetworkNames["devnet"] // "Sphinx Devnet"
@@ -328,7 +338,6 @@ func GetDevnetChainParams() *SphinxChainParameters {
 	params.BIP44CoinType = 1
 	params.LedgerName = "Sphinx Devnet"
 
-	// Also change genesis hash to distinguish devnet
 	// NOTE: The genesis hash MUST remain identical across all network phases
 	// (devnet/testnet/mainnet) because:
 	//   1. VDF discriminant → RANDAO seed → leader election must be identical
@@ -337,8 +346,10 @@ func GetDevnetChainParams() *SphinxChainParameters {
 	//   2. Chain compatibility checks (ValidateChainCompatibility) compare
 	//      genesis hashes — peers on different phases must still agree.
 	//   3. All nodes share the same genesis block 0 regardless of phase.
-	// Do NOT add a "DEVNET_" prefix here or anywhere else.
-	params.GenesisHash = GetGenesisHash()
+	// Do NOT add a "DEVNET_" prefix here or anywhere else. Leave the hash empty
+	// during cold devnet startup so parameter resolution cannot build block 0
+	// before StartNode authors the validator set. FinishInit fills the actual
+	// hash once the genesis block exists.
 
 	params.MaxBlockSize = 8 * 1024 * 1024
 	params.BlockGasLimit = big.NewInt(50000000)

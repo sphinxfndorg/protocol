@@ -168,10 +168,50 @@ func TestConsensusDigest_ProjectsExactFieldSet(t *testing.T) {
 
 	wantProjection := []string{
 		"version", "chain_id", "chain", "validators", "funded_accounts",
-		"multisig", "escrow_multisig", "witnesses", "bootstrap",
+		"multisig", "escrow_multisig", "bootstrap",
 	}
 	if got := consensusDigestProjectionTags(t); !reflect.DeepEqual(got, wantProjection) {
 		t.Errorf("ConsensusDigest projection fields = %v, want %v", got, wantProjection)
+	}
+}
+
+func TestConsensusDigest_IgnoresDerivedWitnessBook(t *testing.T) {
+	gf := &GenesisStateFile{
+		Version: 1,
+		ChainID: DevnetChainID,
+		Chain: GenesisChainParams{
+			ChainID:      DevnetChainID,
+			Network:      "devnet",
+			EpochBlocks:  DevnetEpochBlocks,
+			MinStakeNSPX: SelfGenesisStakeNSPX(),
+		},
+		Validators: []GenesisStakedValidator{{
+			NodeID:        "Node-127.0.0.1:30303",
+			PublicKey:     "abc123",
+			StakeNSPX:     SelfGenesisStakeNSPX(),
+			OwnerAddress:  "owner",
+			RewardAddress: "reward",
+		}},
+		Bootstrap: true,
+	}
+
+	before, err := gf.ConsensusDigest()
+	if err != nil {
+		t.Fatalf("digest before witnesses: %v", err)
+	}
+
+	gf.Witnesses = &GenesisWitnessBook{
+		Version:      1,
+		ChainID:      DevnetChainID,
+		VaultAddress: "vault",
+		Expiry:       1,
+	}
+	after, err := gf.ConsensusDigest()
+	if err != nil {
+		t.Fatalf("digest after witnesses: %v", err)
+	}
+	if after != before {
+		t.Fatalf("derived witness book changed consensus digest: before=%s after=%s", before, after)
 	}
 }
 

@@ -2233,7 +2233,7 @@ func (bc *Blockchain) CreateBlock() (block *types.Block, err error) {
 	newHeader := types.NewBlockHeader(
 		nextHeight,
 		parentHashBytes,
-		bc.GetDifficulty(),
+		prevBlock.GetDifficulty(),
 		txsRoot,
 		stateRoot,
 		bc.chainParams.BlockGasLimit,

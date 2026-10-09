@@ -279,20 +279,13 @@ the first node as its seed:
 
 ```bash
 # Terminal 1 — authors devnet genesis and starts the first validator
-cd desktop/protocol
 ./sphinx node --pbft
 
 # Terminal 2 — joins as a peer and syncs from Terminal 1
-cd desktop/protocol
 ./sphinx node --pbft --port-offset=1 --seeds=127.0.0.1:30303
 
 # Terminal 3+ — same pattern, with a unique local port offset
-cd desktop/protocol
 ./sphinx node --pbft --port-offset=2 --seeds=127.0.0.1:30303
-
-# Terminal 3+ — same pattern, with a unique local port offset
-cd desktop/protocol
-./sphinx node --pbft --port-offset=3 --seeds=127.0.0.1:30303
 ```
 
 Joining as a peer does not change validator membership or consensus readiness.

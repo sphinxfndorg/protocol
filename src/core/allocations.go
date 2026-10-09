@@ -227,14 +227,14 @@ func DefaultGenesisAllocations() []*GenesisAllocation {
 		// Escrowed at CGE — released 25% at months 12/24/36/48.
 		// Amount: policy.CGEFounderSPX. Address below is the canonical
 		// recipient (REAL ADDRESS #1) and stays in core.
-		NewFounderAlloc("SPIF 7AB6 2C1B 1E0C EAAA 2810 8B7E BEA2 3ACE 718D 412F 84BD C3BF 5FC1 4F8F 4220 5FFA", policy.CGEFounderSPX),
+		NewFounderAlloc("SPIF F471 9CBD E8EE 7766 2B76 7F59 7039 94EF A5D2 D9F4 597C 3C2B D1E2 861E AEB1 3159", policy.CGEFounderSPX),
 
 		// ── Co-founders (4) ───────────────────────────────────────────────
 		// 85,000,000 SPX funded at genesis (unsold remainder of 95,000,000).
 		// Escrowed at CGE — released 25% at months 12/24/36/48.
 		// Amount: policy.CGECoFounderSPX. Address below is the canonical
 		// recipient (REAL ADDRESS #2) and stays in core.
-		NewCoFounderAlloc("SPIF 9911 75EA 129E 8680 A36B 1A34 3103 E0C3 D66F 6333 9731 20BA 7E7E 5FAC C45F B3C0", policy.CGECoFounderSPX),
+		NewCoFounderAlloc("SPIF BD4D 2032 DDEC 0060 E94D 6A3E F866 A278 F47B 0A2C FB2A E2DC 301A C261 953C C106", policy.CGECoFounderSPX),
 
 		// ── Development Fund ───────────────────────────────────────────────
 		// 150,000,000 SPX funded at genesis — module rewards
@@ -243,14 +243,14 @@ func DefaultGenesisAllocations() []*GenesisAllocation {
 		// ReleaseDevelopmentModule call from the module registry.
 		// Amount: policy.CGEDevelopmentSPX. Address below is the canonical
 		// recipient (REAL ADDRESS #3) and stays in core.
-		NewDevelopmentAlloc("SPIF 6AC5 7C53 E628 7C19 AE58 65BC 958D CDFC 5AAF 9826 8959 0D11 7379 B2CB D4A8 5156", policy.CGEDevelopmentSPX),
+		NewDevelopmentAlloc("SPIF 7C25 F767 770D 2C7E 242C 55C4 A129 82FC 73A7 E03D 410E 66B2 CDF3 E6F0 6B40 3411", policy.CGEDevelopmentSPX),
 
 		// ── Contributors ───────────────────────────────────────────────────
 		// 75,000,000 SPX funded at genesis (unsold remainder of 90,000,000).
 		// Escrowed at CGE — released linearly over 36 months, no cliff.
 		// Amount: policy.CGEContributorsSPX. Address below is the canonical
 		// recipient (REAL ADDRESS #4) and stays in core.
-		NewContributorAlloc("SPIF 064C 84E2 0435 6BA4 07C4 0825 AE2F 4780 7E19 DA96 00A9 1111 C22B DC61 5680 C7EF", policy.CGEContributorsSPX),
+		NewContributorAlloc("SPIF 4E4F 7B3B 2FF1 5795 5379 A8A4 DAE2 6D36 1480 EE27 132C AE92 C7DE B523 7F27 8E01", policy.CGEContributorsSPX),
 
 		// ── SPHINX Foundation ──────────────────────────────────────────────
 		// 300,000,000 SPX · 0% sold — fully kept for ecosystem.
@@ -259,14 +259,14 @@ func DefaultGenesisAllocations() []*GenesisAllocation {
 		// Liquid at CGE — governed by a 5-of-9 multisig treasury.
 		// Amount: policy.CGEFoundationSPX. Address below is the canonical
 		// treasury (REAL ADDRESS #5) and stays in core.
-		NewFoundationAlloc("SPIF AD19 8DF9 6B76 F9F7 2E2D B336 AFB4 6424 C4BE 01BF 45BB 8145 151A 9F24 9F46 1890", policy.CGEFoundationSPX),
+		NewFoundationAlloc("SPIF 35E8 224A 7F71 ED86 28FD BFD5 ED60 6CF3 5B97 32F2 3E77 A83C 7286 2B92 B2FF D5F6", policy.CGEFoundationSPX),
 
 		// ── Campaigns ──────────────────────────────────────────────────────
 		// 15,000,000 SPX funded at genesis (unsold remainder of 35,000,000).
 		// Liquid at CGE — future marketing and partnerships.
 		// Amount: policy.CGECampaignsSPX. Address below is the canonical
 		// recipient (REAL ADDRESS #6) and stays in core.
-		NewCampaignAlloc("SPIF B7CA BAC6 53D2 D7B0 D01C 189D E612 8C63 11EB C93B 7038 1E9A C14B 57A2 69BD DB9F", policy.CGECampaignsSPX),
+		NewCampaignAlloc("SPIF 3FC4 E475 5A11 8E66 34F4 B689 FE13 288B DF64 95A9 5465 B692 9AFB 858F 6DF1 6E71", policy.CGECampaignsSPX),
 
 		// ── Community Airdrops ─────────────────────────────────────────────
 		// 90,000,000 SPX · 0% sold — fully kept.
@@ -274,7 +274,7 @@ func DefaultGenesisAllocations() []*GenesisAllocation {
 		// Sybil resistance / proof-of-humanity gating is application-layer.
 		// Amount: policy.CGEAirdropsSPX. Address below is the canonical
 		// recipient (REAL ADDRESS #7) and stays in core.
-		NewAirdropAlloc("SPIF 3406 2BDA 5176 B816 9719 3077 F7DC 1694 069D 2C6A 88A4 B734 9A98 821D 0AD9 52AF", policy.CGEAirdropsSPX),
+		NewAirdropAlloc("SPIF 7ED7 AFC5 AF4E 9ECC 29B0 04C5 E687 ABB4 2EE2 6EA9 5A05 68A3 F40B DE98 12D7 84C6", policy.CGEAirdropsSPX),
 
 		// ── Public ICO Pool ───────────────────────────────────────────────
 		// 100,000,000 SPX funded at genesis (unsold remainder of 200,000,000;
@@ -282,14 +282,14 @@ func DefaultGenesisAllocations() []*GenesisAllocation {
 		// Liquid at CGE — public investors have no cliff, no vesting.
 		// Amount: policy.CGEPublicICOPoolSPX. Address below is the canonical
 		// recipient (REAL ADDRESS #8) and stays in core.
-		NewPublicICOPoolAlloc("SPIF 780D 0EFD C578 62F1 8098 6F02 F25C CEA1 430C FB7C 9460 F6C6 DE92 C34A C3D3 591B", policy.CGEPublicICOPoolSPX),
+		NewPublicICOPoolAlloc("SPIF 8F34 52C1 2382 AA9E 6280 8B75 409D A5CD FD96 3C57 6367 31E3 4728 DCA2 3319 A7FF", policy.CGEPublicICOPoolSPX),
 
 		// ── Reserve / Unsold ───────────────────────────────────────────────
 		// 200,000,000 SPX · 0% sold.
 		// Liquid at CGE — future ecosystem needs, emergencies, strategic initiatives.
 		// Amount: policy.CGEReserveSPX. Address below is the canonical
 		// recipient (REAL ADDRESS #9) and stays in core.
-		NewReserveAlloc("SPIF 171F BCCB 61C8 B697 DAA7 FC77 0881 96ED 387E D81B CC2F A8EE CA41 3E0F E08D 60F0", policy.CGEReserveSPX),
+		NewReserveAlloc("SPIF 029C 1D9F 37BA 57FE 6B9A 53FE A58D A27A 4B24 F008 9F0C AC75 6E42 2DDC A8B9 22C8", policy.CGEReserveSPX),
 	}
 }
 

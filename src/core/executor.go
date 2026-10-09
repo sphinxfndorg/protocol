@@ -1629,18 +1629,29 @@ func (bc *Blockchain) ExecuteBlock(block *types.Block) ([]byte, error) {
 	return stateRoot, nil
 }
 
-// previewStateRoot computes the state root block creation will seal, using
-// the caller's state handle when one is supplied. CreateBlock passes the SAME
-// handle it used to read cgeReleasesPendingAt, so the proposer's hot path
-// opens state once rather than twice; nil (tests, fallback paths) keeps the
-// previous open-our-own behaviour.
-func (bc *Blockchain) previewStateRoot(stateDB *StateDB, height uint64, txs []*types.Transaction, proposerID string, headerTimestamp int64, witnesses []*types.CGEReleaseWitness) []byte {
+// previewStateRoot computes the state root AND the finalized GasUsed block
+// creation will seal, using the caller's state handle when one is supplied.
+// CreateBlock passes the SAME handle it used to read cgeReleasesPendingAt,
+// so the proposer's hot path opens state once rather than twice; nil (tests,
+// fallback paths) keeps the previous open-our-own behaviour.
+//
+// ★ WHY BOTH VALUES ARE RETURNED. GasUsed participates in SigDataHash (see
+// FinalizeHash), so the sealed header must carry the exact GasUsed execution
+// produced — not big.NewInt(0). The old code previewed only the state root
+// and sealed GasUsed=0; the leader then signed GasUsed=0, but the first
+// CommitBlock (leader's own, and every verifier's executeBlockStaged via
+// applyTransactions) rewrote GasUsed to the real total, so every verifier
+// recomputed a different SigDataHash and rejected the block with "signed
+// proof does not bind to the expected message". Empty blocks were unaffected
+// (real GasUsed is 0), which is why only the first SPX-bearing block broke
+// sync. Sealing the previewed GasUsed makes sign and verify agree.
+func (bc *Blockchain) previewStateRoot(stateDB *StateDB, height uint64, txs []*types.Transaction, proposerID string, headerTimestamp int64, witnesses []*types.CGEReleaseWitness) ([]byte, *big.Int) {
 	if stateDB == nil {
 		var err error
 		stateDB, err = bc.newStateDB()
 		if err != nil {
 			logger.Warn("previewStateRoot: failed to open stateDB: %v", err)
-			return bc.calculateStateRootFallback()
+			return bc.calculateStateRootFallback(), big.NewInt(0)
 		}
 	}
 
@@ -1678,7 +1689,7 @@ func (bc *Blockchain) previewStateRoot(stateDB *StateDB, height uint64, txs []*t
 	// that caused "state root mismatch" errors on late joiners.
 	if err := bc.applyBlockTransitions(block, stateDB); err != nil {
 		logger.Warn("previewStateRoot: applyBlockTransitions failed: %v", err)
-		return bc.calculateStateRootFallback()
+		return bc.calculateStateRootFallback(), big.NewInt(0)
 	}
 
 	// computeStateRoot() operates on the same pending state that Commit()
@@ -1687,9 +1698,16 @@ func (bc *Blockchain) previewStateRoot(stateDB *StateDB, height uint64, txs []*t
 	root, err := stateDB.computeStateRoot()
 	if err != nil {
 		logger.Warn("previewStateRoot: computeStateRoot failed: %v", err)
-		return bc.calculateStateRootFallback()
+		return bc.calculateStateRootFallback(), big.NewInt(0)
 	}
-	return root
+	// applyBlockTransitions finalized GasUsed on the scratch header (0 for
+	// empty blocks, the real total otherwise). Return a copy — the scratch
+	// block is discarded, and the caller must not alias its header.
+	gasUsed := big.NewInt(0)
+	if block.Header.GasUsed != nil {
+		gasUsed = new(big.Int).Set(block.Header.GasUsed)
+	}
+	return root, gasUsed
 }
 
 // calculateStateRootFallback computes a state root from the current state DB.
@@ -2213,7 +2231,9 @@ func (bc *Blockchain) CreateBlock() (block *types.Block, err error) {
 		logger.Warn("CreateBlock: CGE witness staging: %v", err)
 	}
 	blockWitnesses := bc.stagedWitnesses(cgeReleasesPendingAt(previewState, currentTimestamp), nextHeight)
-	stateRoot := bc.previewStateRoot(previewState, nextHeight, selectedTxs, proposerID, currentTimestamp, blockWitnesses)
+	// Seal the previewed GasUsed alongside the previewed state root. Both
+	// feed SigDataHash, so both must be final before SignBlockHeader signs.
+	stateRoot, sealedGasUsed := bc.previewStateRoot(previewState, nextHeight, selectedTxs, proposerID, currentTimestamp, blockWitnesses)
 
 	logger.Info("Creating block with timestamp: %d (%s)",
 		currentTimestamp, time.Unix(currentTimestamp, 0).Format(time.RFC3339))
@@ -2237,7 +2257,7 @@ func (bc *Blockchain) CreateBlock() (block *types.Block, err error) {
 		txsRoot,
 		stateRoot,
 		bc.chainParams.BlockGasLimit,
-		big.NewInt(0),
+		sealedGasUsed,
 		extraData,
 		miner,
 		currentTimestamp,

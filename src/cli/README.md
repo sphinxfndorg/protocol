@@ -292,7 +292,7 @@ cd desktop/protocol
 
 # Terminal 4+ — same pattern, with a unique local port offset
 cd desktop/protocol
-./sphinx node --pbft --port-offset=2 --seeds=127.0.0.1:30303
+./sphinx node --pbft --port-offset=3 --seeds=127.0.0.1:30303
 
 ```
 

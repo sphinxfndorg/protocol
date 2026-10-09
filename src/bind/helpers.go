@@ -30,9 +30,9 @@ import (
 	svm "github.com/sphinxfndorg/protocol/src/core/kernel/opcodes"
 	vmachine "github.com/sphinxfndorg/protocol/src/core/kernel/vm"
 	spxKey "github.com/sphinxfndorg/protocol/src/core/sthincs/key/backend"
+	types "github.com/sphinxfndorg/protocol/src/core/transaction"
 	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/parameters"
 	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/sthincs"
-	types "github.com/sphinxfndorg/protocol/src/core/transaction"
 	usiKey "github.com/sphinxfndorg/protocol/src/usi/core/key"
 
 	logger "github.com/sphinxfndorg/protocol/src/console"
@@ -1150,11 +1150,6 @@ func runBlockSyncLoop(
 // Block production loop
 // ============================================================================
 
-// inFlightTxSet holds the IDs a node selected into a block that has not
-// committed yet. A proposer leaves the mempool as soon as CreateBlock takes
-// the txs, and only clears them when the block commits, so without this the
-// "Mempool N pending" line reads 0 for the whole round on the proposer while
-// every follower still reports 1.
 type inFlightTxSet struct {
 	mu  sync.Mutex
 	ids map[string]struct{}
@@ -1407,6 +1402,8 @@ func runBlockProductionLoop(
 		defer blockTicker.Stop()
 		peerCheckTicker := time.NewTicker(5 * time.Second)
 		defer peerCheckTicker.Stop()
+		mempoolTicker := time.NewTicker(200 * time.Millisecond)
+		defer mempoolTicker.Stop()
 
 		// ★ FATAL AFTER REPEATED INVARIANT FAILURES.
 		//
@@ -1474,6 +1471,7 @@ func runBlockProductionLoop(
 				lastInvariantErr = ""
 				invariantRepeats = 0
 				inFlight.add(blk.Body.TxsList)
+				progress.UpdateMempoolActivity(mempoolPendingCount(bc, cons, inFlight), 0)
 				wrapped := core.NewBlockHelper(blk)
 				commitErr := bc.CommitBlock(wrapped)
 				inFlight.remove(blk.Body.TxsList)
@@ -1481,8 +1479,7 @@ func runBlockProductionLoop(
 					logger.Error("[%s] solo commit error: %v", nodeID, commitErr)
 					continue
 				}
-				pending := bc.GetMempool().GetPendingTransactions()
-				logger.Info("[%s] Solo-mined and committed block height=%d txs=%d", nodeID, blk.GetHeight(), len(pending))
+				logger.Info("[%s] Solo-mined and committed block height=%d txs=%d", nodeID, blk.GetHeight(), len(blk.Body.TxsList))
 
 				// NEW: keep the dashboard's Height/Sync fields in sync with reality —
 				// this is the only place a solo-mining node's tip advances, and the
@@ -1492,6 +1489,11 @@ func runBlockProductionLoop(
 				progress.UpdateBlockSync(int64(blk.GetHeight()), int64(blk.GetHeight()))
 
 				progress.UpdateMempoolActivity(mempoolPendingCount(bc, cons, inFlight), 0)
+
+			case <-mempoolTicker.C:
+				if bc.GetMempool() != nil {
+					progress.UpdateMempoolActivity(mempoolPendingCount(bc, cons, inFlight), 0)
+				}
 
 			case <-peerCheckTicker.C:
 				// Solo→PBFT handoff uses the SAME stake-weighted gate as the
@@ -1816,7 +1818,11 @@ startPBFT:
 
 		selectedTxs := newBlock.Body.TxsList
 		inFlight.add(selectedTxs)
-		releaseInFlight := func() { inFlight.remove(selectedTxs) }
+		progress.UpdateMempoolActivity(mempoolPendingCount(bc, cons, inFlight), 0)
+		releaseInFlight := func() {
+			inFlight.remove(selectedTxs)
+			progress.UpdateMempoolActivity(mempoolPendingCount(bc, cons, inFlight), 0)
+		}
 
 		consensusVM := vmachine.NewVM([]byte{byte(svm.PUSH1), 0x01})
 		if err := consensusVM.Run(); err != nil {
@@ -1939,7 +1945,7 @@ startPBFT:
 
 					logger.Info("[%s] Block committed! Height now: %d", nodeID, currentHeight)
 
-				releaseInFlight()
+					releaseInFlight()
 
 					// NEW: this ticker loop is a third, independent place
 					// currentHeight advances — entirely separate from both the

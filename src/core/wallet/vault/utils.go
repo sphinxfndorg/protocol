@@ -12,9 +12,7 @@ import (
 	"io"
 	"log"
 	"os"
-	"runtime"
 	"strings"
-	"unsafe"
 
 	keys "github.com/sphinxfndorg/protocol/src/usi/core/key"
 	"lukechampine.com/blake3"
@@ -23,19 +21,10 @@ import (
 // ---------------------------------------------------------------------
 // Utility Functions
 // ---------------------------------------------------------------------
-// clearBytes securely clears a byte slice from memory
 func clearBytes(data []byte) {
-	if data == nil {
-		return
-	}
-
-	// Use compiler intrinsic for efficient memory clearing
 	for i := range data {
 		data[i] = 0
 	}
-
-	// Prevent compiler optimization
-	_ = (*[0]byte)(unsafe.Pointer(&data[0]))
 }
 
 // NewSecureBuffer creates a new secure buffer with the given data
@@ -61,7 +50,6 @@ func (sb *SecureBuffer) Clear() {
 		}
 		sb.data = nil
 	}
-	runtime.GC() // Encourage garbage collection
 }
 
 // Len returns the length of the data

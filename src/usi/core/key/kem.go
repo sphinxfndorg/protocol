@@ -1,3 +1,6 @@
+// Copyright (c) 2024-present Sphinx Core Dev
+// MIT License https://opensource.org/license/mit
+
 // go/src/usi/core/key/kem.go
 package keys
 
@@ -70,7 +73,6 @@ func GenerateKEMKeys() ([]byte, []byte, error) {
 	// ── 3. Merge into single blobs ───────────────────────────────────────────
 	pubBlob := marshalHybridKey(x25519Pub, kyberPubBytes)
 	privBlob := marshalHybridKey(x25519Priv, kyberPrivBytes)
-	defer zeroBytes(privBlob)
 
 	log.Printf("[KEM] KEM keys generated successfully (public: %d bytes, private: %d bytes)",
 		len(pubBlob), len(privBlob))

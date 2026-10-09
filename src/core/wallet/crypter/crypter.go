@@ -106,7 +106,11 @@ func NewCrypter(key, iv []byte) (*CCrypter, error) {
 	return cKeyCrypter, nil
 }
 
-// BytesToKeySHA512AES: Derives an encryption key and initialization vector (IV) from the provided key data and salt using SHA-512.
+// BytesToKeySHA512AES: Derives an encryption key and IV from the key data and salt.
+// NOTE: despite the name this uses SHA3-512 (sha3.New512), not SHA-512. The name is
+// kept so callers don't break. It is a plain iterated hash: CPU-only, NOT memory-hard,
+// so on its own it is weak against GPU guessing of human passphrases (see the
+// KDF note on EncryptSecret).
 // The key derivation process is repeated 'count' times for key stretching.
 func (c *CCrypter) BytesToKeySHA512AES(salt, keyData []byte, count int) ([]byte, []byte, error) {
 	// Validate input parameters: count must be greater than 0, and both keyData and salt must not be nil.
@@ -151,7 +155,7 @@ func (c *CCrypter) BytesToKeySHA512AES(salt, keyData []byte, count int) ([]byte,
 	// FIX: the original code sliced buf directly (key := buf[:32], iv :=
 	// buf[32:48]) and then called memoryCleanse(buf) on the *same backing
 	// array* a few lines later. Since Go slices share the underlying array,
-	// that zeroed out the key and IV bytes Claude was about to return,
+	// that zeroed out the key and IV bytes the function was about to return,
 	// silently handing the caller two all-zero slices. Every key derived
 	// through this path was a fixed all-zero AES-256 key.
 	key := make([]byte, WALLET_CRYPTO_KEY_SIZE)
@@ -231,8 +235,25 @@ func (c *CCrypter) SetKey(newKey, newIV []byte) bool {
 	return true // Return true to indicate successful key setup.
 }
 
-// Encrypt: Encrypts the provided plaintext using AES-256-GCM.
+// Wipe zeroes the derived key/IV and marks the crypter unusable. Call it (e.g.
+// via defer) as soon as a crypter is no longer needed.
+func (c *CCrypter) Wipe() {
+	memoryCleanse(c.vchKey)
+	memoryCleanse(c.vchIV)
+	c.vchKey, c.vchIV, c.fKeySet = nil, nil, false
+}
+
+// Encrypt: Encrypts the provided plaintext using AES-256-GCM (no AAD).
+// Output format is unchanged: nonce(12) || ciphertext || tag(16).
 func (c *CCrypter) Encrypt(plaintext []byte) ([]byte, error) {
+	return c.EncryptWithAAD(plaintext, nil)
+}
+
+// EncryptWithAAD is Encrypt with additional authenticated data. Pass something
+// that identifies WHERE the blob belongs (key ID, address, public key) so an
+// attacker cannot swap encrypted secrets between records: decryption fails
+// unless the same AAD is supplied. Same output format as Encrypt.
+func (c *CCrypter) EncryptWithAAD(plaintext, aad []byte) ([]byte, error) {
 	// Check if the key and IV have been set in the CCrypter object.
 	if !c.fKeySet {
 		return nil, errors.New("key not set") // Return an error if the key has not been set.
@@ -257,7 +278,7 @@ func (c *CCrypter) Encrypt(plaintext []byte) ([]byte, error) {
 	}
 
 	// Encrypt the plaintext using GCM. Seal appends the ciphertext to the IV (gcm.Seal).
-	ciphertext := gcm.Seal(nil, iv, plaintext, nil)
+	ciphertext := gcm.Seal(nil, iv, plaintext, aad)
 
 	// Prepend the IV (nonce) to the ciphertext so it can be used for decryption.
 	// FIX: the original wrote `result := append(iv, ciphertext...)`. Since iv
@@ -276,8 +297,13 @@ func (c *CCrypter) Encrypt(plaintext []byte) ([]byte, error) {
 	return result, nil
 }
 
-// Decrypt: Decrypts the provided ciphertext using AES-256-GCM.
+// Decrypt: Decrypts a blob produced by Encrypt (no AAD).
 func (c *CCrypter) Decrypt(ciphertext []byte) ([]byte, error) {
+	return c.DecryptWithAAD(ciphertext, nil)
+}
+
+// DecryptWithAAD decrypts a blob produced by EncryptWithAAD with the same aad.
+func (c *CCrypter) DecryptWithAAD(ciphertext, aad []byte) ([]byte, error) {
 	// Check if the key and IV have been set in the CCrypter object.
 	if !c.fKeySet {
 		return nil, errors.New("key not set") // Return an error if the key has not been set.
@@ -305,7 +331,7 @@ func (c *CCrypter) Decrypt(ciphertext []byte) ([]byte, error) {
 	}
 
 	// Decrypt the ciphertext using GCM. The IV is used here to decrypt the data.
-	plaintext, err := gcm.Open(nil, iv, ciphertext, nil)
+	plaintext, err := gcm.Open(nil, iv, ciphertext, aad)
 	if err != nil {
 		return nil, err // Return an error if decryption fails.
 	}
@@ -335,6 +361,12 @@ func (c *CCrypter) Decrypt(ciphertext []byte) ([]byte, error) {
 // path, which was itself a signal something was wired up incorrectly here.
 // If your wallet format expects per-key IVs derived from the pubkey (as
 // DecryptKey suggests), that's now handled via AAD — see DecryptKey below.
+//
+// KDF NOTE: the key is derived with 10,000 rounds of SHA3-512 only. That is fine
+// when masterKey is high-entropy random bytes, but weak if masterKey is a human
+// passphrase (no memory-hardness, GPUs are fast at this). For passphrase-based
+// use, derive masterKey with Argon2id first (as the disk/USB keystores do) or
+// introduce a versioned Argon2id format; do not just raise the round count.
 func EncryptSecret(masterKey []byte, plaintext []byte) ([]byte, error) {
 	cKeyCrypter := &CCrypter{}
 

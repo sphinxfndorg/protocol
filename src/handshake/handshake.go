@@ -5,6 +5,7 @@
 package security
 
 import (
+	"errors"
 	"log"
 	"net"
 	"time"
@@ -13,59 +14,69 @@ import (
 )
 
 var (
-	// handshakeLatency tracks the latency of Kyber768 handshakes using a Prometheus histogram.
+	// handshakeLatency tracks the latency of handshakes.
 	handshakeLatency = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Name:    "kyber_handshake_latency_seconds", // Metric name
-			Help:    "Latency of Kyber768 handshakes",  // Description of the metric
-			Buckets: prometheus.DefBuckets,             // Default latency buckets for histogram
+			Name:    "kyber_handshake_latency_seconds",
+			Help:    "Latency of Kyber768 handshakes",
+			Buckets: prometheus.DefBuckets,
 		},
-		[]string{"protocol"}, // Label by protocol type (e.g., "p2p", "rpc")
+		[]string{"protocol"},
 	)
 
-	// handshakeErrors counts total Kyber768 handshake failures using a Prometheus counter.
+	// handshakeErrors counts handshake failures.
 	handshakeErrors = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "kyber_handshake_errors_total",              // Metric name
-			Help: "Total number of Kyber768 handshake errors", // Description of the metric
+			Name: "kyber_handshake_errors_total",
+			Help: "Total number of Kyber768 handshake errors",
 		},
-		[]string{"protocol"}, // Label by protocol type
+		[]string{"protocol"},
 	)
 )
 
-// init registers the Prometheus metrics so they can be collected and exposed.
-func init() {
-	prometheus.MustRegister(handshakeLatency, handshakeErrors) // Register histogram and counter metrics
+// register tolerates duplicate registration instead of panicking at import time.
+func register(c prometheus.Collector) {
+	if err := prometheus.Register(c); err != nil {
+		var already prometheus.AlreadyRegisteredError
+		if !errors.As(err, &already) {
+			log.Printf("handshake: failed to register metric: %v", err)
+		}
+	}
 }
 
-// NewHandshake initializes a new Handshake object with Prometheus metrics attached.
+func init() {
+	register(handshakeLatency)
+	register(handshakeErrors)
+}
+
+// NewHandshake initializes a Handshake with metrics and the default timeout.
+// Set Auth on the result to authenticate peers.
 func NewHandshake() *Handshake {
 	return &Handshake{
-		Metrics: &HandshakeMetrics{ // Assign metrics to the handshake
-			Latency: handshakeLatency, // Latency histogram
-			Errors:  handshakeErrors,  // Error counter
-		},
+		Metrics: &HandshakeMetrics{Latency: handshakeLatency, Errors: handshakeErrors},
+		Timeout: DefaultHandshakeTimeout,
 	}
 }
 
-// PerformHandshake executes a Kyber768 key exchange using the provided network connection.
+// PerformHandshake runs the hybrid key exchange on conn.
 func (h *Handshake) PerformHandshake(conn net.Conn, protocol string, isInitiator bool) (*EncryptionKey, error) {
-	start := time.Now() // Record start time to measure latency
+	if h == nil {
+		h = NewHandshake()
+	}
+	start := time.Now()
 
-	// Execute Kyber768 key encapsulation mechanism (KEM); initiator defines key generation direction
-	kem, err := PerformKEM(conn, isInitiator)
+	enc, err := PerformKEMWithAuth(conn, isInitiator, h.Auth, h.Timeout)
 	if err != nil {
-		// Increment the error counter with the protocol label if handshake fails
-		h.Metrics.Errors.WithLabelValues(protocol).Inc()
-		log.Printf("Kyber768 handshake error for %s: %v", protocol, err) // Log the error
-		return nil, err                                                  // Return nil key and error
+		if h.Metrics != nil && h.Metrics.Errors != nil {
+			h.Metrics.Errors.WithLabelValues(protocol).Inc()
+		}
+		log.Printf("handshake error for %s: %v", protocol, err)
+		return nil, err
 	}
 
-	// Record and observe the handshake latency duration
-	h.Metrics.Latency.WithLabelValues(protocol).Observe(time.Since(start).Seconds())
-
-	// Log success message after successful key exchange
-	log.Printf("Kyber768 handshake successful for %s", protocol)
-
-	return kem, nil // Return the resulting encryption key
+	if h.Metrics != nil && h.Metrics.Latency != nil {
+		h.Metrics.Latency.WithLabelValues(protocol).Observe(time.Since(start).Seconds())
+	}
+	log.Printf("handshake successful for %s (peer authenticated: %t)", protocol, enc.PeerAuthenticated)
+	return enc, nil
 }

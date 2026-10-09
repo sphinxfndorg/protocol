@@ -7,6 +7,7 @@ package security
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/big"
 
 	"github.com/sphinxfndorg/protocol/src/consensus"
@@ -14,8 +15,25 @@ import (
 	"github.com/sphinxfndorg/protocol/src/network"
 )
 
+// MaxMessageDataSize bounds a message payload (anti memory-DoS).
+const MaxMessageDataSize = 16 << 20 // 16 MiB
+
 // ValidateMessage ensures the message conforms to expected structure and type rules.
-func (m *Message) ValidateMessage() error {
+// It never panics on peer-supplied data: a panic while decoding (for example a
+// nil big.Int amount) is converted into a validation error instead of crashing
+// the node.
+func (m *Message) ValidateMessage() (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("invalid message: %v", r)
+		}
+	}()
+	if m == nil {
+		return errors.New("message is nil")
+	}
+	if len(m.Data) > MaxMessageDataSize {
+		return errors.New("message data too large")
+	}
 	// Check if the message type is not empty
 	if m.Type == "" {
 		return errors.New("message type is empty")
@@ -142,6 +160,9 @@ func (m *Message) Encode() ([]byte, error) {
 
 // DecodeMessage takes a JSON byte slice and returns a validated Message object.
 func DecodeMessage(data []byte) (*Message, error) {
+	if len(data) > MaxMessageDataSize+4096 {
+		return nil, errors.New("message too large")
+	}
 	var msg Message
 
 	if err := json.Unmarshal(data, &msg); err != nil {

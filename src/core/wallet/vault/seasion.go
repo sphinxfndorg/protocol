@@ -12,12 +12,14 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log"
 
 	"github.com/cloudflare/circl/kem/kyber/kyber768"
 	"golang.org/x/crypto/curve25519"
+	"golang.org/x/crypto/sha3"
 )
 
 // -----------------------------------------------------------------------------
@@ -41,7 +43,7 @@ func EncryptSessionKeyForRecipient(sessionKey []byte, pub *HybridPublicKey) (*Re
 		log.Printf("[ERROR] EncryptSessionKeyForRecipient: nil public key")
 		return nil, errors.New("EncryptSessionKeyForRecipient: nil public key")
 	}
-	log.Printf("[INFO] EncryptSessionKeyForRecipient: starting hybrid KEM encryption for recipient: %.16s...", pub.Fingerprint[:16])
+	log.Printf("[INFO] EncryptSessionKeyForRecipient: starting hybrid KEM encryption for recipient: %.16s...", pub.Fingerprint)
 	log.Printf("[DEBUG] EncryptSessionKeyForRecipient: X25519 public key length: %d bytes", len(pub.X25519Pub))
 	log.Printf("[DEBUG] EncryptSessionKeyForRecipient: Kyber public key length: %d bytes", len(pub.KyberPub))
 	if len(pub.X25519Pub) != 32 {
@@ -110,7 +112,7 @@ func EncryptSessionKeyForRecipient(sessionKey []byte, pub *HybridPublicKey) (*Re
 
 	// ── Combine shared secrets → AES-256 key ─────────────────────────────────
 
-	combinedKey := combineSharedSecrets(x25519Shared, kyberShared)
+	combinedKey := combineSharedSecretsV2(x25519Shared, kyberShared, ephPub, pub.X25519Pub, kyberCT)
 	defer zeroBytes(combinedKey)
 	log.Printf("[DEBUG] EncryptSessionKeyForRecipient: combined shared secret (size: %d bytes)", len(combinedKey))
 
@@ -164,16 +166,11 @@ func EncryptSessionKeyForRecipient(sessionKey []byte, pub *HybridPublicKey) (*Re
 // DecryptSessionKeyWithPrivates recovers the session key from a V3 RecipientEntry
 // using the recipient's ephemeral X25519 and Kyber768 private keys.
 func DecryptSessionKeyWithPrivates(entry *RecipientEntry, x25519Priv, kyberPriv []byte) ([]byte, error) {
-	log.Printf("[INFO] DecryptSessionKeyWithPrivates: starting hybrid KEM decryption for recipient: %.16s...", entry.Fingerprint[:16])
-	log.Printf("[DEBUG] DecryptSessionKeyWithPrivates: X25519 ciphertext length: %d bytes", len(entry.X25519Ciphertext))
-	log.Printf("[DEBUG] DecryptSessionKeyWithPrivates: Kyber ciphertext length: %d bytes", len(entry.KyberCiphertext))
-	log.Printf("[DEBUG] DecryptSessionKeyWithPrivates: X25519 private key length: %d bytes", len(x25519Priv))
-	log.Printf("[DEBUG] DecryptSessionKeyWithPrivates: Kyber private key length: %d bytes", len(kyberPriv))
-
 	if entry == nil {
 		log.Printf("[ERROR] DecryptSessionKeyWithPrivates: nil entry")
 		return nil, errors.New("DecryptSessionKeyWithPrivates: nil entry")
 	}
+	log.Printf("[INFO] DecryptSessionKeyWithPrivates: starting hybrid KEM decryption for recipient: %.16s...", entry.Fingerprint)
 	// Minimum: ephemeralPub(32) + nonce(12) + AES-GCM tag(16) = 60 bytes.
 	if len(entry.X25519Ciphertext) < 60 {
 		log.Printf("[ERROR] DecryptSessionKeyWithPrivates: X25519Ciphertext too short: %d bytes (minimum 60)", len(entry.X25519Ciphertext))
@@ -228,7 +225,11 @@ func DecryptSessionKeyWithPrivates(entry *RecipientEntry, x25519Priv, kyberPriv 
 
 	// ── Combine shared secrets → AES-256 key ─────────────────────────────────
 
-	combinedKey := combineSharedSecrets(x25519Shared, kyberShared)
+	recipientPub, err := curve25519.X25519(x25519Priv, curve25519.Basepoint)
+	if err != nil {
+		return nil, fmt.Errorf("derive recipient X25519 public key: %w", err)
+	}
+	combinedKey := combineSharedSecretsV2(x25519Shared, kyberShared, ephPub, recipientPub, entry.KyberCiphertext)
 	defer zeroBytes(combinedKey)
 	log.Printf("[DEBUG] DecryptSessionKeyWithPrivates: combined shared secret (size: %d bytes)", len(combinedKey))
 
@@ -255,6 +256,20 @@ func DecryptSessionKeyWithPrivates(entry *RecipientEntry, x25519Priv, kyberPriv 
 
 	sessionKey, err := gcm.Open(nil, rest[:ns], rest[ns:], []byte(entry.Fingerprint))
 	if err != nil {
+		// LEGACY FALLBACK: entries made before the KDF combiner used plain XOR.
+		// Remove once all V3 vaults have been re-encrypted.
+		legacyKey := combineSharedSecrets(x25519Shared, kyberShared)
+		defer zeroBytes(legacyKey)
+		if lb, e1 := aes.NewCipher(legacyKey); e1 == nil {
+			if lg, e2 := cipher.NewGCM(lb); e2 == nil {
+				if sk, e3 := lg.Open(nil, rest[:ns], rest[ns:], []byte(entry.Fingerprint)); e3 == nil {
+					log.Printf("[WARN] DecryptSessionKeyWithPrivates: legacy XOR-combined entry for %.16s... (re-encrypt to upgrade)", entry.Fingerprint)
+					return sk, nil
+				}
+			}
+		}
+	}
+	if err != nil {
 		log.Printf("[ERROR] DecryptSessionKeyWithPrivates: hybrid KEM decryption failed — wrong keys or tampered entry: %v", err)
 		return nil, errors.New("hybrid KEM decryption failed — wrong keys or tampered entry")
 	}
@@ -274,23 +289,36 @@ func DecryptSessionKeyWithPrivates(entry *RecipientEntry, x25519Priv, kyberPriv 
 func combineSharedSecrets(x25519Secret, kyberSecret []byte) []byte {
 	combined := make([]byte, 32)
 	copy(combined, x25519Secret)
-	log.Printf("[DEBUG] combineSharedSecrets: X25519 secret (first 8 bytes): %x", x25519Secret[:8])
 
 	for i := 0; i < 32 && i < len(kyberSecret); i++ {
 		combined[i] ^= kyberSecret[i]
 	}
-	if len(kyberSecret) > 0 {
-		log.Printf("[DEBUG] combineSharedSecrets: Kyber secret (first 8 bytes): %x", kyberSecret[:8])
-		log.Printf("[DEBUG] combineSharedSecrets: combined secret (first 8 bytes): %x", combined[:8])
-	} else {
-		log.Printf("[DEBUG] combineSharedSecrets: no Kyber secret, using X25519 only")
-	}
 	return combined
+}
+
+// combineSharedSecretsV2 derives the 32-byte AES key with SHA3-256 over a
+// domain label and length-prefixed fields: both shared secrets plus the
+// ciphertext/public material they belong to. Unlike XOR, this binds the key to
+// the exchange transcript (ephemeral pub, recipient pub, Kyber ciphertext).
+func combineSharedSecretsV2(x25519Secret, kyberSecret, ephPub, recipientPub, kyberCT []byte) []byte {
+	h := sha3.New256()
+	put := func(b []byte) {
+		var l [8]byte
+		binary.BigEndian.PutUint64(l[:], uint64(len(b)))
+		h.Write(l[:])
+		h.Write(b)
+	}
+	put([]byte("sphinx-hybrid-kem-v2"))
+	put(x25519Secret)
+	put(kyberSecret)
+	put(ephPub)
+	put(recipientPub)
+	put(kyberCT)
+	return h.Sum(nil)
 }
 
 // zeroBytes overwrites every byte in b with zero to clear sensitive data.
 func zeroBytes(b []byte) {
-	log.Printf("[DEBUG] zeroBytes: clearing sensitive data of size %d bytes", len(b))
 	for i := range b {
 		b[i] = 0
 	}

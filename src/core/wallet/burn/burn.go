@@ -3,85 +3,87 @@
 
 // go/src/core/wallet/burn/burn.go
 //
-// Burn-coin address package. A "DEAD XXX" address is created from a real
-// SPHINCS+ key pair exactly like a "SPIF XXX" wallet address, except the
-// private key material is destroyed in a one-time ceremony.
+// Burn-coin address package.
+//
+// A burn address is only *provably* unspendable if nobody ever held a private
+// key for it. The old ceremony generated a real SPHINCS+ key pair on a machine
+// and then tried to wipe it: anyone who copied that process's memory (or
+// simply ran modified code) kept a working key, and Go cannot reliably wipe
+// the key manager's own copies. This version never creates a usable key at
+// all: the "public key" is a nothing-up-my-sleeve value, SHAKE256 of a public
+// label (and optional tag), so finding a signing key for it would mean
+// inverting the hash.
 package burn
 
 import (
-	"crypto/rand"
+	"bytes"
 	"encoding/hex"
 	"fmt"
 	"log"
 
-	keyutils "github.com/sphinxfndorg/protocol/src/accounts/key/utils"
 	"github.com/sphinxfndorg/protocol/src/common"
 	sphincs "github.com/sphinxfndorg/protocol/src/core/sthincs/key/backend"
 	keys "github.com/sphinxfndorg/protocol/src/usi/core/key"
+	"golang.org/x/crypto/sha3"
 )
 
-// BurnAddressInfo is the public, auditable output of a burn ceremony.
-// It deliberately contains NO private key material and NO passphrase:
-// only the DEAD display address and the SPHINCS+ public key it was derived
-// from (kept so anyone can re-derive and verify the address).
+const burnNUMSLabel = "sphinx-burn-address-nums-v1"
+
+// BurnAddressInfo is the public, auditable result. It contains NO private
+// material, because none ever exists.
 type BurnAddressInfo struct {
 	Address      string `json:"address"`
 	PublicKeyHex string `json:"public_key_hex"`
 	OrgCode      string `json:"org_code"`
 }
 
-// GenerateBurnAddress runs a one-time burn ceremony and returns the public,
-// auditable result. A fresh SPHINCS+ key pair is generated, encrypted with
-// an ephemeral 32-byte crypto-random passphrase, then the passphrase, the
-// plaintext private key, and the encrypted blob are all wiped from memory.
-// NOTHING is written to disk. Nobody retains anything that can decrypt or
-// reconstruct the private key, so the resulting address is provably
-// unspendable.
-func GenerateBurnAddress() (*BurnAddressInfo, error) {
+// numsPublicKey expands label+tag into n pseudo-public-key bytes.
+func numsPublicKey(tag string, n int) []byte {
+	sh := sha3.NewShake256()
+	sh.Write([]byte(burnNUMSLabel))
+	sh.Write([]byte{0})
+	sh.Write([]byte(tag))
+	out := make([]byte, n)
+	sh.Read(out)
+	return out
+}
+
+// serializedPKLen returns the serialized public-key length of the configured
+// SPHINCS+ parameter set, so the burn "key" has the same shape as a real one.
+func serializedPKLen() (int, error) {
 	km, err := sphincs.NewKeyManager()
 	if err != nil {
-		return nil, fmt.Errorf("initialize SPHINCS+ key manager: %w", err)
+		return 0, fmt.Errorf("initialize SPHINCS+ key manager: %w", err)
 	}
-	sm, err := keyutils.NewStorageManager()
+	// The generated key pair is used only to measure the length and is dropped.
+	_, pk, err := km.GenerateKey()
 	if err != nil {
-		return nil, fmt.Errorf("initialize storage manager: %w", err)
+		return 0, fmt.Errorf("measure public key length: %w", err)
 	}
-	diskStorage := sm.GetStorage(string(keyutils.StorageTypeDisk))
+	b, err := pk.SerializePK()
+	if err != nil {
+		return 0, fmt.Errorf("serialize public key: %w", err)
+	}
+	n := len(b)
+	wipeBytes(b)
+	return n, nil
+}
 
-	sk, pk, err := km.GenerateKey()
-	if err != nil {
-		return nil, fmt.Errorf("generate SPHINCS+ key pair: %w", err)
-	}
-	pkBytes, err := pk.SerializePK()
-	if err != nil {
-		return nil, fmt.Errorf("serialize public key: %w", err)
-	}
-	skBytes, err := sk.SerializeSK()
-	if err != nil {
-		wipeBytes(pkBytes)
-		return nil, fmt.Errorf("serialize private key: %w", err)
-	}
+// GenerateBurnAddress returns the default (empty-tag) provably unspendable
+// burn address. It is deterministic: everyone derives the same address.
+func GenerateBurnAddress() (*BurnAddressInfo, error) {
+	return GenerateBurnAddressTagged("")
+}
 
-	passBytes := make([]byte, 32)
-	if _, err := rand.Read(passBytes); err != nil {
-		wipeBytes(skBytes)
-		wipeBytes(pkBytes)
-		return nil, fmt.Errorf("generate ceremony passphrase: %w", err)
+// GenerateBurnAddressTagged returns a burn address for a public tag
+// (for example "genesis" or "fees"), so different purposes can have separate,
+// independently auditable burn addresses.
+func GenerateBurnAddressTagged(tag string) (*BurnAddressInfo, error) {
+	n, err := serializedPKLen()
+	if err != nil {
+		return nil, err
 	}
-	passphrase := hex.EncodeToString(passBytes)
-	wipeBytes(passBytes)
-
-	encryptedSK, encErr := diskStorage.EncryptData(skBytes, passphrase)
-	wipeString(&passphrase)
-	wipeBytes(skBytes)
-	if encryptedSK != nil {
-		wipeBytes(encryptedSK)
-		encryptedSK = nil
-	}
-	if encErr != nil {
-		wipeBytes(pkBytes)
-		return nil, fmt.Errorf("ceremony encryption step: %w", encErr)
-	}
+	pkBytes := numsPublicKey(tag, n)
 
 	raw := keys.SHAKE256HashWithOrg(pkBytes, keys.OrgDEAD)
 	address := keys.FormatOrgAddress(raw, keys.OrgDEAD)
@@ -91,9 +93,7 @@ func GenerateBurnAddress() (*BurnAddressInfo, error) {
 		PublicKeyHex: hex.EncodeToString(pkBytes),
 		OrgCode:      string(keys.OrgDEAD),
 	}
-	wipeBytes(pkBytes)
-
-	log.Printf("[SUCCESS] GenerateBurnAddress: ceremony complete, burn address %s (private material destroyed)", address)
+	log.Printf("[SUCCESS] GenerateBurnAddress: burn address %s (nothing-up-my-sleeve, no private key exists)", address)
 	return info, nil
 }
 
@@ -108,7 +108,7 @@ func DefaultBurnAddressInfo() *BurnAddressInfo {
 }
 
 // VerifyBurnAddress recomputes the DEAD address from a public key and checks
-// it matches the claimed address. Used to audit ceremony outputs.
+// it matches the claimed address.
 func VerifyBurnAddress(publicKeyHex, address string) error {
 	pkBytes, err := hex.DecodeString(publicKeyHex)
 	if err != nil {
@@ -130,21 +130,24 @@ func VerifyBurnAddress(publicKeyHex, address string) error {
 	return nil
 }
 
+// VerifyProvablyUnspendable checks that publicKeyHex is exactly the
+// nothing-up-my-sleeve value for tag, i.e. that no private key can exist for it
+// short of breaking SHAKE256. VerifyBurnAddress alone only proves the address
+// matches *some* public key; this proves that key is the NUMS one.
+func VerifyProvablyUnspendable(publicKeyHex, tag string) error {
+	pkBytes, err := hex.DecodeString(publicKeyHex)
+	if err != nil {
+		return fmt.Errorf("invalid public key hex: %w", err)
+	}
+	if !bytes.Equal(pkBytes, numsPublicKey(tag, len(pkBytes))) {
+		return fmt.Errorf("public key is not the nothing-up-my-sleeve value for tag %q", tag)
+	}
+	return nil
+}
+
 // wipeBytes overwrites b with zeros.
 func wipeBytes(b []byte) {
 	for i := range b {
 		b[i] = 0
 	}
-}
-
-// wipeString overwrites the backing bytes of *s with zeros.
-func wipeString(s *string) {
-	if s == nil {
-		return
-	}
-	b := []byte(*s)
-	for i := range b {
-		b[i] = 0
-	}
-	*s = ""
 }

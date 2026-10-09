@@ -166,6 +166,9 @@ func (ks *DiskKeyStore) UpdateKeyMetadata(keyID string, metadata map[string]inte
 		return fmt.Errorf("key not found: %s", keyID)
 	}
 
+	if keyPair.Metadata == nil {
+		keyPair.Metadata = make(map[string]interface{}) // FIX: assignment to nil map panicked
+	}
 	for k, v := range metadata {
 		keyPair.Metadata[k] = v
 	}
@@ -178,6 +181,9 @@ func (ks *DiskKeyStore) RemoveKey(keyID string) error { // Changed receiver type
 	ks.mu.Lock()
 	defer ks.mu.Unlock()
 
+	if !validKeyID(keyID) {
+		return fmt.Errorf("invalid key ID: %q", keyID)
+	}
 	delete(ks.keys, keyID)
 
 	keyFile := filepath.Join(ks.storagePath, "keys", keyID+".json")
@@ -192,11 +198,15 @@ func (ks *DiskKeyStore) RemoveKey(keyID string) error { // Changed receiver type
 func (ks *DiskKeyStore) EncryptData(data []byte, passphrase string) ([]byte, error) { // Changed receiver type
 	salt := ks.generateSalt(passphrase)
 
-	if !ks.crypt.SetKeyFromPassphrase([]byte(passphrase), salt, 1000) {
+	// FIX: use a fresh crypter per call. The shared ks.crypt was mutated
+	// without a lock, so concurrent Encrypt/Decrypt could use another
+	// caller's key.
+	c := &crypter.CCrypter{}
+	if !c.SetKeyFromPassphrase([]byte(passphrase), salt, 1000) {
 		return nil, fmt.Errorf("failed to set encryption key")
 	}
 
-	encryptedData, err := ks.crypt.Encrypt(data)
+	encryptedData, err := c.Encrypt(data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encrypt data: %w", err)
 	}
@@ -208,11 +218,12 @@ func (ks *DiskKeyStore) EncryptData(data []byte, passphrase string) ([]byte, err
 func (ks *DiskKeyStore) DecryptKey(keyPair *key.KeyPair, passphrase string) ([]byte, error) { // Changed receiver type
 	salt := ks.generateSalt(passphrase)
 
-	if !ks.crypt.SetKeyFromPassphrase([]byte(passphrase), salt, 1000) {
+	c := &crypter.CCrypter{} // FIX: per-call crypter (see EncryptData)
+	if !c.SetKeyFromPassphrase([]byte(passphrase), salt, 1000) {
 		return nil, fmt.Errorf("failed to set decryption key")
 	}
 
-	decryptedSK, err := ks.crypt.Decrypt(keyPair.EncryptedSK)
+	decryptedSK, err := c.Decrypt(keyPair.EncryptedSK)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decrypt secret key: %w", err)
 	}
@@ -294,6 +305,12 @@ func (ks *DiskKeyStore) GetWalletInfo() *key.WalletInfo { // Changed receiver ty
 }
 
 // Helper functions
+
+// validKeyID rejects IDs that could escape the keys directory when joined
+// into a file path (e.g. "../../x").
+func validKeyID(id string) bool {
+	return id != "" && id == filepath.Base(id) && id != "." && id != ".."
+}
 
 func (ks *DiskKeyStore) generateKeyID() string { // Changed receiver type
 	timestamp := time.Now().UnixNano()

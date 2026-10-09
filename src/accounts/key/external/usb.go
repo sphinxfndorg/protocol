@@ -183,6 +183,9 @@ func (ks *USBKeyStore) RemoveKey(keyID string) error {
 		return fmt.Errorf("USB device not mounted")
 	}
 
+	if !validKeyID(keyID) {
+		return fmt.Errorf("invalid key ID: %q", keyID)
+	}
 	delete(ks.keys, keyID)
 
 	// Remove from USB
@@ -279,7 +282,7 @@ func (ks *USBKeyStore) BackupFromDisk(diskStore interface{ ListKeys() []*key.Key
 
 // RestoreToDisk restores keys from USB to disk wallet  // Renamed from RestoreToHot
 func (ks *USBKeyStore) RestoreToDisk(diskStore interface{ StoreKey(*key.KeyPair) error }, passphrase string) ([]*key.KeyPair, error) {
-	if !ks.isMounted {
+	if !ks.IsMounted() { // FIX: was an unlocked read of ks.isMounted
 		return nil, fmt.Errorf("USB device not mounted")
 	}
 
@@ -341,11 +344,15 @@ func (ks *USBKeyStore) GetWalletInfo() *key.WalletInfo {
 func (ks *USBKeyStore) EncryptData(data []byte, passphrase string) ([]byte, error) {
 	salt := ks.generateSalt(passphrase)
 
-	if !ks.crypt.SetKeyFromPassphrase([]byte(passphrase), salt, 1000) {
+	// FIX: use a fresh crypter per call. The shared ks.crypt was mutated
+	// without a lock, so concurrent Encrypt/Decrypt could use another
+	// caller's key.
+	c := &crypter.CCrypter{}
+	if !c.SetKeyFromPassphrase([]byte(passphrase), salt, 1000) {
 		return nil, fmt.Errorf("failed to set encryption key")
 	}
 
-	encryptedData, err := ks.crypt.Encrypt(data)
+	encryptedData, err := c.Encrypt(data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encrypt data: %w", err)
 	}
@@ -357,11 +364,12 @@ func (ks *USBKeyStore) EncryptData(data []byte, passphrase string) ([]byte, erro
 func (ks *USBKeyStore) DecryptKey(keyPair *key.KeyPair, passphrase string) ([]byte, error) {
 	salt := ks.generateSalt(passphrase)
 
-	if !ks.crypt.SetKeyFromPassphrase([]byte(passphrase), salt, 1000) {
+	c := &crypter.CCrypter{} // FIX: per-call crypter (see EncryptData)
+	if !c.SetKeyFromPassphrase([]byte(passphrase), salt, 1000) {
 		return nil, fmt.Errorf("failed to set decryption key")
 	}
 
-	decryptedSK, err := ks.crypt.Decrypt(keyPair.EncryptedSK)
+	decryptedSK, err := c.Decrypt(keyPair.EncryptedSK)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decrypt secret key: %w", err)
 	}
@@ -428,6 +436,12 @@ func (ks *USBKeyStore) ExportKey(keyID string, includePrivate bool, passphrase s
 }
 
 // Helper functions
+
+// validKeyID rejects IDs that could escape the keys directory when joined
+// into a file path (e.g. "../../x").
+func validKeyID(id string) bool {
+	return id != "" && id == filepath.Base(id) && id != "." && id != ".."
+}
 
 func (ks *USBKeyStore) generateKeyID() string {
 	timestamp := time.Now().UnixNano()

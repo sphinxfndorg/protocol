@@ -156,7 +156,11 @@ func GenerateKeyPairWithOrg(passphrase string, orgCode OrgCode) (*KeyPair, error
 	log.Printf("KEM keys generated: public=%d bytes, private=%d bytes", len(kemPub), len(kemPriv))
 
 	// Combine SPHINCS+ private key and KEM private key
-	combinedSK := append(skBytes, kemPriv...)
+	combinedSK := make([]byte, 0, len(skBytes)+len(kemPriv))
+	combinedSK = append(combinedSK, skBytes...)
+	combinedSK = append(combinedSK, kemPriv...)
+	defer zeroBytes(combinedSK)
+	defer zeroBytes(skBytes)
 	log.Printf("Combined private key size: %d bytes", len(combinedSK))
 
 	// Encrypt the combined private key
@@ -283,6 +287,7 @@ func saveKeyToDisk(kp *KeyPair) error {
 		"encrypted":      true,
 		"storage":        "disk",
 		"kem_public":     base64.StdEncoding.EncodeToString(kp.KEMPublicKey),
+		"org_code":       kp.OrgCode,
 		"kem_algorithm":  "Kyber768+X25519",
 		"has_kem":        true,
 		"ledger":         ledgerHeaders,
@@ -419,7 +424,7 @@ func LoadKeyFromDisk(passphrase string) (*KeyPair, []byte, error) {
 			}
 		}
 
-		kp.OrgCode = string(OrgSPIF)
+		kp.OrgCode = storedOrgCode(loadedKeyPair.Metadata)
 		kp.Address = GetPublicKeyFingerprint(kp)
 
 		log.Printf("[SUCCESS] LoadKeyFromDisk: successfully loaded key %s", id)
@@ -479,15 +484,25 @@ func GetKeyByID(keyID, passphrase string) (*KeyPair, []byte, error) {
 	// Verify the SPHINCS+ private key matches the stored public key
 	ok, err := keyManager.VerifyPubKey(skBytes, loadedKeyPair.PublicKey)
 	if err != nil {
+		zeroBytes(combinedSK)
 		return nil, nil, fmt.Errorf("verify public key: %w", err)
 	}
 	if !ok {
+		zeroBytes(combinedSK)
 		return nil, nil, fmt.Errorf("decrypted secret key does not match the stored public key")
 	}
 
+	kp.OrgCode = storedOrgCode(loadedKeyPair.Metadata)
 	kp.Address = GetPublicKeyFingerprint(kp)
 
 	return kp, skBytes, nil
+}
+
+func storedOrgCode(metadata map[string]interface{}) string {
+	if v, ok := metadata["org_code"].(string); ok && v != "" && IsValidOrgCode(v) {
+		return v
+	}
+	return string(OrgSPIF)
 }
 
 // ListKeys lists all stored key IDs.

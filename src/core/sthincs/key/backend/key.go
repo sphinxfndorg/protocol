@@ -83,7 +83,12 @@ func (sk *SPHINCS_SK) SerializeSK() ([]byte, error) {
 	}
 
 	// Combine the SKseed, SKprf, PKseed, and PKroot into a single byte slice.
-	data := append(sk.SKseed, sk.SKprf...)
+	// FIX: allocate a fresh slice. append(sk.SKseed, ...) could write into
+	// SKseed's spare capacity / shared backing array and corrupt neighbouring
+	// key material (e.g. when SKseed is a sub-slice of a larger buffer).
+	data := make([]byte, 0, len(sk.SKseed)+len(sk.SKprf)+len(sk.PKseed)+len(sk.PKroot))
+	data = append(data, sk.SKseed...)
+	data = append(data, sk.SKprf...)
 	data = append(data, sk.PKseed...)
 	data = append(data, sk.PKroot...)
 

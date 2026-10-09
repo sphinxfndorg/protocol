@@ -5,274 +5,357 @@ package sips3
 
 import (
 	"crypto/rand"
-	"encoding/json"
+	"crypto/sha256"
+	"crypto/subtle"
+	_ "embed"
+	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"math/big"
-	"net/http"
 	"strings"
-	"sync"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/sphinxfndorg/protocol/src/common"
 	"golang.org/x/crypto/argon2"
 )
 
-// Argon2 parameters
-// OWASP have published guidance on Argon2 at https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html
-// At time of writing (Jan 2023), this says:
-// Argon2id should use one of the following configuration settings as a base minimum which includes the minimum memory size (m), the minimum number of iterations (t) and the degree of parallelism (p).
-// m=37 MiB, t=1, p=1
-// m=15 MiB, t=2, p=1
-// Both of these configuration settings are equivalent in the defense they provide. The only difference is a trade off between CPU and RAM usage.
+// Argon2 parameters. argon2.IDKey memory is in KiB, so 64*1024 = 64 MiB.
+// OWASP minimum: m=37 MiB,t=1,p=1 or m=15 MiB,t=2,p=1.
 const (
-	memory      = 64 * 1024 // Memory cost set to 64 KiB (64 * 1024 bytes) is for demonstration purpose
-	iterations  = 2         // Number of iterations for Argon2id set to 2
-	parallelism = 1         // Degree of parallelism set to 1
-	tagSize     = 32        // Tag size set to 256 bits (32 bytes)
+	memory      = 64 * 1024
+	iterations  = 2
+	parallelism = 1
+	tagSize     = 32
 )
 
-var (
-	mu               sync.Mutex              // Ensures thread-safe access to shared resources
-	passphraseHashes = map[string]struct{}{} // Stores hashes of generated passphrases (used database in production)
+// WordListSize is the exact size of EACH language list (11 bits per word).
+const WordListSize = 2048
+
+// Language identifies which embedded list a mnemonic was built from.
+type Language string
+
+const (
+	English Language = "english"
+	Bahasa  Language = "bahasa"
 )
 
-// GitHubFile represents the structure of file information returned by GitHub's API
-type GitHubFile struct {
-	Name string `json:"name"` // Name of the file
-	Path string `json:"path"` // Path to the file in the repository
-	Type string `json:"type"` // Type of the file (e.g., file, directory)
+// SECURITY: word lists are embedded and SHA-256 pinned instead of being
+// downloaded from a mutable GitHub branch at runtime (a tampered or tiny list
+// would collapse entropy; a random list per phrase made recovery impossible).
+//
+// SETUP (one time), place both files in this directory, one word per line:
+//
+//	wordlists/english.txt   (2048 unique words)
+//	wordlists/bahasa.txt    (2048 unique words)
+//
+// Then run `sha256sum` on each (or call LoadWordList once: the error prints the
+// hash) and paste the hashes below. Empty pin = fail closed.
+//
+//go:embed wordlists/english.txt
+var englishRaw []byte
+
+//go:embed wordlists/bahasa.txt
+var bahasaRaw []byte
+
+const (
+	EnglishWordListSHA256 = "187db04a869dd9bc7be80d21a86497d692c0db6abd3aa8cb6be5d618ff757fae"
+	BahasaWordListSHA256  = "cbb777280ebae586926679c6d96c6b8b6515e8db2c3480b6cd48ec5ac7d80fc2"
+)
+
+// ErrAmbiguousLanguage means every word of the phrase exists in both lists
+// and the checksum passes for both. Astronomically unlikely, but reported
+// instead of guessed.
+var ErrAmbiguousLanguage = errors.New("sips3: mnemonic is valid in more than one language")
+
+// LoadWordList returns the verified list for lang.
+func LoadWordList(lang Language) ([]string, error) {
+	var raw []byte
+	var pin string
+	switch lang {
+	case English:
+		raw, pin = englishRaw, EnglishWordListSHA256
+	case Bahasa:
+		raw, pin = bahasaRaw, BahasaWordListSHA256
+	default:
+		return nil, fmt.Errorf("sips3: unsupported language %q", lang)
+	}
+	sum := sha256.Sum256(raw)
+	got := hex.EncodeToString(sum[:])
+	if pin == "" {
+		return nil, fmt.Errorf("sips3: %s word list is not pinned; embedded list hashes to %s", lang, got)
+	}
+	if subtle.ConstantTimeCompare([]byte(got), []byte(strings.ToLower(pin))) != 1 {
+		return nil, fmt.Errorf("sips3: %s word list does not match pinned SHA-256", lang)
+	}
+	words := parseWordList(raw)
+	if err := validateWordList(words); err != nil {
+		return nil, fmt.Errorf("%s list: %w", lang, err)
+	}
+	return words, nil
 }
 
-// Base URL for accessing the repository directory on GitHub (HTTPS version)
-const baseURL = "https://api.github.com/repos/sphinx-core/sips/contents/.github/workflows/sips0003"
-
-// FetchFileList fetches the list of files from a specified URL
-func FetchFileList(url string) ([]GitHubFile, error) {
-	resp, err := http.Get(url) // Sends an HTTP GET request to the specified URL
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch file list: %w", err) // Returns an error if the request fails
-	}
-	defer resp.Body.Close() // Ensures the response body is closed after function execution
-
-	if resp.StatusCode != http.StatusOK { // Checks if the HTTP status is OK (200)
-		return nil, fmt.Errorf("unexpected response: %s", resp.Status) // Returns an error for unexpected responses
-	}
-
-	var files []GitHubFile                                            // Declares a slice to store file information
-	if err := json.NewDecoder(resp.Body).Decode(&files); err != nil { // Decodes the JSON response into the slice
-		return nil, fmt.Errorf("failed to decode response: %w", err) // Returns an error if decoding fails
-	}
-
-	return files, nil // Returns the list of files
-}
-
-// SelectAndLoadTxtFile selects a random .txt file and loads its content
-func SelectAndLoadTxtFile(url string) ([]string, error) {
-	files, err := FetchFileList(url) // Fetches the list of files from the repository
-	if err != nil {
-		return nil, err // Returns an error if file fetching fails
-	}
-
-	// Filters the files to include only those with a .txt extension
-	var txtFiles []GitHubFile
-	for _, file := range files {
-		if strings.HasSuffix(file.Name, ".txt") { // Checks if the file name ends with .txt
-			txtFiles = append(txtFiles, file) // Adds the .txt file to the list
-		}
-	}
-
-	if len(txtFiles) == 0 { // Checks if no .txt files were found
-		return nil, errors.New("no .txt files found in the directory") // Returns an error
-	}
-
-	// Selects a random .txt file from the list
-	var selectedFile GitHubFile
-	if len(txtFiles) > 0 { // Check if there are any files
-		randIndex, _ := rand.Int(rand.Reader, big.NewInt(int64(len(txtFiles)))) // Generates a random index
-		selectedFile = txtFiles[randIndex.Int64()]                              // Selects the file at the random index
-	} else {
-		return nil, errors.New("no .txt files found") // Error if no files are found
-	}
-
-	// Constructs the URL for fetching the raw content of the selected file
-	rawBaseURL := "https://raw.githubusercontent.com/sphinx-core/sips/main/.github/workflows/sips0003/" // Changed to HTTPS
-	fileURL := rawBaseURL + selectedFile.Name
-
-	// Fetches the content of the selected file
-	resp, err := http.Get(fileURL) // Sends an HTTP GET request to the file URL
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch file content: %w", err) // Returns an error if the request fails
-	}
-	defer resp.Body.Close() // Ensures the response body is closed after function execution
-
-	body, err := io.ReadAll(resp.Body) // Reads the response body
-	if err != nil {
-		return nil, fmt.Errorf("failed to read file content: %w", err) // Returns an error if reading fails
-	}
-
-	// Splits the content into individual words and trims whitespace
+func parseWordList(raw []byte) []string {
 	var words []string
-	for _, word := range strings.Split(string(body), "\n") {
-		trimmedWord := strings.TrimSpace(word) // Removes leading/trailing whitespace
-		if trimmedWord != "" {                 // Ignores empty lines
-			words = append(words, trimmedWord) // Adds the word to the list
+	for _, line := range strings.Split(strings.ReplaceAll(string(raw), "\r\n", "\n"), "\n") {
+		if w := strings.TrimSpace(line); w != "" {
+			words = append(words, w)
 		}
 	}
-
-	return words, nil // Returns the list of words
+	return words
 }
 
-// GeneratePassphrase creates a secure passphrase using a given word list
-func GeneratePassphrase(words []string, wordCount int) (string, string, error) {
-	// Check if the word list is empty; if so, return an error
-	if len(words) == 0 {
-		return "", "", errors.New("word list is empty")
+// validateWordList enforces size, UTF-8, no inner whitespace, uniqueness.
+func validateWordList(words []string) error {
+	if len(words) != WordListSize {
+		return fmt.Errorf("sips3: word list must contain exactly %d words, got %d", WordListSize, len(words))
 	}
-
-	var passphrase []string
-	// Loop to generate a passphrase by selecting random words from the word list
-	for i := 0; i < wordCount; i++ {
-		// Generate a random index to pick a word from the list
-		randIndex, err := rand.Int(rand.Reader, big.NewInt(int64(len(words))))
-		if err != nil {
-			// Return an error if random index generation fails
-			return "", "", fmt.Errorf("failed to generate random index: %w", err)
+	seen := make(map[string]struct{}, len(words))
+	for _, w := range words {
+		if !utf8.ValidString(w) {
+			return errors.New("sips3: word list contains invalid UTF-8")
 		}
-		// Append the selected word to the passphrase slice
-		passphrase = append(passphrase, words[randIndex.Int64()])
+		for _, r := range w {
+			if unicode.IsSpace(r) {
+				return fmt.Errorf("sips3: word %q contains whitespace", w)
+			}
+		}
+		if _, dup := seen[w]; dup {
+			return fmt.Errorf("sips3: duplicate word %q in list", w)
+		}
+		seen[w] = struct{}{}
 	}
+	return nil
+}
 
-	// Join the words in the passphrase slice into a single string separated by spaces
-	passphraseStr := strings.Join(passphrase, " ")
-
-	// Create a slice to hold the 16-byte nonce
-	nonce := make([]byte, 16)
-	// Generate random bytes to populate the nonce
-	if _, err := rand.Read(nonce); err != nil {
-		// Return an error if nonce generation fails
-		return "", "", fmt.Errorf("failed to generate nonce: %w", err)
+// randomLanguage picks English or Bahasa with crypto/rand (50/50).
+func randomLanguage() (Language, error) {
+	var b [1]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("sips3: failed to pick language: %w", err)
 	}
-
-	// Convert the passphrase string to a byte slice for encoding
-	passphraseBytes := []byte(passphraseStr)
-	// Check if the byte slice is valid UTF-8
-	if !utf8.Valid(passphraseBytes) {
-		// Return an error if the passphrase contains invalid UTF-8 characters
-		return "", "", errors.New("invalid UTF-8 encoding in passphrase")
+	if b[0]&1 == 0 {
+		return English, nil
 	}
+	return Bahasa, nil
+}
 
-	// Use the generated passphrase as part of the salt (to stretch)
-	// NOTE: the SpxHash input is a mnemonic passphrase, i.e. secret material.
-	// SpxHashUncached is used deliberately: it is byte-identical to SpxHash
-	// (same shared instance, same protocol key) but stores nothing, so the
-	// passphrase is not copied into the process-wide LRU cache where it would
-	// linger in memory and leak cache-hit timing. See common.SpxHash's SECURITY
-	// note. Do NOT "fix" the SHA-512/256 primitive here: it is not the password
-	// KDF (that is Argon2id, below) and changing it would alter SIPS-0001 and
-	// the pinned test vectors.
+func entropyBitsForWordCount(wordCount int) (int, error) {
+	switch wordCount {
+	case 12:
+		return 128, nil
+	case 15:
+		return 160, nil
+	case 18:
+		return 192, nil
+	case 21:
+		return 224, nil
+	case 24:
+		return 256, nil
+	}
+	return 0, errors.New("sips3: word count must be 12, 15, 18, 21, or 24")
+}
+
+// mnemonicFromEntropy encodes entropy || SHA-256 checksum bits into 11-bit
+// indices of ONE list (BIP-39 construction).
+func mnemonicFromEntropy(words []string, entropy []byte) (string, error) {
+	bits := len(entropy) * 8
+	if bits < 128 || bits > 256 || bits%32 != 0 {
+		return "", errors.New("sips3: entropy must be 16, 20, 24, 28 or 32 bytes")
+	}
+	cs := bits / 32
+	h := sha256.Sum256(entropy)
+
+	n := new(big.Int).SetBytes(entropy)
+	n.Lsh(n, uint(cs))
+	n.Or(n, big.NewInt(int64(h[0]>>(8-uint(cs)))))
+
+	total := bits + cs
+	count := total / 11
+	mask := big.NewInt(0x7ff)
+	out := make([]string, count)
+	for i := 0; i < count; i++ {
+		idx := new(big.Int).Rsh(n, uint(total-11*(i+1)))
+		idx.And(idx, mask)
+		out[i] = words[idx.Int64()]
+	}
+	return strings.Join(out, " "), nil
+}
+
+// NewMnemonicFromEntropyLang builds a checksummed mnemonic in a given language.
+func NewMnemonicFromEntropyLang(entropy []byte, lang Language) (string, error) {
+	words, err := LoadWordList(lang)
+	if err != nil {
+		return "", fmt.Errorf("failed to load words: %w", err)
+	}
+	return mnemonicFromEntropy(words, entropy)
+}
+
+// NewMnemonicFromEntropy builds a checksummed mnemonic in a randomly chosen
+// language (English or Bahasa). All words come from that one list.
+func NewMnemonicFromEntropy(entropy []byte) (string, error) {
+	lang, err := randomLanguage()
+	if err != nil {
+		return "", err
+	}
+	return NewMnemonicFromEntropyLang(entropy, lang)
+}
+
+// checkMnemonic verifies membership + checksum against a single list.
+func checkMnemonic(words, fields []string) error {
+	bits, err := entropyBitsForWordCount(len(fields))
+	if err != nil {
+		return err
+	}
+	index := make(map[string]int, len(words))
+	for i, w := range words {
+		index[w] = i
+	}
+	cs := bits / 32
+	n := new(big.Int)
+	for _, f := range fields {
+		i, ok := index[f]
+		if !ok {
+			return fmt.Errorf("sips3: word %q is not in the word list", f)
+		}
+		n.Lsh(n, 11)
+		n.Or(n, big.NewInt(int64(i)))
+	}
+	gotCS := new(big.Int).And(n, big.NewInt(int64(1<<uint(cs)-1))).Int64()
+	n.Rsh(n, uint(cs))
+	entropy := make([]byte, bits/8)
+	n.FillBytes(entropy)
+	h := sha256.Sum256(entropy)
+	if int64(h[0]>>(8-uint(cs))) != gotCS {
+		return errors.New("sips3: mnemonic checksum mismatch")
+	}
+	return nil
+}
+
+// matchingLanguages returns every language for which the phrase is valid.
+func matchingLanguages(mnemonic string) ([]Language, error) {
+	fields := strings.Fields(mnemonic)
+	var matched []Language
+	var firstErr error
+	for _, lang := range []Language{English, Bahasa} {
+		words, err := LoadWordList(lang)
+		if err != nil {
+			return nil, err
+		}
+		if err := checkMnemonic(words, fields); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		matched = append(matched, lang)
+	}
+	if len(matched) == 0 {
+		return nil, fmt.Errorf("sips3: mnemonic is not valid in any supported language: %w", firstErr)
+	}
+	return matched, nil
+}
+
+// DetectLanguage returns the single language a valid phrase belongs to.
+func DetectLanguage(mnemonic string) (Language, error) {
+	m, err := matchingLanguages(mnemonic)
+	if err != nil {
+		return "", err
+	}
+	if len(m) > 1 {
+		return "", ErrAmbiguousLanguage
+	}
+	return m[0], nil
+}
+
+// ValidateMnemonic checks membership, word count and checksum in whichever
+// supported language the phrase uses. Mixed-language phrases are rejected.
+func ValidateMnemonic(mnemonic string) error {
+	_, err := matchingLanguages(mnemonic)
+	return err
+}
+
+// GeneratePassphrase creates a checksummed passphrase of wordCount words from
+// the given list (one language) using crypto/rand entropy. Returns the
+// passphrase and its Argon2id verifier.
+func GeneratePassphrase(words []string, wordCount int) (string, string, error) {
+	if err := validateWordList(words); err != nil {
+		return "", "", err
+	}
+	bits, err := entropyBitsForWordCount(wordCount)
+	if err != nil {
+		return "", "", err
+	}
+	entropy := make([]byte, bits/8)
+	if _, err := rand.Read(entropy); err != nil {
+		return "", "", fmt.Errorf("failed to generate entropy: %w", err)
+	}
+	defer func() {
+		for i := range entropy {
+			entropy[i] = 0
+		}
+	}()
+
+	passphraseStr, err := mnemonicFromEntropy(words, entropy)
+	if err != nil {
+		return "", "", err
+	}
+	// Do NOT swap the primitive in stretchPassphrase: Argon2id is the KDF and
+	// changing it would alter SIPS-0001 and the pinned test vectors.
 	stretchedHashStr, err := stretchPassphrase(passphraseStr)
 	if err != nil {
 		return "", "", err
 	}
-
-	// Lock the mutex to ensure thread safety when accessing shared data
-	mu.Lock()
-	defer mu.Unlock()
-	// Check if the generated hash already exists in the hash map
-	if _, exists := passphraseHashes[stretchedHashStr]; exists {
-		// Return an error if a duplicate passphrase is detected
-		return "", "", errors.New("duplicate passphrase detected, regenerate")
-	}
-
-	// Store the hash in the map to avoid future duplicates
-	passphraseHashes[stretchedHashStr] = struct{}{}
-
-	return passphraseStr, stretchedHashStr, nil // Return the generated passphrase and stretched hash
+	return passphraseStr, stretchedHashStr, nil
 }
 
-// stretchPassphrase derives the hex-encoded Argon2id verifier for a mnemonic
-// passphrase.
+// stretchPassphrase derives the hex-encoded Argon2id verifier (UNCHANGED,
+// pinned by TestStretchPassphraseMatchesPreChangeBehaviour):
 //
-// Construction (unchanged, pinned by TestStretchPassphraseMatchesPreChangeBehaviour):
-//
-//	extendedSalt = []byte("mnemonic"+passphrase) || SpxHash(passphrase)  // 8+n+32 bytes
+//	extendedSalt = []byte("mnemonic"+passphrase) || SpxHash(passphrase)
 //	verifier     = hex(argon2.IDKey(passphrase, extendedSalt, iterations, memory, parallelism, tagSize))
-//
-// The SpxHash call is an intermediate that expands the passphrase before Argon2id,
-// not the password KDF itself — Argon2id is what makes guessing expensive. Its
-// input is secret, so it goes through the uncached path (see common.SpxHash's
-// SECURITY note); the digest is byte-identical either way.
-//
-// It repeats the UTF-8 check GeneratePassphrase already does so the helper is
-// safe to call on its own; that is the only validation, and it is unchanged.
 func stretchPassphrase(passphraseStr string) (string, error) {
 	if !utf8.ValidString(passphraseStr) {
 		return "", errors.New("invalid UTF-8 encoding in passphrase")
 	}
-
-	// Use the generated passphrase as part of the salt (to stretch)
-	salt := "mnemonic" + passphraseStr
-	// Convert the salt string to a byte slice for encoding
-	saltBytes := []byte(salt)
-
-	// Use SpxHash from the common package to generate a hash (256-bit).
-	// Uncached: the passphrase is secret material and must not be retained in
-	// the shared LRU cache.
-	hash := common.SpxHashUncached([]byte(passphraseStr))
-
-	// Append the hash to the salt or use it directly in the stretching process
-	extendedSalt := append(saltBytes, hash...) // Combine salt and hash
-
-	// Use Argon2 IDKey to stretch the passphrase and salt into a fixed-length hash
+	saltBytes := []byte("mnemonic" + passphraseStr)
+	hash := common.SpxHashUncached([]byte(passphraseStr)) // secret input: uncached
+	extendedSalt := append(saltBytes, hash...)
 	stretchedHash := argon2.IDKey([]byte(passphraseStr), extendedSalt, iterations, memory, parallelism, tagSize)
-	// Convert the stretched hash to a hexadecimal string representation
 	return fmt.Sprintf("%x", stretchedHash), nil
 }
 
-// isValidEntropy checks if the entropy is a valid multiple of 32 bits and within the allowed range.
 func isValidEntropy(entropy int) bool {
-	validEntropies := []int{128, 160, 192, 224, 256}
-	for _, e := range validEntropies {
-		if entropy == e {
-			return true
-		}
+	switch entropy {
+	case 128, 160, 192, 224, 256:
+		return true
 	}
 	return false
 }
 
-// NewMnemonic generates a mnemonic from any .txt file in the directory
-func NewMnemonic(entropy int) (string, string, error) {
-	// Validate the entropy
+// NewMnemonicLang generates a mnemonic in the given language.
+func NewMnemonicLang(entropy int, lang Language) (string, string, error) {
 	if !isValidEntropy(entropy) {
 		return "", "", errors.New("invalid entropy: must be one of 128, 160, 192, 224, or 256")
 	}
-
-	// Adjust word count to 12, 15, 18, 21, or 24 based on entropy and checksum
-	var wordCount int
-	switch entropy {
-	case 128:
-		wordCount = 12
-	case 160:
-		wordCount = 15
-	case 192:
-		wordCount = 18
-	case 224:
-		wordCount = 21
-	case 256:
-		wordCount = 24
-	}
-
-	words, err := SelectAndLoadTxtFile(baseURL) // Loads the word list from the repository
+	wordCount := (entropy + entropy/32) / 11 // 128->12 ... 256->24
+	words, err := LoadWordList(lang)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to load words: %w", err) // Returns an error if loading fails
+		return "", "", fmt.Errorf("failed to load words: %w", err)
 	}
-
-	passphrase, nonce, err := GeneratePassphrase(words, wordCount) // Generates a passphrase using the word list
+	passphrase, verifier, err := GeneratePassphrase(words, wordCount)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to generate passphrase: %w", err) // Returns an error if generation fails
+		return "", "", fmt.Errorf("failed to generate passphrase: %w", err)
 	}
+	return passphrase, verifier, nil
+}
 
-	return passphrase, nonce, nil // Returns the generated passphrase and nonce
+// NewMnemonic generates a mnemonic in a randomly chosen language
+// (English or Bahasa). Returns the mnemonic and its Argon2id verifier.
+func NewMnemonic(entropy int) (string, string, error) {
+	lang, err := randomLanguage()
+	if err != nil {
+		return "", "", err
+	}
+	return NewMnemonicLang(entropy, lang)
 }

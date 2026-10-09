@@ -78,8 +78,18 @@ const (
 // applyPortOffset rewrites the DEFAULT listen addresses (and default datadir)
 // by offset. An explicitly supplied value is never touched: the caller only
 // reaches here with the flag defaults, and each field is compared against its
-// default literal before being shifted. Offset 0 is a no-op.
+// default literal before being shifted.
+//
+// The default datadir is namespaced per node for EVERY offset, including 0:
+// the bootstrap node resolves to data/node0 so it sits beside data/node1,
+// data/node2, ... exactly like any other node, instead of writing its
+// Node-…/config/custody tree straight into the data/ root. Only the LISTEN
+// PORTS remain a no-op at offset 0 — their 30303/8545/8600 defaults are
+// unchanged.
 func applyPortOffset(offset int, tcpAddr, httpAddr, wsAddr, dataDir *string) {
+	if dataDir != nil && *dataDir == defaultDataDir {
+		*dataDir = fmt.Sprintf("data/node%d", offset)
+	}
 	if offset == 0 {
 		return
 	}
@@ -91,9 +101,6 @@ func applyPortOffset(offset int, tcpAddr, httpAddr, wsAddr, dataDir *string) {
 	}
 	if wsAddr != nil && *wsAddr == defaultWSAddr {
 		*wsAddr = fmt.Sprintf("127.0.0.1:%d", 8700+offset)
-	}
-	if dataDir != nil && *dataDir == defaultDataDir {
-		*dataDir = fmt.Sprintf("data/node%d", offset)
 	}
 }
 

@@ -14,6 +14,9 @@ import (
 
 // SerializeSignature serializes the SPHINCS+ signature into a byte slice.
 func (sm *SphincsManager) SerializeSignature(sig *sthincs.SPHINCS_SIG) ([]byte, error) {
+	if sig == nil {
+		return nil, errors.New("signature is nil")
+	}
 	return sig.SerializeSignature()
 }
 
@@ -21,6 +24,9 @@ func (sm *SphincsManager) SerializeSignature(sig *sthincs.SPHINCS_SIG) ([]byte, 
 func (sm *SphincsManager) DeserializeSignature(sigBytes []byte) (*sthincs.SPHINCS_SIG, error) {
 	if sm.parameters == nil || sm.parameters.Params == nil {
 		return nil, errors.New("SPHINCSParameters are not initialized")
+	}
+	if len(sigBytes) == 0 {
+		return nil, errors.New("empty signature bytes")
 	}
 	return sthincs.DeserializeSignature(sm.parameters.Params, sigBytes)
 }

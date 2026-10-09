@@ -8,142 +8,206 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
-	"encoding/hex"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"math"
 )
 
-// NewEncryptionKey creates a new AES-GCM encryption key from a shared secret
+// MaxSecureMessageSize bounds a single plaintext message (anti memory-DoS).
+const MaxSecureMessageSize = 16 << 20 // 16 MiB
+
+func newGCM(key []byte) (cipher.AEAD, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	return cipher.NewGCM(block)
+}
+
+// NewEncryptionKey creates a single-key AES-256-GCM session from a shared secret.
+//
+// Deprecated: legacy mode (one key for both directions, random nonces, no
+// replay protection). Sessions from PerformKEM do not use this.
 func NewEncryptionKey(sharedSecret []byte) (*EncryptionKey, error) {
-	// Ensure the shared secret is long enough for AES-256 (32 bytes)
 	if len(sharedSecret) < 32 {
 		return nil, errors.New("shared secret too short for AES-256")
 	}
-
-	// Create AES block cipher with the first 32 bytes of the shared secret
-	block, err := aes.NewCipher(sharedSecret[:32])
+	aead, err := newGCM(sharedSecret[:32])
 	if err != nil {
 		return nil, err
 	}
-
-	// Wrap the AES block cipher in a GCM (Galois/Counter Mode) for authenticated encryption
-	aesGCM, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-
-	// SECURITY: do not log key material. The AES-GCM key derived here decrypts
-	// the session; its bytes must never reach stdout/logs.
-	log.Printf("AES-256-GCM session key derived (%d bytes)", len(sharedSecret))
-
-	// Return a new EncryptionKey object
-	return &EncryptionKey{
-		SharedSecret: sharedSecret,
-		AESGCM:       aesGCM,
-	}, nil
+	return &EncryptionKey{SharedSecret: sharedSecret, AESGCM: aead}, nil
 }
 
-// Encrypt encrypts the given plaintext using AES-GCM
+// newDirectionalKey builds a session with separate send and receive keys.
+func newDirectionalKey(sendKey, recvKey []byte) (*EncryptionKey, error) {
+	if len(sendKey) != 32 || len(recvKey) != 32 {
+		return nil, errors.New("session keys must be 32 bytes")
+	}
+	s, err := newGCM(sendKey)
+	if err != nil {
+		return nil, err
+	}
+	r, err := newGCM(recvKey)
+	if err != nil {
+		return nil, err
+	}
+	return &EncryptionKey{AESGCM: s, sendAEAD: s, recvAEAD: r}, nil
+}
+
+// Close drops the session's key references and wipes any stored secret.
+func (enc *EncryptionKey) Close() {
+	if enc == nil {
+		return
+	}
+	for i := range enc.SharedSecret {
+		enc.SharedSecret[i] = 0
+	}
+	enc.SharedSecret = nil
+	enc.AESGCM, enc.sendAEAD, enc.recvAEAD = nil, nil, nil
+}
+
+func seqNonce(seq uint64) []byte {
+	n := make([]byte, 12) // 4 zero bytes || 8-byte big-endian counter
+	binary.BigEndian.PutUint64(n[4:], seq)
+	return n
+}
+
+// Encrypt encrypts plaintext.
+//
+// Handshake sessions: output = seq(8) || AES-GCM(plaintext), nonce derived from
+// seq, seq bound as AAD, never reused (per-direction key + counter).
+// Legacy keys: output = nonce(12) || AES-GCM(plaintext).
 func (enc *EncryptionKey) Encrypt(plaintext []byte) ([]byte, error) {
-	// Ensure encryption key is properly initialized
 	if enc == nil || enc.AESGCM == nil {
 		return nil, errors.New("encryption key is nil")
 	}
-
-	// Generate a random nonce of appropriate size
-	nonce := make([]byte, enc.AESGCM.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		return nil, err
+	if len(plaintext) > MaxSecureMessageSize {
+		return nil, errors.New("plaintext too large")
 	}
 
-	// Encrypt the plaintext using AES-GCM and append the nonce
-	ciphertext := enc.AESGCM.Seal(nil, nonce, plaintext, nil)
+	if enc.sendAEAD == nil { // legacy path
+		nonce := make([]byte, enc.AESGCM.NonceSize())
+		if _, err := rand.Read(nonce); err != nil {
+			return nil, err
+		}
+		return enc.AESGCM.Seal(nonce, nonce, plaintext, nil), nil
+	}
 
-	// Log the encryption event
-	log.Printf("Encrypted message, nonce: %s, ciphertext length: %d", hex.EncodeToString(nonce), len(ciphertext))
+	enc.sendMu.Lock()
+	if enc.sendSeq == math.MaxUint64 {
+		enc.sendMu.Unlock()
+		return nil, errors.New("session send counter exhausted; re-handshake")
+	}
+	seq := enc.sendSeq
+	enc.sendSeq++
+	enc.sendMu.Unlock()
 
-	// Return the combined nonce and ciphertext
-	return append(nonce, ciphertext...), nil
+	out := make([]byte, 8, 8+len(plaintext)+enc.sendAEAD.Overhead())
+	binary.BigEndian.PutUint64(out, seq)
+	return enc.sendAEAD.Seal(out, seqNonce(seq), plaintext, out[:8]), nil
 }
 
-// Decrypt decrypts the given ciphertext using AES-GCM
+// acceptSeq records seq in a 64-wide sliding window; false = replay or too old.
+func (enc *EncryptionKey) acceptSeq(seq uint64) bool {
+	enc.recvMu.Lock()
+	defer enc.recvMu.Unlock()
+	if !enc.recvAny {
+		enc.recvAny, enc.recvMax, enc.recvBitmap = true, seq, 1
+		return true
+	}
+	if seq > enc.recvMax {
+		shift := seq - enc.recvMax
+		if shift >= 64 {
+			enc.recvBitmap = 1
+		} else {
+			enc.recvBitmap = (enc.recvBitmap << shift) | 1
+		}
+		enc.recvMax = seq
+		return true
+	}
+	diff := enc.recvMax - seq
+	if diff >= 64 {
+		return false
+	}
+	bit := uint64(1) << diff
+	if enc.recvBitmap&bit != 0 {
+		return false
+	}
+	enc.recvBitmap |= bit
+	return true
+}
+
+// Decrypt authenticates and decrypts a message from Encrypt. Replays and
+// messages older than the 64-message window are rejected.
 func (enc *EncryptionKey) Decrypt(ciphertext []byte) ([]byte, error) {
-	// Check for valid encryption key
 	if enc == nil || enc.AESGCM == nil {
 		return nil, errors.New("encryption key is nil")
 	}
+	if len(ciphertext) > MaxSecureMessageSize+64 {
+		return nil, errors.New("ciphertext too large")
+	}
 
-	// Ensure ciphertext includes a nonce
-	if len(ciphertext) < enc.AESGCM.NonceSize() {
+	if enc.recvAEAD == nil { // legacy path
+		ns := enc.AESGCM.NonceSize()
+		if len(ciphertext) < ns {
+			return nil, errors.New("ciphertext too short")
+		}
+		return enc.AESGCM.Open(nil, ciphertext[:ns], ciphertext[ns:], nil)
+	}
+
+	if len(ciphertext) < 8+enc.recvAEAD.Overhead() {
 		return nil, errors.New("ciphertext too short")
 	}
-
-	// Extract the nonce and the actual ciphertext
-	nonce := ciphertext[:enc.AESGCM.NonceSize()]
-	encrypted := ciphertext[enc.AESGCM.NonceSize():]
-
-	// Log the decryption attempt
-	log.Printf("Decrypting message, nonce: %s, ciphertext length: %d", hex.EncodeToString(nonce), len(encrypted))
-
-	// Decrypt the message using AES-GCM
-	plaintext, err := enc.AESGCM.Open(nil, nonce, encrypted, nil)
+	seq := binary.BigEndian.Uint64(ciphertext[:8])
+	plaintext, err := enc.recvAEAD.Open(nil, seqNonce(seq), ciphertext[8:], ciphertext[:8])
 	if err != nil {
-		log.Printf("Decryption failed: %v", err)
-		return nil, err
+		return nil, errors.New("decryption failed")
+	}
+	// Check for replay only AFTER authentication, so forged packets cannot
+	// poison the window.
+	if !enc.acceptSeq(seq) {
+		return nil, errors.New("replayed or stale message")
 	}
 	return plaintext, nil
 }
 
-// SecureMessage serializes and encrypts the message struct
+// SecureMessage serializes and encrypts the message.
 func SecureMessage(msg *Message, enc *EncryptionKey) ([]byte, error) {
-	// Encode the message to JSON
-	data, err := msg.Encode()
-	if err != nil {
-		return nil, fmt.Errorf("failed to encode message: %v", err)
+	if msg == nil {
+		return nil, errors.New("message is nil")
 	}
-	log.Printf("Encoding message, type: %s, data length: %d", msg.Type, len(data))
-
-	// Encrypt the data using the EncryptionKey
-	ciphertext, err := enc.Encrypt(data)
-	if err != nil {
-		return nil, fmt.Errorf("failed to encrypt message: %v", err)
-	}
-	log.Printf("Encrypted message, nonce: %x, ciphertext length: %d", ciphertext[:enc.AESGCM.NonceSize()], len(ciphertext))
-	return ciphertext, nil
-}
-
-// DecodeSecureMessage decrypts and deserializes an encrypted message
-func DecodeSecureMessage(data []byte, enc *EncryptionKey) (*Message, error) {
-	// Check encryption key
 	if enc == nil {
 		return nil, errors.New("encryption key is nil")
 	}
+	data, err := msg.Encode()
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode message: %w", err)
+	}
+	ciphertext, err := enc.Encrypt(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encrypt message: %w", err)
+	}
+	return ciphertext, nil
+}
 
-	// Log input size
-	log.Printf("Decoding message, data length: %d", len(data))
-
-	// Decrypt message
+// DecodeSecureMessage decrypts, deserializes and validates an encrypted message.
+func DecodeSecureMessage(data []byte, enc *EncryptionKey) (*Message, error) {
+	if enc == nil {
+		return nil, errors.New("encryption key is nil")
+	}
 	plaintext, err := enc.Decrypt(data)
 	if err != nil {
 		return nil, err
 	}
-
-	// Log plaintext size
-	log.Printf("Decrypted plaintext length: %d", len(plaintext))
-
-	// Parse plaintext JSON into Message struct
 	var msg Message
 	if err := json.Unmarshal(plaintext, &msg); err != nil {
 		return nil, err
 	}
-
-	// Validate the message contents
 	if err := msg.ValidateMessage(); err != nil {
 		return nil, err
 	}
-
-	// Return parsed message
 	return &msg, nil
 }

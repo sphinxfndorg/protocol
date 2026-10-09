@@ -7,6 +7,8 @@ package types
 import (
 	"encoding/hex"
 	"time"
+
+	"golang.org/x/crypto/sha3"
 )
 
 // Meta holds all cryptographic and descriptive metadata for a signed document.
@@ -134,6 +136,7 @@ func (m *Meta) Clone() *Meta {
 	return &Meta{
 		Signature:          m.Signature,
 		PublicKey:          m.PublicKey,
+		OrgCode:            m.OrgCode,
 		FileHash:           m.FileHash,
 		FinalDocumentHash:  m.FinalDocumentHash,
 		DocumentSignature:  m.DocumentSignature,
@@ -165,9 +168,9 @@ func (m *Meta) Clone() *Meta {
 	}
 }
 
-// ComputeFileHashFromBytes is a helper to compute hash from bytes
+// ComputeFileHashFromBytes returns hex(SHAKE-256, 32 bytes) of data.
 func ComputeFileHashFromBytes(data []byte) string {
-	// This will be implemented by sign package or here with crypto
-	// For now, just a placeholder - actual implementation should use SHAKE256
-	return hex.EncodeToString(data[:32])
+	h := make([]byte, 32)
+	sha3.ShakeSum256(h, data)
+	return hex.EncodeToString(h)
 }

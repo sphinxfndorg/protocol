@@ -113,6 +113,8 @@ func (k *KeystoreConfig) GetWalletDerivationPaths() map[string]string {
 
 // GenerateLedgerHeaders generates headers specifically formatted for Ledger hardware
 func (k *KeystoreConfig) GenerateLedgerHeaders(operation string, amount float64, address string, memo string) string {
+	k.mu.RLock() // FIX: DerivationPaths was read without a lock
+	defer k.mu.RUnlock()
 	bip44Path := k.DerivationPaths[WalletTypeBIP44]
 	if bip44Path == "" {
 		bip44Path = fmt.Sprintf("m/44'/%d'/0'/0/0", k.BIP44CoinType)
@@ -143,6 +145,8 @@ func (k *KeystoreConfig) GenerateLedgerHeaders(operation string, amount float64,
 
 // GenerateTrezorHeaders generates headers specifically formatted for Trezor hardware
 func (k *KeystoreConfig) GenerateTrezorHeaders(operation string, amount float64, address string, memo string) string {
+	k.mu.RLock() // FIX: DerivationPaths was read without a lock
+	defer k.mu.RUnlock()
 	trezorPath := k.DerivationPaths[WalletTypeTrezor]
 	if trezorPath == "" {
 		trezorPath = fmt.Sprintf("m/44'/%d'/0'/0/0", k.BIP44CoinType)
@@ -173,6 +177,8 @@ func (k *KeystoreConfig) GenerateTrezorHeaders(operation string, amount float64,
 
 // GenerateDiskHeaders generates headers specifically formatted for Disk wallet operations
 func (k *KeystoreConfig) GenerateDiskHeaders(operation string, amount float64, address string, memo string) string {
+	k.mu.RLock() // FIX: DerivationPaths was read without a lock
+	defer k.mu.RUnlock()
 	diskPath := k.DerivationPaths[WalletTypeDisk]
 	if diskPath == "" {
 		diskPath = fmt.Sprintf("m/44'/%d'/0'/0/0", k.BIP44CoinType)

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/sphinxfndorg/protocol/src/accounts/key"
 	disk "github.com/sphinxfndorg/protocol/src/accounts/key/disk"
@@ -179,10 +180,38 @@ func ValidateStoragePath(path string, storageType StorageType) error {
 	os.Remove(testFile)
 
 	if storageType == StorageTypeUSB {
-		if filepath.VolumeName(path) == "" {
+		if !looksRemovable(path) {
 			return fmt.Errorf("path does not appear to be a removable drive: %s", path)
 		}
 	}
 
 	return nil
+}
+
+// looksRemovable is a best-effort check that path is on an external/removable
+// volume. (filepath.VolumeName is always empty on macOS/Linux, so the old check
+// rejected every USB path there.)
+func looksRemovable(path string) bool {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		vol := filepath.VolumeName(abs)
+		return vol != "" && !strings.EqualFold(vol, os.Getenv("SystemDrive"))
+	}
+	var roots []string
+	switch runtime.GOOS {
+	case "darwin":
+		roots = []string{"/Volumes/"}
+	default:
+		roots = []string{"/media/", "/run/media/", "/mnt/"}
+	}
+	p := filepath.ToSlash(abs) + "/"
+	for _, r := range roots {
+		if strings.HasPrefix(p, r) && len(p) > len(r) {
+			return true
+		}
+	}
+	return false
 }

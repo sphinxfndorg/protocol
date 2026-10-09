@@ -26,7 +26,7 @@ func TestApplyPortOffset_MatchesNodeIdentity(t *testing.T) {
 		wantWS   string
 		wantDir  string
 	}{
-		{offset: 0, wantTCP: defaultTCPAddr, wantHTTP: defaultHTTPAddr, wantWS: defaultWSAddr, wantDir: "data"},
+		{offset: 0, wantTCP: defaultTCPAddr, wantHTTP: defaultHTTPAddr, wantWS: defaultWSAddr, wantDir: "data/node0"},
 		{offset: 1, wantTCP: "127.0.0.1:30304", wantHTTP: "127.0.0.1:8546", wantWS: "127.0.0.1:8701", wantDir: "data/node1"},
 		{offset: 2, wantTCP: "127.0.0.1:30305", wantHTTP: "127.0.0.1:8547", wantWS: "127.0.0.1:8702", wantDir: "data/node2"},
 	}

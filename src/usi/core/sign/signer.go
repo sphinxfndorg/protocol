@@ -6,7 +6,6 @@ package sign
 
 import (
 	"crypto/subtle"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
@@ -23,7 +22,6 @@ import (
 func Sign(msg []byte, passphrase string) (*Signature, error) {
 	startTime := time.Now()
 	log.Printf("[INFO] Sign: starting signing process for message length %d bytes", len(msg))
-	log.Printf("[DEBUG] Sign: message hash (hex): %s", hex.EncodeToString(msg))
 
 	kp, skBytes, err := keys.LoadKeyFromDisk(passphrase)
 	if err != nil {
@@ -207,12 +205,18 @@ func VerifyWithRegisteredKey(msg []byte, sig *Signature, passphrase string) (boo
 // independently confirmed that sig.PublicKey matches the registered key.
 func VerifyWithEmbeddedKey(msg []byte, sig *Signature, passphrase string) (bool, error) {
 	log.Printf("[INFO] VerifyWithEmbeddedKey: starting verification with embedded key")
+	if sig == nil {
+		return false, errors.New("nil signature")
+	}
 
 	// First verify key matches registered key
-	registeredKP, _, err := keys.LoadKeyFromDisk(passphrase)
+	registeredKP, skBytes, err := keys.LoadKeyFromDisk(passphrase)
 	if err != nil {
 		log.Printf("[ERROR] VerifyWithEmbeddedKey: failed to load registered key: %v", err)
 		return false, err
+	}
+	for i := range skBytes {
+		skBytes[i] = 0
 	}
 	if subtle.ConstantTimeCompare(sig.PublicKey, registeredKP.PublicKey) != 1 {
 		log.Printf("[ERROR] VerifyWithEmbeddedKey: embedded key does not match registered key")

@@ -8,7 +8,6 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/binary"
-	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -19,8 +18,7 @@ import (
 // generateNonce creates a cryptographically secure 16-byte random nonce.
 func generateNonce() ([]byte, error) {
 	nonce := make([]byte, 16)
-	_, err := rand.Read(nonce)
-	if err != nil {
+	if _, err := rand.Read(nonce); err != nil {
 		return nil, err
 	}
 	return nonce, nil
@@ -38,7 +36,7 @@ func generateTimestamp() []byte {
 // Charlie trusts this registry and rejects any transaction whose PK does not match.
 type PublicKeyRegistry struct {
 	mu      sync.RWMutex
-	entries map[string][]byte // nodeID → pkBytes
+	entries map[string][]byte // nodeID → pkBytes (private copies)
 }
 
 // NewPublicKeyRegistry creates an empty registry.
@@ -49,32 +47,35 @@ func NewPublicKeyRegistry() *PublicKeyRegistry {
 // Register stores a trusted public key for a node identity.
 // This must be called through a trusted channel (setup, bootstrap, on-chain),
 // never from the contents of an unverified incoming message.
+// First registration wins (TOFU); attempts to overwrite are rejected.
+// The key is copied, so later changes to the caller's slice cannot alter it.
 func (r *PublicKeyRegistry) Register(nodeID string, pkBytes []byte) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	// TOFU: reject attempts to overwrite an already-registered key.
-	// An attacker who learns Alice's node ID cannot replace her key by
-	// sending a message — the first registration wins.
 	if _, exists := r.entries[nodeID]; exists {
 		log.Printf("PublicKeyRegistry: rejected attempt to overwrite key for %s", nodeID)
 		return
 	}
-	r.entries[nodeID] = pkBytes
-	fmt.Printf("PublicKeyRegistry: registered key for node %q\n", nodeID)
+	cp := make([]byte, len(pkBytes))
+	copy(cp, pkBytes)
+	r.entries[nodeID] = cp
+	log.Printf("PublicKeyRegistry: registered key for node %q", nodeID)
 }
 
-// Lookup returns the trusted public key for a node, and false if unknown.
+// Lookup returns a copy of the trusted public key for a node, and false if unknown.
 func (r *PublicKeyRegistry) Lookup(nodeID string) ([]byte, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	pk, ok := r.entries[nodeID]
-	return pk, ok
+	if !ok {
+		return nil, false
+	}
+	cp := make([]byte, len(pk))
+	copy(cp, pk)
+	return cp, true
 }
 
 // VerifyIdentity checks that receivedPK matches the registry entry for nodeID.
-// This is the identity layer on top of the cryptographic layer.
-// Cryptographic checks (proof, commitment, Spx_verify) prove the message was
-// signed by whoever owns receivedPK. This check proves receivedPK IS Alice.
 func (r *PublicKeyRegistry) VerifyIdentity(nodeID string, receivedPK []byte) bool {
 	trustedPK, ok := r.Lookup(nodeID)
 	if !ok {

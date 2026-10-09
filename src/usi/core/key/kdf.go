@@ -14,37 +14,12 @@ import (
 // Passphrase-based key derivation (Argon2id) — used by vault ONLY
 // ─────────────────────────────────────────────────────────────────────────────
 //
-// IMPORTANT — this is NOT the KDF used by key.go / kem.go in this package.
-// Those two route through diskStorage (disk.DiskKeyStore, see local.go),
-// which derives its key very differently:
+// This KDF is used by vault only. key.go / kem.go go through diskStorage,
+// which (see src/accounts/key/keysafe) derives Argon2id(passphrase, random
+// 16-byte salt, time=3, memory=64MiB, threads=4) -> 32-byte master key and
+// then encrypts with crypter.EncryptSecret. Salt is stored in the blob.
 //
-//	disk.DiskKeyStore.generateSalt(passphrase):
-//	    Argon2id(passphrase, "sphinx-disk-keystore-salt", time=3,
-//	             memory=64MiB, threads=2, outLen=16)   -> a 16-byte SALT,
-//	             deterministically re-derived from the passphrase alone
-//	             (never random, never stored/passed in by the caller)
-//	then:
-//	    CCrypter.SetKeyFromPassphrase(passphrase, thatSalt, 1000)
-//	    -> BytesToKeySHA512AES: 1000 rounds of SHA3-512(passphrase||salt)
-//	    -> split into a 32-byte AES key + 16-byte IV
-//
-// That's Argon2id feeding a second SHA3-512-stretching stage, with threads=2
-// and a 16-byte output used only as a salt — structurally different from
-// (and not parameter-compatible with) this function. Do not call this
-// function expecting it to match what diskStorage encrypted, and vice versa.
-//
-// DeriveKeyFromPassphrase exists solely for vault.deriveKey (see
-// vault/utils.go), which — unlike disk.DiskKeyStore — generates its own
-// random salt up front and persists it in the manifest (manifest.Salt),
-// then passes that same salt back in here on decrypt. Because vault owns
-// and stores its salt itself, this function does not need disk.go's
-// self-deriving-salt trick; it only needs to be a deterministic function of
-// (passphrase, salt) — which Argon2id already is, given fixed parameters.
-//
-// Parameters here intentionally match vault.DefaultKeyDerivationParams
-// (time=3, memory=64 MiB, threads=4, keyLen=32). Keep the two in sync if
-// either changes, since vault.deriveKey ignores its own params argument and
-// defers entirely to the constants below.
+// Parameters here match vault.DefaultKeyDerivationParams; keep them in sync.
 const (
 	kdfArgon2Time    uint32 = 3
 	kdfArgon2Memory  uint32 = 64 * 1024 // 64 MiB

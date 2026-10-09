@@ -286,9 +286,14 @@ cd desktop/protocol
 cd desktop/protocol
 ./sphinx node --pbft --port-offset=1 --seeds=127.0.0.1:30303
 
-# Terminal 3+ — same pattern, with a unique local port offset
+# Terminal 3 — same pattern, with a unique local port offset
 cd desktop/protocol
 ./sphinx node --pbft --port-offset=2 --seeds=127.0.0.1:30303
+
+# Terminal 4+ — same pattern, with a unique local port offset
+cd desktop/protocol
+./sphinx node --pbft --port-offset=2 --seeds=127.0.0.1:30303
+
 ```
 
 Joining as a peer does not change validator membership or consensus readiness.

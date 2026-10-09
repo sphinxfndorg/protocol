@@ -1127,6 +1127,28 @@ func (c *Consensus) GetCurrentHeight() uint64 {
 	return c.currentHeight
 }
 
+func (c *Consensus) UncommittedBlockTxIDs() []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	var ids []string
+	for _, blk := range []Block{c.preparedBlock, c.lockedBlock} {
+		if blk == nil {
+			continue
+		}
+		tb, ok := blk.GetUnderlyingBlock().(*types.Block)
+		if !ok || tb == nil {
+			continue
+		}
+		for _, tx := range tb.Body.TxsList {
+			if tx != nil && tx.ID != "" {
+				ids = append(ids, tx.ID)
+			}
+		}
+	}
+	return ids
+}
+
 // membershipEpoch returns the epoch that decides WHO IS IN THE SET for proposer
 // selection, derived from the chain HEIGHT.
 //

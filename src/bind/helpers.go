@@ -32,6 +32,7 @@ import (
 	spxKey "github.com/sphinxfndorg/protocol/src/core/sthincs/key/backend"
 	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/parameters"
 	"github.com/sphinxfndorg/protocol/src/crypto/STHINCS/sthincs"
+	types "github.com/sphinxfndorg/protocol/src/core/transaction"
 	usiKey "github.com/sphinxfndorg/protocol/src/usi/core/key"
 
 	logger "github.com/sphinxfndorg/protocol/src/console"
@@ -1149,6 +1150,95 @@ func runBlockSyncLoop(
 // Block production loop
 // ============================================================================
 
+// inFlightTxSet holds the IDs a node selected into a block that has not
+// committed yet. A proposer leaves the mempool as soon as CreateBlock takes
+// the txs, and only clears them when the block commits, so without this the
+// "Mempool N pending" line reads 0 for the whole round on the proposer while
+// every follower still reports 1.
+type inFlightTxSet struct {
+	mu  sync.Mutex
+	ids map[string]struct{}
+}
+
+func newInFlightTxSet() *inFlightTxSet {
+	return &inFlightTxSet{ids: make(map[string]struct{})}
+}
+
+func (s *inFlightTxSet) add(txs []*types.Transaction) {
+	if s == nil || len(txs) == 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, tx := range txs {
+		if tx == nil || tx.ID == "" {
+			continue
+		}
+		s.ids[tx.ID] = struct{}{}
+	}
+}
+
+func (s *inFlightTxSet) remove(txs []*types.Transaction) {
+	if s == nil || len(txs) == 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, tx := range txs {
+		if tx == nil {
+			continue
+		}
+		delete(s.ids, tx.ID)
+	}
+}
+
+func (s *inFlightTxSet) list() []string {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, 0, len(s.ids))
+	for id := range s.ids {
+		out = append(out, id)
+	}
+	return out
+}
+
+func mempoolPendingCount(bc *core.Blockchain, cons *consensus.Consensus, inFlight *inFlightTxSet) int {
+	mp := bc.GetMempool()
+	if mp == nil {
+		return 0
+	}
+	pending := mp.GetPendingTransactions()
+	seen := make(map[string]struct{}, len(pending))
+	count := 0
+	for _, tx := range pending {
+		if tx == nil {
+			continue
+		}
+		if _, ok := seen[tx.ID]; !ok {
+			seen[tx.ID] = struct{}{}
+			count++
+		}
+	}
+	if cons != nil {
+		for _, id := range cons.UncommittedBlockTxIDs() {
+			if _, ok := seen[id]; !ok {
+				seen[id] = struct{}{}
+				count++
+			}
+		}
+	}
+	for _, id := range inFlight.list() {
+		if _, ok := seen[id]; !ok {
+			seen[id] = struct{}{}
+			count++
+		}
+	}
+	return count
+}
+
 // runBlockProductionLoop runs continuous block production with PBFT consensus.
 //
 // It checks the syncState before entering the PBFT loop. A node in SYNCING
@@ -1178,6 +1268,8 @@ func runBlockProductionLoop(
 		singleNodeInterval  = 10 * time.Second
 		multiNodeRoundDelay = 3 * time.Second
 	)
+
+	inFlight := newInFlightTxSet()
 
 	// effectiveValidatorCount reports how many validators can take part in
 	// PBFT right now: validators in the ACTIVE STAKED set (chain state) that
@@ -1381,9 +1473,12 @@ func runBlockProductionLoop(
 				}
 				lastInvariantErr = ""
 				invariantRepeats = 0
+				inFlight.add(blk.Body.TxsList)
 				wrapped := core.NewBlockHelper(blk)
-				if err := bc.CommitBlock(wrapped); err != nil {
-					logger.Error("[%s] solo commit error: %v", nodeID, err)
+				commitErr := bc.CommitBlock(wrapped)
+				inFlight.remove(blk.Body.TxsList)
+				if commitErr != nil {
+					logger.Error("[%s] solo commit error: %v", nodeID, commitErr)
 					continue
 				}
 				pending := bc.GetMempool().GetPendingTransactions()
@@ -1396,7 +1491,7 @@ func runBlockProductionLoop(
 				// forever even as blocks are actually being produced.
 				progress.UpdateBlockSync(int64(blk.GetHeight()), int64(blk.GetHeight()))
 
-				progress.UpdateMempoolActivity(len(pending), 0)
+				progress.UpdateMempoolActivity(mempoolPendingCount(bc, cons, inFlight), 0)
 
 			case <-peerCheckTicker.C:
 				// Solo→PBFT handoff uses the SAME stake-weighted gate as the
@@ -1621,9 +1716,8 @@ startPBFT:
 
 		// Update mempool and validator counts periodically
 		if bc.GetMempool() != nil {
-			pending := bc.GetMempool().GetPendingTransactions()
 			// Estimate TPS: we don't have a real TPS counter, just pass 0 or compute from block times
-			progress.UpdateMempoolActivity(len(pending), 0)
+			progress.UpdateMempoolActivity(mempoolPendingCount(bc, cons, inFlight), 0)
 		}
 		progress.UpdateValidatorStatus(effectiveValidatorCount(), stakedSetSize())
 
@@ -1720,14 +1814,20 @@ startPBFT:
 
 		logger.Info("[%s] Created block height=%d txs=%d", nodeID, newBlock.GetHeight(), len(pending))
 
+		selectedTxs := newBlock.Body.TxsList
+		inFlight.add(selectedTxs)
+		releaseInFlight := func() { inFlight.remove(selectedTxs) }
+
 		consensusVM := vmachine.NewVM([]byte{byte(svm.PUSH1), 0x01})
 		if err := consensusVM.Run(); err != nil {
 			logger.Error("[%s] Consensus VM error: %v", nodeID, err)
+			releaseInFlight()
 			continue
 		}
 		result, err := consensusVM.GetResult()
 		if err != nil || result != 1 {
 			logger.Error("[%s] Block failed consensus VM rules", nodeID)
+			releaseInFlight()
 			continue
 		}
 		logger.Info("[%s] VM: Consensus verification passed", nodeID)
@@ -1743,6 +1843,7 @@ startPBFT:
 		if signingService != nil && len(newBlock.Header.ProposerSignature) == 0 {
 			if err := signingService.SignBlock(wrapped); err != nil {
 				logger.Error("[%s] Failed to sign block header: %v", nodeID, err)
+				releaseInFlight()
 				continue
 			}
 			logger.Info("[%s] Block header signed", nodeID)
@@ -1763,6 +1864,7 @@ startPBFT:
 		blockData, err := json.Marshal(concreteBlock)
 		if err != nil {
 			logger.Error("[%s] Failed to serialize block: %v", nodeID, err)
+			releaseInFlight()
 			continue
 		}
 
@@ -1779,6 +1881,7 @@ startPBFT:
 		if signingService != nil {
 			if err := signingService.SignProposal(proposal); err != nil {
 				logger.Error("[%s] Failed to sign proposal: %v", nodeID, err)
+				releaseInFlight()
 				continue
 			}
 		}
@@ -1788,6 +1891,7 @@ startPBFT:
 
 		if err := cons.BroadcastProposal(proposal); err != nil {
 			logger.Error("[%s] BroadcastProposal failed: %v", nodeID, err)
+			releaseInFlight()
 			continue
 		}
 
@@ -1805,6 +1909,7 @@ startPBFT:
 			select {
 			case <-ctx.Done():
 				commitTicker.Stop()
+				releaseInFlight()
 				return
 			case <-commitTimeout:
 				// Advance the view. Re-proposing under the same view re-elects
@@ -1814,6 +1919,7 @@ startPBFT:
 				// different proposer and make progress.
 				logger.Warn("[%s] Timeout waiting for block commitment at height %d — advancing view to re-elect a leader",
 					nodeID, currentHeight+1)
+				releaseInFlight()
 				cons.StartViewChange()
 				committed = true
 			case <-commitTicker.C:
@@ -1832,6 +1938,8 @@ startPBFT:
 					}
 
 					logger.Info("[%s] Block committed! Height now: %d", nodeID, currentHeight)
+
+				releaseInFlight()
 
 					// NEW: this ticker loop is a third, independent place
 					// currentHeight advances — entirely separate from both the
